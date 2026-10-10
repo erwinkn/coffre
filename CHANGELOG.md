@@ -72,11 +72,12 @@ is logged with what it was. Service accounts is in the sidebar of anyone
 who sets one up, listing only the accounts they manage. A person brings
 back only an account they removed themselves. The setting names
 environments by slug, so a Maintainer who renames `prod` takes it out of
-`all except prod`, for an environment they already hold; `only dev,
-staging` holds against a rename. Settings written into the log in the
-vault's name but not by it are reported and passed over, and when the
-vault finds none of its own past them, the setting is closed, never
-everywhere.
+`all except prod`, or, renaming `staging` away first, into `only dev,
+staging`, for an environment they already hold: both lists follow the
+current slug, and only keeping renames from them keeps prod to Admins.
+Settings written into the log in the vault's name but not by it are
+reported and passed over, and when the vault finds none of its own past
+them, the setting is closed, never everywhere.
 
 - **API.** `GET` and `PUT /api/settings`, `{ "serviceAccounts": <scope> }`.
   `GET /api/me` adds `setsUpServices` and `serviceSetup`; members and a

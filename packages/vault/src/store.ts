@@ -509,8 +509,8 @@ export async function newestVaultEntries(db: Queryable, action: string, limit: n
   return stored(rows);
 }
 
-/** Up to `limit` of the vault's allowed access entries about `principal`, newest first. */
-export async function accessEntriesAbout(db: Queryable, principal: string, limit: number): Promise<StoredEntry[]> {
+/** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */
+export async function accessEntriesAbout(db: Queryable, principal: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const rows = await db
     .select(entryColumns(db))
@@ -521,6 +521,7 @@ export async function accessEntriesAbout(db: Queryable, principal: string, limit
         eq(auditLog.subjectPrincipal, principal),
         inArray(auditLog.action, [...ACCESS_ACTIONS]),
         eq(auditLog.decision, 'allow'),
+        before === undefined ? undefined : lt(auditLog.seq, before),
       ),
     )
     .orderBy(desc(auditLog.seq))
@@ -531,10 +532,10 @@ export async function accessEntriesAbout(db: Queryable, principal: string, limit
 /**
  * Up to `limit` of the vault's reports that `principal`'s row was changed
  * around it (`vault.tampered`, for their row or an older one put back),
- * before `before` (the newest when undefined), newest first: what
- * `tamperedMembers` in @coffre/db/grants reads too.
+ * after `after` and before `before` (the newest when undefined), newest
+ * first: what `tamperedMembers` in @coffre/db/grants reads too.
  */
-export async function tamperReportsAbout(db: Queryable, principal: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
+export async function tamperReportsAbout(db: Queryable, principal: string, limit: number, after: bigint, before?: bigint): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const rows = await db
     .select(entryColumns(db))
@@ -545,6 +546,7 @@ export async function tamperReportsAbout(db: Queryable, principal: string, limit
         eq(auditLog.subjectPrincipal, principal),
         eq(auditLog.action, 'vault.tampered'),
         inArray(auditLog.code, ['mac', 'stale']),
+        gt(auditLog.seq, after),
         before === undefined ? undefined : lt(auditLog.seq, before),
       ),
     )

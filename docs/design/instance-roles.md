@@ -191,13 +191,17 @@ wider than their own: a service account a person sets up reads, at most,
 what that person reads.
 
 The setting names environments by slug, so it is policy, not a boundary,
-for those who rename environments. A Maintainer of `market` renames
-`market/prod` to `market/production`, and `all except [prod]` no longer
-keeps it to Admins: they set up accounts for it, giving them what they
-hold. They gain no read, since they already hold it; they only skip
-asking an Admin. Each rename is in the log (`environment.update`). Keep
-prod to Admins against them with `only [dev, staging]` instead, which a
-rename leaves out, or give them less than Maintainer there.
+for those who rename environments. Both lists follow the current slug. A
+Maintainer of `market` renames `market/prod` to `market/production`, and
+`all except [prod]` no longer keeps it to Admins. Under `only [dev,
+staging]`, they rename `market/dev` to `market/dev-old`, then
+`market/prod` to `market/dev`, and the setting lets it in. Either way,
+they set up accounts for it, giving them what they hold. They gain no
+read, since they already hold it; they only skip asking an Admin. Each
+rename is in the log (`environment.update`). Renaming takes
+`environment.manage` on the project, which a Maintainer or an Owner of it
+holds: to keep prod to Admins, give those you would not trust with its
+service accounts less than Maintainer on the project.
 
 The vault reads the setting from its newest `settings.change` that carries
 its MAC, and reports each one in its name it did not write. It reads back

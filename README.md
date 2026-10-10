@@ -315,10 +315,13 @@ setting **Who sets up service accounts** (Settings, or `coffre settings
 service-accounts --except-environments prod`) keeps the rest to Admins
 ([docs/design/instance-roles.md](docs/design/instance-roles.md)). It names
 environments by slug, so a Maintainer who renames `prod` takes it out of
-`all except prod`; they hold it already, so it is policy rather than a
-boundary, and `only dev, staging` holds against a rename. A person brings
-back only an account they removed; one someone else removed, only those
-who run the instance bring back.
+`all except prod`, and one who renames `staging` away, then `prod` to
+`staging`, takes it into `only dev, staging`: both lists follow the
+current slug. They hold it already, so it is policy rather than a
+boundary; keep Maintainer of a project, which renames its environments,
+to those you trust with its service accounts. A person brings back only
+an account they removed; one someone else removed, only those who run
+the instance bring back.
 
 ## Design decisions worth knowing
 

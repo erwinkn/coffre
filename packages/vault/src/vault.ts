@@ -215,6 +215,9 @@ const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, e
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`#newestAuthentic`). */
 const LOOK_BACK = { page: 32, pages: 32 };
 
+/** What `#newestAuthentic` finds: the entry, or why there is none. */
+type Newest = StoredEntry | 'none' | 'forged' | 'unreached';
+
 /** Why a person's change to a service account is refused. */
 const NOT_THEIRS = 'a person gives a service account at most what they hold, where the instance lets them set one up, and only to one whose every grant they hold';
 
@@ -476,38 +479,43 @@ class VaultService implements Vault {
       this.#report(reports, principal, 'mac', row.mac.toString('hex'));
       return 'mac';
     }
-    const newest = await this.#newestAccessSeq(db, principal, reports);
-    // No row, and no entry: someone never admitted. No row, but entries: one
-    // deleted, unless it was admitted since the row was read.
-    if (row === undefined ? newest === null : newest === row.accessSeq) return null;
+    const newest = await this.#newestAccess(db, principal, reports);
+    // No row, and no entry of the vault's own: someone never admitted. No
+    // row, but one: one deleted, unless it was admitted since the row was
+    // read. Too many forged to see past: neither a row nor the lack of one holds.
+    const seq = typeof newest !== 'string' ? newest.seq : newest === 'unreached' ? undefined : null;
+    if (row === undefined ? seq === null : seq === row.accessSeq) return null;
     if (row === undefined && (await store.member(db, principal)) !== undefined) throw new Retry();
-    this.#report(reports, principal, 'stale', `${row?.accessSeq ?? 'none'}<${newest}`);
+    this.#report(reports, principal, 'stale', `${row?.accessSeq ?? 'none'}<${seq ?? newest}`);
     return 'stale';
   }
 
-  /** The seq of the newest access entry about `principal` that carries the vault's MAC, or null. */
-  async #newestAccessSeq(db: Queryable, principal: string, reports: NewEntry[]): Promise<bigint | null> {
-    for (const entry of await store.accessEntriesAbout(db, principal, 32)) {
-      if (this.#authentic(entry)) return entry.seq;
-      this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq);
-    }
-    return null;
+  /** The newest access entry about `principal` that carries the vault's MAC (`#newestAuthentic`). */
+  #newestAccess(db: Queryable, principal: string, reports: NewEntry[]): Promise<Newest> {
+    return this.#newestAuthentic(
+      (before) => store.accessEntriesAbout(db, principal, LOOK_BACK.page, before),
+      (entry) => this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq),
+    );
   }
 
   /**
-   * Whether the vault's newest report that `principal`'s row was changed
-   * around it is newer than its newest entry changing what they hold: only
-   * starting them over, or another change, settles it. Both by their MACs.
+   * Whether the vault has reported `principal`'s row changed around it
+   * since its newest entry changing what they hold: only starting them
+   * over, or another change, settles it. Both by their MACs, and only
+   * reports after that entry are read, so older ones, forged or not, never
+   * hide it.
    */
   async #reportStands(db: Queryable, principal: string, reports: NewEntry[]): Promise<boolean> {
+    const access = await this.#newestAccess(db, principal, reports);
+    // Too many forged to see past, either one: it may stand, so they are left as they are.
+    if (access === 'unreached') return true;
+    const after = typeof access === 'string' ? -1n : access.seq;
     const report = await this.#newestAuthentic(
-      (before) => store.tamperReportsAbout(db, principal, LOOK_BACK.page, before),
+      (before) => store.tamperReportsAbout(db, principal, LOOK_BACK.page, after, before),
       (entry) => this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq),
     );
-    // Too many forged to see past: it may stand, so they are left as they are.
-    if (report === 'unreached') return true;
-    if (report === 'none' || report === 'forged') return false;
-    return report.seq > ((await this.#newestAccessSeq(db, principal, reports)) ?? -1n);
+    // One of its own after that entry stands, and so may one past too many forged.
+    return report === 'unreached' || typeof report !== 'string';
   }
 
   /**
@@ -520,7 +528,7 @@ class VaultService implements Vault {
   async #newestAuthentic(
     page: (before: bigint | undefined) => Promise<StoredEntry[]>,
     forged: (entry: StoredEntry) => void,
-  ): Promise<StoredEntry | 'none' | 'forged' | 'unreached'> {
+  ): Promise<Newest> {
     let before: bigint | undefined;
     for (let read = 0; read < LOOK_BACK.pages; read += 1) {
       const entries = await page(before);

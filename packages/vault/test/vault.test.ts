@@ -956,6 +956,31 @@ test('a person brings back a service account they removed, never one someone els
   assert.equal(code(await w.vault.admit({ actor: ROOT, principal: 'token:theirs' })), 'ok', 'who runs the instance brings back any');
 });
 
+test('a service account whose row was deleted is refused, under forged entries about it too, and never comes back from nothing', async () => {
+  const w = await world();
+  const { vaultMembers } = tablesOf(db.owner);
+  const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: 'token:ci' })).ok);
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: 'token:ci' })).ok);
+
+  // Root removed it; its row deleted, the log still says so, under a page of forged entries and under more than the vault reads back.
+  await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, 'token:ci'));
+  assert.equal((await w.vault.access('token:ci')).status, 'tampered');
+  await forgeEntries(32, { action: 'member.add', subjectPrincipal: 'token:ci' });
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci' })), 'tampered');
+  await forgeEntries(32 * 32, { action: 'member.add', subjectPrincipal: 'token:ci' });
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci' })), 'tampered');
+
+  // Started over, it comes back past the removal's generation.
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: 'token:ci' })).ok);
+  assert.deepEqual(await w.vault.admit({ actor: ROOT, principal: 'token:ci' }), { ok: true, created: true, role: 'member', scope: EVERYWHERE, generation: 2 });
+
+  // Forged entries about one the vault never admitted lock nobody out.
+  await forgeEntries(3, { action: 'member.add', subjectPrincipal: 'token:new' });
+  assert.deepEqual(await w.vault.admit({ actor: ADA, principal: 'token:new' }), { ok: true, created: true, role: 'member', scope: EVERYWHERE, generation: 0 });
+});
+
 test('an instance role reaches every project in its scope, the ones made later too, and grants add to it', async () => {
   const w = await world();
   const { environments } = tablesOf(db.owner);
@@ -1218,6 +1243,19 @@ test('tamper reports forged in the vault\'s name above its own leave the one it 
   const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
   assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
   assert.equal((await tamperings(w)).filter(([, fault]) => fault === 'forged_entry').length, 33);
+});
+
+test('tamper reports forged in the vault\'s name before a change to what a member holds leave the conversion to run, as migrate says', async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  await member(w, 'token:legacy', []);
+  // As many as the vault reads back, all before the grant: none can stand.
+  await forgeEntries(32 * 32, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
+  await everyProjectGrant('token:legacy', null, 'viewer');
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map(({ principal, conversion }) => [principal, conversion.grants.length]), [['token:legacy', 1]]);
+  const converted = await (await fresh()).access('token:legacy');
+  assert.deepEqual(converted.grants.map((grant) => [grant.projectId, grant.environmentId, grant.role]), [[w.project, null, 'viewer']]);
+  assert.deepEqual(await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`), []);
 });
 
 test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {
