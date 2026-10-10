@@ -18,15 +18,19 @@ test('the GitHub form fills in a workflow of the repository, or a reusable workf
       repository_id: '41532',
       workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main',
       ref: 'refs/heads/main',
-      event_name: 'push',
+      event_name: ['push'],
     },
   });
   checkBinding(workflow);
+  // Several events, one binding.
+  const ci = bindingOf(form({ repository: 'acme/api', repositoryId: '41532', ownerId: '9919', workflow: 'ci.yml', events: ['push', 'pull_request'] }));
+  assert.deepEqual(checkBinding(ci).claims.event_name, ['push', 'pull_request']);
+  assert.throws(() => bindingOf(form({ repository: 'acme/api', repositoryId: '41532', ownerId: '9919', workflow: 'ci.yml', events: [] })), /Choose at least one event/);
 
   const called = 'acme/deploy/.github/workflows/release.yml@refs/heads/main';
-  const reusable = bindingOf(form({ reusable: true, repositoryId: '41532', ownerId: '9919', called, sha: SHA, refKind: 'tag', refName: 'v3', event: 'release' }));
+  const reusable = bindingOf(form({ reusable: true, repositoryId: '41532', ownerId: '9919', called, sha: SHA, refKind: 'tag', refName: 'v3', events: ['release'] }));
   assert.equal(reusable.profile, 'github-reusable');
-  assert.deepEqual([reusable.claims.ref, reusable.claims.event_name, reusable.claims.workflow_ref], ['refs/tags/v3', 'release', undefined]);
+  assert.deepEqual([reusable.claims.ref, reusable.claims.event_name, reusable.claims.workflow_ref], ['refs/tags/v3', ['release'], undefined]);
   checkBinding(reusable);
   const anywhere = bindingOf(form({ reusable: true, anyRepository: true, ownerId: '9919', called, sha: SHA }));
   assert.equal(anywhere.profile, 'github-reusable-organization');
@@ -41,7 +45,7 @@ test('the GitLab form names the namespace and the project, and the other issuer 
   assert.deepEqual(gitlab, {
     profile: 'gitlab',
     issuer: null,
-    claims: { namespace_id: '12', project_id: '345', ref_type: 'branch', ref: 'main', pipeline_source: 'push' },
+    claims: { namespace_id: '12', project_id: '345', ref_type: 'branch', ref: 'main', pipeline_source: ['push'] },
   });
   checkBinding(gitlab);
   assert.equal(bindingOf(form({ platform: 'gitlab', gitlabUrl: 'https://gitlab.acme.example', projectId: '1', namespaceId: '2' })).issuer, 'https://gitlab.acme.example');
@@ -56,6 +60,10 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
   assert.deepEqual(
     summary({ profile: 'github', issuer, claims: bindingOf(form({ repository: 'acme/api', repositoryId: '1', ownerId: '2', workflow: 'deploy.yml' })).claims }),
     { title: 'acme/api · deploy.yml', detail: 'push at main' },
+  );
+  assert.deepEqual(
+    summary({ profile: 'github', issuer, claims: { workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main', event_name: ['push', 'pull_request'] } }),
+    { title: 'acme/api · ci.yml', detail: 'push, pull_request at main' },
   );
   assert.deepEqual(
     summary({ profile: 'github-reusable', issuer, claims: { repository_id: '41532', ref: 'refs/heads/main', event_name: 'push', job_workflow_ref: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', job_workflow_sha: SHA } }),

@@ -1,5 +1,5 @@
 import type { BindingPlan, BindingView } from '@coffre/client';
-import { GITHUB_EVENTS, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
+import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { Fragment, useState } from 'react';
 import { bindingOf, EMPTY_FORM, summary, type Form, type RefKind } from '../lib/bindings';
 import { removeBinding } from '../lib/changes';
@@ -15,8 +15,8 @@ import { GitHub, Link, Plus, X } from './icons';
 /**
  * The CI runs that may sign in as a service, by the ID token their platform
  * signs for each run (docs/design/oidc.md). A run is trusted only when
- * every claim of a binding matches exactly, so the claims are what the page
- * shows, in full, before anything is saved.
+ * every claim of a binding matches, so the claims are what the page shows,
+ * in full, before anything is saved.
  */
 export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; bindings: BindingView[] }) {
   const change = removeBinding(useCoffre(), serviceId);
@@ -28,12 +28,15 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
       <Card
         labelledBy="trusted-workloads"
         title="Sign in with OIDC"
-        description="CI runs sign in as this service account with their platform's ID token, when it matches a trust binding. There is nothing to store, so prefer it wherever the CI supports it."
+        description={
+          <>
+            A CI run signs in with the ID token GitHub Actions or GitLab gives it, so there is no secret to store. For example,{' '}
+            <span className="mono">deploy.yml</span> in <span className="mono">acme/api</span>, on pushes to <span className="mono">main</span>.
+          </>
+        }
       >
         {bindings.length === 0 ? (
-          <EmptyState title="No trust bindings">
-            Trust a CI workflow to let its runs sign in as this service account with no stored secret. Until then, CI needs a bearer token.
-          </EmptyState>
+          <EmptyState title="No trust bindings">Trust a workflow to let its runs sign in.</EmptyState>
         ) : (
           <div className="dt-wrap">
             <table className="dt">
@@ -136,7 +139,7 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
         {Object.entries(binding.claims).map(([name, value]) => (
           <tr key={name}>
             <th className="mono">{name}</th>
-            <td className="mono">{value}</td>
+            <td className="mono">{claimValues(value).join(', ')}</td>
           </tr>
         ))}
         <tr>
@@ -145,6 +148,46 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
         </tr>
       </tbody>
     </table>
+  );
+}
+
+/** Checkboxes for what may start a run: GitHub's events, or GitLab's pipeline sources. */
+function Choices(props: { label: string; options: readonly string[]; chosen: string[]; onChange: (chosen: string[]) => void; hint?: string }) {
+  const { options, chosen } = props;
+  return (
+    <fieldset className="field checks">
+      <legend className="label">{props.label}</legend>
+      <div className="checks-row">
+        {options.map((option) => (
+          <label key={option} className="check mono">
+            <input
+              type="checkbox"
+              checked={chosen.includes(option)}
+              // Kept in the options' order, as the server stores them.
+              onChange={(event) => props.onChange(options.filter((each) => (each === option ? event.target.checked : chosen.includes(each))))}
+            />
+            {option}
+          </label>
+        ))}
+      </div>
+      {props.hint !== undefined && <span className="hint">{props.hint}</span>}
+    </fieldset>
+  );
+}
+
+/** What trusting `pull_request` or `workflow_run` exposes, said where the owner chooses it and again before saving. */
+function Exposure({ events }: { events: string[] }) {
+  const exposed = events.filter((event) => EVENT_EXPOSURE[event] !== undefined);
+  if (exposed.length === 0) return null;
+  return (
+    <Notice tone="warn">
+      {exposed.map((event) => (
+        <p key={event}>
+          <span className="mono">{event}</span>: {EVENT_EXPOSURE[event]}
+        </p>
+      ))}
+      <p>Give this service account only the secrets CI needs.</p>
+    </Notice>
   );
 }
 
@@ -198,7 +241,15 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
     <div className="form-row">
       <label className="field" style={{ flex: '0 0 8rem' }}>
         <span className="label">At</span>
-        <select className="select" value={form.refKind} onChange={(event) => set({ refKind: event.target.value as RefKind })}>
+        <select
+          className="select"
+          value={form.refKind}
+          onChange={(event) => {
+            const refKind = event.target.value as RefKind;
+            // A release runs at a tag; a schedule, a pull request or a workflow_run on a branch.
+            set({ refKind, events: form.events.filter((each) => githubEventsAt(refKind).includes(each)) });
+          }}
+        >
           <option value="branch">Branch</option>
           <option value="tag">Tag</option>
         </select>
@@ -281,18 +332,15 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
                 ) : (
                   field('Workflow file', 'workflow', { placeholder: 'deploy.yml', mono: true })
                 )}
-                <label className="field">
-                  <span className="label">Event</span>
-                  <select className="select" value={form.event} onChange={(event) => set({ event: event.target.value })}>
-                    {GITHUB_EVENTS.map((event) => (
-                      <option key={event} value={event}>
-                        {event}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="hint">Pull requests and workflow_run are never trusted: their runs can carry a stranger's code.</span>
-                </label>
                 {ref}
+                <Choices
+                  label="Events"
+                  options={githubEventsAt(form.refKind)}
+                  chosen={form.events}
+                  onChange={(events) => set({ events })}
+                  hint={form.events.includes('pull_request') ? `A pull request matches by the branch it merges into: ${form.refName.trim() || 'main'}.` : undefined}
+                />
+                <Exposure events={form.events} />
               </>
             )}
 
@@ -324,17 +372,13 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
                 </div>
                 <ErrorLine error={lookup.error} />
                 {ref}
-                <label className="field">
-                  <span className="label">Pipeline source</span>
-                  <select className="select" value={form.source} onChange={(event) => set({ source: event.target.value })}>
-                    {GITLAB_PIPELINE_SOURCES.map((source) => (
-                      <option key={source} value={source}>
-                        {source}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="hint">Merge-request pipelines are never trusted: they name another project.</span>
-                </label>
+                <Choices
+                  label="Pipeline sources"
+                  options={GITLAB_PIPELINE_SOURCES}
+                  chosen={form.sources}
+                  onChange={(sources) => set({ sources })}
+                  hint="Merge-request pipelines are never trusted: they name another project."
+                />
               </>
             )}
 
@@ -364,10 +408,11 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
         ) : (
           <div className="form">
             <p>
-              Runs whose ID token carries exactly these claims will sign in as <span className="mono">{member}</span>, and read
-              what it may read.
+              Runs whose ID token matches these claims sign in as <span className="mono">service:{serviceId}</span> and read what it can
+              read.
             </p>
             <Claims binding={plan} />
+            <Exposure events={claimValues(plan.claims.event_name)} />
             {plan.replaces.length > 0 && (
               <Notice tone="info">
                 This replaces {plan.replaces.length === 1 ? 'a binding' : `${plan.replaces.length} bindings`}

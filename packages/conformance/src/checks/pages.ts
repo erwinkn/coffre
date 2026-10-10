@@ -97,6 +97,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     ...PAGES,
     ['/settings', 'Settings', null],
     [person, admin.email, 'Access'],
+    [`${person}/apps`, admin.email, 'Connected apps'],
     [`${person}/activity`, admin.email, 'Activity'],
     ['/service-accounts', 'Service accounts', null],
     [account, `service:${name}`, 'Sign-in'],
@@ -124,7 +125,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
         expect(loaded.dialog?.includes('Removing revokes 0 grants, 0 bearer tokens') === true, `${path}: Remove… does not preview what it would revoke`, loaded.dialog);
       }
       if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
-      if (path === person) expect(loaded.cards.includes('Connected apps'), `${path} does not show an owner the person's connected apps`, loaded.cards);
+      if (path === `${person}/apps`) expect(loaded.cards.includes('Connected apps'), `${path} does not show an owner the person's connected apps`, loaded.cards);
       if (path === '/account/apps') {
         expect(loaded.cards.join(' then ') === 'Connect an app then Connected apps', `${path} does not show Connect an app, then the connected apps`, loaded.cards);
         for (const shown of [mcp, `claude mcp add --transport http coffre ${mcp}`, 'Add custom connector']) {

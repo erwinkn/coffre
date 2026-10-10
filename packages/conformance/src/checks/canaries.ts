@@ -38,7 +38,7 @@ function pages(people: People): string[] {
     ...['', '/users', '/service-accounts', '/settings'].map((tab) => `/projects/${PROJECT}${tab}`),
     ...[DEV, PROD, BULK].map((path) => `/projects/${path}`),
     '/users',
-    ...users.flatMap((person) => ['', '/activity'].map((tab) => `/users/${encodeURIComponent(person.email)}${tab}`)),
+    ...users.flatMap((person) => ['', '/apps', '/activity'].map((tab) => `/users/${encodeURIComponent(person.email)}${tab}`)),
     '/service-accounts',
     ...['', '/access', '/activity'].map((tab) => `/service-accounts/${SERVICE.slice('token:'.length)}${tab}`),
   ];

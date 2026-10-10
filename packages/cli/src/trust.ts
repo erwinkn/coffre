@@ -10,7 +10,19 @@
  * issuer and the keys it names. `--apply` saves it.
  */
 import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView, type WorkloadIds } from '@coffre/client';
-import { fullRef, GITHUB_EVENTS, GITLAB_PIPELINE_SOURCES, githubReusable, githubWorkflow, gitlabProject, type BindingClaims } from '@coffre/core/workloads';
+import {
+  claimValues,
+  EVENT_EXPOSURE,
+  fullRef,
+  GITHUB_EVENTS,
+  githubEventsAt,
+  GITLAB_PIPELINE_SOURCES,
+  githubReusable,
+  githubWorkflow,
+  gitlabProject,
+  type BindingClaims,
+  type ClaimValue,
+} from '@coffre/core/workloads';
 
 export type TrustFlags = {
   github?: string;
@@ -20,12 +32,14 @@ export type TrustFlags = {
   'any-repository'?: boolean;
   gitlab?: string;
   'gitlab-url'?: string;
-  source?: string;
+  /** Repeated, or a comma list. */
+  source?: string[];
   issuer?: string;
   claim?: string[];
   branch?: string;
   tag?: string;
-  event?: string;
+  /** Repeated, or a comma list. */
+  event?: string[];
   'repository-id'?: string;
   'owner-id'?: string;
   'project-id'?: string;
@@ -38,7 +52,7 @@ export type Lookup = (input: { github?: string; gitlab?: string; gitlabUrl?: str
 
 export const TRUST_USAGE = `usage: coffre trust <service>                       its trust bindings
        coffre trust <service> --github <owner>/<repo> --workflow <file> (--branch <b> | --tag <t>)
-                    [--event push,workflow_dispatch,schedule,release]
+                    [--event push,workflow_dispatch,schedule,release,pull_request,workflow_run]
        coffre trust <service> --github <owner>/<repo> --reusable <owner>/<repo>/.github/workflows/<file>@<ref>
                     --sha <commit> (--branch <b> | --tag <t>) [--event …] [--any-repository]
        coffre trust <service> --gitlab <group>/<project> (--branch <b> | --tag <t>)
@@ -47,7 +61,8 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
          IDs, when the lookup cannot see a private repository or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
          [--label <text>] [--replace <binding-id>] [--apply]
-         --event and --source take one or more, each a binding of its own; push alone unless told
+         --event and --source take one or more, push alone unless told; a pull request matches
+         by the branch it merges into
        coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it
 A service account, service:<name>, signs in by OIDC this way, its CI's ID token matched by a trust
 binding, with no stored secret; or, for CI without OIDC, with a bearer token: coffre tokens issue <service>.`;
@@ -58,10 +73,6 @@ export function serviceMember(value: string): string {
   return member.startsWith('token:') ? member : `token:${member}`;
 }
 
-/** The binding the flags describe, its IDs looked up where they were not given. Throws a sentence. */
-/** The flags as `coffre trust` takes them: --event and --source repeated, or a comma list. */
-export type TrustArgs = Omit<TrustFlags, 'event' | 'source'> & { event?: string[]; source?: string[] };
-
 /** `push,workflow_dispatch` and `--event schedule`, as one list, each once. */
 function listOf(values: string[] | undefined): string[] | undefined {
   if (values === undefined) return undefined;
@@ -69,11 +80,39 @@ function listOf(values: string[] | undefined): string[] | undefined {
 }
 
 /**
- * The bindings the flags describe: one for each event (GitHub) or pipeline
- * source (GitLab) named, since a binding matches one; `push` unless told.
- * The repository's or project's IDs are looked up once.
+ * What the binding accepts, by the event (GitHub) or the pipeline source
+ * (GitLab) that started the run; the flag that adds the others the ref
+ * allows (a schedule runs on a branch, a release at a tag), short of those
+ * that run unreviewed code; and what each of those chosen exposes.
  */
-export async function bindingsFrom(flags: TrustArgs, lookup: Lookup): Promise<BindingRequest[]> {
+export function describeEvents(binding: Pick<BindingPlan, 'profile' | 'claims'>): string | null {
+  if (binding.profile === 'custom') return null;
+  const gitlab = binding.profile === 'gitlab';
+  const chosen = claimValues(binding.claims[gitlab ? 'pipeline_source' : 'event_name']);
+  const tag = gitlab ? binding.claims.ref_type === 'tag' : String(binding.claims.ref).startsWith('refs/tags/');
+  const all: readonly string[] = gitlab
+    ? GITLAB_PIPELINE_SOURCES
+    : githubEventsAt(tag ? 'tag' : 'branch').filter((event) => EVENT_EXPOSURE[event] === undefined);
+  const others = all.filter((value) => !chosen.includes(value));
+  const [what, flag] = gitlab ? ['pipelines', '--source'] : ['runs', '--event'];
+  const accepts = `Accepts ${what} started by ${listing(chosen)}.`;
+  const lines = [others.length === 0 ? accepts : `${accepts} Not by ${listing(others, 'or')}: add them with ${flag}, as ${flag} ${[...chosen, ...others].join(',')}.`];
+  for (const event of chosen) if (EVENT_EXPOSURE[event] !== undefined) lines.push(`${event}: ${EVENT_EXPOSURE[event]}`);
+  return lines.join('\n');
+}
+
+function listing(items: readonly string[], last: 'and' | 'or' = 'and'): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} ${last} ${items.at(-1)}`;
+}
+
+/**
+ * The binding the flags describe, its IDs looked up where they were not
+ * given: one, whatever the events (GitHub) or pipeline sources (GitLab) it
+ * names; `push` unless told. Throws a sentence.
+ */
+export async function bindingFrom(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest> {
+  const kinds = [flags.github !== undefined, flags.gitlab !== undefined, flags.issuer !== undefined].filter(Boolean).length;
+  if (kinds !== 1) throw new Error('name one of --github, --gitlab or --issuer');
   const [events, sources] = [listOf(flags.event), listOf(flags.source)];
   if (flags.github === undefined && events !== undefined) throw new Error('--event is a GitHub run\'s: --source names a GitLab pipeline\'s');
   if (flags.gitlab === undefined && sources !== undefined) throw new Error('--source is a GitLab pipeline\'s: --event names a GitHub run\'s');
@@ -83,44 +122,8 @@ export async function bindingsFrom(flags: TrustArgs, lookup: Lookup): Promise<Bi
   for (const source of sources ?? []) {
     if (!(GITLAB_PIPELINE_SOURCES as readonly string[]).includes(source)) throw new Error(`--source takes ${GITLAB_PIPELINE_SOURCES.join(', ')}, not ${source}`);
   }
-  let looked: Promise<WorkloadIds> | undefined;
-  const once: Lookup = (input) => (looked ??= lookup(input));
-  const each = flags.github !== undefined ? (events ?? ['push']).map((event) => ({ event })) : flags.gitlab !== undefined ? (sources ?? ['push']).map((source) => ({ source })) : [{}];
-  const bindings: BindingRequest[] = [];
-  // One after another: the first lookup's refusal is said once, not raced.
-  const { event: _events, source: _sources, ...rest } = flags;
-  for (const one of each) bindings.push(await bindingFrom({ ...rest, ...one }, once));
-  return bindings;
-}
-
-/**
- * What the bindings accept, by the event (GitHub) or the pipeline source
- * (GitLab) that started the run, and the flag that adds the others, those
- * the ref allows: a schedule runs on a branch, a release at a tag.
- */
-export function describeEvents(bindings: readonly Pick<BindingPlan, 'profile' | 'claims'>[]): string | null {
-  const [first] = bindings;
-  if (first === undefined || first.profile === 'custom') return null;
-  const gitlab = first.profile === 'gitlab';
-  const claim = gitlab ? 'pipeline_source' : 'event_name';
-  const chosen = bindings.map(({ claims }) => claims[claim]!).filter((value) => value !== undefined);
-  const tag = gitlab ? first.claims.ref_type === 'tag' : first.claims.ref?.startsWith('refs/tags/') === true;
-  const all: readonly string[] = gitlab ? GITLAB_PIPELINE_SOURCES : GITHUB_EVENTS.filter((event) => (tag ? event !== 'schedule' : event !== 'release'));
-  const others = all.filter((value) => !chosen.includes(value));
-  const [what, flag] = gitlab ? ['pipelines', '--source'] : ['runs', '--event'];
-  const accepts = `Accepts ${what} started by ${listing(chosen)}${chosen.length > 1 ? ', a binding each' : ''}.`;
-  return others.length === 0 ? accepts : `${accepts} Not by ${listing(others, 'or')}: add them with ${flag}, as ${flag} ${[...chosen, ...others].join(',')}.`;
-}
-
-function listing(items: readonly string[], last: 'and' | 'or' = 'and'): string {
-  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} ${last} ${items.at(-1)}`;
-}
-
-export async function bindingFrom(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest> {
-  const kinds = [flags.github !== undefined, flags.gitlab !== undefined, flags.issuer !== undefined].filter(Boolean).length;
-  if (kinds !== 1) throw new Error('name one of --github, --gitlab or --issuer');
-  if (flags.github !== undefined) return github(flags, lookup);
-  if (flags.gitlab !== undefined) return gitlab(flags, lookup);
+  if (flags.github !== undefined) return github(flags, events ?? ['push'], lookup);
+  if (flags.gitlab !== undefined) return gitlab(flags, sources ?? ['push'], lookup);
   return custom(flags);
 }
 
@@ -131,10 +134,9 @@ function refFrom(flags: TrustFlags, form: 'full' | 'name'): { ref: string; type:
   return { ref: form === 'name' ? name : fullRef(type, name), type };
 }
 
-async function github(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest> {
+async function github(flags: TrustFlags, events: string[], lookup: Lookup): Promise<BindingRequest> {
   const repository = flags.github!;
   const { ref } = refFrom(flags, 'full');
-  const event = flags.event ?? 'push';
   const ids = async () => {
     if (flags['repository-id'] !== undefined && flags['owner-id'] !== undefined) {
       return { repositoryId: flags['repository-id'], ownerId: flags['owner-id'] };
@@ -157,7 +159,7 @@ async function github(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest
   if (flags.reusable !== undefined) {
     if (flags.sha === undefined) throw new Error('a reusable workflow is trusted at one commit: --sha <commit>');
     const caller = flags.workflow === undefined ? undefined : { repository, workflow: flags.workflow };
-    const called = { ref, event, called: flags.reusable, sha: flags.sha, caller };
+    const called = { ref, events, called: flags.reusable, sha: flags.sha, caller };
     if (flags['any-repository'] === true) {
       if (flags['owner-id'] === undefined) throw new Error('--any-repository trusts every repository of the organization: name it by --owner-id <n>');
       return { ...githubReusable({ ...called, repositoryId: null, ownerId: flags['owner-id'] }), issuer: null };
@@ -167,10 +169,10 @@ async function github(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest
   }
   if (flags.workflow === undefined) throw new Error('name the workflow file: --workflow deploy.yml');
   const { repositoryId, ownerId } = await ids();
-  return { ...githubWorkflow({ repository, repositoryId, ownerId, workflow: flags.workflow, ref, event }), issuer: null };
+  return { ...githubWorkflow({ repository, repositoryId, ownerId, workflow: flags.workflow, ref, events }), issuer: null };
 }
 
-async function gitlab(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest> {
+async function gitlab(flags: TrustFlags, sources: string[], lookup: Lookup): Promise<BindingRequest> {
   const project = flags.gitlab!;
   const { ref, type } = refFrom(flags, 'name');
   let ids: { projectId: string; namespaceId: string };
@@ -193,7 +195,7 @@ async function gitlab(flags: TrustFlags, lookup: Lookup): Promise<BindingRequest
     ids = found;
   }
   return {
-    ...gitlabProject({ namespaceId: ids.namespaceId, projectId: ids.projectId, refType: type, ref, source: flags.source ?? 'push' }),
+    ...gitlabProject({ namespaceId: ids.namespaceId, projectId: ids.projectId, refType: type, ref, sources }),
     issuer: flags['gitlab-url'] ?? null,
   };
 }
@@ -211,7 +213,7 @@ function custom(flags: TrustFlags): BindingRequest {
 /** A binding, or a plan for one, as lines: what it trusts, every claim in full. */
 export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'claims'>): string[] {
   const width = Math.max(0, ...Object.keys(binding.claims).map((name) => name.length));
-  const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? 'claims ' : '       '}  ${name.padEnd(width)}  ${value}`);
+  const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? 'claims ' : '       '}  ${name.padEnd(width)}  ${claimValues(value).join(', ')}`);
   return [`  profile  ${binding.profile}`, `  issuer   ${binding.issuer}`, `  keys     ${binding.jwksUri}`, ...claims];
 }
 
@@ -236,14 +238,18 @@ function refName(ref: string): string {
  * IDs where a name could change hands; a name is shown where a claim has one.
  */
 export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims'>): string {
-  const claims = binding.claims;
-  const on = (ref: string | undefined, how: string | undefined) => [ref === undefined ? null : `on ${refName(ref)}`, how === undefined ? null : `by ${how}`].filter(Boolean).join(', ');
+  // Every claim is one value, but what started the run, which may be several.
+  const claims = binding.claims as Record<string, string | undefined>;
+  const on = (ref: string | undefined, how: ClaimValue | undefined) => {
+    const into = claimValues(how).includes('pull_request') ? ' or a pull request into it' : '';
+    return [ref === undefined ? null : `on ${refName(ref)}${into}`, how === undefined ? null : `by ${listing(claimValues(how), 'or')}`].filter(Boolean).join(', ');
+  };
   /** `acme/api/.github/workflows/deploy.yml@refs/heads/main` as its repository and workflow file. */
   const workflow = (ref: string) => /^([^/]+\/[^/]+)\/(?:\.github\/workflows\/)?(.+)@/.exec(ref);
   switch (binding.profile) {
     case 'github': {
       const [, repository, file] = workflow(claims.workflow_ref ?? '') ?? [];
-      return `GitHub Actions runs of ${repository ?? `repository ${claims.repository_id}`}'s workflow ${file ?? '(any)'}, ${on(claims.ref, claims.event_name)}`;
+      return `GitHub Actions runs of ${repository ?? `repository ${claims.repository_id}`}'s workflow ${file ?? '(any)'}, ${on(claims.ref, binding.claims.event_name)}`;
     }
     case 'github-reusable':
     case 'github-reusable-organization': {
@@ -253,12 +259,12 @@ export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims
           ? `any repository of owner ${claims.repository_owner_id}`
           : repository === undefined ? `repository ${claims.repository_id}` : `${repository}'s workflow ${file}`;
       const sha = claims.job_workflow_sha === undefined ? '' : ` at commit ${claims.job_workflow_sha.slice(0, 12)}`;
-      return `GitHub Actions runs of ${callers} that call the reusable workflow ${claims.job_workflow_ref}${sha}, ${on(claims.ref, claims.event_name)}`;
+      return `GitHub Actions runs of ${callers} that call the reusable workflow ${claims.job_workflow_ref}${sha}, ${on(claims.ref, binding.claims.event_name)}`;
     }
     case 'gitlab': {
       const ref = claims.ref === undefined ? undefined : `${claims.ref_type === 'tag' ? 'refs/tags' : 'refs/heads'}/${claims.ref}`;
       const where = binding.issuer === 'https://gitlab.com' ? '' : ` on ${binding.issuer}`;
-      return `GitLab pipelines of project ${claims.project_id} (namespace ${claims.namespace_id})${where}, ${on(ref, claims.pipeline_source)}`;
+      return `GitLab pipelines of project ${claims.project_id} (namespace ${claims.namespace_id})${where}, ${on(ref, binding.claims.pipeline_source)}`;
     }
     case 'custom':
       return `runs whose ID token, from ${binding.issuer}, says ${Object.entries(claims).map(([name, value]) => `${name}=${value}`).join(', ')}`;

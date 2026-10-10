@@ -64,10 +64,10 @@ older one turns it on ([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply
 ```
 
-A binding matches one event: the one that started the run. By default that
-is `push`, and the preview says which events the bindings accept and how to
-add others. A workflow a person can start by hand and that runs on a
-schedule as well:
+A binding trusts one workflow file, at one branch or tag, on the events you
+list. By default that is `push`, and the preview says which events the
+binding accepts and how to add others. A workflow a person can start by
+hand and that runs on a schedule as well:
 
 ```yaml
 # .github/workflows/deploy.yml
@@ -79,7 +79,7 @@ on:
     - cron: '17 6 * * *'
 ```
 
-is trusted with a binding for each, made in one go:
+is trusted with one binding:
 
 ```sh
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --event push,workflow_dispatch,schedule --apply
@@ -88,6 +88,34 @@ coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --
 A schedule runs on a branch, and a release at a tag (`--tag v1 --event
 release`). On GitLab, `--source push,web,schedule` does the same for the
 pipeline's source.
+
+### CI on pull requests
+
+`--event pull_request` trusts the workflow's runs for pull requests into
+the binding's branch. Such a run is at `refs/pull/<n>/merge`, so coffre
+matches it by `base_ref`, the branch it merges into, as GitHub's own
+`on.pull_request.branches` filter does:
+
+```sh
+coffre trust api-ci --github acme/api --workflow ci.yml --branch main --event push,pull_request --apply
+```
+
+A pull request runs its own code and its own copy of the workflow file,
+before anyone reviews it. So anyone who can push a branch to the
+repository can read what the service account reads. Pull requests from
+forks get no ID token: GitHub turns `id-token: write` off for them, unless
+an admin enabled "Send write tokens to workflows from pull requests" on a
+private repository. Dependabot's are treated like forks. Give a service
+account trusted on pull requests only the secrets CI needs, never
+production's.
+
+`workflow_run` runs the default branch's workflow after another one
+finishes, and a fork's pull request can start it. It is safe while it runs
+none of the code or artifacts of the run that started it.
+
+`pull_request_target` is refused. It runs with the base repository's tokens
+for anyone's pull request, forks included, and exists to label or comment
+on them.
 
 coffre looks up a repository's or project's IDs, which a binding keeps, so
 that a name passed on to someone else trusts nothing. GitHub and GitLab

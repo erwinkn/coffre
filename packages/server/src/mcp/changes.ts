@@ -9,7 +9,16 @@ import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
 import { EVERY_PROJECT, ROLE_NAMES, type Permission } from '@coffre/core/access';
-import { defaultIssuer, GITHUB_ISSUER, GITLAB_ISSUER, WORKLOAD_PROFILES, type WorkloadProfile } from '@coffre/core/identity';
+import {
+  claimValues,
+  defaultIssuer,
+  EVENT_EXPOSURE,
+  GITHUB_ISSUER,
+  GITLAB_ISSUER,
+  WORKLOAD_PROFILES,
+  type BindingClaims,
+  type WorkloadProfile,
+} from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
 import { secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -188,7 +197,7 @@ const ID_CLAIMS = new Set(['repository_id', 'repository_owner_id', 'project_id',
  * name its IDs anything. Each ID claim gets a note: what it names, that
  * coffre could not tell, or that it does not ask that host.
  */
-async function namesOf(transport: WorkloadTransport, profile: WorkloadProfile, issuer: string | null, claims: Record<string, string>): Promise<Record<string, string>> {
+async function namesOf(transport: WorkloadTransport, profile: WorkloadProfile, issuer: string | null, claims: BindingClaims): Promise<Record<string, string>> {
   const notes: Record<string, string> = {};
   const own = defaultIssuer(profile);
   if (own === null || (issuer ?? own) !== own) {
@@ -209,7 +218,10 @@ async function namesOf(transport: WorkloadTransport, profile: WorkloadProfile, i
     const value = object?.[key];
     return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
   };
-  const id = (claim: string) => (claims[claim] !== undefined && /^[1-9][0-9]{0,19}$/.test(claims[claim]) ? claims[claim] : null);
+  const id = (claim: string) => {
+    const value = claims[claim];
+    return typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) ? value : null;
+  };
   const name = (claim: string, what: string, path: string | null) => {
     if (claims[claim] !== undefined) notes[claim] = path === null ? UNNAMED : `the ${what} ${path}`;
   };
@@ -237,6 +249,15 @@ async function namesOf(transport: WorkloadTransport, profile: WorkloadProfile, i
 }
 
 const approved = 'Nothing changes until the person approves it on coffre.';
+
+/** A binding's claims as the page's lines: each in full, what an ID names where coffre could tell, and what an event that runs unreviewed code exposes. */
+function claimLines(claims: BindingClaims, names: Record<string, string>): Detail[] {
+  return Object.entries(claims).map(([claim, value]) => {
+    const exposed = claim === 'event_name' ? claimValues(value).flatMap((event) => (EVENT_EXPOSURE[event] === undefined ? [] : [EVENT_EXPOSURE[event]])) : [];
+    const note = exposed.length > 0 ? exposed.join(' ') : names[claim];
+    return { label: claim, value: claimValues(value).join(', '), kind: 'mono' as const, ...(note === undefined ? {} : { note }), ...(exposed.length > 0 ? { warn: true as const } : {}) };
+  });
+}
 
 function secretTool<I extends z.ZodObject>(definition: Omit<ChangeTool<I>, 'scope' | 'names'> & { scope?: McpScope }): Tool {
   return changeTool({ scope: 'write', names: (args: { secret: string }) => [args.secret], ...definition } as ChangeTool<I>);
@@ -647,7 +668,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     name: 'trust_workload',
     needs: 'owner',
     title: 'Trust a CI workload',
-    description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. ${approved}`,
+    description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. ${approved}`,
     scope: 'manage-access',
     idempotent: false,
     destructive: false,
@@ -656,7 +677,9 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         service,
         profile: z.enum(WORKLOAD_PROFILES),
         issuer: z.string().max(400).optional().describe("The issuer's URL, for a custom profile"),
-        claims: z.record(z.string().max(64), z.string().max(1024)).describe('The ID token claims a run must carry, such as repository_id and ref'),
+        claims: z
+          .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
+          .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]'),
         label: z.string().trim().min(1).max(120).optional(),
       })
       .strict(),
@@ -676,7 +699,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
           unfamiliar
             ? { label: 'Runs from', value: issuer, kind: 'mono', note: "Not GitHub's or GitLab's own: whoever runs this host can sign in as the account. Approve only if it is yours.", warn: true }
             : { label: 'Runs from', value: issuer ?? `${profile}'s own issuer` },
-          ...Object.entries(claims).map(([claim, value]) => ({ label: claim, value, kind: 'mono' as const, ...(names[claim] === undefined ? {} : { note: names[claim] }) })),
+          ...claimLines(claims, names),
           ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
         ];
       },
@@ -705,7 +728,10 @@ export const CHANGE_TOOLS: readonly Tool[] = [
           { label: 'Service account', value: shownService(service), kind: 'mono' },
           ...(binding === undefined
             ? [{ label: 'Binding', value: `${id}, which it does not hold` }]
-            : [{ label: 'Runs from', value: binding.issuer }, ...Object.entries(binding.claims).map(([claim, value]) => ({ label: claim, value, kind: 'mono' as const }))]),
+            : [
+                { label: 'Runs from', value: binding.issuer },
+                ...Object.entries(binding.claims).map(([claim, value]) => ({ label: claim, value: claimValues(value).join(', '), kind: 'mono' as const })),
+              ]),
         ];
       },
       apply: async (api, { service, id }) => {

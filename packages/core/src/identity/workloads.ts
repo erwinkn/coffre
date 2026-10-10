@@ -3,15 +3,18 @@
  * their platform signs for them (docs/design/oidc.md).
  *
  * A binding names a profile, an issuer, and claims a token must carry, each
- * a top-level string matched exactly. The profile sets the minimum: the
- * server refuses a binding that lacks a claim its profile requires, from the
- * UI, the CLI or the API alike. Say a service is bound to `deploy.yml`,
- * pushed to `main` of `acme/api`:
+ * a top-level string matched exactly. The event that started the run may
+ * be any of several: a list. The profile sets the minimum: the server
+ * refuses a binding that lacks a claim its profile requires, from the UI,
+ * the CLI or the API alike. Say a service is bound to `ci.yml` of
+ * `acme/api`, pushed or dispatched on `main`, or run for a pull request
+ * into `main`:
  *
  *   { profile: 'github', issuer: 'https://token.actions.githubusercontent.com',
  *     claims: { repository_owner_id: '9919', repository_id: '41532',
- *               workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main',
- *               ref: 'refs/heads/main', event_name: 'push' } }
+ *               workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main',
+ *               ref: 'refs/heads/main',
+ *               event_name: ['pull_request', 'push', 'workflow_dispatch'] } }
  */
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
@@ -46,15 +49,49 @@ export const REQUIRED_CLAIMS: Record<WorkloadProfile, readonly string[]> = {
 };
 
 /**
- * Events triggered by someone with write access, at a ref the binding names
- * exactly. `pull_request`, `pull_request_target`, `workflow_run` and the
- * rest are refused, even when their ref happens to match: their runs can
- * carry a stranger's code.
+ * The events a GitHub binding may trust. The first four are started by
+ * someone with write access, at the ref the binding names. The last two
+ * can run code nobody reviewed, so the owner opts in to each:
+ *
+ * - `pull_request` runs the pull request's own code and workflow file, at
+ *   `refs/pull/<n>/merge`; a binding matches it by the branch it merges
+ *   into. Forks get no ID token, unless the repository sends write tokens
+ *   to their pull requests (a setting of private repositories), so this
+ *   trusts whoever can push a branch to the repository.
+ * - `workflow_run` runs the default branch's workflow, but a fork's pull
+ *   request can start it: the run is as safe as what it does with the
+ *   code and artifacts of the run that started it.
+ *
+ * `pull_request_target` and the rest are refused, even when their ref
+ * happens to match: they exist to act on anyone's pull request, with the
+ * base repository's tokens.
  */
-export const GITHUB_EVENTS = ['push', 'workflow_dispatch', 'schedule', 'release'] as const;
+export const GITHUB_EVENTS = ['push', 'workflow_dispatch', 'schedule', 'release', 'pull_request', 'workflow_run'] as const;
+
+/**
+ * What trusting each of the last two events exposes, as the UI, the CLI and
+ * the approval page say it when one is chosen.
+ */
+export const EVENT_EXPOSURE: Readonly<Record<string, string>> = {
+  pull_request:
+    'Anyone who can push a branch to the repository can open a pull request and run their own code as this service account, unreviewed. ' +
+    'Pull requests from forks get no ID token, unless the repository sends them write tokens.',
+  workflow_run:
+    "A fork's pull request can start workflow_run. The workflow comes from the default branch, so this is safe unless it runs code or artifacts from the run that started it.",
+};
 
 /** Pipelines that run the project's own code, at its own ref: never a merge request's. */
 export const GITLAB_PIPELINE_SOURCES = ['push', 'web', 'schedule'] as const;
+
+/** The claim that says what started the run, which a binding may name several values of, and why the others are refused. */
+const GITHUB_EVENT = { name: 'event_name', values: GITHUB_EVENTS, why: "other events can run a stranger's code" };
+const EVENT_CLAIM: Record<WorkloadProfile, { name: string; values: readonly string[]; why: string } | null> = {
+  github: GITHUB_EVENT,
+  'github-reusable': GITHUB_EVENT,
+  'github-reusable-organization': GITHUB_EVENT,
+  gitlab: { name: 'pipeline_source', values: GITLAB_PIPELINE_SOURCES, why: 'merge-request pipelines name another project' },
+  custom: null,
+};
 
 /** At most this many live bindings per service, and claims per binding. */
 export const MAX_BINDINGS = 16;
@@ -70,7 +107,9 @@ const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(heads|tags)\/\S{1,200}$/;
 const WORKFLOW = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/[^@\s]+\.ya?ml@\S+$/;
 
-export type BindingClaims = Record<string, string>;
+/** A claim a binding names: one value, or, for what started the run, any of several. */
+export type ClaimValue = string | string[];
+export type BindingClaims = Record<string, ClaimValue>;
 
 /** What makes a binding, checked: its profile, its issuer as a URL, and its claims, sorted. */
 export type BindingPolicy = { profile: WorkloadProfile; issuer: string; claims: BindingClaims };
@@ -118,11 +157,24 @@ export function checkBinding(
 
   const entries = Object.entries(input.claims);
   if (entries.length > MAX_CLAIMS) throw new BindingInvalid(`a binding names at most ${MAX_CLAIMS} claims`);
+  const event = EVENT_CLAIM[profile];
   const claims: BindingClaims = {};
   for (const [name, value] of entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     if (!CLAIM_NAME.test(name)) throw new BindingInvalid(`"${name}" is not a claim name a binding can match`);
     if (RESERVED.has(name)) throw new BindingInvalid(`a binding never names "${name}": the exchange checks it`);
-    if (typeof value !== 'string' || value.length === 0) throw new BindingInvalid(`claim ${name} must be a nonempty string`);
+    if (name === event?.name) {
+      // Stored once each, in the profile's order, and a single one as a plain value.
+      const given: unknown[] = Array.isArray(value) ? value : [value];
+      if (given.length === 0 || given.some((each) => !event.values.includes(each as string))) {
+        throw new BindingInvalid(`${name} must be one or more of ${event.values.join(', ')}: ${event.why}`);
+      }
+      const values = event.values.filter((each) => given.includes(each));
+      claims[name] = values.length === 1 ? values[0]! : values;
+      continue;
+    }
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new BindingInvalid(`claim ${name} must be a nonempty string${Array.isArray(value) && event !== null ? `: only ${event.name} lists several` : ''}`);
+    }
     if (new TextEncoder().encode(value).length > MAX_CLAIM_BYTES) {
       throw new BindingInvalid(`claim ${name} is longer than ${MAX_CLAIM_BYTES} bytes`);
     }
@@ -139,44 +191,81 @@ export function checkBinding(
   return { profile, issuer, claims };
 }
 
+/** A claim's values, one or several. */
+export function claimValues(value: ClaimValue | undefined): string[] {
+  return value === undefined ? [] : typeof value === 'string' ? [value] : value;
+}
+
+/** What a ref must be for each event: the branch or tag it runs at, or for a pull request, the branch it merges into. */
+const EVENT_REFS: Record<string, { prefix: string; why: string }> = {
+  release: { prefix: 'refs/tags/', why: 'a release runs at its tag: refs/tags/<tag>' },
+  schedule: { prefix: 'refs/heads/', why: 'a schedule runs on the default branch: refs/heads/<branch>' },
+  workflow_run: { prefix: 'refs/heads/', why: 'a workflow_run runs on the default branch: refs/heads/<branch>' },
+  pull_request: { prefix: 'refs/heads/', why: 'a pull request matches by the branch it merges into: refs/heads/<branch>' },
+};
+
 function checkGitHub(profile: WorkloadProfile, claims: BindingClaims): void {
   for (const id of ['repository_owner_id', 'repository_id']) {
-    if (claims[id] !== undefined && !DIGITS.test(claims[id])) throw new BindingInvalid(`${id} is GitHub's numeric ID, not a name`);
+    const value = claims[id];
+    if (value !== undefined && !DIGITS.test(value as string)) throw new BindingInvalid(`${id} is GitHub's numeric ID, not a name`);
   }
-  const event = claims.event_name;
-  if (!(GITHUB_EVENTS as readonly string[]).includes(event)) {
-    throw new BindingInvalid(`event_name must be one of ${GITHUB_EVENTS.join(', ')}: other events can run a stranger's code`);
-  }
-  const ref = claims.ref;
+  const events = claimValues(claims.event_name);
+  const ref = claims.ref as string;
   if (!REF.test(ref)) throw new BindingInvalid('ref is a full ref: refs/heads/<branch> or refs/tags/<tag>');
-  if (event === 'release' && !ref.startsWith('refs/tags/')) throw new BindingInvalid('a release runs at its tag: refs/tags/<tag>');
-  if (event === 'schedule' && !ref.startsWith('refs/heads/')) throw new BindingInvalid('a schedule runs on the default branch: refs/heads/<branch>');
+  for (const event of events) {
+    const rule = EVENT_REFS[event];
+    if (rule !== undefined && !ref.startsWith(rule.prefix)) throw new BindingInvalid(rule.why);
+  }
+  const workflow = claims.workflow_ref as string | undefined;
   if (profile === 'github') {
-    // The workflow file at the ref it ran from, which for these events is the run's ref.
-    if (!WORKFLOW.test(claims.workflow_ref) || !claims.workflow_ref.endsWith(`@${ref}`)) {
+    // The workflow file at the binding's ref, which a pull request's run is matched at too.
+    if (!WORKFLOW.test(workflow!) || !workflow!.endsWith(`@${ref}`)) {
       throw new BindingInvalid('workflow_ref is <owner>/<repository>/.github/workflows/<file>@<ref>, at the binding\'s ref');
     }
     return;
   }
   // A reusable workflow, pinned to one commit: its path can be reused and its branch changed.
-  if (!WORKFLOW.test(claims.job_workflow_ref)) {
+  if (!WORKFLOW.test(claims.job_workflow_ref as string)) {
     throw new BindingInvalid('job_workflow_ref is <owner>/<repository>/.github/workflows/<file>@<ref>');
   }
-  if (!SHA.test(claims.job_workflow_sha)) throw new BindingInvalid('job_workflow_sha is the called workflow\'s full commit SHA');
-  if (claims.workflow_ref !== undefined && !WORKFLOW.test(claims.workflow_ref)) {
+  if (!SHA.test(claims.job_workflow_sha as string)) throw new BindingInvalid('job_workflow_sha is the called workflow\'s full commit SHA');
+  if (workflow !== undefined && !WORKFLOW.test(workflow)) {
     throw new BindingInvalid('workflow_ref, which narrows the binding to one caller, is <owner>/<repository>/.github/workflows/<file>@<ref>');
   }
 }
 
 function checkGitLab(claims: BindingClaims): void {
   for (const id of ['namespace_id', 'project_id']) {
-    if (!DIGITS.test(claims[id])) throw new BindingInvalid(`${id} is GitLab's numeric ID, not a path`);
+    if (!DIGITS.test(claims[id] as string)) throw new BindingInvalid(`${id} is GitLab's numeric ID, not a path`);
   }
   if (claims.ref_type !== 'branch' && claims.ref_type !== 'tag') throw new BindingInvalid('ref_type is branch or tag');
-  if (claims.ref.startsWith('refs/')) throw new BindingInvalid('GitLab\'s ref is the branch or tag name, without refs/');
-  if (!(GITLAB_PIPELINE_SOURCES as readonly string[]).includes(claims.pipeline_source)) {
-    throw new BindingInvalid(`pipeline_source must be one of ${GITLAB_PIPELINE_SOURCES.join(', ')}: merge-request pipelines name another project`);
-  }
+  if ((claims.ref as string).startsWith('refs/')) throw new BindingInvalid('GitLab\'s ref is the branch or tag name, without refs/');
+}
+
+/**
+ * The claims of a verified token that differ from what a binding expects,
+ * by name: none when it matches. A claim matches when the token carries its
+ * value, or one of its values. A GitHub `pull_request` run, at
+ * `refs/pull/<n>/merge`, counts as a run at the branch it merges into: its
+ * `ref`, and the ref its `workflow_ref` ends in, are read as
+ * `refs/heads/<base_ref>`.
+ */
+export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>): string[] {
+  const claims = profile.startsWith('github') ? atBaseBranch(token) : token;
+  return Object.entries(expected)
+    .filter(([name, value]) => {
+      const actual = claims[name];
+      return typeof actual !== 'string' || !claimValues(value).includes(actual);
+    })
+    .map(([name]) => name);
+}
+
+function atBaseBranch(claims: Record<string, unknown>): Record<string, unknown> {
+  const { event_name: event, ref, base_ref: base, workflow_ref: workflow } = claims;
+  if (event !== 'pull_request' || typeof ref !== 'string' || typeof base !== 'string' || base === '') return claims;
+  const at = `refs/heads/${base}`;
+  const file = typeof workflow === 'string' && workflow.endsWith(`@${ref}`) ? `${workflow.slice(0, -ref.length)}${at}` : workflow;
+  return { ...claims, ref: at, workflow_ref: file };
 }
 
 /** The claims as the MAC and the database hold them: JSON, sorted by name. */
@@ -231,20 +320,45 @@ export function fullRef(kind: 'branch' | 'tag', name: string): string {
   return `refs/${kind === 'branch' ? 'heads' : 'tags'}/${name}`;
 }
 
+/** The GitHub events a binding at a branch, or at a tag, may name. */
+export function githubEventsAt(kind: 'branch' | 'tag'): string[] {
+  return GITHUB_EVENTS.filter((event) => EVENT_REFS[event] === undefined || EVENT_REFS[event].prefix === fullRef(kind, ''));
+}
+
 /** A workflow file at a ref, as GitHub's tokens name it: `acme/api/.github/workflows/deploy.yml@refs/heads/main`. */
 export function workflowRef(repository: string, file: string, ref: string): string {
   return `${repository}/.github/workflows/${file.replace(/^\.github\/workflows\//, '')}@${ref}`;
 }
 
-/** A workflow of the repository, run by `event` at `ref`. */
+/**
+ * What started the run, as the presets take it: `event` (`source`, for
+ * GitLab), the one value 0.4.6's presets took, or `events` (`sources`), any
+ * of several. Naming both, or neither, is a type error and, for a caller the
+ * types do not reach, a `BindingInvalid` at run time: a preset never guesses
+ * which one was meant.
+ */
+export type Starts<One extends string, Many extends string> =
+  | ({ [K in One]: string } & { [K in Many]?: never })
+  | ({ [K in Many]: string[] } & { [K in One]?: never });
+
+function started(input: Record<string, unknown>, one: string, many: string): ClaimValue {
+  const single = input[one];
+  const list = input[many];
+  if (single !== undefined && list !== undefined) throw new BindingInvalid(`name ${one} or ${many}, not both`);
+  // As 0.4.6 made it: the plain value, so a one-event binding is the same claim either way.
+  if (single !== undefined) return single as string;
+  if (list === undefined) throw new BindingInvalid(`name ${one} or ${many}`);
+  return list as string[];
+}
+
+/** A workflow of the repository, run at `ref` by any of `events`; a pull request, by the branch it merges into. */
 export function githubWorkflow(input: {
   repository: string;
   repositoryId: string;
   ownerId: string;
   workflow: string;
   ref: string;
-  event: string;
-}): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
   return {
     profile: 'github',
     claims: {
@@ -252,7 +366,7 @@ export function githubWorkflow(input: {
       repository_id: input.repositoryId,
       workflow_ref: workflowRef(input.repository, input.workflow, input.ref),
       ref: input.ref,
-      event_name: input.event,
+      event_name: started(input, 'event', 'events'),
     },
   };
 }
@@ -266,16 +380,15 @@ export function githubReusable(input: {
   repositoryId: string | null;
   ownerId: string;
   ref: string;
-  event: string;
   called: string;
   sha: string;
   caller?: { repository: string; workflow: string };
-}): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
   const claims: BindingClaims = {
     repository_owner_id: input.ownerId,
     ...(input.repositoryId === null ? {} : { repository_id: input.repositoryId }),
     ref: input.ref,
-    event_name: input.event,
+    event_name: started(input, 'event', 'events'),
     job_workflow_ref: input.called,
     job_workflow_sha: input.sha,
   };
@@ -283,14 +396,13 @@ export function githubReusable(input: {
   return { profile: input.repositoryId === null ? 'github-reusable-organization' : 'github-reusable', claims };
 }
 
-/** A GitLab project's pipelines from `source`, at a branch or tag. */
+/** A GitLab project's pipelines from any of `sources`, at a branch or tag. */
 export function gitlabProject(input: {
   namespaceId: string;
   projectId: string;
   refType: 'branch' | 'tag';
   ref: string;
-  source: string;
-}): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'source', 'sources'>): Omit<BindingPolicy, 'issuer'> {
   return {
     profile: 'gitlab',
     claims: {
@@ -298,7 +410,7 @@ export function gitlabProject(input: {
       project_id: input.projectId,
       ref_type: input.refType,
       ref: input.ref,
-      pipeline_source: input.source,
+      pipeline_source: started(input, 'source', 'sources'),
     },
   };
 }
