@@ -9,6 +9,8 @@ import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
+import { managedAccount } from './services.ts';
+import { getSettings, putSettings } from './settings.ts';
 import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
@@ -302,9 +304,10 @@ export const routes = {
     run: (ctx, { params, input }) => signin(ctx).issueServiceToken(ctx, serviceId(params.member), input),
   }),
   ...route('DELETE /members/:member/tokens/:id', {
-    run: (ctx, { params }) => {
-      serviceId(params.member);
-      return signin(ctx).revokeCredential(ctx, params.id);
+    run: async (ctx, { params }) => {
+      const service = serviceId(params.member);
+      const { managed } = await managedAccount(ctx, ctx.caller, service);
+      return signin(ctx).revokeCredential(ctx, params.id, managed ? service : null);
     },
   }),
   ...route('GET /members/:member/bindings', {
@@ -339,6 +342,14 @@ export const routes = {
   }),
   ...route('DELETE /members/:member/bindings/:id', {
     run: (ctx, { params }) => workloads(ctx).unbind(ctx, serviceId(params.member), params.id),
+  }),
+  // The instance's settings: where people set up service accounts themselves.
+  ...route('GET /settings', {
+    run: (ctx) => getSettings(ctx),
+  }),
+  ...route('PUT /settings', {
+    input: z.object({ serviceAccounts: scopeInput }).strict(),
+    run: (ctx, { input }) => putSettings(ctx, input),
   }),
   ...route('PATCH /access/:member', {
     input: z.record(

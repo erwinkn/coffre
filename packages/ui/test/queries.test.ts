@@ -34,6 +34,7 @@ const me = {
   scope: { projects: 'all', environments: 'all' },
   isRootAdmin: false,
   runsInstance: true,
+  setsUpServices: true,
   canReadAudit: true,
   environments: [],
 };

@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
-import { assignableToEnvironment, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, givesService, type Role } from '@coffre/core/access';
 import type { AccessChange } from '@coffre/core/vault';
 
 import { memberStanding, places } from '../db/queries.ts';
-import { placeOf } from './caller.ts';
+import { can, placeOf } from './caller.ts';
 import { denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
-import { ApiError, badRequest, conflict, notFound, vaultRefused } from './errors.ts';
+import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
+import { managedAccount, NOT_THEIRS } from './services.ts';
 
 /** A role, a role until a date, or `null` to take access away. */
 export type AccessValue = Role | { role: Role; until: string | null } | null;
@@ -41,8 +42,11 @@ function parseUntil(until: string, now: Date): Date {
  *
  * Each place needs `grant.manage` there: on a project, from a grant on it,
  * or an instance role whose scope takes in all of it; on an environment,
- * also one whose scope takes in that environment. A member holds at most
- * one role per place, so naming a new role replaces the old one.
+ * also one whose scope takes in that environment. A person sets up a
+ * service account without it, where the instance lets them: they give it
+ * at most what they hold there, and only one whose every grant they hold
+ * (`givesService`, `managesService`). A member holds at most one role per
+ * place, so naming a new role replaces the old one.
  *
  * The app checks first, to answer in its own words; the vault holds the
  * grants and checks again, so a bug here cannot grant what the rules forbid.
@@ -90,8 +94,19 @@ export async function setAccess(
     const subject = { principalType: grantee.type, principalId: grantee.id };
     const scoped = (want: (typeof located)[number]) =>
       ({ projectId: want.projectId, environmentId: want.environmentId, metadata: { ...subject, role: want.role } });
-    for (const want of located) {
-      need(ctx, 'grant.manage', want.place, want.role === null ? 'access.revoke' : 'access.grant', scoped(want));
+    if (grantee.type === 'service' && ctx.caller.principal.type === 'user' && !located.every((want) => can(ctx.caller, 'grant.manage', want.place))) {
+      // What it held at each place they change too: taking a grant away is changing it.
+      const { standing, managed, setting } = await managedAccount(ctx, ctx.caller, grantee.id);
+      const before = (want: (typeof located)[number]) =>
+        standing.grants.find((grant) => grant.projectId === want.projectId && grant.environmentId === want.environmentId)?.role;
+      const beyond = located.find((want) => !managed || ![want.role, before(want)].every((role) => role == null || givesService(ctx.caller, setting, role, want.place)));
+      if (beyond !== undefined) {
+        throw new Refusal(forbidden(NOT_THEIRS), denied(ctx, beyond.role === null ? 'access.revoke' : 'access.grant', 'not_service_manager', scoped(beyond)));
+      }
+    } else {
+      for (const want of located) {
+        need(ctx, 'grant.manage', want.place, want.role === null ? 'access.revoke' : 'access.grant', scoped(want));
+      }
     }
     // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
     const self = grantee.type === ctx.caller.principal.type && grantee.id === ctx.caller.principal.id;

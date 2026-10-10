@@ -490,6 +490,27 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
   }
 }
 
+/**
+ * `coffre settings`: the instance's settings. With `service-accounts` and
+ * the scope flags, where people set up service accounts themselves, which
+ * those who run the instance set: `--except-environments prod` keeps prod's
+ * to an Admin whose scope takes prod in. No flag is everywhere again.
+ */
+export async function settings(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { ...json, ...SCOPE_FLAGS }, ['service-accounts'], 0);
+  const api = connect();
+  const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
+  if (positionals[0] === undefined && (projects !== undefined || environments !== undefined)) {
+    throw new UsageError('the scope flags set one setting: coffre settings service-accounts --except-environments prod');
+  }
+  if (positionals[0] !== undefined && positionals[0] !== 'service-accounts') throw new UsageError(`no setting "${positionals[0]}": service-accounts`);
+  const result = positionals[0] === undefined
+    ? await api.settings.get()
+    : await api.settings.set({ serviceAccounts: { ...(projects && { projects }), ...(environments && { environments }) } });
+  if (values.json) return asJson(io, result);
+  io.out.write(`service accounts, set up by anyone who holds access in: ${scopeInWords(result.serviceAccounts)}\n`);
+}
+
 export async function revoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, { env: { type: 'string' }, service: { type: 'boolean', default: false } }, ['<project>', '<principal>']);
   const [project, name] = positionals as [string, string];

@@ -27,6 +27,9 @@ auditor grant. Where no grant can hold both, as maintainer on `*` beside
 access-manager on billing for a service account, the one that reads stays.
 `coffre migrate` says what it will make of each before you deploy, and
 names what is lost: "loses access-manager on billing (keeps maintainer)".
+A member the vault has reported tampered with is left as they are, as
+`coffre migrate` says, until their access next changes or they are
+started over.
 The first request after the upgrade converts every member holding one,
 one after another, before it answers, so on an instance with many it may
 be slow; one cut short leaves the rest to the next.
@@ -53,6 +56,37 @@ be slow; one cut short leaves the rest to the next.
   `vault_members`, and lets the vault's login update them. Rolling back to
   0.4 leaves Members and Admins everywhere as they were; anyone else is
   refused until removed.
+
+**Anyone who holds access sets up service accounts for it.** Setting up
+CI took an Admin of the whole instance; now a person who holds access adds
+a service account, gives it grants, issues its tokens and trusts its
+workflows by OIDC, with no Admin. They give it at most what they hold
+themselves: a Developer of every `dev` gives `developer` on `market/dev`,
+never `maintainer`, nor `market/prod`. They manage an account only while
+they hold everything it holds, so a dev Developer issues no token for an
+account that also reads prod; one that holds nothing yet is its maker's. A
+new setting, **Who sets up service accounts**, keeps the rest to Admins:
+environments all except prod, and prod's CI takes an Admin whose scope
+takes in prod. Only those who run the instance change it, and each change
+is logged with what it was. Service accounts is in the sidebar of anyone
+who sets one up, listing only the accounts they manage.
+
+- **API.** `GET` and `PUT /api/settings`, `{ "serviceAccounts": <scope> }`.
+  `GET /api/me` adds `setsUpServices` and `serviceSetup`; members and a
+  member's access add `managed`. Removing a member answers its `report`
+  only to those who run the instance (null otherwise). A refusal to
+  someone who does not manage the account logs `not_service_manager`.
+- **CLI.** `coffre settings`, and `coffre settings service-accounts` with
+  the scope flags `coffre admit` takes. `coffre offboard` removes an account
+  you manage.
+- **MCP.** The service account tools are listed to anyone who holds access,
+  and checked against the account; the setting is changed in the pages and
+  the CLI only.
+
+**An Auditor of the whole instance reads the whole log**, the instance's
+own entries too: sign-ins, people, service accounts, settings. It verifies
+the log, as `coffre verify log` and the Audit page do, and runs nothing it
+reads about. A scoped Auditor still reads only the places in its scope.
 
 **One OIDC binding per workflow, on several events, pull requests
 included.** A GitHub binding now lists the events it trusts, so a workflow

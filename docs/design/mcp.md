@@ -397,9 +397,13 @@ leaves out a tool no role the person holds now reaches anywhere, and keeps
 a tool their roles reach but their connection's scopes withhold: clients
 see what they could do, and step up when they need to. Each tool declares
 what it needs: any member (`whoami`, `list_projects`); someone who runs the
-instance, an Admin or Owner with no scope or a root admin (`describe_member`,
-`admit_member`, `offboard_member`, the service-token and trust tools); one
-whose scope takes in new projects (`create_project`); or a permission held
+instance, or a person who holds anything anywhere, who may set up service
+accounts
+([instance-roles.md](instance-roles.md), "Setting up service accounts")
+(`list_access`, `describe_member`, `admit_member`, `offboard_member`, the
+service-token and trust tools, each checked against the account before it
+is offered for approval); one whose scope takes in new projects
+(`create_project`); or a permission held
 somewhere, by a grant's role or the person's instance role, as the API lets
 them. The list is computed on
 each request from the `vault.access` answer the token check already read,

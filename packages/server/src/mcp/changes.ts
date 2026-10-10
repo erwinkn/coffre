@@ -110,6 +110,19 @@ async function instanceOnly({ connection }: ToolContext): Promise<void> {
   if (!runsInstance(connection.caller)) throw new CoffreError(403, 'forbidden', 'only an admin or owner of the whole instance can do this');
 }
 
+/**
+ * Refuse now, as the API would on Approve, unless the person manages the
+ * service account: who runs the instance, or a person who reaches every
+ * grant it holds (`managesService`), which the API answers.
+ */
+async function manages(api: CoffreClient, service: string): Promise<void> {
+  const access = await api.members.access(service).catch((error: unknown) => {
+    if (error instanceof CoffreError && error.status === 403) return null;
+    throw error;
+  });
+  if (access === null || !access.managed) throw new CoffreError(403, 'forbidden', `you do not manage ${shownMember(service)}: it holds something you do not, or the instance keeps it to admins`);
+}
+
 /** Refuse now, as the API would on Approve, when the person may not make a project. */
 async function projectMakers({ connection }: ToolContext): Promise<void> {
   if (!makesProjects(connection.caller)) throw new CoffreError(403, 'forbidden', 'only an admin or owner whose scope takes in new projects can do this');
@@ -545,11 +558,13 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         return `change ${shownMember(apiMember(member))}'s access at ${places.length === 1 ? places[0] : `${places.length} places`}`;
       },
       // Each place needs grant.manage there, as the API checks: on a project, all of it; on an environment, that one.
-      check: async (ctx, { changes }) => {
+      // A service account's manager gives it what they hold, which the API decides on Approve.
+      check: async (ctx, { member, changes }) => {
         const places = Object.keys(changes).map(placeOf);
         if (places.some((place) => place.split('/')[0] === '*')) {
           throw new CoffreError(400, 'bad_request', 'grants are on a project or an environment: a person reaches every project by their instance role (admit_member)');
         }
+        if (apiMember(member).startsWith('token:') && !runsInstance(ctx.connection.caller)) return manages(ctx.api, apiMember(member));
         const projects = places.filter((place) => !place.includes('/'));
         await needsOn(ctx.api, projects, 'grant.manage');
         for (const place of places.filter((candidate) => candidate.includes('/'))) await needs(ctx.api, place, 'grant.manage');
@@ -565,9 +580,9 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'admit_member',
-    needs: 'instance',
+    needs: 'services',
     title: 'Admit a member, or set their role',
-    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
+    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. A person who holds access may add a service account, where the instance lets them. ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
     scope: 'manage-access',
     idempotent: true,
     destructive: false,
@@ -579,7 +594,10 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ member }) => [apiMember(member)],
     change: {
       summary: ({ member, role, scope }) => `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${INSTANCE_ROLES[role].name}, ${scopeInWords(fullScope(scope))}`}`,
-      check: instanceOnly,
+      check: async (ctx, { member, role, scope }) => {
+        if (!apiMember(member).startsWith('token:') || (role ?? 'member') !== 'member' || scope !== undefined) return instanceOnly(ctx);
+        if (!(await ctx.api.me()).setsUpServices) throw new CoffreError(403, 'forbidden', 'you set up no service account: the instance keeps them to admins where you hold access');
+      },
       preview: async (_api, { member, role, scope }) => [
         { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
         role === undefined
@@ -599,9 +617,9 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'offboard_member',
-    needs: 'instance',
+    needs: 'services',
     title: 'Offboard a member',
-    description: `Remove a member: their grants, sessions, tokens and linked accounts end, and the answer lists the secrets they read or wrote, to rotate. ${approved}`,
+    description: `Remove a member: their grants, sessions, tokens and linked accounts end, and the answer lists the secrets they read or wrote, to rotate. A service account's manager removes it too, without that list. ${approved}`,
     scope: 'manage-access',
     idempotent: true,
     destructive: true,
@@ -609,8 +627,15 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ member }) => [apiMember(member)],
     change: {
       summary: ({ member }) => `offboard ${shownMember(apiMember(member))}`,
-      check: instanceOnly,
+      check: async (ctx, { member }) => (apiMember(member).startsWith('token:') && !runsInstance(ctx.connection.caller) ? manages(ctx.api, apiMember(member)) : instanceOnly(ctx)),
       preview: async (api, { member }) => {
+        if (!(await api.me()).runsInstance) {
+          const access = await api.members.access(apiMember(member));
+          return [
+            { label: 'Service account', value: shownMember(apiMember(member)), kind: 'mono' },
+            { label: 'Ends', value: `${access.grants.length} grants, and every token and trust binding` },
+          ];
+        }
         const report = await api.members.get(apiMember(member));
         return [
           { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
@@ -620,7 +645,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       },
       apply: async (api, { member }) => {
         const removed = await api.members.remove(apiMember(member));
-        const toRotate = removed.report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`);
+        const toRotate = (removed.report?.exposed ?? []).map((entry) => `${entry.project}/${entry.environment}/${entry.key}`);
         return {
           result: { member: shownMember(apiMember(member)), revoked: removed.revoked, toRotate },
           text: `${shownMember(apiMember(member))} is offboarded. ${toRotate.length === 0 ? 'Nothing they read needs rotating.' : `Rotate what they read or wrote: ${toRotate.join(', ')}.`}`,
@@ -630,7 +655,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'issue_service_token',
-    needs: 'instance',
+    needs: 'services',
     title: 'Issue a service token',
     description: `Issue a bearer token for a service account. coffre shows the token to the person on its page, once; it never reaches you. ${approved}`,
     scope: 'manage-access',
@@ -640,7 +665,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
-      check: instanceOnly,
+      check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
       preview: async (_api, { service, label, expiresInDays }) => [
         { label: 'Service account', value: shownService(service), kind: 'mono' },
         ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
@@ -659,7 +684,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'revoke_service_token',
-    needs: 'instance',
+    needs: 'services',
     title: 'Revoke a service token',
     description: `Revoke one of a service account's tokens, by the ID describe_member lists. ${approved}`,
     scope: 'manage-access',
@@ -669,7 +694,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service }) => `revoke a token of ${shownService(service)}`,
-      check: instanceOnly,
+      check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
       preview: async (api, { service, id }) => {
         const token = (await api.tokens.list(serviceMember(service))).tokens.find((entry) => entry.id === id);
         return [
@@ -686,7 +711,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'trust_workload',
-    needs: 'instance',
+    needs: 'services',
     title: 'Trust a CI workload',
     description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. ${approved}`,
     scope: 'manage-access',
@@ -731,7 +756,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'untrust_workload',
-    needs: 'instance',
+    needs: 'services',
     title: 'Stop trusting a CI workload',
     description: `Remove one of a service account's trust bindings, by the ID describe_member lists. ${approved}`,
     scope: 'manage-access',
@@ -741,7 +766,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service }) => `stop trusting a CI workload as ${shownService(service)}`,
-      check: instanceOnly,
+      check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
       preview: async (api, { service, id }) => {
         const binding = (await api.bindings.list(serviceMember(service))).bindings.find((entry) => entry.id === id);
         return [

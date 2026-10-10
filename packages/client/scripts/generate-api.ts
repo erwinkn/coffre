@@ -40,6 +40,7 @@ const NAMED = {
   Me: 'api/projects.ts',
   Member: 'api/members.ts',
   MemberAccess: 'api/members.ts',
+  SettingsView: 'api/settings.ts',
   MissingKey: 'api/missing.ts',
   OffboardingReport: 'api/members.ts',
   ListedReference: 'api/references.ts',

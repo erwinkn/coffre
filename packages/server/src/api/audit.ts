@@ -1,4 +1,4 @@
-import { runsInstance } from '@coffre/core/access';
+import { readsWholeLog, runsInstance } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
 import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
@@ -150,11 +150,12 @@ export type AuditQuery = {
 };
 
 /**
- * Newest first, both authors. Those who run the instance read everything;
- * anyone else reads the projects and environments where they hold
- * `audit.read`, by a grant or their instance role, and nothing else: an
- * entry about no place, such as a sign-in or a member's removal, is the
- * instance's, and theirs alone.
+ * Newest first, both authors. Whoever reads the whole log reads everything:
+ * a root admin, and an Auditor, Admin or Owner whose scope narrows nothing
+ * (`readsWholeLog`). Anyone else reads the projects and environments where
+ * they hold `audit.read`, by a grant or their instance role, and nothing
+ * else: an entry about no place, such as a sign-in or a member's removal,
+ * is the instance's, and theirs alone.
  *
  * Without `detail`, the page says what it left out: the detail entries the
  * same filters match in the page's stretch of the log, by action. A page's
@@ -172,7 +173,7 @@ export async function listAudit(
     limit: query.limit,
   };
   const { caller } = ctx;
-  if (!runsInstance(caller)) {
+  if (!readsWholeLog(caller)) {
     const projectIds: string[] = [];
     const environmentIds: string[] = [];
     // A project's whole log where they read all of it, else each environment's they read, as places are now.
@@ -267,7 +268,7 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
   };
 }
 
-/** What the keys are checked against (`AuditKeys`): owners and root admins only, as verification is. */
+/** What the keys are checked against (`AuditKeys`): for those who run the instance, whose keys they are. */
 export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
   if (!runsInstance(ctx.caller)) {
     throw forbidden('only a root admin, or an admin or owner of the whole instance, may read what the keys are checked against');
@@ -290,11 +291,12 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
  * against the prefix it signed, its key batches accounted for, and the
  * members and grants replayed. Anyone who can insert a row can link it to
  * the chain, so an entry whose author did not write it fails one check or
- * the other. Owners only: a partial view of the chain cannot be verified.
+ * the other. For whoever reads the whole log (`readsWholeLog`): a part of
+ * the chain cannot be verified.
  */
 export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
-  if (!runsInstance(ctx.caller)) {
-    throw forbidden('only a root admin, or an admin or owner of the whole instance, may verify the complete audit chain');
+  if (!readsWholeLog(ctx.caller)) {
+    throw forbidden('only those who read the whole log may verify it: a root admin, or an auditor, admin or owner of the whole instance');
   }
   const failed = (author: 'app' | 'vault', failedAtSeq: number | bigint | null, reason: string, through: bigint | null) => ({
     ok: false as const,

@@ -537,7 +537,8 @@ export type MemberRow = {
 /** What one member holds, as stored: their row, their live grants by place, and the projects' slugs a scope names by id. */
 export type MemberAccessRows = {
   /** Null when they have no row. */
-  member: { status: 'active' | 'removed'; role: InstanceRole; scope: Scope; tampered: boolean } | null;
+  /** `admittedBy`: who admitted them last, or removed them, as their row says (`status_changed_by`). */
+  member: { status: 'active' | 'removed'; role: InstanceRole; scope: Scope; tampered: boolean; admittedBy: string } | null;
   grants: { projectId: string; projectSlug: string; environmentId: string | null; environmentSlug: string | null; role: string; expiresAt: number | null }[];
   /** Every project's slug, by id, when their scope names projects; empty otherwise. */
   projectSlugs: Map<string, string>;
@@ -550,7 +551,7 @@ export type MemberAccessRows = {
  * its place, and, when their scope names projects, every project's slug,
  * to name them by. A member page reads this once, not one list per project.
  *
- *   SELECT m.status, m.owner, m.role, m.scope, <finding>, <change>, x.*
+ *   SELECT m.status, m.owner, m.role, m.scope, m.status_changed_by, <finding>, <change>, x.*
  *   FROM vault_members m LEFT JOIN (
  *     SELECT 'grant', g.principal, project, slugs, role, end FROM vault_grants g … WHERE g.principal = $1 AND live
  *     UNION ALL
@@ -563,7 +564,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
   const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
   const query = sql`
-    SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope,
+    SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
       (SELECT max(${log.seq}) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.action} = 'vault.tampered'
         AND ${log.code} IN ('mac', 'stale') AND ${log.subjectPrincipal} = ${m.principal}) AS found_seq,
       (SELECT max(${log.seq}) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
@@ -584,7 +585,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
     ) x ON x.principal = ${m.principal}
     WHERE ${m.principal} = ${principal}`;
   type Row = {
-    status: string; owner: boolean | number; member_role: string | null; scope: string | null;
+    status: string; owner: boolean | number; member_role: string | null; scope: string | null; status_changed_by: string;
     found_seq: string | number | null; changed_seq: string | number | null;
     kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
     environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
@@ -600,6 +601,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
       status: first.status as 'active' | 'removed',
       ...storedRole({ owner: first.owner === true || first.owner === 1, role: first.member_role, scope: first.scope }),
       tampered: seq(first.found_seq) > seq(first.changed_seq),
+      admittedBy: first.status_changed_by,
     },
     grants: rows.flatMap((row) =>
       row.kind === 'grant'

@@ -251,7 +251,7 @@ test('removed people stay listed, with as many values to rotate as their report'
   assert.deepEqual((await root.members.list()).removed, []);
 
   const { report } = await root.members.remove(`user:${DEV}`);
-  assert.equal(report.exposed.length, 2);
+  assert.equal(report?.exposed.length, 2);
   await root.members.remove(`token:${SERVICE}`);
   const listed = async () =>
     (await root.members.list()).removed.map(

@@ -149,6 +149,17 @@ async function scenario(operations: readonly Operation[]) {
   const signedIn = (member: Member) => credentials.some((credential) => credential.member === member && credential.live);
   /** Whether ada manages and sees grants: as an Admin only, since her grants are viewer and developer. */
   const adaManages = () => model.role.name === 'admin' && model.active.ada && signedIn('ada');
+  /**
+   * Whether Ada sets up service accounts, so lists the directory: an admin,
+   * or, as the setting is everywhere, a person who holds anything anywhere,
+   * by a grant or a Developer's role over an environment there is.
+   */
+  const adaSetsUp = () => {
+    if (!model.active.ada || !signedIn('ada')) return false;
+    if (model.role.name === 'admin' || model.grants.ada.size > 0) return true;
+    const only = model.role.only;
+    return model.role.name === 'developer' && (only === null || only === 'prod' || model.environments.some((environment) => environment.slug === only));
+  };
   /** Whether ada's instance role reads and writes the environment of this slug. */
   const adaDevelops = (member: Member, slug: Slug) => member === 'ada' && model.role.name === 'developer' && (model.role.only === null || model.role.only === slug);
   function may(member: Member, environment: Environment | undefined, write = false): boolean {
@@ -282,11 +293,13 @@ async function scenario(operations: readonly Operation[]) {
     for (const member of members) {
       for (const slug of slugs) await read(member, slug);
     }
-    // An owner sees every member and their grants; anyone else with no grant.manage, none.
-    const directory = await allowed(() => client('ada').members.list(), adaManages());
-    if (directory) {
+    // An owner sees every member and their grants; anyone else who sets up service accounts, those they manage; anyone else, none.
+    const directory = await allowed(() => client('ada').members.list(), adaSetsUp());
+    if (directory && adaManages()) {
       assert.equal(directory.members.find((listed) => listed.member === principal('ada'))?.instanceRole, 'admin');
       assert.equal(directory.members.some((listed) => listed.member === principal('ci')), model.active.ci, 'an owner sees every member');
+    } else if (directory) {
+      assert.ok(directory.members.every((listed) => listed.principalType === 'service' && listed.managed), 'only the service accounts she manages');
     }
     // Every list shows the places the model has, archived included, and no tombstone.
     const listed = (await root.projects.list()).projects;

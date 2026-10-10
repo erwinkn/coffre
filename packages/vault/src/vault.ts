@@ -5,20 +5,24 @@ import {
   assignableToEnvironment,
   convertEveryProjectGrants,
   EVERYWHERE,
+  givesService,
   grantKind,
   isInstanceRole,
   isRole,
   isScope,
+  managesService,
   mayManageAccess,
   normalScope,
   NOTHING,
   runsInstance,
+  setsUpServices,
   type Holdings,
   type InstanceRole,
   type Permission,
   type Place,
   type Role,
   type Scope,
+  type ServiceAccount,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, type SecretContext } from '@coffre/core/envelope';
@@ -60,6 +64,8 @@ import {
   type RewrapInput,
   type SecretRef,
   type SetAccessInput,
+  type SetSettingsInput,
+  type Settings,
   type UnwrapInput,
   type Vault,
   type Via,
@@ -169,6 +175,10 @@ const LOCK_TIMEOUT_MS = 15_000;
 /** A member: `user:<email>` or `token:<name>`. */
 const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 
+/** A person, and a service account: only a person sets one up (`givesService`). */
+const PERSON = /^user:/;
+const SERVICE = /^token:/;
+
 /** Who acts for the vault itself, as when it gives a root admin a member row. */
 const VAULT_ACTOR = 'system:vault';
 
@@ -192,6 +202,15 @@ const TAMPERED_SUBJECT = "this member's record failed the vault's integrity chec
 
 /** The action of the vault's entry that signs a prefix of the log. */
 const CHECKPOINT = 'audit.checkpoint';
+
+/** The action of the vault's entry that holds the instance's settings, and changes them (`settings`). */
+const SETTINGS = 'settings.change';
+
+/** The settings before anyone changed them: people set up service accounts anywhere they hold access. */
+const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
+
+/** Why a person's change to a service account is refused. */
+const NOT_THEIRS = 'a person gives a service account at most what they hold, where the instance lets them set one up, and only to one whose every grant they hold';
 
 /** Who asks for checkpoints: the app's scheduled job. */
 const SCHEDULER = 'system:coffre-scheduler';
@@ -469,6 +488,17 @@ class VaultService implements Vault {
     return null;
   }
 
+  /**
+   * Whether the vault's newest report that `principal`'s row was changed
+   * around it is newer than its newest entry changing what they hold: only
+   * starting them over, or another change, settles it. Both by their MACs.
+   */
+  async #reportStands(db: Queryable, principal: string, reports: NewEntry[]): Promise<boolean> {
+    const report = (await store.tamperReportsAbout(db, principal, 32)).find((entry) => this.#authentic(entry));
+    if (report === undefined) return false;
+    return report.seq > ((await this.#newestAccessSeq(db, principal, reports)) ?? -1n);
+  }
+
   /** Whether `entry` carries the vault's MAC: under any of its keys before `since`, and only its current one from there. */
   #authentic(entry: StoredEntry): boolean {
     const { logKeys, since } = this.#prepared;
@@ -543,8 +573,11 @@ class VaultService implements Vault {
    * one decision per member who holds any, as `system:vault`, each grant it
    * replaces an `access.revoke` that says what became of it. Another
    * process that converts the same member at once finds nothing left under
-   * their lock. A member whose row fails its check is left as they are:
-   * removing them clears it.
+   * their lock. A member whose row fails its check is left as they are, and
+   * so is one the vault has reported changed around it since the last
+   * change to what they hold, even if their row checks out again now (a
+   * genuine row put back): `coffre migrate`, which holds no key, can tell
+   * only that, and says the same. Removing them clears both.
    */
   async #convert(): Promise<void> {
     for (const principal of await store.everyProjectHolders(this.#db)) {
@@ -560,6 +593,7 @@ class VaultService implements Vault {
     if (row === undefined || subject.status !== 'active') return;
     const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
     if (everyProject.length === 0) return;
+    if (await this.#reportStands(d.tx, principal, d.reports)) return;
     // The projects there are now, read under the log's head, which a deletion holds.
     await lockLogHead(d.tx);
     const before = roleOf(principal, row);
@@ -1469,7 +1503,9 @@ class VaultService implements Vault {
       });
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!where.every((place) => mayManageAccess(acting.live, place))) throw refused('not_allowed');
+      // Where they manage access, anything; otherwise only a person to a service account (`givesService`).
+      const manages = where.every((place) => mayManageAccess(acting.live, place));
+      if (!manages && !(SERVICE.test(principal) && PERSON.test(actor))) throw refused('not_allowed');
       // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
       if (actor === principal && !acting.live.isRootAdmin && changes.some((change) => change.role !== null)) {
         throw refused('not_allowed', 'nobody grants themselves a role: ask another admin');
@@ -1480,6 +1516,17 @@ class VaultService implements Vault {
       if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       if (row?.status === 'removed') throw refused('removed');
       if (row === undefined) throw refused('not_a_member');
+      if (!manages) {
+        // The setting as of the log's head, which a change to it takes too.
+        const setting = (await this.#settingsAt(d.tx)).serviceAccounts;
+        const account = await this.#account(d.tx, subject, row);
+        // Each place's new role they must hold, and what it held before: taking a grant away is changing it.
+        const gives = changes.every((change, i) => {
+          const before = subject.live.grants.find((grant) => placeKey({ ...grant, environmentSlug: null }) === placeKey(change));
+          return [change.role, before?.role].every((role) => role == null || givesService(acting.live, setting, role, where[i]));
+        });
+        if (!gives || !managesService(acting.live, setting, actor, account)) throw refused('not_allowed', NOT_THEIRS);
+      }
       // The grants the check verified, not a second read: what the decision changes, and seals.
       const held = subject.stored;
       d.grants.set(principal, [...held]);
@@ -1551,7 +1598,14 @@ class VaultService implements Vault {
       validateCorrelation(input);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!runsInstance(acting.live)) throw refused('not_allowed', 'only admins and owners of the whole instance may add members or set their roles');
+      if (!runsInstance(acting.live)) {
+        // A service account, with no grant yet, any person who could give it one sets up (`setsUpServices`).
+        const service = SERVICE.test(principal) && (input.role ?? 'member') === 'member' && input.scope === undefined;
+        const setting = (await this.#settingsAt(d.tx)).serviceAccounts;
+        if (!service || !PERSON.test(actor) || !setsUpServices(acting.live, setting, placesOf(await store.liveProjects(d.tx)))) {
+          throw refused('not_allowed', 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up');
+        }
+      }
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       if (input.role !== undefined && !isInstanceRole(input.role)) throw refused('invalid', `no such instance role: ${input.role}`);
@@ -1623,7 +1677,12 @@ class VaultService implements Vault {
         if (!runsInstance(holder)) throw refused('not_allowed', 'only admins and owners of the whole instance may remove a member whose record failed its check');
         return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
       }
-      if (!runsInstance(holder)) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members');
+      if (!runsInstance(holder)) {
+        // A service account its manager removes: they reach everything it holds (`managesService`).
+        const theirs = SERVICE.test(principal) && PERSON.test(actor) && row?.status === 'active' &&
+          managesService(holder, (await this.#settingsAt(d.tx)).serviceAccounts, actor, await this.#account(d.tx, subject, row));
+        if (!theirs) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members, and a service account whoever manages it');
+      }
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
 
       const revoked = held.filter((grant) => live(grant, d.at));
@@ -1655,6 +1714,72 @@ class VaultService implements Vault {
         });
       });
       return { revoked: revoked.map(view), generation };
+    });
+  }
+
+  /**
+   * A service account as `managesService` weighs it: its live grants, each
+   * environment by its slug, which the setting's scope matches, and who
+   * admitted it, as its row says.
+   */
+  async #account(db: Queryable, subject: Standing, row: Member): Promise<ServiceAccount> {
+    const slugs = await store.environmentsById(db, subject.live.grants.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId])));
+    return {
+      grants: subject.live.grants.map((grant) => ({
+        role: grant.role,
+        place: grant.environmentId === null
+          ? { projectId: grant.projectId! }
+          : { projectId: grant.projectId!, environmentId: grant.environmentId, environmentSlug: slugs.get(grant.environmentId)?.slug ?? null },
+      })),
+      admittedBy: row.statusChangedBy,
+    };
+  }
+
+  // --- the instance's settings ------------------------------------------------
+
+  async settings(): Promise<Settings> {
+    await this.#settled();
+    return this.#settingsAt(this.#db);
+  }
+
+  /**
+   * The settings the vault's newest `settings.change` says, by its MAC: one
+   * in its name it did not write is passed over, as a `key.check` is.
+   */
+  async #settingsAt(db: Queryable): Promise<Settings> {
+    for (const entry of await store.newestVaultEntries(db, SETTINGS, 32)) {
+      if (!this.#authentic(entry)) continue;
+      const { serviceAccounts } = JSON.parse(entry.metadata) as { serviceAccounts?: unknown };
+      if (isScope(serviceAccounts)) return { serviceAccounts };
+    }
+    return DEFAULT_SETTINGS;
+  }
+
+  setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>> {
+    const { actor } = input;
+    const entry = (decision: 'allow' | 'deny', detail: Record<string, unknown>, code: RefusalCode | null = null): NewEntry => ({
+      actor,
+      action: SETTINGS,
+      decision,
+      code,
+      operationId: input.operationId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: JSON.stringify({ ...detail, ...traced(input) }),
+    });
+    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+      new Refused(refusal(code, message), [entry('deny', { serviceAccounts: input.settings?.serviceAccounts ?? null }, code)]);
+    return this.#decide([actor], async (d) => {
+      validateCorrelation(input);
+      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      if (acting.status === 'tampered') throw refused('tampered');
+      if (!runsInstance(acting.live)) throw refused('not_allowed', "only admins and owners of the whole instance change its settings");
+      if (!isScope(input.settings?.serviceAccounts)) throw refused('invalid', 'who sets up service accounts is a scope: { projects, environments }, each all, only or except');
+      // Under the log's head, so two changes at once each name the one before.
+      await lockLogHead(d.tx);
+      const previous = await this.#settingsAt(d.tx);
+      const settings: Settings = { serviceAccounts: normalScope(input.settings.serviceAccounts) };
+      if (JSON.stringify(settings) !== JSON.stringify(previous)) d.log.push(entry('allow', { ...settings, previous }));
+      return { settings };
     });
   }
 
@@ -2324,6 +2449,14 @@ function located(place: store.Place): { ids: Pick<NewEntry, 'projectId' | 'envir
 }
 
 /** One key per place a member can hold a grant at, by what the grant names first: its environment, its project, or neither, on every project of 0.4. */
+/** Every project there is now and each of its environments, as a permission check names them. */
+function placesOf(projects: readonly { id: string; environments: readonly { id: string; slug: string }[] }[]): Place[] {
+  return projects.flatMap((project) => [
+    { projectId: project.id },
+    ...project.environments.map((environment) => ({ projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug })),
+  ]);
+}
+
 function placeKey(place: store.Place): string {
   if (place.environmentId !== null) return `environment:${place.environmentId}`;
   return place.projectId !== null ? `project:${place.projectId}` : `every-project:${place.environmentSlug ?? ''}`;

@@ -826,6 +826,62 @@ async function laterProject(): Promise<{ project: string; dev: SecretRef; prod: 
 
 const DEV_ONLY: Scope = { projects: 'all', environments: { only: ['dev'] } };
 
+test('a person sets up a service account in the vault too: no more than they hold, only one they reach whole, inside the setting', async () => {
+  const w = await world();
+  const CI = 'token:ci';
+  const grant = (actor: string, environmentId: string | null, role: string | null, principal = CI) =>
+    w.vault.setAccess({ actor, principal, changes: [{ projectId: w.project, environmentId, role: role as 'viewer' | null, expiresAt: null }] });
+  const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB })).ok);
+
+  // A person who holds nothing sets up nothing; one who holds dev adds an account, and gives it what she holds there.
+  assert.equal(code(await w.vault.admit({ actor: BOB, principal: 'token:bob' })), 'not_allowed');
+  assert.ok((await w.vault.admit({ actor: ADA, principal: CI })).ok);
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'user:eve@acme.example' })), 'not_allowed', 'never a person');
+  assert.equal(code(await grant(ADA, w.dev, 'developer')), 'ok');
+  assert.equal(code(await grant(ADA, w.prod, 'viewer')), 'not_allowed', 'prod, which she does not hold');
+  assert.equal(code(await grant(ADA, null, 'viewer')), 'not_allowed', 'the project, which reaches prod');
+  assert.equal(code(await grant(ADA, w.dev, 'auditor')), 'not_allowed', 'a role she does not hold');
+  assert.equal(code(await grant(ADA, w.dev, 'viewer', BOB)), 'not_allowed', 'never to a person');
+
+  // Once it holds prod, it is out of her hands: no change, no removal.
+  assert.equal(code(await grant(ROOT, w.prod, 'viewer')), 'ok');
+  assert.equal(code(await grant(ADA, w.dev, 'viewer')), 'not_allowed');
+  assert.equal(code(await grant(ADA, w.dev, null)), 'not_allowed');
+  assert.equal(code(await w.vault.remove({ actor: ADA, principal: CI })), 'not_allowed');
+  assert.equal(code(await grant(ROOT, w.prod, null)), 'ok');
+  assert.equal(code(await grant(ADA, w.dev, 'viewer')), 'ok');
+
+  // The setting: only who runs the instance changes it, logged with what it was; dev kept to Admins, she sets up nothing there.
+  const PROD_ONLY: Scope = { projects: 'all', environments: { only: ['prod'] } };
+  assert.equal(code(await w.vault.setSettings({ actor: ADA, settings: { serviceAccounts: PROD_ONLY } })), 'not_allowed');
+  assert.deepEqual(await w.vault.setSettings({ actor: ROOT, settings: { serviceAccounts: PROD_ONLY } }), { ok: true, settings: { serviceAccounts: PROD_ONLY } });
+  assert.deepEqual(await w.vault.settings(), { serviceAccounts: PROD_ONLY });
+  assert.equal(code(await grant(ADA, w.dev, 'developer')), 'not_allowed');
+  assert.equal(code(await w.vault.remove({ actor: ADA, principal: CI })), 'not_allowed');
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci-2' })), 'not_allowed');
+  const changes = (await vaultLog(w)).filter((entry) => entry.action === 'settings.change');
+  assert.deepEqual(changes.map((entry) => [entry.actor, entry.outcome]), [[ADA, 'refuse'], [ROOT, 'allow']]);
+  assert.deepEqual(changes[1]!.detail.previous, { serviceAccounts: EVERYWHERE });
+
+  // A setting written in the vault's name around it is passed over.
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  const [head] = await db.owner.select().from(auditChainHead);
+  const fields = {
+    seq: head.nextSeq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: ROOT,
+    action: 'settings.change', decision: 'allow', code: null, subjectPrincipal: null, projectId: null, environmentId: null,
+    secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null, relatedSeq: null,
+    metadata: JSON.stringify({ serviceAccounts: EVERYWHERE }),
+  };
+  const mac = Buffer.alloc(32, 7);
+  const hash = entryHash(head.headHash, fields, mac);
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+  await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
+  assert.deepEqual(await w.vault.settings(), { serviceAccounts: PROD_ONLY });
+  assert.equal(code(await grant(ADA, w.dev, 'developer')), 'not_allowed');
+});
+
 test('an instance role reaches every project in its scope, the ones made later too, and grants add to it', async () => {
   const w = await world();
   const { environments } = tablesOf(db.owner);
@@ -1045,6 +1101,30 @@ test('migrate does not list a member whose row the vault found tampered with, wh
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => preview.principal), [ADA]);
   await (await fresh()).access(ADA);
   assert.deepEqual((await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`)).map((grant) => grant.principal), [BOB]);
+});
+
+test('a genuine row put back after a tamper report is left as migrate says, until a change to what they hold settles it', async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  await member(w, BOB, []);
+  await everyProjectGrant(BOB, null, 'viewer');
+  await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
+  assert.equal((await w.vault.access(BOB)).status, 'tampered');
+  // The exact row put back: it checks out again, and no entry says so.
+  await db.owner.update(vaultGrants).set({ role: 'viewer' }).where(eq(vaultGrants.principal, BOB));
+  assert.equal((await w.vault.access(BOB)).status, 'active');
+
+  // migrate, which holds no key, leaves BOB out; the vault leaves him as he is too.
+  assert.deepEqual(await everyProjectPreview(db.owner, Date.now()), []);
+  await (await fresh()).access(BOB);
+  const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
+  assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
+
+  // A change to what he holds is newer than the report: both convert him again.
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: BOB, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })).ok);
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => preview.principal), [BOB]);
+  await (await fresh()).access(BOB);
+  assert.deepEqual(await db.owner.select().from(vaultGrants).where(everyProject), []);
 });
 
 test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {

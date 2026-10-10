@@ -490,6 +490,18 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
   return row === undefined ? undefined : stored([row])[0];
 }
 
+/** Up to `limit` of the vault's allowed entries of `action`, newest first. */
+export async function newestVaultEntries(db: Queryable, action: string, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
 /** Up to `limit` of the vault's allowed access entries about `principal`, newest first. */
 export async function accessEntriesAbout(db: Queryable, principal: string, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
@@ -502,6 +514,29 @@ export async function accessEntriesAbout(db: Queryable, principal: string, limit
         eq(auditLog.subjectPrincipal, principal),
         inArray(auditLog.action, [...ACCESS_ACTIONS]),
         eq(auditLog.decision, 'allow'),
+      ),
+    )
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
+/**
+ * Up to `limit` of the vault's reports that `principal`'s row was changed
+ * around it (`vault.tampered`, for their row or an older one put back),
+ * newest first: what `tamperedMembers` in @coffre/db/grants reads too.
+ */
+export async function tamperReportsAbout(db: Queryable, principal: string, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.author, 'vault'),
+        eq(auditLog.subjectPrincipal, principal),
+        eq(auditLog.action, 'vault.tampered'),
+        inArray(auditLog.code, ['mac', 'stale']),
       ),
     )
     .orderBy(desc(auditLog.seq))

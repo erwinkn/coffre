@@ -1022,6 +1022,19 @@ async function trust(args: string[]): Promise<void> {
   if (events !== null) process.stdout.write(`${events}\n`);
 }
 
+/** `coffre offboard` of a service account by its manager: what it holds, and with --apply, removed. */
+async function offboardManaged(coffre: CoffreClient, member: string, apply: boolean): Promise<void> {
+  const access = await coffre.members.access(member);
+  const shown = shownMember(member);
+  if (!access.managed) fail(`you do not manage ${shown}: it holds something you do not, or the instance keeps it to admins`);
+  if (!apply) {
+    process.stdout.write(`${shown} is active; removing it would revoke ${access.grants.length} grant${access.grants.length === 1 ? '' : 's'}, and every token and trust binding\nNothing changed. Re-run with --apply to remove it.\n`);
+    return;
+  }
+  const removed = await coffre.members.remove(member);
+  process.stdout.write(`removed ${shown}: revoked ${waysIn('service', removed.revoked)}\n`);
+}
+
 async function offboard(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -1038,13 +1051,19 @@ async function offboard(args: string[]): Promise<void> {
   const shown = shownMember(member).replace(/^user:/, '');
   const coffre = client();
 
-  let report = await coffre.members.get(member);
+  // A service account's manager, who does not run the instance, reads what it holds, not what it read anywhere.
+  const found = await coffre.members.get(member).catch((error: unknown) => {
+    if (error instanceof CoffreError && error.status === 403 && member.startsWith('token:')) return null;
+    throw error;
+  });
+  if (found === null) return offboardManaged(coffre, member, values.apply);
+  let report = found;
   const they = report.principalType === 'user' ? 'they' : 'it';
 
   if (report.status === 'active' && values.apply) {
     const removed = await coffre.members.remove(member);
     process.stdout.write(`removed ${shown}: revoked ${waysIn(report.principalType, removed.revoked)}\n`);
-    report = removed.report;
+    report = removed.report ?? report;
   } else if (report.status === 'active') {
     process.stdout.write(
       `${shown} is active; removing would revoke ${waysIn(report.principalType, report.live)}\n`,
@@ -1174,7 +1193,7 @@ async function verify(args: string[]): Promise<void> {
   }
 }
 
-/** The whole audit log, verified by the app and the vault, as an owner. */
+/** The whole audit log, verified by the app and the vault, for whoever reads it whole. */
 async function verifyLog(): Promise<void> {
   const result = await client().audit.verify();
 
@@ -1281,6 +1300,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   grant: grantAccess,
   revoke: (args) => manage.revoke(connect, args),
   offboard,
+  settings: (args) => manage.settings(connect, args),
   tokens: (args) => manage.tokens(connect, args),
   'tokens issue': (args) => manage.tokensIssue(connect, args),
   'tokens revoke': (args) => manage.tokensRevoke(connect, args),

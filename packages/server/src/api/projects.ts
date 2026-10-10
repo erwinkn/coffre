@@ -26,6 +26,7 @@ import { can, canAnywhere, instanceRoleOf, permissionsAt, placeOf, seesProject }
 import { allowed, audited, denied, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
+import { serviceSettingFor, setsUp } from './services.ts';
 import { formatMember } from './paths.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
@@ -45,6 +46,14 @@ export type Me = {
   /** Whether they run the instance: an admin or owner with no scope, or a root admin. */
   runsInstance: boolean;
   canReadAudit: boolean;
+  /** Whether they set up any service account: who runs the instance, or a person who could give one a grant somewhere. */
+  setsUpServices: boolean;
+  /**
+   * Where a person sets up service accounts without running the instance:
+   * the instance's setting, projects by slug, those they see; null for a
+   * service account. Inside it, they give one what they hold there.
+   */
+  serviceSetup: Scope | null;
   /**
    * What this deployment's configuration turns on, as `signin({ … })` says:
    * MCP clients (`mcp`), as the endpoint they connect to,
@@ -88,7 +97,7 @@ const iso = (value: Date | null) => value?.toISOString() ?? null;
 export async function me(ctx: ApiContext): Promise<Me> {
   const { caller } = ctx;
   const reachable: Me['environments'] = [];
-  const known = await places(ctx.db);
+  const [known, setting] = await Promise.all([places(ctx.db), serviceSettingFor(ctx.vault, caller)]);
   for (const project of known) {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {
@@ -107,6 +116,9 @@ export async function me(ctx: ApiContext): Promise<Me> {
     isRootAdmin: caller.isRootAdmin,
     runsInstance: runsInstance(caller),
     canReadAudit: canAnywhere(caller, 'audit.read'),
+    setsUpServices: setsUp(caller, setting, known),
+    // A scope names projects the caller may not see (D95): those they do, by slug.
+    serviceSetup: setting === null ? null : scopeView(setting, runsInstance(caller) ? known : known.filter((project) => seesProject(caller, project))),
     features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
     environments: reachable,
   };

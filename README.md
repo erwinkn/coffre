@@ -173,10 +173,12 @@ coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
                                             # the CI runs trusted to sign in as service:api-deploy, by OIDC;
                                             # previews the claims, --apply saves (docs/design/oidc.md)
 coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --apply removes it
+                                            # anyone with access does these for what they hold, where
+coffre settings service-accounts --except-environments prod   # this lets them: prod's take an Admin
 
 coffre audit --denied
 coffre verify                               # asks which: instance, keys or log; admins and owners
-coffre verify log                           # checks the whole log
+coffre verify log                           # checks the whole log, as an auditor, admin or owner of all of it
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
 coffre verify instance                      # checks the instance from outside (docs/conformance.md)
 ```
@@ -293,15 +295,24 @@ on one environment: the API answers 409 rather than grant less than asked.
 **Root admins** are named in the vault's configuration, and no row anywhere
 makes someone one. They hold every permission everywhere, reading secrets
 included, so keep the list short. An Admin or Owner whose scope narrows
-nothing, or a root admin, **runs the instance**: adds and removes people and
-service accounts, sets instance roles, issues tokens, and reads the
-instance's own log entries. A scoped Admin manages environments and grants
-inside its scope only, and sets no role. Nobody changes their own role or
-grants themselves one, which stops a quiet read of one's own; it is no
-boundary. An Admin holds no secret permission, but one who runs the
-instance can still reach any value by admitting a service account, granting
-it a reading role and issuing its token, each step in the log, as a 0.4
-owner could: make Admins only people you would trust with the values
+nothing, or a root admin, **runs the instance**: adds and removes people,
+sets instance roles and the instance's settings, and manages every service
+account. An Auditor, Admin or Owner whose scope narrows nothing reads the
+whole log, the instance's own entries included, and verifies it. A scoped
+Admin manages environments and grants inside its scope only, and sets no
+role. Nobody changes their own role or grants themselves one, which stops a
+quiet read of one's own; it is no boundary. An Admin holds no secret
+permission, but can still reach any value in its scope by admitting a
+service account, granting it a reading role and issuing its token, each
+step in the log, as a 0.4 owner could: make Admins only people you would
+trust with the values.
+
+**Anyone who holds access sets up service accounts for it.** A Developer of
+every `dev` adds `ci-web`, gives it `developer` on `market/dev`, issues its
+token or trusts its workflow by OIDC, with no Admin: at most what they hold
+themselves, and only on an account whose every grant they hold. The
+setting **Who sets up service accounts** (Settings, or `coffre settings
+service-accounts --except-environments prod`) keeps the rest to Admins
 ([docs/design/instance-roles.md](docs/design/instance-roles.md)).
 
 ## Design decisions worth knowing

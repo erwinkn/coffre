@@ -60,6 +60,7 @@ export const keys = {
   apps: ['apps'],
   audit: ['audit'],
   auditKeys: ['audit', 'keys'],
+  settings: ['settings'],
 } satisfies Record<string, QueryKey | ((...args: never[]) => QueryKey)>;
 
 /** Members' grants, as rows, and a row for each one whose instance role reaches the place listed. */
@@ -96,13 +97,14 @@ function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
     const { members, removed } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, scope, isRootAdmin, tampered, grants }) => ({
+      ({ principalType, principalId, instanceRole, scope, isRootAdmin, tampered, managed, grants }) => ({
         principalType,
         principalId,
         instanceRole,
         scope,
         isRootAdmin,
         tampered,
+        managed,
         grants: grants.map(({ project, environment }) => ({ project, environment })),
       }),
     );
@@ -182,7 +184,7 @@ export const queries = {
           ? listDirectory(client)
           : Promise.resolve({
               ok: false as const,
-              error: 'Only admins and owners can manage users and service accounts.',
+              error: 'Only admins and owners manage users, and service accounts are set up by those who hold access where the instance lets them.',
               signedOut: false,
             }),
     }),
@@ -259,6 +261,13 @@ export const queries = {
       queryFn: () => (allowed ? uiResult(() => client.audit.keys()) : Promise.resolve(null)),
     }),
 
+  /** The instance's settings: null for anyone but those who run it, who alone may ask. */
+  settings: (client: CoffreClient, allowed: boolean) =>
+    queryOptions({
+      queryKey: [...keys.settings, { allowed }],
+      queryFn: () => (allowed ? uiResult(() => client.settings.get()) : Promise.resolve(null)),
+    }),
+
   /** A page of the log, as filtered: always read fresh. */
   auditEntries: (client: CoffreClient, search: AuditSearch) =>
     queryOptions({
@@ -300,8 +309,9 @@ export const queries = {
 };
 
 /**
- * Whether the log holds, or why that is not known. Verifying is for owners:
- * anyone else reads their projects' part of the log, and a part cannot be
+ * Whether the log holds, or why that is not known. Verifying is for those
+ * who read the whole log (an Auditor, Admin or Owner whose scope narrows
+ * nothing, a root admin): anyone else reads their projects' part of it, and a part cannot be
  * checked as a chain, so for them it is a fact about the page, not a fault.
  */
 async function verifyChain(client: CoffreClient) {
@@ -360,6 +370,10 @@ export function shellOf(
     accessTampered: me?.tampered === true,
     /** What the deployment's configuration turns on: MCP clients, as their endpoint's URL, and CI runs signing in by their ID tokens. */
     features: member?.features ?? { mcp: null, workloads: false },
+    /** Every environment you hold something in, and what: what you may give a service account there (`givable`). */
+    environments: member?.environments ?? [],
+    /** Where you set up service accounts yourself, the instance's setting, projects by slug. */
+    serviceSetup: member?.serviceSetup ?? null,
   };
 }
 
@@ -401,13 +415,29 @@ export async function loadDirectory(queryClient: QueryClient, client: CoffreClie
   return queryClient.fetchQuery(queries.directory(client, shell.capabilities.canManageGrants));
 }
 
-/** The instance's settings: the directory's counts, and what its keys are checked against. */
+/** The instance's settings: the directory's counts, where people set up service accounts, and what its keys are checked against. */
 export async function loadSettings(queryClient: QueryClient, client: CoffreClient) {
   const shell = await loadShell(queryClient, client);
   await Promise.all([
     loadDirectory(queryClient, client),
+    queryClient.fetchQuery(queries.settings(client, shell.capabilities.runsInstance)),
     queryClient.fetchQuery(queries.auditKeys(client, shell.capabilities.runsInstance)),
   ]);
+}
+
+/** Whether the Service accounts page lists anyone: to admins and owners, and to whoever sets one up, those they manage. */
+export function listsServices(shell: Shell): boolean {
+  return shell.capabilities.canManageGrants || shell.capabilities.setsUpServices;
+}
+
+/**
+ * How the caller may have a service account sign in, from its list entry
+ * or its access: bearer tokens under coffre's own sign-in, trusted
+ * workloads where the deployment trusts them, each only for an account they
+ * manage.
+ */
+export function waysFor(shell: Shell, managed: boolean): { tokens: boolean; workloads: boolean } {
+  return { tokens: managed && shell.auth.signin !== null, workloads: managed && shell.features.workloads };
 }
 
 /**
@@ -418,18 +448,17 @@ export async function loadSettings(queryClient: QueryClient, client: CoffreClien
  */
 export async function loadServiceDirectory(queryClient: QueryClient, client: CoffreClient) {
   const shell = await loadShell(queryClient, client);
-  const directory = await loadDirectory(queryClient, client);
-  const allowed = shell.capabilities.runsInstance && shell.auth.signin !== null;
-  const trusts = shell.capabilities.runsInstance && shell.features.workloads;
-  if (!directory.ok || !allowed) return directory;
+  const directory = await queryClient.fetchQuery(queries.directory(client, listsServices(shell)));
+  if (!directory.ok) return directory;
   await Promise.all(
     directory.principals
       .filter((principal) => principal.principalType === 'service')
       .flatMap((principal) => {
         const member = memberRef('service', principal.principalId);
+        const ways = waysFor(shell, principal.managed === true);
         return [
-          queryClient.fetchQuery(queries.credentials(client, member, allowed)),
-          queryClient.fetchQuery(queries.bindings(client, member, trusts)),
+          queryClient.fetchQuery(queries.credentials(client, member, ways.tokens)),
+          queryClient.fetchQuery(queries.bindings(client, member, ways.workloads)),
         ];
       }),
   );
@@ -451,25 +480,31 @@ export type MemberReport = Awaited<ReturnType<typeof loadMember>>;
  */
 export async function loadAccess(queryClient: QueryClient, client: CoffreClient, member: string) {
   const shell = await loadShell(queryClient, client);
-  await queryClient.fetchQuery(queries.memberAccess(client, member, listsAccess(shell)));
+  return queryClient.fetchQuery(queries.memberAccess(client, member, listsAccess(shell)));
 }
 
-/** Whether the caller may ask what someone holds: admins and owners, and whoever manages a project's access. */
+/**
+ * Whether the caller may ask what someone holds: admins and owners,
+ * whoever manages a project's access, and whoever sets up service accounts,
+ * of those they manage.
+ */
 export function listsAccess(shell: Shell): boolean {
-  return shell.capabilities.canManageGrants || managedProjects(shell.projects).length > 0;
+  return shell.capabilities.canManageGrants || shell.capabilities.setsUpServices || managedProjects(shell.projects).length > 0;
 }
+
+export type MemberAccessResult = Awaited<ReturnType<typeof loadAccess>>;
 
 /**
  * How a service account's page lets it sign in: bearer tokens under
  * coffre's own sign-in, trusted workloads where the deployment trusts them.
- * Null where it shows neither: to anyone who does not run the instance,
- * and for an account that is not active, which can be issued nothing.
+ * Null where it shows neither: to anyone who does not manage it (its access
+ * says, `managed`), and for an account that is not active, which can be
+ * issued nothing.
  */
-export function signInWays(shell: Shell, report: MemberReport): { tokens: boolean; workloads: boolean } | null {
-  const owner = shell.capabilities.runsInstance;
-  const ways = { tokens: owner && shell.auth.signin !== null, workloads: owner && shell.features.workloads };
-  const active = report?.ok === true && report.report?.status === 'active';
-  return active && (ways.tokens || ways.workloads) ? ways : null;
+export function signInWays(shell: Shell, access: MemberAccessResult): { tokens: boolean; workloads: boolean } | null {
+  const managed = access?.ok === true && access.managed && access.status === 'active';
+  const ways = waysFor(shell, managed);
+  return ways.tokens || ways.workloads ? ways : null;
 }
 
 /**
@@ -516,6 +551,11 @@ export const affects = {
   role: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), keys.me, keys.projects],
   /** Someone removed: the directory, their report, and every grant, which removal ends, those on every project too. */
   removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), ['grants'], keys.projects],
+  /**
+   * Where people set up service accounts changed: the setting, and what you
+   * may do, which the directory and `/me` say.
+   */
+  settings: (): QueryKey[] => [keys.settings, keys.me, keys.directory],
   credentials: (member: string): QueryKey[] => [keys.credentials(member)],
   bindings: (member: string): QueryKey[] => [keys.bindings(member)],
   /** Unlinking an account also ends the sessions it signed in. */

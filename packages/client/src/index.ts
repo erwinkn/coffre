@@ -346,6 +346,12 @@ export function createClient(options: ClientOptions) {
       disconnect: (id: string) => call('DELETE /apps/:id', { id }),
     },
 
+    /** The instance's settings, for those who run it: where people set up service accounts themselves. */
+    settings: {
+      get: () => call('GET /settings', {}),
+      set: (input: RouteInput<'PUT /settings'>) => call('PUT /settings', {}, input),
+    },
+
     audit: {
       list: (query: RouteInput<'GET /audit'> = {}) => call('GET /audit', {}, query),
       verify: () => call('GET /audit/verification', {}),

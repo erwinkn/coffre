@@ -86,6 +86,8 @@ export function testVault(
     setAccess: call('setAccess'),
     admit: call('admit'),
     remove: call('remove'),
+    settings: call('settings'),
+    setSettings: call('setSettings'),
     checkpoint: call('checkpoint'),
     about: call('about'),
     keyChecks: call('keyChecks'),

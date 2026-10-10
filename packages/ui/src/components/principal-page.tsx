@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, Outlet } from '@tanstack/react-router';
-import { INSTANCE_ROLES, ROLES, scopeInWords, unscoped } from '@coffre/core/access';
+import { INSTANCE_ROLES, ROLE_NAMES, ROLES, scopeInWords, unscoped, type Role } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
@@ -12,6 +12,7 @@ import { useMounted } from '../lib/mounted';
 import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
 import { accessRows, projectAccessLabel, type ProjectAccess } from '../lib/project-access';
+import { givable, serviceProjects } from '../lib/service-setup';
 import {
   accessChanges,
   accessPatch,
@@ -25,7 +26,7 @@ import {
   type AccessPlan,
 } from '../lib/access-plan';
 import type { MemberAccess } from '@coffre/client';
-import type { DirectoryPrincipal } from '../shared/models';
+import type { DirectoryPrincipal, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
@@ -39,6 +40,9 @@ import { PageTabs } from './tabs';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
+/** The roles you may give at a project, or one of its environments: any where you manage access (`givable`). */
+type Offers = (project: ProjectSummary, environment: string | null) => readonly Role[];
+
 /** Who a user or service account is to the instance, as an owner reads it; null for anyone else. */
 function useReport(principalType: PrincipalType, principalId: string) {
   const { capabilities } = useShell();
@@ -47,18 +51,27 @@ function useReport(principalType: PrincipalType, principalId: string) {
 
 /**
  * What `loadAccess` read in one request: their role and scope, and, for each
- * project where you manage access, the grants they hold there.
+ * project where you manage access, the grants they hold there. For a
+ * service account you manage, each project where you may give it
+ * something, and what (`offers`).
  */
-function useMemberAccess(principalType: PrincipalType, principalId: string): { access: MemberAccess | null; error: string | null; projects: ProjectAccess[] } {
+function useMemberAccess(principalType: PrincipalType, principalId: string): {
+  access: MemberAccess | null;
+  error: string | null;
+  projects: ProjectAccess[];
+  offers: Offers;
+} {
   const shell = useShell();
-  const managed = managedProjects(shell.projects);
   const { data } = useSuspenseQuery(queries.memberAccess(useCoffre(), memberRef(principalType, principalId), listsAccess(shell)));
   const error = data !== null && !data.ok ? data.error : null;
   const access = data?.ok === true ? data : null;
+  const yours = principalType === 'service' && access?.managed === true;
+  const listed = yours ? serviceProjects(shell) : managedProjects(shell.projects);
   return {
     access,
     error,
-    projects: managed.map((project) => ({
+    offers: yours ? (project, environment) => givable(shell, project, environment) : () => ROLE_NAMES,
+    projects: listed.map((project) => ({
       project,
       grants: (access?.grants ?? []).filter((grant) => grant.project === project.slug).map((grant) => ({
         id: grant.id,
@@ -87,6 +100,9 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
   const mounted = useMounted();
   const { capabilities } = shell;
   const report = useReport(principalType, principalId);
+  // A service account you manage, though you do not run the instance: what it holds, from its access.
+  const { data: held } = useSuspenseQuery(queries.memberAccess(useCoffre(), memberRef(principalType, principalId), listsAccess(shell)));
+  const yours = principalType === 'service' && held?.ok === true && held.managed;
   // A role change or removal made from this page's menu, refused.
   const { status, dismiss } = useChangeStatus(directoryList.queryKey);
   const change = status(memberRef(principalType, principalId));
@@ -103,14 +119,17 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
           scope: found.scope,
           isRootAdmin: found.isRootAdmin,
           tampered: found.status === 'tampered',
+          managed: principalType === 'service',
         }
-      : undefined;
+      : yours
+        ? { principalType, principalId, instanceRole: 'member' as const, scope: null, isRootAdmin: false, tampered: false, managed: true }
+        : undefined;
 
   // Owners get a report about anyone ever registered, removed or not, so a
   // miss there means there is no such user. Everyone else only reaches this
-  // page through projects they manage.
+  // page through projects they manage, or a service account they manage.
   const unknown = report?.ok === true && found === null;
-  if (unknown || (report === null && managedProjects(shell.projects).length === 0)) {
+  if (unknown || (report === null && managedProjects(shell.projects).length === 0 && !yours)) {
     return (
       <ClosedDoor
         icon={people ? <Users size={18} /> : <Key size={18} />}
@@ -160,7 +179,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
         ),
       ]
     : [
-        signInWays(shell, report) !== null && (
+        signInWays(shell, held) !== null && (
           <Link key="sign-in" to="/service-accounts/$account" params={{ account: principalId }} activeOptions={{ exact: true, includeSearch: false }}>
             <LinkIcon size={15} />
             Sign-in
@@ -223,7 +242,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
 export function PrincipalAccess({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
   const { instanceRole } = useShell();
   const report = useReport(principalType, principalId);
-  const { access: held, error, projects: access } = useMemberAccess(principalType, principalId);
+  const { access: held, error, projects: access, offers } = useMemberAccess(principalType, principalId);
   const kind = KIND[principalType];
   const people = principalType === 'user';
   const found = report?.ok === true ? report.report : null;
@@ -293,14 +312,16 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
 
           {editable.length > 0 && (
             <div className="table-actions">
-              <EditAccess principalType={principalType} principalId={principalId} access={editable} />
+              <EditAccess principalType={principalType} principalId={principalId} access={editable} offers={offers} />
             </div>
           )}
 
           {/* A root admin manages every project, so nothing is out of view. */}
           {instanceRole !== 'root-admin' && (
             <p className="hint section-foot">
-              Only projects where you manage access are listed.
+              {held?.managed === true && principalType === 'service'
+                ? 'Only projects where you may give it access are listed: what you hold there, where the instance lets you.'
+                : 'Only projects where you manage access are listed.'}
             </p>
           )}
 
@@ -362,10 +383,12 @@ function EditAccess({
   principalType,
   principalId,
   access,
+  offers,
 }: {
   principalType: PrincipalType;
   principalId: string;
   access: ProjectAccess[];
+  offers: Offers;
 }) {
   const coffre = useCoffre();
   const [open, setOpen] = useState(false);
@@ -381,7 +404,10 @@ function EditAccess({
       .map((environment) => environment.slug);
     const held = planFromGrants(grants, environments);
     const plan = Object.hasOwn(edits, project.slug) ? edits[project.slug] : held;
-    return { project, grants, environments, held, plan, changes: accessChanges(grants, plan) };
+    // What you may give here: every role where you manage access; a service account you manage, what you hold.
+    const whole = offers(project, null);
+    const each = Object.fromEntries(environments.map((slug) => [slug, offers(project, slug)]));
+    return { project, grants, environments, held, plan, whole, each, changes: accessChanges(grants, plan) };
   });
   const changed = rows.filter((row) => row.changes.length > 0);
 
@@ -406,7 +432,7 @@ function EditAccess({
             Edit access for <span className="mono">{principalId}</span>
           </>
         }
-        description={`Set what this ${kind} can reach on each project you manage, and until when.`}
+        description={`Set what this ${kind} can reach on each project you ${principalType === 'service' ? 'may give it access to' : 'manage'}, and until when.`}
         wide
       >
         <form
@@ -439,7 +465,7 @@ function EditAccess({
               <span>Access</span>
               <span>Expires</span>
             </li>
-            {rows.map(({ project, grants, environments, held, plan, changes }) => {
+            {rows.map(({ project, grants, environments, held, plan, whole, each, changes }) => {
               const id = `plan-${project.slug}`;
               const edit = (next: AccessPlan) =>
                 setEdits((current) => ({ ...current, [project.slug]: next }));
@@ -471,10 +497,10 @@ function EditAccess({
                   >
                     {held.level === 'custom' && <option value="custom">Keep as is</option>}
                     <option value="none">No access</option>
-                    <option value="owner">{ROLES.owner.name}</option>
-                    <option value="viewer">{ROLES.viewer.name}: all</option>
-                    <option value="developer">{ROLES.developer.name}: all</option>
-                    {environments.length > 0 && <option value="env">Per environment…</option>}
+                    {whole.includes('owner') && <option value="owner">{ROLES.owner.name}</option>}
+                    {whole.includes('viewer') && <option value="viewer">{ROLES.viewer.name}: all</option>}
+                    {whole.includes('developer') && <option value="developer">{ROLES.developer.name}: all</option>}
+                    {environments.some((slug) => each[slug]!.length > 0) && <option value="env">Per environment…</option>}
                   </select>
                   {(plan.level === 'owner' ||
                     plan.level === 'viewer' ||
@@ -513,8 +539,8 @@ function EditAccess({
                               }}
                             >
                               <option value="">No access</option>
-                              <option value="viewer">{ROLES.viewer.name}</option>
-                              <option value="developer">{ROLES.developer.name}</option>
+                              {each[slug]!.includes('viewer') && <option value="viewer">{ROLES.viewer.name}</option>}
+                              {each[slug]!.includes('developer') && <option value="developer">{ROLES.developer.name}</option>}
                             </select>
                             {current !== null && (
                               <ExpiryField

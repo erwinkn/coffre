@@ -29,6 +29,19 @@ export type Api = {
       isRootAdmin: boolean;
       runsInstance: boolean;
       canReadAudit: boolean;
+      setsUpServices: boolean;
+      serviceSetup: null | {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
       features: {
         mcp: string | null;
         workloads: boolean;
@@ -388,6 +401,7 @@ export type Api = {
           };
         };
         reachesByRole: boolean;
+        managed: boolean;
         isRootAdmin: boolean;
         tampered: boolean;
         grants: {
@@ -521,7 +535,7 @@ export type Api = {
         identities: number;
         apps: number;
       };
-      report: {
+      report: null | {
         principalType: "service" | "user";
         principalId: string;
         status: "active" | "removed" | "tampered";
@@ -1022,6 +1036,7 @@ export type Api = {
         };
       };
       isRootAdmin: boolean;
+      managed: boolean;
       grants: {
         id: string;
         project: string;
@@ -1031,6 +1046,53 @@ export type Api = {
         permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
         expiresAt: string | null;
       }[];
+    };
+  };
+  "PUT /settings": {
+    input: {
+      serviceAccounts: {
+        projects?: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments?: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
+    };
+    output: {
+      serviceAccounts: {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
+    };
+  };
+  "GET /settings": {
+    input: undefined;
+    output: {
+      serviceAccounts: {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
     };
   };
 };
@@ -1299,6 +1361,19 @@ export type Me = {
   isRootAdmin: boolean;
   runsInstance: boolean;
   canReadAudit: boolean;
+  setsUpServices: boolean;
+  serviceSetup: null | {
+    projects: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+    environments: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+  };
   features: {
     mcp: string | null;
     workloads: boolean;
@@ -1328,6 +1403,7 @@ export type Member = {
     };
   };
   reachesByRole: boolean;
+  managed: boolean;
   isRootAdmin: boolean;
   tampered: boolean;
   grants: {
@@ -1360,6 +1436,7 @@ export type MemberAccess = {
     };
   };
   isRootAdmin: boolean;
+  managed: boolean;
   grants: {
     id: string;
     project: string;
@@ -1369,6 +1446,21 @@ export type MemberAccess = {
     permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
     expiresAt: string | null;
   }[];
+};
+
+export type SettingsView = {
+  serviceAccounts: {
+    projects: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+    environments: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+  };
 };
 
 export type MissingKey = {

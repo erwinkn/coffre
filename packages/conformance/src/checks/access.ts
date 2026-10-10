@@ -96,6 +96,7 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   const before = await admin.api.members.get(leaver.member);
   expect(before.live.apps === 1 && before.apps.length === 1, "the owner's report does not list the app the leaver connected", before.apps);
   const { revoked, report } = await admin.api.members.remove(leaver.member);
+  expect(report !== null, "an owner's removal does not answer with the leaver's report");
   expect(revoked.apps === 1 && report.live.apps === 0 && report.apps.length === 0, 'removal does not say it disconnected their app', { revoked, apps: report.apps });
   expect(!(await discovers(deployment, app)), "a removed member's app still reaches /mcp");
   const exposed = report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`).sort();

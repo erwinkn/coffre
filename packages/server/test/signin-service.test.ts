@@ -811,7 +811,7 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.deepEqual(await signin.listSessions(lead, null), []);
 });
 
-test('only owners issue service tokens, for active services, for 1 to 366 whole days', async () => {
+test('only those who manage a service account issue its tokens, for active services, for 1 to 366 whole days', async () => {
   await assert.rejects(
     signin.issueServiceToken(dev, SERVICE, { label: null, expiresInDays: 30 }),
     { status: 403 },
@@ -845,8 +845,8 @@ test('only owners issue service tokens, for active services, for 1 to 366 whole 
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
-    ['token.create', 'deny', DEV, 'requires_instance_admin'],
-    ['token.create', 'deny', SERVICE, 'requires_instance_admin'],
+    ['token.create', 'deny', DEV, 'not_service_manager'],
+    ['token.create', 'deny', SERVICE, 'not_service_manager'],
     ['token.create', 'deny', LEAD, 'unknown_principal'],
     ['token.create', 'deny', LEAD, 'unknown_principal'],
     ['token.create', 'deny', LEAD, 'unknown_principal'],

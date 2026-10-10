@@ -158,5 +158,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'GET /audit/verification': { ui: [{ does: "Audit: the log's seal, verified on every visit", in: 'pages/audit.tsx', call: 'audit.verify' }] },
+  'GET /settings': { ui: [{ does: 'Settings › Service accounts: where people set them up', in: 'pages/settings.tsx', call: 'settings.get' }] },
+  'PUT /settings': { ui: [{ does: 'Settings › Service accounts › Edit', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
 };

@@ -475,14 +475,23 @@ test('a change the person could not make is refused before anyone is asked, for 
     ['create_project', { project: 'shop', name: 'Shop' }],
     ['admit_member', { member: 'user:new@acme.example' }],
     ['offboard_member', { member: `user:${OTHER}` }],
-    ['issue_service_token', { service: 'ci-deploy', expiresInDays: 1 }],
-    ['revoke_service_token', { service: 'ci-deploy', id: randomUUID() }],
-    ['untrust_workload', { service: 'ci-deploy', id: randomUUID() }],
   ];
   for (const [tool, args] of owners) {
     const refused = (await callRaw(dev, tool, args)).body.result!;
     assert.equal(refused.isError, true, tool);
     assert.match(refused.content[0]!.text!, /only an admin or owner (of the whole instance|whose scope takes in new projects) can do this/, tool);
+  }
+  // A service account's tools, for one it does not manage: it holds what DEV does not, or holds nothing DEV gave it.
+  const services: [string, Record<string, unknown>][] = [
+    ['issue_service_token', { service: 'ci-deploy', expiresInDays: 1 }],
+    ['revoke_service_token', { service: 'ci-deploy', id: randomUUID() }],
+    ['untrust_workload', { service: 'ci-deploy', id: randomUUID() }],
+    ['offboard_member', { member: 'service:ci-deploy' }],
+  ];
+  for (const [tool, args] of services) {
+    const refused = (await callRaw(dev, tool, args)).body.result!;
+    assert.equal(refused.isError, true, tool);
+    assert.match(refused.content[0]!.text!, /you do not manage service:ci-deploy/, tool);
   }
   const viewer = await connect(OTHER, 'read write manage-access');
   const access = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { market: 'viewer' } })).body.result!;

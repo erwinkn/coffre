@@ -324,13 +324,78 @@ export function mayManageAccess(actor: Holdings, place: Place): boolean {
 
 /**
  * Whether the holder runs the instance: a root admin, or an Admin or Owner
- * whose scope narrows nothing. They add and remove people and service
- * accounts, set instance roles, read the instance's own log entries
- * (sign-ins, people), and change its settings. A scoped Admin manages only
- * inside its scope, so it does none of these.
+ * whose scope narrows nothing. They add and remove people, set instance
+ * roles, and change the instance's settings; they read its whole log too
+ * (`readsWholeLog`). A scoped Admin manages only inside its scope, so it
+ * does none of these.
  */
 export function runsInstance(holder: Holdings): boolean {
   return holder.isRootAdmin || (administers(holder.role) && unscoped(holder.scope));
+}
+
+/**
+ * Who may set up service accounts themselves, the instance's setting: a
+ * scope as a role's is, projects by id and environments by slug, which
+ * only those who run the instance change. Inside it, any person gives a
+ * service account what they hold, never more (`givesService`). Everywhere,
+ * unless it says otherwise:
+ *
+ *   { projects: 'all', environments: { except: ['prod'] } }   CI for dev and staging; prod's takes an Admin
+ */
+export type ServiceSetting = Scope;
+
+/**
+ * Whether `holder` may give a service account `role` at `place`: where
+ * they manage access, as anyone may; or inside the setting, where they hold
+ * everything `role` does. A Developer on `market/dev` gives viewer or
+ * developer there, never maintainer; a grant on `market` takes holding it
+ * on all of `market`. `setting` is null for a service account, which sets
+ * up none.
+ */
+export function givesService(holder: Holdings, setting: ServiceSetting | null, role: Role, place: Place): boolean {
+  if (mayManageAccess(holder, place)) return true;
+  return setting !== null && inScope(setting, place) && ROLES[role].permissions.every((permission) => allows(holder, permission, place));
+}
+
+/** Whether `holder` gives a service account anything anywhere among `places`: whether they set any up. */
+export function setsUpServices(holder: Holdings, setting: ServiceSetting | null, places: readonly Place[]): boolean {
+  if (runsInstance(holder)) return true;
+  return places.some((place) => ROLE_NAMES.some((role) => givesService(holder, setting, role, place)));
+}
+
+/** A service account as `managesService` weighs it: its live grants, where they are, and who admitted it. */
+export type ServiceAccount = {
+  grants: readonly { role: Role; place: Place }[];
+  /** The member who admitted it last (`user:…`), as its row says. */
+  admittedBy: string | null;
+};
+
+/**
+ * Whether `holder`, the member `actor`, manages a service account: issues
+ * and revokes its tokens, adds and removes its trust bindings, changes its
+ * grants and removes it. A credential for it reads everything it holds, so
+ * they must reach every grant it holds, as if giving it (`givesService`):
+ * a Developer on `dev` manages an account on `market/dev`, and not one that
+ * holds `market/prod` too. One that holds nothing, only the person who
+ * admitted it: anyone else's token for it would read whatever it is given
+ * next. Those who run the instance manage every one.
+ */
+export function managesService(holder: Holdings, setting: ServiceSetting | null, actor: string, account: ServiceAccount): boolean {
+  if (runsInstance(holder)) return true;
+  if (account.grants.length === 0) return setting !== null && account.admittedBy === actor;
+  return account.grants.every((grant) => givesService(holder, setting, grant.role, grant.place));
+}
+
+/**
+ * Whether the holder reads the whole log, the instance's own entries
+ * (sign-ins, people, service accounts, settings) with every project's, and
+ * verifies it: whoever holds `audit.read` by an instance role whose scope
+ * narrows nothing, an Auditor's included, and a root admin. Reading, not
+ * running: an Auditor of the whole instance changes nothing it reads about.
+ * Anyone else reads the places they hold `audit.read` in.
+ */
+export function readsWholeLog(holder: Holdings): boolean {
+  return holder.isRootAdmin || (instanceRoleGrants(holder.role, 'audit.read') && unscoped(holder.scope));
 }
 
 /**

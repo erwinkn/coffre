@@ -33,11 +33,13 @@ for (const mode of ['modern', 'legacy'] as const) {
     try {
       const { tools } = await mcp.listTools();
       // A viewer's: the tools their role reaches somewhere, the one that reveals values among them, though
-      // this connection holds Read alone, so that a client steps up for it. Not the access or the log's,
-      // which no role of theirs reaches.
+      // this connection holds Read alone, so that a client steps up for it; and those for the service
+      // accounts they may set up. Not the log's, which no role of theirs reaches.
       const readTools = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'show_secret_value', 'reveal_secret_values'];
-      assert.deepEqual(tools.map((tool) => tool.name), readTools);
-      assert.ok(tools.every((tool) => tool.annotations?.readOnlyHint === true));
+      const serviceTools = ['admit_member', 'offboard_member', 'issue_service_token', 'revoke_service_token', 'trust_workload', 'untrust_workload'];
+      assert.deepEqual(tools.map((tool) => tool.name).filter((name) => !['list_access', 'describe_member', ...serviceTools].includes(name)), readTools);
+      assert.deepEqual(tools.map((tool) => tool.name).filter((name) => serviceTools.includes(name)), serviceTools);
+      assert.ok(tools.filter((tool) => !serviceTools.includes(tool.name)).every((tool) => tool.annotations?.readOnlyHint === true));
       assert.ok(tools.every((tool) => tool.annotations?.openWorldHint === false));
       // No tool takes a value: an agent cannot supply one.
       assert.ok(tools.every((tool) => !JSON.stringify(tool.inputSchema).includes('"value"')), 'no input named value');
@@ -196,7 +198,9 @@ const ANYONE = ['whoami', 'list_projects'];
 const READS = ['list_secrets', 'secret_history', 'show_secret_value', 'reveal_secret_values'];
 const WRITES = ['request_secret_value', 'generate_secret_value', 'rename_secret', 'restore_secret_version'];
 const ARCHIVES = ['archive_secret', 'unarchive_secret'];
-const OWNERS = ['describe_member', 'create_project', 'admit_member', 'offboard_member', 'issue_service_token', 'revoke_service_token', 'trust_workload', 'untrust_workload'];
+const OWNERS = ['create_project'];
+// For anyone who holds access: the service accounts they may set up, each call checked against the account.
+const SERVICES = ['list_access', 'describe_member', 'admit_member', 'offboard_member', 'issue_service_token', 'revoke_service_token', 'trust_workload', 'untrust_workload'];
 const sorted = (...names: string[][]) => names.flat().sort();
 
 test("each person's tools/list is what their roles reach somewhere, whatever the connection's scopes, cached for them alone, a few minutes", async () => {
@@ -209,21 +213,21 @@ test("each person's tools/list is what their roles reach somewhere, whatever the
 
   // A viewer, connected with Read alone: Reveal values stays listed, for the client to step up to.
   const viewer = await listFor(await connect(DEV, 'read'));
-  assert.deepEqual(viewer.names.sort(), sorted(ANYONE, READS));
+  assert.deepEqual(viewer.names.sort(), sorted(ANYONE, READS, SERVICES));
   assert.deepEqual(viewer.legacy.sort(), viewer.names, 'the same in either era');
   assert.deepEqual([viewer.ttlMs, viewer.cacheScope], [300_000, 'private']);
 
   // An access manager: who has access, and changing it; no value, nor the log.
-  assert.deepEqual((await listFor(await connect('access@acme.example'))).names.sort(), sorted(ANYONE, ['list_access', 'set_access']));
+  assert.deepEqual((await listFor(await connect('access@acme.example'))).names.sort(), sorted(ANYONE, SERVICES, ['set_access']));
   // An instance owner with no grant: the instance's own tools, and every project's management, not a value.
   assert.deepEqual(
     (await listFor(await connect('owner@acme.example'))).names.sort(),
-    sorted(ANYONE, OWNERS, ['list_access', 'set_access', 'read_audit_log', 'create_environment']),
+    sorted(ANYONE, OWNERS, SERVICES, ['set_access', 'read_audit_log', 'create_environment']),
   );
   // A project's owner: everything a role gives there, nothing that is the instance's.
   assert.deepEqual(
     (await listFor(await connect('lead@acme.example'))).names.sort(),
-    sorted(ANYONE, READS, WRITES, ARCHIVES, ['list_access', 'set_access', 'read_audit_log', 'create_environment']),
+    sorted(ANYONE, READS, WRITES, ARCHIVES, SERVICES, ['set_access', 'read_audit_log', 'create_environment']),
   );
   // A root admin: every tool, whatever the connection holds.
   const everything = await listFor(await connect(ROOT, 'read'));
@@ -240,9 +244,9 @@ test("each person's tools/list is what their roles reach somewhere, whatever the
 test("a role granted shows in the person's next list, and one taken is gone from it; a tool they cannot see, called by name, is refused as ever", async () => {
   const token = await connect(DEV, 'read write');
   const root = clientFor(deps, ROOT);
-  assert.deepEqual((await listFor(token)).names.sort(), sorted(ANYONE, READS));
+  assert.deepEqual((await listFor(token)).names.sort(), sorted(ANYONE, READS, SERVICES));
   await root.access.set(`user:${DEV}`, { market: 'maintainer' });
-  assert.deepEqual((await listFor(token)).names.sort(), sorted(ANYONE, READS, WRITES, ARCHIVES, ['create_environment']));
+  assert.deepEqual((await listFor(token)).names.sort(), sorted(ANYONE, READS, WRITES, ARCHIVES, SERVICES, ['create_environment']));
   await root.access.set(`user:${DEV}`, { market: null, 'market/prod': null });
   assert.deepEqual((await listFor(token)).names.sort(), sorted(ANYONE));
 

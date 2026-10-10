@@ -38,12 +38,17 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
   );
 }
 
-function ScopeField({ scope, onChange }: { scope: Scope; onChange: (scope: Scope) => void }) {
+/**
+ * Where something applies: projects and environments, each All, Only or All
+ * except. A role's scope, and the instance's setting of where people set
+ * up service accounts, which has the same shape.
+ */
+export function ScopeField({ scope, onChange, legend = 'Where' }: { scope: Scope; onChange: (scope: Scope) => void; legend?: string }) {
   const { projects } = useShell();
   const slugs = [...new Set(projects.flatMap((project) => project.environments.map((environment) => environment.slug)))].sort();
   return (
     <fieldset className="field scope-field">
-      <legend className="label">Where</legend>
+      <legend className="label">{legend}</legend>
       <FilterRow
         label="Projects"
         filter={scope.projects}

@@ -11,6 +11,7 @@ const member = {
   scope: { projects: 'all', environments: 'all' },
   isRootAdmin: false,
   runsInstance: true,
+  setsUpServices: true,
   canReadAudit: true,
   environments: [],
   features: { mcp: 'https://coffre.example/mcp', workloads: false },

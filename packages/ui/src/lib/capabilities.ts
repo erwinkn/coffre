@@ -18,6 +18,12 @@ export type UiCapabilities = {
    * trust bindings, offboarding reports, the instance's keys.
    */
   runsInstance: boolean;
+  /**
+   * Who sets up service accounts: those who run the instance, and a person
+   * who holds access somewhere the instance's setting takes in. The Service
+   * accounts page lists them the ones they manage.
+   */
+  setsUpServices: boolean;
   canReadAudit: boolean;
   canCreateProject: boolean;
 };
@@ -25,6 +31,7 @@ export type UiCapabilities = {
 const NONE: UiCapabilities = {
   canManageGrants: false,
   runsInstance: false,
+  setsUpServices: false,
   canReadAudit: false,
   canCreateProject: false,
 };
@@ -44,6 +51,7 @@ export function deriveUiCapabilities(
     // grant controls on each project page.
     canManageGrants: isRootAdmin || administers(role),
     runsInstance: me.runsInstance,
+    setsUpServices: me.setsUpServices,
     canReadAudit: me.canReadAudit,
     // A new project is one no `only` list names: as the server decides,
     // from the role and the scope, projects by slug.

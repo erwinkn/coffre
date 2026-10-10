@@ -1,6 +1,7 @@
 # Instance roles with scopes
 
-Written on 2026-10-10, from Erwin's decisions that week (D82, D84). It
+Written on 2026-10-10, from Erwin's decisions that week (D82, D84; the
+Auditor's log, D96; people setting up service accounts, D97 and D99). It
 replaces the grants on every project of 0.4 ([instance-grants.md](instance-grants.md)).
 
 0.4 had two ways to reach many projects: an instance role, `user` or
@@ -71,11 +72,20 @@ holds `viewer` on `billing`:
 ## Who runs the instance
 
 **Running the instance** takes a root admin, or an Admin or Owner whose
-scope narrows nothing (`runsInstance`): adding and removing people and
-service accounts, setting instance roles, service tokens and trust
-bindings, a member's offboarding report, the instance's own log entries
-(sign-ins, people), verifying the whole log, deleting an archived project
-or environment for good.
+scope narrows nothing (`runsInstance`): adding and removing people,
+setting instance roles, the instance's settings, a member's offboarding
+report, deleting an archived project or environment for good. They manage
+every service account too; people set up their own where the setting lets
+them ("Setting up service accounts", below).
+
+**Reading the whole log** takes `audit.read` from an instance role whose
+scope narrows nothing: an Auditor, Admin or Owner everywhere, or a root
+admin (`readsWholeLog`). They read the instance's own entries, sign-ins,
+people, service accounts and settings, beside every project's, and verify
+the log whole (`coffre verify log`), which a part of it could not be. An
+Auditor of the whole instance changes none of what it reads about: it runs
+nothing. A scoped Auditor reads the entries of the places in its scope, and
+verifies nothing.
 
 A **scoped Admin** manages only inside its scope: environments and grants,
 people's and service accounts' alike, on the places its scope takes in. It
@@ -94,13 +104,86 @@ Nobody hands out more than they reach:
   themselves a role** (giving one up is fine; a root admin, who reads
   everything anyway, is exempt). That stops a quiet read of one's own, and
   is no boundary: an Admin can grant a project role that reads to someone
-  else, as an access manager can in a project, and an Admin of the whole
-  instance can reach any value in three steps, each in the log, by
-  admitting a service account, granting it `owner` on a project and issuing
-  its token, as a 0.4 owner could. Keep Admins to people you would trust
-  with the values, and read the log for those steps.
-- An Auditor reads the log of the projects and environments in its scope,
-  never the instance's own entries.
+  else, as an access manager can in a project, and an Admin can reach any
+  value in its scope in three steps, each in the log, by admitting a
+  service account, granting it `owner` on a project and issuing its token,
+  as a 0.4 owner could. An Admin scoped to market, which manages market's
+  grants, manages an account that holds only market's, its tokens
+  included. Keep Admins to people you would trust with the values, and
+  read the log for those steps.
+- An Auditor of the whole instance reads all of the log; a scoped one, the
+  projects and environments in its scope, never the instance's own entries.
+
+## Setting up service accounts
+
+Anyone who holds access sets up service accounts for it, CI above all,
+without an Admin, inside an instance setting that keeps some places to
+Admins: **Who sets up service accounts**, a scope as a role's is (projects
+by id, environments by slug, so `prod` is every project's `prod`, later
+ones too). Everywhere, until someone who runs the instance narrows it;
+only they change it, and each change is a `settings.change` entry, with
+what it was.
+
+| Setting | A Developer of every environment | Who sets up prod's |
+|---|---|---|
+| everywhere | dev's, staging's and prod's | the same Developer, or an Admin |
+| environments all except [prod] | dev's and staging's | an Admin whose scope takes in prod |
+| projects only [] | none | an Admin, inside its scope |
+
+Inside the setting, a person who holds access somewhere
+(`setsUpServices`):
+
+- **adds a service account**, which holds nothing yet;
+- **gives it a grant** on a place where they hold everything the role
+  does (`givesService`): a Developer of `market/dev` gives `viewer` or
+  `developer` there, never `maintainer` or `owner`, nor `market`, which
+  takes holding all of `market`;
+- **manages it** (`managesService`) while they reach every grant it holds:
+  issue, list and revoke its tokens, add and remove its trust bindings,
+  change and take away its grants, remove it. A token reads everything its
+  account holds, so a Developer of `dev` manages no account that also
+  holds `market/prod`, whoever gave it that.
+
+Outside the setting, or beyond what they hold, nothing changes: an Admin
+gives and takes grants where its scope reaches, as before, and with them
+manages the accounts whose grants all lie there. Who runs the instance
+manages every account.
+
+For example, prod kept to Admins (environments all except [prod]), Ada a
+Developer of every `dev`:
+
+| Ada asks to | Answer |
+|---|---|
+| add `ci-web` | yes, logged `member.add` by her |
+| give it `developer` on `market/dev` | yes |
+| give it `viewer` on `market/prod` | no: outside the setting, and she holds nothing there |
+| give it `maintainer` on `market` | no: she holds neither the project nor that role |
+| issue a token for it, or trust `ci.yml` to sign in as it | yes, while it holds only what she reaches |
+| the same, once an Admin gives it `viewer` on `market/prod` | no: she does not reach prod |
+
+Every step is in the log, with who took it. A person's lists show them
+only the accounts they manage, each with everything it holds, which they
+reach anyway; no other account, no person, and no scope (D95).
+
+Three rules close what reaching every grant leaves open:
+
+- **An account with no grant is its maker's.** Only the person who added
+  it, as its row says, and those who run the instance, manage it until it
+  holds something: otherwise anyone could issue a token for an Admin's new,
+  empty account before the Admin grants it prod.
+- **Losing access loses the accounts.** An account stays as it is when its
+  maker leaves or is narrowed; whoever reaches its grants manages it, and
+  they no longer do. Its tokens and bindings keep working until revoked,
+  as anything an Admin issued does: offboarding a person lists the tokens
+  they issued (`issuedTokens`), to revoke.
+- **A wider grant widens its credentials.** An Admin who gives prod to an
+  account a Developer set up for dev gives it to the tokens and bindings
+  that Developer made, which the account's page lists, by who made each.
+  Read them before granting it more.
+
+No one grants a person through this, nor themselves (D91), nor a role any
+wider than their own: a service account a person sets up reads, at most,
+what that person reads.
 
 ## Where it lives
 
@@ -141,12 +224,15 @@ SQL migration: once per process, before its first call does anything else
 anyway: core's `covers` knows only projects and environments. The first
 request after the upgrade waits for it, one member after another, so on an
 instance with many holders it may be slow; one cut short leaves the rest
-to the next. Two kinds of holder it leaves as they are: a member whose row
-the vault found tampered with, until they are started over, and a root
-admin while they are one, who holds everything anyway; once they are not,
-the next process converts theirs. `coffre migrate` leaves out the first;
-the second it cannot tell, since the vault's configuration names root
-admins and the database does not.
+to the next. Two kinds of holder it leaves as they are: a member the vault
+has reported tampered with (`vault.tampered`), until their access next
+changes or they are started over, and a root admin while they are one,
+who holds everything anyway; once they are not, the next process converts
+theirs. The first is the vault's report in the log, not whether their row
+checks out now: a genuine row put back after a report stays left, as
+`coffre migrate`, which holds no key to check a row, says. `coffre migrate`
+leaves out the first; the second it cannot tell, since the vault's
+configuration names root admins and the database does not.
 
 The rule (`convertEveryProjectGrants`, in core, with a property test that
 nobody ends up holding more anywhere, at any time, including in a project
@@ -198,7 +284,13 @@ grant given is an `access.grant` with `reason: 'every-project'`.
 
 ## Where it shows
 
-- **API.** `PUT /api/members/<member>` takes `{ role, scope }`, the scope's
+- **API.** `GET` and `PUT /api/settings` read and set
+  `{ "serviceAccounts": <scope> }`, for those who run the instance.
+  `GET /api/me` says `setsUpServices`, and `serviceSetup`, the setting with
+  the projects the caller sees. Members and a member's access say
+  `managed`, for an account the caller manages; removing one answers its
+  `report` only to those who run the instance.
+  `PUT /api/members/<member>` takes `{ role, scope }`, the scope's
   projects by slug: `{ "role": "developer", "scope": { "environments": { "only": ["dev"] } } }`
   (either filter left out is `all`). Members list `instanceRole` and
   `scope`, which is null but for those who run the instance: a scope names
@@ -209,10 +301,18 @@ grant given is an `access.grant` with `reason: 'every-project'`.
   takes projects and environments only: `*` is a 400. Making a project or
   an environment no longer answers `inherited`.
 - **CLI.** `coffre members add <member> --role <role> [--projects …]
-  [--environments …]`; `coffre grant` takes a project or an environment.
+  [--environments …]`; `coffre grant` takes a project or an environment;
+  `coffre settings service-accounts --except-environments prod` sets the
+  setting, `coffre settings` shows it. `coffre offboard` of an account its
+  manager runs removes it, without the report.
 - **MCP.** `admit_member` takes `role` and `scope`; `set_access` takes
   projects and environments; tools for running the instance are listed to
-  those who run it.
+  those who run it, and those for service accounts to anyone who holds
+  access, each checked against the account as the API checks it. The
+  setting itself is the pages' and the CLI's, as permanent deletion is.
 - **UI.** A person's role is one dropdown, with a compact scope editor
   under it for every role but Member. "Grant on every project" is gone; a
-  service account's Access tab grants on projects and environments only.
+  service account's Access tab grants on projects and environments only,
+  and to someone who set it up, only what they may give. Service accounts
+  is in the sidebar of anyone who sets one up, listing those they manage;
+  Settings edits who sets them up with the same scope editor.

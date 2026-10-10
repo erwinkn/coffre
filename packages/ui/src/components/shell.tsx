@@ -242,12 +242,8 @@ function Sidebar({
         />
         <AdministrationItems
           capabilities={capabilities}
-          users={
-            <>
-              <NavLink to="/users" label="Users" icon={<Users size={16} />} collapsed={collapsed} />
-              <NavLink to="/service-accounts" label="Service accounts" icon={<Key size={16} />} collapsed={collapsed} />
-            </>
-          }
+          users={<NavLink to="/users" label="Users" icon={<Users size={16} />} collapsed={collapsed} />}
+          services={<NavLink to="/service-accounts" label="Service accounts" icon={<Key size={16} />} collapsed={collapsed} />}
           audit={
             <NavLink to="/audit" label="Audit" icon={<Ledger size={16} />} collapsed={collapsed} />
           }

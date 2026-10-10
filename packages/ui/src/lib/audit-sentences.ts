@@ -8,7 +8,7 @@
  * and places in it links. `plain` flattens it, for tests and titles.
  */
 import { shownMember, type AuditEntryView } from '@coffre/client';
-import { INSTANCE_ROLES, isInstanceRole } from '@coffre/core/access';
+import { INSTANCE_ROLES, isInstanceRole, isScope, scopeInWords, type Scope } from '@coffre/core/access';
 
 /** What a sentence is made from: an entry of the log, as `GET /api/audit` gives it. */
 export type AuditEntry = Pick<
@@ -311,6 +311,16 @@ const TEMPLATES: Record<string, Template> = {
     tried: ({ entry }) => (entry.metadata.owner === false ? 'take owner from' : 'make'),
     what: ({ entry }) => [...subject(entry), ...(entry.metadata.owner === false ? [] : [' an owner'])],
   },
+  // Where people set up service accounts themselves, which those who run the instance set.
+  'settings.change': {
+    did: 'set',
+    tried: 'set',
+    what: ({ entry }) => ['where people set up service accounts', ...setting(entry.metadata.serviceAccounts).map((words) => `: ${words}`)],
+    then: ({ entry }) => {
+      const previous = (entry.metadata.previous as { serviceAccounts?: unknown } | undefined)?.serviceAccounts;
+      return setting(previous).map((words) => `, was ${words}`);
+    },
+  },
   // A binding trusts CI runs to sign in as a service; removing one is its tombstone.
   'token.bind': {
     did: 'trusted CI runs to sign in as',
@@ -417,6 +427,21 @@ function scoped(entry: AuditEntry): Part[] {
   return scope === undefined || (scope.projects === 'all' && scope.environments === 'all') ? [] : [', with a scope'];
 }
 
+/**
+ * The setting of where people set up service accounts, in words: its
+ * projects counted, as the log names them by id, its environments by name.
+ *
+ *   All projects · all but prod      2 projects · dev only
+ */
+function setting(scope: unknown): string[] {
+  if (!isScope(scope)) return [];
+  const { projects } = scope;
+  const counted: Scope = projects === 'all'
+    ? scope
+    : { ...scope, projects: 'only' in projects ? { only: [plural(projects.only.length, 'project')] } : { except: [plural(projects.except.length, 'project')] } };
+  return [scopeInWords(counted)];
+}
+
 /** The role a member is added or brought back with, said when it is more than Member. */
 function asRole(entry: AuditEntry): Part[] {
   const role = roleName(text(entry.metadata.role) ?? '');
@@ -458,6 +483,7 @@ const REASONS: Record<string, string> = {
   own_role: 'nobody changes their own role',
   own_grant: 'nobody grants themselves a role',
   service_cannot_hold_role: 'service accounts hold project grants only',
+  not_service_manager: 'they hold less than the service account, or than they gave it',
   unknown_environment: 'no such environment',
   unknown_secret: 'no such secret',
   no_value: 'it holds no value',

@@ -5,7 +5,7 @@ import { EVERYWHERE, INSTANCE_ROLES, scopeInWords, unscoped } from '@coffre/core
 import { changeRole, directoryList, invite, removeMember, type InviteVars, type RoleVars } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { scopeComplete } from '../lib/validation';
-import { queries } from '../lib/queries';
+import { queries, waysFor } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
@@ -181,7 +181,7 @@ export function DirectoryTable({
           </div>
         )}
       </section>
-      {capabilities.runsInstance && (
+      {(capabilities.runsInstance || (!users && capabilities.setsUpServices)) && (
         <div className="table-actions">
           <AddPrincipal principalType={principalType} />
         </div>
@@ -205,13 +205,13 @@ const PLATFORM: Record<string, string> = {
  */
 function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
   const client = useCoffre();
-  const { auth, capabilities, features } = useShell();
+  const shell = useShell();
   const member = memberOf(principal);
-  // As `loadServiceDirectory` read them, so these come from its cache.
-  const allowed = capabilities.runsInstance && auth.signin !== null;
+  // As `loadServiceDirectory` read them, so these come from its cache; an account just added is yours.
+  const ways = waysFor(shell, principal.managed !== false);
   // Not suspended: an account added here is shown at once, its facts when they come.
-  const { data: bindings } = useQuery(queries.bindings(client, member, capabilities.runsInstance && features.workloads));
-  const { data: credentials } = useQuery(queries.credentials(client, member, allowed));
+  const { data: bindings } = useQuery(queries.bindings(client, member, ways.workloads));
+  const { data: credentials } = useQuery(queries.credentials(client, member, ways.tokens));
 
   const platforms = new Map<string, number>();
   const bindingList = bindings?.ok === true ? bindings.bindings : [];
@@ -329,9 +329,9 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
 }
 
 /**
- * Change role and Remove, behind one menu, for those who run the instance.
- * Root admins get none: the deployment's configuration owns them. Nobody
- * changes their own role.
+ * Change role and Remove, behind one menu, for those who run the instance;
+ * Remove, for a service account you manage. Root admins get none: the
+ * deployment's configuration owns them. Nobody changes their own role.
  */
 export function PrincipalActions({
   principal,
@@ -353,7 +353,8 @@ export function PrincipalActions({
   const kind = KIND[principal.principalType];
 
   const self = me?.type === principal.principalType && me.id === principal.principalId;
-  if (principal.isRootAdmin || !capabilities.runsInstance) return null;
+  const yours = principal.principalType === 'service' && principal.managed === true;
+  if (principal.isRootAdmin || !(capabilities.runsInstance || yours)) return null;
 
   return (
     <>
@@ -366,7 +367,7 @@ export function PrincipalActions({
           {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
         </Menu.Trigger>
         <MenuPopup align="end">
-          {principal.principalType === 'user' && !self && (
+          {principal.principalType === 'user' && !self && capabilities.runsInstance && (
             <>
               <Menu.Item
                 className="menu-item"

@@ -1,12 +1,17 @@
+import { useState } from 'react';
 import type { RouteOutput } from '@coffre/client';
+import { scopeInWords, unscoped, type Scope } from '@coffre/core/access';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
-import { queries } from '../lib/queries';
+import { affects, queries } from '../lib/queries';
+import { useAction } from '../lib/use-action';
 import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
-import { Toggletip } from '../components/ui';
-import { Info } from '../components/icons';
+import { ScopeField } from '../components/role-field';
+import { ErrorLine, Modal, Spinner, Toggletip } from '../components/ui';
+import { Info, Pencil } from '../components/icons';
 
 /** The instance's settings. Your own are under Account, at the sidebar's foot. */
 
@@ -15,6 +20,7 @@ export function SettingsPage() {
   const client = useCoffre();
   const { data: directory } = useSuspenseQuery(queries.directory(client, capabilities.canManageGrants));
   const { data: keys } = useSuspenseQuery(queries.auditKeys(client, capabilities.runsInstance));
+  const { data: settings } = useSuspenseQuery(queries.settings(client, capabilities.runsInstance));
   const providers = auth?.signin?.providers.map((provider) => provider.label) ?? [];
 
   const principals = directory?.ok === true ? directory.principals : null;
@@ -75,8 +81,78 @@ export function SettingsPage() {
         </dl>
       </Card>
 
+      {settings?.ok === true && <ServiceSetup scope={settings.serviceAccounts} />}
       {keys?.ok === true && <Keys keys={keys} />}
     </>
+  );
+}
+
+/**
+ * Who sets up service accounts without running the instance: anyone who
+ * holds access, inside this scope, giving one at most what they hold there.
+ * Narrowed, the rest takes an Admin whose own scope reaches it.
+ */
+function ServiceSetup({ scope }: { scope: Scope }) {
+  const client = useCoffre();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(scope);
+  const { pending, error, setError, run } = useAction();
+  const close = () => {
+    setOpen(false);
+    setDraft(scope);
+    setError(null);
+  };
+  return (
+    <Card
+      labelledBy="service-setup"
+      title="Service accounts"
+      description="Anyone who holds access sets up service accounts for CI where this lets them: the account, its tokens and its OIDC trust, giving it at most what they hold. Elsewhere, an Admin whose scope reaches it does."
+      actions={
+        <button className="btn" type="button" onClick={() => setOpen(true)}>
+          <Pencil size={14} />
+          Edit
+        </button>
+      }
+    >
+      <dl className="facts">
+        <Fact label="Set up by people in">
+          <span>{unscoped(scope) ? 'Every project and environment' : scopeInWords(scope)}</span>
+        </Fact>
+      </dl>
+      <Modal
+        open={open}
+        onOpenChange={(next) => (next ? setOpen(true) : close())}
+        title="Who sets up service accounts"
+        description="People set up service accounts, and give them what they hold, in these projects and environments. All except prod keeps prod's to Admins."
+      >
+        <form
+          className="form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            run(() => client.settings.set({ serviceAccounts: draft }), {
+              affects: affects.settings(),
+              onSuccess: () => {
+                toast.success('Saved where people set up service accounts');
+                setOpen(false);
+                setError(null);
+              },
+            });
+          }}
+        >
+          <ScopeField legend="Where" scope={draft} onChange={setDraft} />
+          <ErrorLine error={error} />
+          <div className="dialog-actions">
+            <button className="btn" type="button" onClick={close}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" type="submit" disabled={pending}>
+              {pending && <Spinner />}
+              Save
+            </button>
+          </div>
+        </form>
+      </Modal>
+    </Card>
   );
 }
 

@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { runsInstance } from '@coffre/core/access';
 import {
   deriveKey,
   generateToken,
@@ -39,6 +38,7 @@ import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember } from './paths.ts';
+import { managedAccount, notManager } from './services.ts';
 
 export type SigninServiceDeps = {
   db: Database;
@@ -582,8 +582,12 @@ export class SigninService {
     });
   }
 
-  /** Revoke one credential: your own, or anyone's if you own the instance. */
-  async revokeCredential(ctx: Asker, credentialId: string): Promise<{ revoked: true }> {
+  /**
+   * Revoke one credential: your own; or anyone's, if you run the instance;
+   * or a token of `managed`, a service account the caller manages
+   * (`managedAccount`, asked before: no vault call runs in a transaction).
+   */
+  async revokeCredential(ctx: Asker, credentialId: string, managed: string | null = null): Promise<{ revoked: true }> {
     return audited(this.#deps, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
       const unknown = () =>
@@ -594,7 +598,8 @@ export class SigninService {
       if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principal === principalOf(principal);
-      if (!own) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
+      const theirs = managed !== null && row.principal === `token:${managed}` && row.kind === 'service';
+      if (!own && !theirs) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
       const revoked = await updateAuth(
         tx,
         this.#deps.chainKey,
@@ -682,7 +687,9 @@ export class SigninService {
   async listServiceTokens(ctx: Asker, serviceId: string): Promise<ServiceTokenRow[]> {
     const { principal } = ctx.caller;
     const self = principal.type === 'service' && principal.id === serviceId;
-    if (!self && !runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see service tokens');
+    if (!self && !(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) {
+      throw forbidden('only those who manage this service account may see its tokens');
+    }
     const [service] = await members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date());
     return (service?.credentials ?? [])
       // Those its trust bindings issued are a CI run's for five minutes, not tokens anyone keeps.
@@ -714,9 +721,10 @@ export class SigninService {
     }
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
-      requireInstance(ctx, 'token.create', { metadata: details }, 'issue service tokens');
       const service = { type: 'service' as const, id: serviceId };
-      const standing = await this.#standing(service);
+      // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
+      const { standing, managed } = await managedAccount(this.#deps, ctx.caller, serviceId);
+      if (!managed) throw notManager(ctx, 'token.create', details, 'issue its tokens');
       const refusal = () => new Refusal(
         notFound('unknown service'),
         denied(ctx, 'token.create', 'unknown_principal', { metadata: details }),

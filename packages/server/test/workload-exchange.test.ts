@@ -530,9 +530,9 @@ test('removing a binding ends its credentials at once; a denied attempt changes 
   const [row] = await db.owner.select().from(serviceBindings);
   const [issued] = await db.owner.select().from(credentials);
 
-  // Someone not an owner tries: logged as a denial, and the credential still works.
+  // Someone who does not manage it tries: logged as a denial, and the credential still works.
   const devContext = await contextFor(deps, DEV);
-  await assert.rejects(runtime.workloads!.unbind(devContext, SERVICE, id), /only admins and owners of the whole instance/);
+  await assert.rejects(runtime.workloads!.unbind(devContext, SERVICE, id), /only those who manage this service account may remove its trust bindings/);
   assert.equal(await caller(credential), `service:${SERVICE}`);
   assert.equal((await trade(token(rsa))).status, 200, 'its entry is no tombstone');
 

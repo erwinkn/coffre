@@ -1,5 +1,5 @@
 import type { AccessFault } from './access-fault.ts';
-import type { GrantPlace, InstanceRole, Role, Scope } from './access.ts';
+import type { GrantPlace, InstanceRole, Role, Scope, ServiceSetting } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -71,6 +71,14 @@ export interface Vault {
   admit(input: AdmitInput): Promise<Outcome<{ created: boolean; role: InstanceRole; scope: Scope; generation: number }>>;
   /** Remove a member: revoke every grant and refuse them until admitted again, from `generation` on. */
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>>;
+  /**
+   * The instance's settings, as the vault's newest `settings.change` entry
+   * says, by its MAC: an entry is where they live, so each change is logged
+   * by being made. Everywhere, until someone narrows it.
+   */
+  settings(): Promise<Settings>;
+  /** Change the instance's settings: those who run it, never anyone else. */
+  setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>>;
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
@@ -105,7 +113,7 @@ export interface Vault {
    * from it. The links and hashes of the chain are the caller's to
    * recompute through `upTo`, as the app does first; with none, the vault
    * recomputes them all itself. A verdict and nothing else, so anyone may
-   * ask; the app asks for owners.
+   * ask; the app asks for those who read the whole log (`readsWholeLog`).
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
@@ -319,6 +327,17 @@ export type RemoveInput = Correlation & {
   actor: string;
   principal: string;
 
+};
+
+/** What the instance's settings hold. */
+export type Settings = {
+  /** Where people set up service accounts themselves (`ServiceSetting` in @coffre/core/access), projects by id. */
+  serviceAccounts: ServiceSetting;
+};
+
+export type SetSettingsInput = Correlation & {
+  actor: string;
+  settings: Settings;
 };
 
 /**

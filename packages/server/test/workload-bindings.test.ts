@@ -101,7 +101,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   assert.deepEqual(await live(), [binding]);
   // The service itself may see its bindings; another member may not.
   assert.deepEqual((await clientFor(deps, SERVICE, 'service').bindings.list(MEMBER)).bindings, [binding]);
-  await assert.rejects(as(DEV).bindings.list(MEMBER), /only admins and owners of the whole instance may see trust bindings/);
+  await assert.rejects(as(DEV).bindings.list(MEMBER), /only those who manage this service account may see its trust bindings/);
 
   const [entry] = await entries('token.bind');
   assert.deepEqual(entry, {
@@ -126,16 +126,16 @@ test('the server holds every binding to its profile, from the API as from anywhe
   assert.deepEqual(await entries(), [], 'an invalid binding is a bad request, not a decision');
 });
 
-test('only owners trust workloads; a refusal is logged, and an unknown service is no service', async () => {
-  await assert.rejects(bind(DEPLOY, {}, DEV), /only admins and owners of the whole instance may trust workloads/);
-  await assert.rejects(as(DEV).bindings.preview(MEMBER, { profile: 'github', claims: { ...DEPLOY } }), /only admins and owners of the whole instance may trust workloads/);
+test('only those who manage a service account trust workloads as it; a refusal is logged, and an unknown service is no service', async () => {
+  await assert.rejects(bind(DEPLOY, {}, DEV), /only those who manage this service account may trust workloads as it/);
+  await assert.rejects(as(DEV).bindings.preview(MEMBER, { profile: 'github', claims: { ...DEPLOY } }), /only those who manage this service account may trust workloads as it/);
   await assert.rejects(as(LEAD).bindings.create('token:nobody', { profile: 'github', claims: { ...DEPLOY } }), /unknown service/);
   await assert.rejects(as(LEAD).bindings.create(`user:${DEV}`, { profile: 'github', claims: { ...DEPLOY } }), /only tokens hold service tokens/);
   assert.deepEqual(
     (await entries('token.bind')).map((entry) => [entry.actor, entry.decision, entry.metadata.reason, entry.metadata.principalId]),
     [
-      [`user:${DEV}`, 'deny', 'requires_instance_admin', SERVICE],
-      [`user:${DEV}`, 'deny', 'requires_instance_admin', SERVICE],
+      [`user:${DEV}`, 'deny', 'not_service_manager', SERVICE],
+      [`user:${DEV}`, 'deny', 'not_service_manager', SERVICE],
       [`user:${LEAD}`, 'deny', 'unknown_principal', 'nobody'],
     ],
   );
@@ -194,7 +194,7 @@ test('removing a binding writes its tombstone; a denied attempt is no tombstone,
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, binding.id));
 
   // Someone who is not an owner tries: refused and logged, under the same action, and the binding stands.
-  await assert.rejects(as(DEV).bindings.remove(MEMBER, binding.id), /only admins and owners of the whole instance may remove trust bindings/);
+  await assert.rejects(as(DEV).bindings.remove(MEMBER, binding.id), /only those who manage this service account may remove its trust bindings/);
   assert.deepEqual(await tombstoned(db.runtime, [binding.id]), new Set());
   assert.deepEqual((await live()).map((candidate) => candidate.id), [binding.id]);
 
@@ -203,7 +203,7 @@ test('removing a binding writes its tombstone; a denied attempt is no tombstone,
   assert.deepEqual(await tombstoned(db.runtime, [binding.id]), new Set([binding.id]));
   assert.deepEqual(
     (await entries('token.unbind')).map((entry) => [entry.actor, entry.decision, entry.metadata.bindingId, entry.metadata.reason]),
-    [[`user:${DEV}`, 'deny', binding.id, 'requires_instance_admin'], [`user:${LEAD}`, 'allow', binding.id, 'removed']],
+    [[`user:${DEV}`, 'deny', binding.id, 'not_service_manager'], [`user:${LEAD}`, 'allow', binding.id, 'removed']],
   );
   await assert.rejects(as(LEAD).bindings.remove(MEMBER, binding.id), /unknown trust binding/);
 
@@ -273,5 +273,5 @@ test("an owner looks up a public repository's or project's IDs; a private one is
   await assert.rejects(lead.bindings.lookup({ github: '../../users' }), /a GitHub repository is <owner>\/<name>/);
   await assert.rejects(lead.bindings.lookup({ gitlab: 'acme/api', gitlabUrl: 'http://10.0.0.1' }), /must use https/);
   await assert.rejects(lead.bindings.lookup({}), /look up a GitHub repository or a GitLab project/);
-  await assert.rejects(as(DEV).bindings.lookup({ github: 'acme/api' }), /only admins and owners of the whole instance may trust workloads/);
+  await assert.rejects(as(DEV).bindings.lookup({ github: 'acme/api' }), /only those who set up service accounts may trust workloads/);
 });

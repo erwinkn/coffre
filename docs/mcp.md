@@ -88,8 +88,9 @@ could with the CLI.
 **Your client lists only the tools your roles reach.** A viewer's client
 sees the reads and the two that show values, not `set_access` or the
 audit log; an access manager's sees `list_access` and `set_access`, not
-values; an admin's sees the instance's own tools, such as `admit_member`
-and `create_project`. A tool your roles allow but your
+values; anyone who holds access sees the service account tools, to set up
+the accounts they manage; an admin's sees the instance's own tools, such
+as `create_project`. A tool your roles allow but your
 connection's scopes don't stays listed: calling it asks for the scope, as
 below. Clients keep the list for five minutes at most, so a role granted
 or taken shows in it within minutes. The list is only what is shown: every

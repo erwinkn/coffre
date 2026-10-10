@@ -151,7 +151,8 @@ test('nobody changes their own instance role, and a scoped admin sets nobody\'s 
     ['access.grant', 'missing_grant_manage'],
     ['access.grant', 'own_grant'],
     ['access.grant', 'own_grant'],
-    ['access.grant', 'missing_grant_manage'],
+    // To a service account, as anyone who sets one up: it gives no reading role it does not hold.
+    ['access.grant', 'not_service_manager'],
     ['project.create', 'requires_instance_admin'],
   ]);
 
@@ -205,16 +206,27 @@ test("where someone's role applies is told only to those who run the instance: a
   assert.deepEqual([(await listed(boss))?.scope, (await boss.members.access(ADA)).scope], [null, null]);
 });
 
-test('an auditor reads the log of the places in its scope, and never the instance\'s', async () => {
+test('a scoped auditor reads the log of the places in its scope; an auditor of the whole instance reads all of it', async () => {
   await root.members.add(ADA, { role: 'auditor', scope: { projects: { only: ['market'] }, environments: { only: ['dev'] } } });
   const { entries } = await ada.audit.list({ detail: '1' });
   assert.ok(entries.length > 0);
   assert.ok(entries.every((entry) => entry.project === 'market' && entry.environment === 'dev'), JSON.stringify(entries.map((entry) => [entry.project, entry.environment])));
-  // Unscoped, every project's, still not the instance's own: sign-ins, people.
+  assert.ok(entries.every((entry) => entry.project !== null), 'never the instance\'s own entries');
+  await assert.rejects(ada.audit.verify(), { status: 403 });
+  // Unscoped (D96): every project's, and the instance's own too: people, service accounts, sign-ins.
   await root.members.add(ADA, { role: 'auditor' });
   const everywhere = (await ada.audit.list({ detail: '1' })).entries;
   assert.ok(everywhere.some((entry) => entry.project === 'billing'));
-  assert.ok(everywhere.every((entry) => entry.project !== null));
+  assert.ok(everywhere.some((entry) => entry.action === 'member.role' && entry.subject === ADA), 'the instance\'s own entries');
+  assert.ok(everywhere.some((entry) => entry.action === 'member.add' && entry.subject === CI));
+  assert.equal((await ada.audit.verify()).ok, true, 'and verifies it whole');
+  // Reading, not running: it changes none of what it reads about.
+  assert.equal((await ada.me()).runsInstance, false);
+  await assert.rejects(ada.members.add('user:eve@acme.example'), { status: 403 });
+  await assert.rejects(ada.audit.keys(), { status: 403 });
+  // Narrowed by projects alone, the instance's own entries go again.
+  await root.members.add(ADA, { role: 'auditor', scope: { projects: { except: ['billing'] } } });
+  assert.ok((await ada.audit.list({ detail: '1' })).entries.every((entry) => entry.project === 'market'));
   await assert.rejects(ada.audit.verify(), { status: 403 });
   assert.ok((await boss.audit.list({})).entries.some((entry) => entry.project === null), 'an admin of the whole instance reads it all');
 });

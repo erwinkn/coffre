@@ -243,25 +243,29 @@ export const serviceAccounts = {
   },
 };
 
-/** `/service-accounts/$account`, the layout of a service account's tabs: who it is to the instance, for owners. */
+/**
+ * `/service-accounts/$account`, the layout of a service account's tabs: who
+ * it is to the instance, for owners, and what it holds, for whoever manages it.
+ */
 export const serviceAccount = {
-  loader: ({ context, params }: Loader<{ account: string }>) => {
+  loader: async ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadMember(queryClient, coffre, memberRef('service', params.account));
+    const member = memberRef('service', params.account);
+    await Promise.all([loadMember(queryClient, coffre, member), loadAccess(queryClient, coffre, member)]);
   },
 };
 
 /**
  * `/service-accounts/$account/`, how it signs in: its trusted workloads and
- * bearer tokens. Only an owner manages them, and only while it is active;
- * anyone else is sent to its access.
+ * bearer tokens. Only whoever manages it sees them, and only while it is
+ * active; anyone else is sent to its access.
  */
 export const serviceAccountSignIn = {
   loader: async ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
     const member = memberRef('service', params.account);
-    const [shell, report] = await Promise.all([loadShell(queryClient, coffre), loadMember(queryClient, coffre, member)]);
-    const ways = signInWays(shell, report);
+    const [shell, access] = await Promise.all([loadShell(queryClient, coffre), loadAccess(queryClient, coffre, member)]);
+    const ways = signInWays(shell, access);
     if (ways === null) throw redirect({ to: '/service-accounts/$account/access', params });
     await Promise.all([
       queryClient.fetchQuery(queries.credentials(coffre, member, ways.tokens)),
