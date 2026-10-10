@@ -191,7 +191,7 @@ test('someone signed in but not a member reaches /me and nothing else', async ()
 test('a member whose record fails the vault\'s check is told so, and listed so, until an owner starts them over', async () => {
   const { vaultMembers } = tablesOf(db.owner);
   // Someone who owns the database makes DEV an owner, around the vault.
-  await db.owner.update(vaultMembers).set({ owner: true }).where(eq(vaultMembers.principal, `user:${DEV}`));
+  await db.owner.update(vaultMembers).set({ owner: true, role: 'admin' }).where(eq(vaultMembers.principal, `user:${DEV}`));
   const page = () => pageClient(new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=${DEV}` } }), runtimeFor(own));
   const client = page();
   const me = await client.me();
@@ -201,7 +201,7 @@ test('a member whose record fails the vault\'s check is told so, and listed so, 
 
   const root = clientFor(deps, ROOT);
   const listed = (await root.members.list()).members.find((member) => member.principalId === DEV);
-  assert.deepEqual([listed?.tampered, listed?.instanceRole], [true, 'user']);
+  assert.deepEqual([listed?.tampered, listed?.instanceRole], [true, 'member']);
   await root.members.remove(`user:${DEV}`);
   await root.members.add(`user:${DEV}`);
   // The next page load: a render checks its caller once, so the one above still sees them as it did.

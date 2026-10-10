@@ -2,6 +2,92 @@
 
 ## Unreleased
 
+**Instance roles with scopes replace grants on every project.** Each
+person has one instance role, Member, Auditor, Developer, Admin or Owner,
+which applies in every project its scope takes in, the ones made later
+too. A scope has two filters, Projects and Environments, each all, only
+some, or all except some; environments match by name, so "Developer,
+environments only dev" reads and writes every project's `dev`. Admin is
+0.4's instance owner: it manages people, projects and access, and holds no
+secret permission; Owner adds every secret. An Admin of the whole instance
+can still reach any value, as a 0.4 owner could, by admitting a service
+account, granting it a reading role and issuing its token, each step in the
+log. A scoped Admin manages only inside its scope and sets no role, and
+nobody changes their own role or grants themselves one, which 0.4 let an
+owner or an access manager do: that stops a quiet read of one's own, not
+an Admin set on reading. Grants are on a
+project or an environment, and only add to the role. Service accounts hold
+grants only. `*` and `*/<env>` are gone from the API, the CLI, the MCP
+tools and the pages: the vault replaces the ones there are when this
+version first runs, never giving more than they did, and logs each
+(`docs/design/instance-roles.md` has the rule). It takes away nothing it
+can keep in the projects there are now: viewer on `*` beside auditor on
+billing becomes viewer on each of billing's environments, beside the
+auditor grant. Where no grant can hold both, as maintainer on `*` beside
+access-manager on billing for a service account, the one that reads stays.
+`coffre migrate` says what it will make of each before you deploy, and
+names what is lost: "loses access-manager on billing (keeps maintainer)".
+A member the vault has reported tampered with is left as they are, as
+`coffre migrate` says, until their access next changes or they are
+started over.
+The first request after the upgrade converts every member holding one,
+one after another, before it answers, so on an instance with many it may
+be slow; one cut short leaves the rest to the next.
+
+- **API.** `PUT /api/members/<member>` takes `{ role, scope }` instead of
+  `{ owner }`; members list `instanceRole` (`member`, `auditor`,
+  `developer`, `admin`, `owner` or `root-admin`) and `scope`, null but for
+  those who run the instance, since a scope names projects, and a
+  place's list says who reaches it by their role (`reachesByRole`).
+  `GET /api/me` adds `scope` and `runsInstance`. `GET /api/members/<member>/access`
+  answers a member's role, scope and the grants you manage in one query: a
+  person's or service account's Access tab reads it once, not one list per
+  project (`coffre access <member>`). Making a project or an
+  environment no longer answers `inherited`, nor `GET /api/projects`
+  `everyProject`. Refusals of what only an Admin or Owner of the whole
+  instance may do log `requires_instance_admin`.
+- **CLI.** `coffre admit <email> --role <role>`, with `--projects`,
+  `--except-projects`, `--environments` and `--except-environments`,
+  replaces `--owner` and `--no-owner`. `coffre grant '*'` and
+  `coffre revoke '*'` are gone.
+- **MCP.** `admit_member` takes `role` and `scope`; `set_access` takes
+  projects and environments.
+- **Schema.** `0002_instance_roles` adds `role` and `scope` to
+  `vault_members`, and lets the vault's login update them. Rolling back to
+  0.4 leaves Members and Admins everywhere as they were; anyone else is
+  refused until removed.
+
+**Anyone who holds access sets up service accounts for it.** Setting up
+CI took an Admin of the whole instance; now a person who holds access adds
+a service account, gives it grants, issues its tokens and trusts its
+workflows by OIDC, with no Admin. They give it at most what they hold
+themselves: a Developer of every `dev` gives `developer` on `market/dev`,
+never `maintainer`, nor `market/prod`. They manage an account only while
+they hold everything it holds, so a dev Developer issues no token for an
+account that also reads prod; one that holds nothing yet is its maker's. A
+new setting, **Who sets up service accounts**, keeps the rest to Admins:
+environments all except prod, and prod's CI takes an Admin whose scope
+takes in prod. Only those who run the instance change it, and each change
+is logged with what it was. Service accounts is in the sidebar of anyone
+who sets one up, listing only the accounts they manage.
+
+- **API.** `GET` and `PUT /api/settings`, `{ "serviceAccounts": <scope> }`.
+  `GET /api/me` adds `setsUpServices` and `serviceSetup`; members and a
+  member's access add `managed`. Removing a member answers its `report`
+  only to those who run the instance (null otherwise). A refusal to
+  someone who does not manage the account logs `not_service_manager`.
+- **CLI.** `coffre settings`, and `coffre settings service-accounts` with
+  the scope flags `coffre admit` takes. `coffre offboard` removes an account
+  you manage.
+- **MCP.** The service account tools are listed to anyone who holds access,
+  and checked against the account; the setting is changed in the pages and
+  the CLI only.
+
+**An Auditor of the whole instance reads the whole log**, the instance's
+own entries too: sign-ins, people, service accounts, settings. It verifies
+the log, as `coffre verify log` and the Audit page do, and runs nothing it
+reads about. A scoped Auditor still reads only the places in its scope.
+
 **One OIDC binding per workflow, on several events, pull requests
 included.** A GitHub binding now lists the events it trusts, so a workflow
 that runs on push, by hand and on a schedule is one entry, not three. It
@@ -21,8 +107,7 @@ Access and Activity. A deployment gains `users.$user.apps.tsx` through
 `coffre update`.
 
 **Shorter explainers.** "Sign in with OIDC" and "Bearer tokens" say what
-each is, when to use it, and give one example. Adding a user says what an
-owner can do only when Owner is chosen.
+each is, when to use it, and give one example.
 
 **Hyperdrive's connection limits now fit the database.**
 Left at Cloudflare's default, 60 per config on Paid, the app's and the

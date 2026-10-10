@@ -8,6 +8,7 @@
  * and places in it links. `plain` flattens it, for tests and titles.
  */
 import { shownMember, type AuditEntryView } from '@coffre/client';
+import { INSTANCE_ROLES, isInstanceRole, isScope, scopeInWords, type Scope } from '@coffre/core/access';
 
 /** What a sentence is made from: an entry of the log, as `GET /api/audit` gives it. */
 export type AuditEntry = Pick<
@@ -261,6 +262,7 @@ const TEMPLATES: Record<string, Template> = {
     then: ({ entry }) => [
       ...(text(entry.metadata.previousRole) === null ? [] : [`, was ${text(entry.metadata.previousRole)}`]),
       ...(text(entry.metadata.expiresAt) === null ? [] : [`, until ${text(entry.metadata.expiresAt)!.slice(0, 10)}`]),
+      ...(entry.metadata.reason === 'every-project' ? [', for a grant on every project'] : []),
     ],
   },
   'access.revoke': {
@@ -272,13 +274,20 @@ const TEMPLATES: Record<string, Template> = {
       ' from ',
       ...subject(entry),
     ],
+    // The vault replacing a grant on every project of 0.4: by what, an instance role or project grants.
+    then: ({ entry }) => {
+      const by = entry.metadata.replacedBy as { role?: unknown } | undefined;
+      if (by === undefined) return [];
+      const role = typeof by.role === 'string' ? roleName(by.role) : null;
+      return [role === null || role === 'Member' ? ', replaced by project grants' : `, replaced by the instance role ${role}`];
+    },
   },
   'member.add': {
     did: 'added',
     tried: 'add',
     what: ({ entry }) => [
       ...subject(entry),
-      ...(entry.metadata.rootAdmin === true ? [' as a root admin'] : entry.metadata.owner === true ? [' as an owner'] : []),
+      ...(entry.metadata.rootAdmin === true ? [' as a root admin'] : entry.metadata.owner === true ? [' as an owner'] : asRole(entry)),
     ],
   },
   'member.remove': {
@@ -287,11 +296,30 @@ const TEMPLATES: Record<string, Template> = {
     what: (facts) => subject(facts.entry),
     then: ({ entry }) => (number(entry.metadata.revoked) === null ? [] : [`, who held ${plural(number(entry.metadata.revoked)!, 'grant')}`]),
   },
-  'member.restore': { did: 'brought back', tried: 'bring back', what: (facts) => subject(facts.entry) },
+  'member.restore': { did: 'brought back', tried: 'bring back', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
+  'member.role': {
+    did: 'made',
+    tried: 'make',
+    what: ({ entry }) => [...subject(entry), ` ${article(roleName(text(entry.metadata.role) ?? 'member') ?? 'Member')}`, ...scoped(entry)],
+    then: ({ entry }) => {
+      const before = roleName(text(entry.metadata.previousRole) ?? '');
+      return [...(before === null ? [] : [`, was ${before}`]), ...(entry.metadata.reason === 'every-project' ? [', for their grants on every project'] : [])];
+    },
+  },
   'member.owner': {
     did: ({ entry }) => (entry.metadata.owner === false ? 'took owner from' : 'made'),
     tried: ({ entry }) => (entry.metadata.owner === false ? 'take owner from' : 'make'),
     what: ({ entry }) => [...subject(entry), ...(entry.metadata.owner === false ? [] : [' an owner'])],
+  },
+  // Where people set up service accounts themselves, which those who run the instance set.
+  'settings.change': {
+    did: 'set',
+    tried: 'set',
+    what: ({ entry }) => ['where people set up service accounts', ...setting(entry.metadata.serviceAccounts).map((words) => `: ${words}`)],
+    then: ({ entry }) => {
+      const previous = (entry.metadata.previous as { serviceAccounts?: unknown } | undefined)?.serviceAccounts;
+      return setting(previous).map((words) => `, was ${words}`);
+    },
   },
   // A binding trusts CI runs to sign in as a service; removing one is its tombstone.
   'token.bind': {
@@ -384,6 +412,42 @@ function intoFolder(entry: AuditEntry): Part[] {
   return [folder === null ? ' out of its folder' : ` to the folder ${folder}`];
 }
 
+/** An instance role's name, from its slug; null for none it knows. */
+function roleName(role: string): string | null {
+  return isInstanceRole(role) ? INSTANCE_ROLES[role].name : null;
+}
+
+function article(name: string): string {
+  return `${/^[AEIOU]/.test(name) ? 'an' : 'a'} ${name}`;
+}
+
+/** Whether an entry's scope narrows the role; its projects are ids, which a sentence cannot name. */
+function scoped(entry: AuditEntry): Part[] {
+  const scope = entry.metadata.scope as { projects?: unknown; environments?: unknown } | undefined;
+  return scope === undefined || (scope.projects === 'all' && scope.environments === 'all') ? [] : [', with a scope'];
+}
+
+/**
+ * The setting of where people set up service accounts, in words: its
+ * projects counted, as the log names them by id, its environments by name.
+ *
+ *   All projects · all but prod      2 projects · dev only
+ */
+function setting(scope: unknown): string[] {
+  if (!isScope(scope)) return [];
+  const { projects } = scope;
+  const counted: Scope = projects === 'all'
+    ? scope
+    : { ...scope, projects: 'only' in projects ? { only: [plural(projects.only.length, 'project')] } : { except: [plural(projects.except.length, 'project')] } };
+  return [scopeInWords(counted)];
+}
+
+/** The role a member is added or brought back with, said when it is more than Member. */
+function asRole(entry: AuditEntry): Part[] {
+  const role = roleName(text(entry.metadata.role) ?? '');
+  return role === null || role === 'Member' ? [] : [` as ${article(role)}`, ...scoped(entry)];
+}
+
 function placeOnly(entry: AuditEntry): Part[] {
   // A grant on every project names no project: its place is a path in its payload, `*` or `*/dev`.
   const everywhere = entry.project === null ? text(entry.metadata.place) : null;
@@ -414,6 +478,12 @@ const REASONS: Record<string, string> = {
   deleted: 'the place was deleted',
   not_allowed: 'not allowed',
   root_admin: 'root admins are set by the deployment',
+  requires_instance_admin: 'requires an admin or owner of the whole instance',
+  requires_instance_owner: 'requires an instance owner',
+  own_role: 'nobody changes their own role',
+  own_grant: 'nobody grants themselves a role',
+  service_cannot_hold_role: 'service accounts hold project grants only',
+  not_service_manager: 'they hold less than the service account, or than they gave it',
   unknown_environment: 'no such environment',
   unknown_secret: 'no such secret',
   no_value: 'it holds no value',

@@ -366,7 +366,7 @@ test('listing secrets never reveals values or logs a secret read', async () => {
 
 test('me shows only the environments and audit capability held', async () => {
   const me = await reader.me();
-  assert.equal(me.instanceRole, 'user');
+  assert.equal(me.instanceRole, 'member');
   assert.equal(me.canReadAudit, false);
   assert.deepEqual(me.environments, [{ project: 'market', environment: 'dev', permissions: ['secret.read'] }]);
 });

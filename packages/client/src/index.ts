@@ -30,10 +30,10 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
-  InheritedGrant,
   ListedReference,
   Me,
   Member,
+  MemberAccess,
   MissingKey,
   OffboardingReport,
   ProjectSummary,
@@ -246,6 +246,8 @@ export function createClient(options: ClientOptions) {
       list: (path?: string) => call('GET /members', {}, { path }),
       /** What they hold, and what to rotate if they leave. */
       get: (member: string) => call('GET /members/:member', { member }),
+      /** Their instance role and scope, and the grants you manage, in one read. */
+      access: (member: string) => call('GET /members/:member/access', { member }),
       add: (member: string, input: RouteInput<'PUT /members/:member'> = {}) =>
         call('PUT /members/:member', { member }, input),
       /** Offboards; returns what to rotate. */
@@ -342,6 +344,12 @@ export function createClient(options: ClientOptions) {
     apps: {
       list: () => call('GET /apps', {}),
       disconnect: (id: string) => call('DELETE /apps/:id', { id }),
+    },
+
+    /** The instance's settings, for those who run it: where people set up service accounts themselves. */
+    settings: {
+      get: () => call('GET /settings', {}),
+      set: (input: RouteInput<'PUT /settings'>) => call('PUT /settings', {}, input),
     },
 
     audit: {

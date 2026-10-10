@@ -7,7 +7,8 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type InheritedGrant } from '@coffre/client';
+import { INSTANCE_ROLES, isInstanceRole, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
+import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion } from '@coffre/client';
 
 import { describeRemoval, serviceMember } from './trust.ts';
 
@@ -27,11 +28,7 @@ type Options = NonNullable<Parameters<typeof parseArgs>[0]>['options'];
 /** Strict options and positionals, each positional named: too few or too many is a usage error. */
 export function parse<O extends Options>(args: string[], options: O, names: readonly string[], optional = 0) {
   const { values, positionals } = parseArgs({ args, options, allowPositionals: true, strict: true });
-  if (positionals.length > names.length) {
-    // A command that takes a project takes `*` too, which a shell expands into file names unless quoted.
-    const quote = names[0] === '<project>' ? "; to name every project, quote it: '*'" : '';
-    throw new UsageError(`too many arguments: ${positionals.slice(names.length).join(' ')}${quote}`);
-  }
+  if (positionals.length > names.length) throw new UsageError(`too many arguments: ${positionals.slice(names.length).join(' ')}`);
   if (positionals.length < names.length - optional) throw new UsageError(`name ${listOf(names.slice(positionals.length))}`);
   return { values, positionals };
 }
@@ -64,21 +61,24 @@ function secret(text: string): string {
 
 const day = (iso: string | null) => (iso === null ? 'never' : iso.slice(0, 10));
 
-/** A place a grant is at, as a person reads it: `market/prod`, or `every project`, or `dev in every project`. */
-export function placeName(path: string): string {
-  if (path === '*') return 'every project';
-  return path.startsWith('*/') ? `${path.slice(2)} in every project` : path;
+/**
+ * A grant is on a project or an environment: what reaches every project is
+ * a person's instance role, and `*` no project.
+ */
+export function onAProject(project: string): void {
+  if (project === '*') {
+    throw new UsageError("grants are on a project or an environment: a person reaches every project by their instance role, `coffre admit <email> --role <role>`");
+  }
 }
 
-
-/** Who reaches a place through grants on every project, a line each under a heading; nothing when nobody does. */
-function reachedBy(heading: string, inherited: readonly InheritedGrant[]): string {
-  if (inherited.length === 0) return '';
-  const lines = inherited.map((grant) => {
-    const until = grant.expiresAt === null ? '' : ` until ${day(grant.expiresAt)}`;
-    return `  ${shownMember(grant.member)} as ${grant.role}, through ${placeName(grant.place)}${until}\n`;
-  });
-  return `${heading}\n${lines.join('')}`;
+/**
+ * Someone's instance role in words: `Developer`, or `Developer, All projects · dev only`
+ * when a scope narrows it. Only those who run the instance are told the scope (null otherwise).
+ */
+export function roleInWords(member: { instanceRole: InstanceRole | 'root-admin'; scope: Scope | null }): string {
+  if (member.instanceRole === 'root-admin') return 'Root admin';
+  const { name } = INSTANCE_ROLES[member.instanceRole];
+  return member.scope === null || unscoped(member.scope) ? name : `${name}, ${scopeInWords(member.scope)}`;
 }
 
 // --- projects and environments ------------------------------------------------
@@ -113,7 +113,6 @@ export async function projectsCreate(connect: () => CoffreClient, args: string[]
   const api = connect();
   const made = await api.projects.create(project, { name: values.name ?? project });
   io.out.write(made.created ? `created ${made.project.slug}, "${made.project.name}"\n` : `${made.project.slug} exists already, "${made.project.name}": nothing changed\n`);
-  io.out.write(reachedBy('who reaches it already:', made.inherited));
 }
 
 export async function environmentsCreate(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
@@ -123,7 +122,6 @@ export async function environmentsCreate(connect: () => CoffreClient, args: stri
   const made = await api.environments.create(`${project}/${environment}`, { name: values.name ?? environment! });
   const path = `${project}/${made.environment.slug}`;
   io.out.write(made.created ? `created ${path}, "${made.environment.name}"\n` : `${path} exists already, "${made.environment.name}": nothing changed\n`);
-  io.out.write(reachedBy('who reaches it already:', made.inherited));
 }
 
 /**
@@ -167,10 +165,10 @@ export async function environmentsRename(connect: () => CoffreClient, args: stri
   const { project, environment } = place(positionals[0]!, true);
   const patch = renamed(values);
   const api = connect();
-  const { environment: now, inherited } = await api.environments.update(`${project}/${environment}`, patch);
+  const { environment: now } = await api.environments.update(`${project}/${environment}`, patch);
   io.out.write(`${project}/${environment} is now ${project}/${now.slug}, "${now.name}"\n`);
-  // A new slug brings in whoever holds it in every project.
-  if (now.slug !== environment) io.out.write(reachedBy('who reaches it now by its new slug:', inherited.filter((grant) => grant.place !== '*')));
+  // Scopes name environments by slug: a new one can bring in, or leave out, those scoped to it.
+  if (now.slug !== environment) io.out.write(`  instance roles scoped to ${environment} no longer reach it; those scoped to ${now.slug} do\n`);
 }
 
 export async function projectsArchive(connect: () => CoffreClient, args: string[], archived: boolean, io: Io = STDIO): Promise<void> {
@@ -444,23 +442,44 @@ export function memberOf(name: string, service: boolean): string {
   return service ? serviceMember(name) : name.startsWith('user:') ? name : `user:${name}`;
 }
 
+/** A filter from its two flags, `--projects a,b` or `--except-projects a,b`; neither leaves it out. */
+function filterOf(values: Record<string, unknown>, what: 'projects' | 'environments'): Filter | undefined {
+  const [only, except] = [values[what], values[`except-${what}`]] as (string | undefined)[];
+  if (only !== undefined && except !== undefined) throw new UsageError(`--${what} or --except-${what}, not both`);
+  const list = (text: string) => text.split(',').map((name) => name.trim()).filter((name) => name !== '');
+  if (only !== undefined) return { only: list(only) };
+  if (except !== undefined) return { except: list(except) };
+  return undefined;
+}
+
+const SCOPE_FLAGS = {
+  projects: { type: 'string' },
+  'except-projects': { type: 'string' },
+  environments: { type: 'string' },
+  'except-environments': { type: 'string' },
+} as const;
+
+/**
+ * `coffre admit ada@acme.example --role developer --environments dev`: a
+ * member, and for a person, their instance role and where it applies,
+ * every project and environment unless the scope flags narrow it.
+ */
 export async function admit(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(
-    args,
-    { service: { type: 'boolean', default: false }, owner: { type: 'boolean', default: false }, 'no-owner': { type: 'boolean', default: false } },
-    ['<principal>'],
-  );
-  if (values.owner && values['no-owner']) throw new UsageError('--owner or --no-owner, not both');
+  const { values, positionals } = parse(args, { service: { type: 'boolean', default: false }, role: { type: 'string' }, ...SCOPE_FLAGS }, ['<principal>']);
   const name = positionals[0]!;
   const service = values.service || SERVICE.test(name);
-  if (service && values.owner) throw new UsageError('a service account cannot own the instance: drop --owner');
+  const role = values.role;
+  if (role !== undefined && !isInstanceRole(role)) throw new UsageError(`no instance role "${role}": member, auditor, developer, admin or owner`);
+  const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
+  const scoped = projects !== undefined || environments !== undefined;
+  if (scoped && role === undefined) throw new UsageError('a scope goes with a role: add --role');
+  if (service && role !== undefined && role !== 'member') throw new UsageError('a service account holds project grants only: drop --role, then coffre grant');
   const who = memberOf(name, service);
-  const owner = values.owner ? true : values['no-owner'] ? false : undefined;
   const api = connect();
-  const result = await api.members.add(who, owner === undefined ? {} : { owner });
-  const role = result.instanceRole === 'owner' ? ', an owner of the instance' : '';
+  const result = await api.members.add(who, role === undefined ? {} : { role, ...(scoped ? { scope: { ...(projects && { projects }), ...(environments && { environments }) } } : {}) });
+  const as = result.instanceRole === 'member' ? '' : ` as ${roleInWords(result)}`;
   const shown = shownMember(result.member);
-  io.out.write(result.created ? `admitted ${shown}${role}\n` : `${shown} is a member${role}${owner === undefined ? ' already' : ' now'}\n`);
+  io.out.write(result.created ? `admitted ${shown}${as}\n` : `${shown} is a member${as}${role === undefined ? ' already' : ' now'}\n`);
   if (service && result.created) {
     const bare = serviceName(who);
     io.out.write(
@@ -471,14 +490,36 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
   }
 }
 
+/**
+ * `coffre settings`: the instance's settings. With `service-accounts` and
+ * the scope flags, where people set up service accounts themselves, which
+ * those who run the instance set: `--except-environments prod` keeps prod's
+ * to an Admin whose scope takes prod in. No flag is everywhere again.
+ */
+export async function settings(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { ...json, ...SCOPE_FLAGS }, ['service-accounts'], 0);
+  const api = connect();
+  const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
+  if (positionals[0] === undefined && (projects !== undefined || environments !== undefined)) {
+    throw new UsageError('the scope flags set one setting: coffre settings service-accounts --except-environments prod');
+  }
+  if (positionals[0] !== undefined && positionals[0] !== 'service-accounts') throw new UsageError(`no setting "${positionals[0]}": service-accounts`);
+  const result = positionals[0] === undefined
+    ? await api.settings.get()
+    : await api.settings.set({ serviceAccounts: { ...(projects && { projects }), ...(environments && { environments }) } });
+  if (values.json) return asJson(io, result);
+  io.out.write(`service accounts, set up by anyone who holds access in: ${scopeInWords(result.serviceAccounts)}\n`);
+}
+
 export async function revoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, { env: { type: 'string' }, service: { type: 'boolean', default: false } }, ['<project>', '<principal>']);
   const [project, name] = positionals as [string, string];
+  onAProject(project);
   const scope = values.env === undefined ? project : `${project}/${values.env}`;
   const who = memberOf(name, values.service);
   const api = connect();
   const { changes } = await api.access.set(who, { [scope]: null });
-  io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${placeName(scope)}\n` : `${shownMember(who)} held no grant on ${placeName(scope)}: nothing changed\n`);
+  io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${scope}\n` : `${shownMember(who)} held no grant on ${scope}: nothing changed\n`);
 }
 
 // --- bearer tokens ----------------------------------------------------------

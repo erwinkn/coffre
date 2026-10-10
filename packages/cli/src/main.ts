@@ -53,7 +53,7 @@ import {
   unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
@@ -859,7 +859,10 @@ async function importEnv(args: string[]): Promise<void> {
 }
 
 async function whoHasAccess(args: string[]): Promise<void> {
-  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false } }, ['<project>[/<environment>]'], 1);
+  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false }, service: { type: 'boolean', default: false } }, ['<project>[/<environment>] | <member>'], 1);
+  // A member's own access: an email, or a service account's name with --service or service:.
+  const asked = positionals[0];
+  if (asked !== undefined && (values.service || /[@:]/.test(asked))) return memberAccess(memberOf(asked, values.service), values.json);
   const result = await client().members.list(positionals[0]);
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -868,13 +871,13 @@ async function whoHasAccess(args: string[]): Promise<void> {
 
   for (const member of result.members) {
     const root = member.isRootAdmin ? '  [root admin]' : '';
+    const role = member.isRootAdmin || member.instanceRole === 'member' ? '' : `  ${manage.roleInWords(member)}`;
     const tampered = member.tampered ? '  [record failed its integrity check: remove to start over]' : '';
-    process.stdout.write(`${named(member.principalType, member.principalId)}${root}${tampered}\n`);
+    process.stdout.write(`${named(member.principalType, member.principalId)}${root}${role}${tampered}\n`);
     for (const g of member.grants) {
       const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
       const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;
-      const everywhere = g.project === '*' ? `  (${manage.placeName(place)})` : '';
-      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}${everywhere}\n`);
+      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}\n`);
     }
   }
   // Who reads a place's secrets through references held elsewhere: a grant there is not the only way in.
@@ -886,6 +889,18 @@ async function whoHasAccess(args: string[]): Promise<void> {
   for (const reference of into) {
     process.stdout.write(`  ${reference.source} through ${reference.holder}, made by ${shownMember(reference.createdBy).replace(/^user:/, '')}\n`);
     for (const reader of reference.readers!) process.stdout.write(`    ${shownMember(reader).replace(/^user:/, '')}\n`);
+  }
+}
+
+/** `coffre access ada@acme.example`: their instance role and the grants you manage, in one read. */
+async function memberAccess(member: string, json: boolean): Promise<void> {
+  const access = await client().members.access(member);
+  if (json) return void process.stdout.write(`${JSON.stringify(access, null, 2)}\n`);
+  const tampered = access.status === 'tampered' ? '  [record failed its integrity check: remove to start over]' : access.status === 'removed' ? '  [removed]' : '';
+  process.stdout.write(`${named(access.principalType, access.principalId)}  ${manage.roleInWords(access)}${tampered}\n`);
+  for (const g of access.grants) {
+    const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
+    process.stdout.write(`  ${place.padEnd(24)} ${g.role}${g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`}\n`);
   }
 }
 
@@ -903,6 +918,7 @@ async function grantAccess(args: string[]): Promise<void> {
 
   const [project, principalId] = positionals as [string, string];
   if (!values.role) throw new UsageError('name the role: --role <role>');
+  manage.onAProject(project);
 
   const role = values.role;
   if (!isRole(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
@@ -916,7 +932,7 @@ async function grantAccess(args: string[]): Promise<void> {
     [scope]: values.expires ? { role, until: values.expires } : role,
   });
 
-  process.stdout.write(`granted ${values.role} on ${manage.placeName(scope)} to ${shownMember(who).replace(/^user:/, '')}\n`);
+  process.stdout.write(`granted ${values.role} on ${scope} to ${shownMember(who).replace(/^user:/, '')}\n`);
 }
 
 function plural(count: number, word: string): string {
@@ -1006,6 +1022,19 @@ async function trust(args: string[]): Promise<void> {
   if (events !== null) process.stdout.write(`${events}\n`);
 }
 
+/** `coffre offboard` of a service account by its manager: what it holds, and with --apply, removed. */
+async function offboardManaged(coffre: CoffreClient, member: string, apply: boolean): Promise<void> {
+  const access = await coffre.members.access(member);
+  const shown = shownMember(member);
+  if (!access.managed) fail(`you do not manage ${shown}: it holds something you do not, or the instance keeps it to admins`);
+  if (!apply) {
+    process.stdout.write(`${shown} is active; removing it would revoke ${access.grants.length} grant${access.grants.length === 1 ? '' : 's'}, and every token and trust binding\nNothing changed. Re-run with --apply to remove it.\n`);
+    return;
+  }
+  const removed = await coffre.members.remove(member);
+  process.stdout.write(`removed ${shown}: revoked ${waysIn('service', removed.revoked)}\n`);
+}
+
 async function offboard(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -1022,13 +1051,19 @@ async function offboard(args: string[]): Promise<void> {
   const shown = shownMember(member).replace(/^user:/, '');
   const coffre = client();
 
-  let report = await coffre.members.get(member);
+  // A service account's manager, who does not run the instance, reads what it holds, not what it read anywhere.
+  const found = await coffre.members.get(member).catch((error: unknown) => {
+    if (error instanceof CoffreError && error.status === 403 && member.startsWith('token:')) return null;
+    throw error;
+  });
+  if (found === null) return offboardManaged(coffre, member, values.apply);
+  let report = found;
   const they = report.principalType === 'user' ? 'they' : 'it';
 
   if (report.status === 'active' && values.apply) {
     const removed = await coffre.members.remove(member);
     process.stdout.write(`removed ${shown}: revoked ${waysIn(report.principalType, removed.revoked)}\n`);
-    report = removed.report;
+    report = removed.report ?? report;
   } else if (report.status === 'active') {
     process.stdout.write(
       `${shown} is active; removing would revoke ${waysIn(report.principalType, report.live)}\n`,
@@ -1087,9 +1122,14 @@ async function offboard(args: string[]): Promise<void> {
 
 function roles(args: string[]): void {
   parse(args, {}, []);
+  process.stdout.write('Instance roles, a person\'s across every project in their scope (coffre admit --role):\n');
+  for (const [slug, role] of Object.entries(INSTANCE_ROLES)) {
+    process.stdout.write(`  ${slug.padEnd(16)} ${role.permissions.length === 0 ? 'nothing: only what grants give' : role.permissions.join(', ')}\n`);
+  }
+  process.stdout.write('\nProject roles, a grant on a project or an environment (coffre grant --role):\n');
   for (const [slug, role] of Object.entries(ROLES)) {
     const scope = assignableToEnvironment(slug as Role) ? 'project or env' : 'project only';
-    process.stdout.write(`${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
+    process.stdout.write(`  ${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
   }
 }
 
@@ -1153,7 +1193,7 @@ async function verify(args: string[]): Promise<void> {
   }
 }
 
-/** The whole audit log, verified by the app and the vault, as an owner. */
+/** The whole audit log, verified by the app and the vault, for whoever reads it whole. */
 async function verifyLog(): Promise<void> {
   const result = await client().audit.verify();
 
@@ -1260,6 +1300,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   grant: grantAccess,
   revoke: (args) => manage.revoke(connect, args),
   offboard,
+  settings: (args) => manage.settings(connect, args),
   tokens: (args) => manage.tokens(connect, args),
   'tokens issue': (args) => manage.tokensIssue(connect, args),
   'tokens revoke': (args) => manage.tokensRevoke(connect, args),

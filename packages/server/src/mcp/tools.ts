@@ -5,7 +5,7 @@
 // it to its connection's. Read, here: what is there, never a value. The
 // tools that change something are in changes.ts, each through an approval.
 import { apiMember, type CoffreClient } from '@coffre/client';
-import { PROJECT_ONLY_PERMISSIONS, type Permission } from '@coffre/core/access';
+import { makesProjects, PERMISSIONS, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
@@ -114,9 +114,9 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'list_access',
-    needs: 'grant.manage',
+    needs: 'services',
     title: 'List access',
-    description: "Who is a member, and their access. Given a place, a project or project/environment, only those who reach it, and through which grant.",
+    description: "Who is a member, their instance role and its scope, and their grants: those you manage access for, and the service accounts you manage. Given a place, a project or project/environment, only those who reach it: by a grant there, or by their instance role.",
     scope: 'read',
     readOnly: true,
     idempotent: true,
@@ -128,9 +128,9 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'describe_member',
-    needs: 'owner',
+    needs: 'services',
     title: 'Describe a member',
-    description: "What a member holds: their grants, and what they have read. For a service account, also its tokens and the CI workloads it trusts.",
+    description: "What a member holds: their grants, and what they have read. For a service account, also its tokens and the CI workloads it trusts. Those who run the instance describe anyone; anyone else, the service accounts they manage, without what they read.",
     scope: 'read',
     readOnly: true,
     idempotent: true,
@@ -138,9 +138,10 @@ const READ_TOOLS: readonly Tool[] = [
     input: z.object({ member }).strict(),
     output: object({ member: { type: 'object' } }),
     names: ({ member }) => [apiMember(member)],
-    run: async ({ api }, args) => {
+    run: async ({ api, connection }, args) => {
       const name = apiMember(args.member);
-      const report = await api.members.get(name);
+      // What it read anywhere is the instance's to know; its manager reads what it holds.
+      const report = runsInstance(connection.caller) || !name.startsWith('token:') ? await api.members.get(name) : await api.members.access(name);
       if (!name.startsWith('token:')) return { structured: { member: report } };
       const [{ tokens }, { bindings }] = await Promise.all([api.tokens.list(name), api.bindings.list(name)]);
       return { structured: { member: report, tokens, bindings } };
@@ -200,14 +201,14 @@ export const TOOLS: readonly Tool[] = [...READ_TOOLS, SHOW_VALUE, REVEAL_VALUES,
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
 /**
- * Who could ever use a tool, by their roles: every member (`anyone`),
- * instance owners alone (`owner`), or whoever holds a permission somewhere.
- * Instance owners hold the project-only ones on every project, and read the
- * whole audit log, as the API lets them.
+ * Who could ever use a tool, by their roles: every member (`anyone`), those
+ * who may make a project (`new-project`), those who may set up a service
+ * account (`services`: who runs the instance, or a person who holds
+ * anything anywhere, as the instance's setting allows, which the API
+ * applies), or whoever holds a permission somewhere, by a grant or their
+ * instance role.
  */
-export type Need = 'anyone' | 'owner' | Permission;
-
-const OWNERS_HOLD: readonly Permission[] = [...PROJECT_ONLY_PERMISSIONS, 'audit.read'];
+export type Need = 'anyone' | 'new-project' | 'services' | Permission;
 
 /**
  * Whether the person's roles, as they are now, let them use `tool`
@@ -218,8 +219,9 @@ const OWNERS_HOLD: readonly Permission[] = [...PROJECT_ONLY_PERMISSIONS, 'audit.
 export function usable(caller: Caller, tool: Tool): boolean {
   const { needs } = tool;
   if (needs === 'anyone') return true;
-  if (needs === 'owner') return caller.isOwner;
-  return canAnywhere(caller, needs) || (caller.isOwner && OWNERS_HOLD.includes(needs));
+  if (needs === 'new-project') return makesProjects(caller);
+  if (needs === 'services') return runsInstance(caller) || (caller.principal.type === 'user' && PERMISSIONS.some((permission) => canAnywhere(caller, permission)));
+  return canAnywhere(caller, needs);
 }
 
 /** A tool as `tools/list` describes it, in either era. */

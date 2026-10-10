@@ -75,7 +75,7 @@ export function AccountPage() {
 
 /** Its first tab: who you are to coffre, and the accounts you sign in with. */
 export function AccountProfilePage() {
-  const { principal, instanceRole, auth } = useShell();
+  const { principal, instanceRole, scope, auth } = useShell();
   if (principal === null) return null;
   return (
     <>
@@ -91,7 +91,8 @@ export function AccountProfilePage() {
                 principal={{
                   principalType: 'user',
                   principalId: principal.id,
-                  instanceRole: instanceRole ?? 'user',
+                  instanceRole: instanceRole ?? 'member',
+                  scope,
                   isRootAdmin: instanceRole === 'root-admin',
                 }}
               />

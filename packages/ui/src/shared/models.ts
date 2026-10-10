@@ -25,8 +25,12 @@ export type GrantRow = {
   role: string;
   roleName: string;
   permissions: Permission[];
-  /** `every-project`: held on every project, or on `environmentSlug` in every project; only owners change it, elsewhere. */
-  scope: 'project' | 'environment' | 'every-project';
+  /**
+   * `instance-role`: no grant, but their instance role reaching the
+   * project, which `role` and `roleName` name; it is changed on their page
+   * in Users, not here.
+   */
+  scope: 'project' | 'environment' | 'instance-role';
   environmentSlug: string | null;
   expiresAt: string | null;
 };
@@ -40,8 +44,8 @@ export type RoleRow = {
   assignableToEnvironment: boolean;
 };
 
-export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 'instanceRole' | 'isRootAdmin'> &
-  Partial<Pick<Member, 'tampered'>> & {
+export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 'instanceRole' | 'scope' | 'isRootAdmin'> &
+  Partial<Pick<Member, 'tampered' | 'managed'>> & {
     /** Where it has access, when the list said; a member just added has none yet. */
     grants?: { project: string; environment: string | null }[];
   };

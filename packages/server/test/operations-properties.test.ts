@@ -23,7 +23,12 @@ const slugs = ['dev', 'prod', 'qa'] as const;
 type Member = typeof members[number];
 type Slug = typeof slugs[number];
 type Role = 'viewer' | 'developer';
-/** Where a grant is: the project, one environment, every project, or one environment slug in every project. */
+/**
+ * Where a grant is: the project, or one environment. `every` and
+ * `every-env` were 0.4's grants on every project, `*`, and `*` on one
+ * slug, which a grant is refused at now; as an instance role, they say where
+ * ada's Developer role applies.
+ */
 type Scope = 'project' | 'environment' | 'every' | 'every-env';
 const kinds = [
   'invite', 'grant', 'revoke', 'set', 'read', 'remove', 'issue', 'revoke-token',
@@ -79,9 +84,13 @@ async function scenario(operations: readonly Operation[]) {
   const root = clientFor(deps, ROOT);
   const model = {
     active: { ada: true, ci: true },
-    /** Whether ada is an instance owner: she manages and sees every grant, and reads a secret only with one of her own. */
-    owner: false,
-    // Each member's roles, by what the grant covers: `project:<generation>`, `env:<n>`, `*` or `*/<slug>`.
+    /**
+     * Ada's instance role: an Admin manages and sees every grant, and reads
+     * a secret only with one of her own; a Developer reads and writes every
+     * environment, or those of one slug (`only`), the ones made later too.
+     */
+    role: { name: 'member' as 'member' | 'admin' | 'developer', only: null as Slug | null },
+    // Each member's roles, by what the grant covers: `project:<generation>` or `env:<n>`.
     grants: { ada: new Map<string, Role>(), ci: new Map<string, Role>() },
     project: null as { generation: number; id: string; archived: boolean } | null,
     environments: [] as Environment[],
@@ -94,11 +103,11 @@ async function scenario(operations: readonly Operation[]) {
   let made = 0;
   const tombstones: Tombstone[] = [];
   const environmentAt = (slug: Slug) => model.environments.find((environment) => environment.slug === slug);
-  /** The key a grant at this scope is held under, or null when the place it names is not there. */
+  /** The key a grant at this scope is held under, or null when the place it names is not there, as on every project. */
   function grantKey(op: Pick<Operation, 'scope' | 'environment'>): string | null {
     switch (op.scope) {
-      case 'every': return '*';
-      case 'every-env': return `*/${op.environment}`;
+      case 'every':
+      case 'every-env': return null;
       case 'project': return model.project === null ? null : `project:${model.project.generation}`;
       case 'environment': {
         const environment = model.project === null ? undefined : environmentAt(op.environment);
@@ -138,20 +147,34 @@ async function scenario(operations: readonly Operation[]) {
   }
   const credentials: { member: Member; id: string; token: string; live: boolean }[] = [];
   const signedIn = (member: Member) => credentials.some((credential) => credential.member === member && credential.live);
-  /** Whether ada manages and sees grants: as an instance owner only, since her roles are viewer and developer. */
-  const adaManages = () => model.owner && model.active.ada && signedIn('ada');
+  /** Whether ada manages and sees grants: as an Admin only, since her grants are viewer and developer. */
+  const adaManages = () => model.role.name === 'admin' && model.active.ada && signedIn('ada');
+  /**
+   * Whether Ada sets up service accounts, so lists the directory: an admin,
+   * or, as the setting is everywhere, a person who holds anything anywhere,
+   * by a grant or a Developer's role over an environment there is.
+   */
+  const adaSetsUp = () => {
+    if (!model.active.ada || !signedIn('ada')) return false;
+    if (model.role.name === 'admin' || model.grants.ada.size > 0) return true;
+    const only = model.role.only;
+    return model.role.name === 'developer' && (only === null || only === 'prod' || model.environments.some((environment) => environment.slug === only));
+  };
+  /** Whether ada's instance role reads and writes the environment of this slug. */
+  const adaDevelops = (member: Member, slug: Slug) => member === 'ada' && model.role.name === 'developer' && (model.role.only === null || model.role.only === slug);
   function may(member: Member, environment: Environment | undefined, write = false): boolean {
     if (!model.active[member] || model.project === null || model.project.archived || environment === undefined || environment.archived) return false;
-    const covering = [`project:${model.project.generation}`, `env:${environment.n}`, '*', `*/${environment.slug}`];
+    if (adaDevelops(member, environment.slug)) return true;
+    const covering = [`project:${model.project.generation}`, `env:${environment.n}`];
     return covering.some((key) => {
       const role = model.grants[member].get(key);
       return write ? role === 'developer' : role !== undefined;
     });
   }
-  /** Whether `member` reads billing/prod/VALUE: a grant on billing/prod, or on prod in every project, and a value or a live reference to a live source. */
+  /** Whether `member` reads billing/prod/VALUE: a grant on billing/prod, or a role on prod, and a value or a live reference to a live source. */
   function mayBilling(member: Member | 'root'): boolean {
     if (model.billing.archived) return false;
-    if (member !== 'root' && (!model.active[member] || !['billing:prod', '*', '*/prod'].some((key) => model.grants[member].has(key)))) return false;
+    if (member !== 'root' && (!model.active[member] || !(model.grants[member].has('billing:prod') || adaDevelops(member, 'prod')))) return false;
     const { reference } = model.billing;
     if (reference === null) return true;
     const source = model.environments.find((each) => each.n === reference.source);
@@ -270,11 +293,13 @@ async function scenario(operations: readonly Operation[]) {
     for (const member of members) {
       for (const slug of slugs) await read(member, slug);
     }
-    // An owner sees every member and their grants; anyone else with no grant.manage, none.
-    const directory = await allowed(() => client('ada').members.list(), adaManages());
-    if (directory) {
-      assert.equal(directory.members.find((listed) => listed.member === principal('ada'))?.instanceRole, 'owner');
+    // An owner sees every member and their grants; anyone else who sets up service accounts, those they manage; anyone else, none.
+    const directory = await allowed(() => client('ada').members.list(), adaSetsUp());
+    if (directory && adaManages()) {
+      assert.equal(directory.members.find((listed) => listed.member === principal('ada'))?.instanceRole, 'admin');
       assert.equal(directory.members.some((listed) => listed.member === principal('ci')), model.active.ci, 'an owner sees every member');
+    } else if (directory) {
+      assert.ok(directory.members.every((listed) => listed.principalType === 'service' && listed.managed), 'only the service accounts she manages');
     }
     // Every list shows the places the model has, archived included, and no tombstone.
     const listed = (await root.projects.list()).projects;
@@ -353,7 +378,9 @@ async function scenario(operations: readonly Operation[]) {
         const permitted = model.active[op.member] && key !== null && (!asAda || adaManages());
         const noOp = permitted && (granting ? previousRole === op.role : previousRole === undefined);
         const previous = noOp ? await state() : undefined;
-        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true);
+        // On every project is no place a grant can be: refused before anyone's rights are asked.
+        const everyProject = op.scope === 'every' || op.scope === 'every-env';
+        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true, everyProject ? 400 : undefined);
         if (result) {
           assert.equal(result.changes[where], noOp ? 'unchanged' : !granting ? 'revoked' : previousRole === undefined ? 'created' : 'updated');
           if (granting) model.grants[op.member].set(key!, op.role);
@@ -381,8 +408,8 @@ async function scenario(operations: readonly Operation[]) {
         if (result) {
           model.active[op.member] = false;
           model.grants[op.member].clear();
-          // Brought back, a member starts over: no grant, and not an owner.
-          if (op.member === 'ada') model.owner = false;
+          // Brought back, a member starts over: no grant, and no role.
+          if (op.member === 'ada') model.role = { name: 'member', only: null };
           for (const credential of credentials) if (credential.member === op.member) credential.live = false;
         }
         break;
@@ -462,11 +489,18 @@ async function scenario(operations: readonly Operation[]) {
         break;
       }
       case 'owner': {
-        // The root makes ada an owner, or takes it back. A member removed is brought back by an invitation, not here.
+        // The root sets ada's instance role: a Developer everywhere, or on one slug; an Admin; or a member again.
+        // A member removed is brought back by an invitation, not here. A service account holds none.
+        if (op.member === 'ci') {
+          await allowed(() => root.members.add(principal('ci'), { role: 'developer' }), false, true, 409);
+          break;
+        }
         if (!model.active.ada) break;
-        const result = await allowed(() => root.members.add(principal('ada'), { owner: !model.owner }), true);
-        assert.equal(result!.instanceRole, model.owner ? 'user' : 'owner');
-        model.owner = !model.owner;
+        const role = ({ every: { name: 'developer', only: null }, 'every-env': { name: 'developer', only: op.environment }, project: { name: 'admin', only: null }, environment: { name: 'member', only: null } } as const)[op.scope];
+        const scope = role.only === null ? undefined : { environments: { only: [role.only] } };
+        const result = await allowed(() => root.members.add(principal('ada'), { role: role.name, ...(scope === undefined ? {} : { scope }) }), true);
+        assert.equal(result!.instanceRole, role.name);
+        model.role = { ...role };
         break;
       }
       case 'refer': {

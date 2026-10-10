@@ -43,7 +43,7 @@ test('R3: removal recovers a member whose row was deleted around the vault', asy
   assert.equal((await deps.vault.access(MEMBER)).status, 'tampered');
 
   const { report } = await root.members.remove(MEMBER);
-  assert.equal(report.status, 'removed');
+  assert.equal(report?.status, 'removed');
   await root.members.add(MEMBER);
   const recovered = await deps.vault.access(MEMBER);
   assert.equal(recovered.status, 'active');

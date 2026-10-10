@@ -7,6 +7,7 @@
  * bundle does not carry zod, and `test/validation.test.ts` holds the two in
  * agreement.
  */
+import type { Filter, InstanceRole, Scope } from '@coffre/core/access';
 import { PROJECT_PAGES } from '@coffre/core/pages';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -38,4 +39,10 @@ export function folderProblem(value: string): string | null {
   if (value !== value.trim()) return 'No space at either end.';
   if (/[/\p{Cc}]/u.test(value)) return 'No slash.';
   return null;
+}
+
+/** Whether a role's scope can be saved: each Only or All except names something. A Member's has nothing to fill. */
+export function scopeComplete({ role, scope }: { role: InstanceRole; scope: Scope }): boolean {
+  const named = (filter: Filter) => filter === 'all' || ('only' in filter ? filter.only : filter.except).length > 0;
+  return role === 'member' || (named(scope.projects) && named(scope.environments));
 }

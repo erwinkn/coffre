@@ -18,10 +18,13 @@ import {
 type Persona = {
   root: boolean;
   instanceRole: Me['instanceRole'];
+  scope?: Me['scope'];
   projectPermissions: Permission[];
   environmentPermissions: Permission[];
   expected: {
     users: boolean;
+    /** The Service accounts page: admins', and whoever sets one up, as `/me` says. */
+    services: boolean;
     audit: boolean;
     newProject: boolean;
     revealSecret: boolean;
@@ -42,44 +45,62 @@ const PERSONAS: Record<string, Persona> = {
       'grant.manage',
       'project.manage',
     ],
-    expected: { users: true, audit: true, newProject: true, revealSecret: true },
+    expected: { users: true, services: true, audit: true, newProject: true, revealSecret: true },
   },
-  owner: {
+  admin: {
     root: false,
-    instanceRole: 'owner',
+    instanceRole: 'admin',
     projectPermissions: [],
     environmentPermissions: [],
-    expected: { users: true, audit: true, newProject: true, revealSecret: false },
+    expected: { users: true, services: true, audit: true, newProject: true, revealSecret: false },
+  },
+  // Scoped to market, it lists people to grant them market, and makes no project: the new one is not market.
+  'scoped admin': {
+    root: false,
+    instanceRole: 'admin',
+    scope: { projects: { only: ['market'] }, environments: 'all' },
+    projectPermissions: ['audit.read', 'environment.manage', 'grant.manage', 'project.manage'],
+    environmentPermissions: [],
+    expected: { users: true, services: true, audit: true, newProject: false, revealSecret: false },
+  },
+  // Scoped to all but billing, a new project is in its scope.
+  'admin of all but billing': {
+    root: false,
+    instanceRole: 'admin',
+    scope: { projects: { except: ['billing'] }, environments: 'all' },
+    projectPermissions: ['audit.read', 'environment.manage', 'grant.manage', 'project.manage'],
+    environmentPermissions: [],
+    expected: { users: true, services: true, audit: true, newProject: true, revealSecret: false },
   },
   auditor: {
     root: false,
-    instanceRole: 'user',
+    instanceRole: 'member',
     projectPermissions: [],
     // Audit roles may be scoped to one environment, so /api/me projects that
     // authority into canReadAudit even when no project-level permission exists.
     environmentPermissions: ['audit.read'],
-    expected: { users: false, audit: true, newProject: false, revealSecret: false },
+    expected: { users: false, services: true, audit: true, newProject: false, revealSecret: false },
   },
   'access manager': {
     root: false,
-    instanceRole: 'user',
+    instanceRole: 'member',
     projectPermissions: ['grant.manage'],
     environmentPermissions: [],
-    expected: { users: false, audit: false, newProject: false, revealSecret: false },
+    expected: { users: false, services: true, audit: false, newProject: false, revealSecret: false },
   },
   developer: {
     root: false,
-    instanceRole: 'user',
+    instanceRole: 'developer',
     projectPermissions: [],
     environmentPermissions: ['secret.read', 'secret.write', 'secret.archive'],
-    expected: { users: false, audit: false, newProject: false, revealSecret: true },
+    expected: { users: false, services: true, audit: false, newProject: false, revealSecret: true },
   },
   outsider: {
     root: false,
-    instanceRole: 'user',
+    instanceRole: 'member',
     projectPermissions: [],
     environmentPermissions: [],
-    expected: { users: false, audit: false, newProject: false, revealSecret: false },
+    expected: { users: false, services: false, audit: false, newProject: false, revealSecret: false },
   },
 };
 
@@ -88,12 +109,17 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
     const me: Me = {
       principal: { type: 'user', id: `${name.replaceAll(' ', '-')}@example.test` },
       instanceRole: persona.instanceRole,
+      scope: persona.scope ?? { projects: 'all', environments: 'all' },
       isRootAdmin: persona.root,
+      runsInstance: persona.root || (persona.instanceRole === 'admin' && persona.scope === undefined),
       canReadAudit:
-        persona.instanceRole === 'owner' ||
+        persona.instanceRole === 'admin' ||
         persona.root ||
         persona.projectPermissions.includes('audit.read') ||
         persona.environmentPermissions.includes('audit.read'),
+      // The server's to say (`setsUpServices`): anyone who holds something, as the setting is everywhere.
+      setsUpServices: persona.expected.services,
+      serviceSetup: { projects: 'all', environments: 'all' },
       environments:
         persona.environmentPermissions.length === 0
           ? []
@@ -126,6 +152,7 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
         createElement(AdministrationItems, {
           capabilities,
           users: createElement('a', { href: '/users' }, 'Users'),
+          services: createElement('a', { href: '/service-accounts' }, 'Service accounts'),
           audit: createElement('a', { href: '/audit' }, 'Audit log'),
         }),
         createElement(
@@ -143,7 +170,8 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
 
     assert.deepEqual(
       {
-        users: affordances.includes('Users'),
+        users: affordances.includes('>Users<'),
+        services: affordances.includes('Service accounts'),
         audit: affordances.includes('Audit log'),
         newProject: affordances.includes('New project'),
         revealSecret: affordances.includes('Reveal secret'),
@@ -156,6 +184,8 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
 test('a signed-out shell exposes no privileged affordances', () => {
   assert.deepEqual(deriveUiCapabilities(null, []), {
     canManageGrants: false,
+    runsInstance: false,
+    setsUpServices: false,
     canReadAudit: false,
     canCreateProject: false,
   });
@@ -164,6 +194,8 @@ test('a signed-out shell exposes no privileged affordances', () => {
 test('root project empty states distinguish empty from archived-only instances', () => {
   const capabilities = {
     canManageGrants: true,
+    runsInstance: true,
+    setsUpServices: true,
     canReadAudit: true,
     canCreateProject: true,
   };
@@ -190,6 +222,8 @@ test('root project empty states distinguish empty from archived-only instances',
 test('non-root archived-only project states point to the visible archived list', () => {
   const capabilities = {
     canManageGrants: true,
+    runsInstance: false,
+    setsUpServices: true,
     canReadAudit: false,
     canCreateProject: false,
   };

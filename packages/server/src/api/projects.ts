@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { covers, everyProjectPath, ROLES, type Permission, type Role } from '@coffre/core/access';
+import { runsInstance, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
@@ -10,7 +10,6 @@ import {
   deletionScope,
   distinctSecretCounts,
   eraseVersions,
-  everyProjectGrants,
   insert,
   places,
   projectsInFolder,
@@ -18,16 +17,16 @@ import {
   tombstoneSlug,
   update,
   type Doomed,
-  type EveryProjectGrant,
   type ResolvedPath,
   fileProject,
   projectFolderOf,
 } from '../db/queries.ts';
-import { everyProjectReaches, seesGrantsIn } from './members.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
+import { can, canAnywhere, instanceRoleOf, permissionsAt, placeOf, seesProject } from './caller.ts';
+import { allowed, audited, denied, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { scopeView } from './members.ts';
+import { serviceSettingFor, setsUp } from './services.ts';
 import { formatMember } from './paths.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
@@ -40,9 +39,21 @@ export type Me = {
   registered: boolean;
   /** Refused by the vault: their record failed its integrity check. */
   tampered: boolean;
-  instanceRole: 'user' | 'owner' | 'root-admin';
+  instanceRole: InstanceRole | 'root-admin';
+  /** Where their instance role applies, projects by slug. */
+  scope: Scope;
   isRootAdmin: boolean;
+  /** Whether they run the instance: an admin or owner with no scope, or a root admin. */
+  runsInstance: boolean;
   canReadAudit: boolean;
+  /** Whether they set up any service account: who runs the instance, or a person who could give one a grant somewhere. */
+  setsUpServices: boolean;
+  /**
+   * Where a person sets up service accounts without running the instance:
+   * the instance's setting, projects by slug, those they see; null for a
+   * service account. Inside it, they give one what they hold there.
+   */
+  serviceSetup: Scope | null;
   /**
    * What this deployment's configuration turns on, as `signin({ … })` says:
    * MCP clients (`mcp`), as the endpoint they connect to,
@@ -83,78 +94,44 @@ export type ProjectSummary = {
 
 const iso = (value: Date | null) => value?.toISOString() ?? null;
 
-/**
- * Someone who reaches a place through a grant on every project, the ones
- * made later too: the member, where the grant is (`*`, or `*` and the
- * environment slug it covers in each), and its role.
- */
-export type InheritedGrant = { member: string; place: string; role: Role; roleName: string; expiresAt: string | null };
-
-/**
- * The live grants on every project that reach a place, for a caller who sees
- * that project's grants (`seesGrantsIn`), and nothing for anyone else: a
- * project as a whole (`environment` null), which only grants on all of every
- * project reach, or an environment by its slug.
- */
-async function inheritedGrants(ctx: ApiContext, projectId: string, environment: string | null): Promise<InheritedGrant[]> {
-  if (!seesGrantsIn(ctx.caller, projectId)) return [];
-  const grants = await everyProjectGrants(ctx.db, new Date());
-  return grants
-    .filter((grant) => grant.environmentSlug === null || grant.environmentSlug === environment)
-    .map(inherited);
-}
-
-function inherited(grant: EveryProjectGrant): InheritedGrant {
-  return {
-      member: grant.principal,
-      place: everyProjectPath(grant.environmentSlug),
-      role: grant.role as Role,
-      roleName: ROLES[grant.role as Role].name,
-    expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
-  };
-}
-
 export async function me(ctx: ApiContext): Promise<Me> {
   const { caller } = ctx;
   const reachable: Me['environments'] = [];
-  for (const project of await places(ctx.db)) {
+  const [known, setting] = await Promise.all([places(ctx.db), serviceSettingFor(ctx.vault, caller)]);
+  for (const project of known) {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {
       if (environment.archivedAt !== null) continue;
-      const place = placeOf(project, environment);
-      const holds = caller.isRootAdmin || caller.grants.some((grant) => covers(grant, place));
-      if (!holds) continue;
-      reachable.push({
-        project: project.slug,
-        environment: environment.slug,
-        permissions: permissionsAt(caller, place),
-      });
+      const permissions = permissionsAt(caller, placeOf(project, environment));
+      if (permissions.length === 0) continue;
+      reachable.push({ project: project.slug, environment: environment.slug, permissions });
     }
   }
   return {
     principal: caller.principal,
     registered: caller.registered,
     tampered: caller.tampered,
-    instanceRole: caller.instanceRole,
+    instanceRole: instanceRoleOf(caller),
+    scope: scopeView(caller.scope, known),
     isRootAdmin: caller.isRootAdmin,
-    canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),
+    runsInstance: runsInstance(caller),
+    canReadAudit: canAnywhere(caller, 'audit.read'),
+    setsUpServices: setsUp(caller, setting, known),
+    // A scope names projects the caller may not see (D95): those they do, by slug.
+    serviceSetup: setting === null ? null : scopeView(setting, runsInstance(caller) ? known : known.filter((project) => seesProject(caller, project))),
     features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
     environments: reachable,
   };
 }
 
 /**
- * The projects the caller can see: any grant anywhere in one makes it
- * visible. An environment grant shows the project without conferring
- * authority over it, so `permissions` are the project-scope ones, and the
- * caller learns the names of environments they hold nothing in, not their
- * contents.
- *
- * `everyProject` is the grants on every project, for those who make
- * projects or environments, which a new one is reached by at once, and
- * for those who manage access.
+ * The projects the caller can see: anything they hold anywhere in one, by
+ * a grant or their instance role, makes it visible. An environment grant
+ * shows the project without conferring authority over it, so `permissions`
+ * are the project-scope ones, and the caller learns the names of
+ * environments they hold nothing in, not their contents.
  */
-export async function listProjects(ctx: ApiContext): Promise<{ projects: ProjectSummary[]; everyProject: InheritedGrant[] }> {
+export async function listProjects(ctx: ApiContext): Promise<{ projects: ProjectSummary[] }> {
   const { caller } = ctx;
   const summaries: ProjectSummary[] = [];
   // The projects whose secrets the caller may count, and where they may.
@@ -163,7 +140,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   for (const project of known) {
     if (!seesProject(caller, project)) continue;
     const scope = { projectId: project.id };
-    if (project.archivedAt !== null && !caller.isOwner && !can(caller, 'project.manage', scope)) {
+    if (project.archivedAt !== null && !runsInstance(caller) && !can(caller, 'project.manage', scope)) {
       continue;
     }
     const manages =
@@ -210,13 +187,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   // One query counts every project, rather than one list per environment.
   const counts = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
   for (const { summary, projectId } of counted) summary.secretCount = counts.get(projectId) ?? 0;
-  // Each grant on every project, to whoever sees the grants of a project it reaches: as `listMembers` shows them.
-  const everyProject = !caller.isOwner && !canAnywhere(caller, 'grant.manage')
-    ? []
-    : (await everyProjectGrants(ctx.db, new Date()))
-        .filter((grant) => caller.isOwner || known.some((project) => everyProjectReaches(grant.environmentSlug, project) && seesGrantsIn(caller, project.id)))
-        .map(inherited);
-  return { projects: summaries, everyProject };
+  return { projects: summaries };
 }
 
 export type PlaceView = { slug: string; name: string; archivedAt: string | null };
@@ -228,16 +199,17 @@ function slugTaken(what: 'project' | 'environment', slug: string): Error {
 
 /**
  * Create a project, or leave it as it is if it already exists: `PUT` names
- * the thing it creates, so sending it twice is harmless. Instance owners only.
+ * the thing it creates, so sending it twice is harmless. Admins and owners
+ * whose scope takes in new projects only (`makesProjects`).
  */
 export async function putProject(
   ctx: ApiContext,
   place: ResolvedPath | null,
   slug: string,
   input: { name: string },
-): Promise<{ project: PlaceView; created: boolean; inherited: InheritedGrant[] }> {
+): Promise<{ project: PlaceView; created: boolean }> {
   const put = await audited(ctx, async (tx, log) => {
-    requireOwner(ctx, 'project.create', { metadata: { slug } });
+    requireProjectMaker(ctx, 'project.create', { metadata: { slug } });
     if (place !== null) {
       const { project } = place;
       return { id: project.id, project: { slug, name: project.name, archivedAt: iso(project.archivedAt) }, created: false };
@@ -252,9 +224,8 @@ export async function putProject(
     log.push(allowed(ctx, 'project.create', { projectId: id, metadata: { slug, name: input.name } }));
     return { id, project: { slug, name: input.name, archivedAt: null }, created: true };
   });
-  // Grants on every project reach it as a whole; one on a slug, only an environment of it, which it has none of yet.
-  const { id, ...made } = put;
-  return { ...made, inherited: await inheritedGrants(ctx, id, null) };
+  const { id: _, ...made } = put;
+  return made;
 }
 
 type PlacePatch = { name?: string; slug?: string; archived?: boolean };
@@ -359,13 +330,13 @@ export async function putEnvironment(
   slug: string,
   input: { name: string },
   { from }: { from?: string } = {},
-): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[] }> {
+): Promise<{ environment: PlaceView; created: boolean }> {
   const { project, environment } = place;
   if (environment !== null) {
     const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt) };
-    return { environment: existing, created: false, inherited: await inheritedGrants(ctx, project.id, slug) };
+    return { environment: existing, created: false };
   }
-  const put = await audited(ctx, async (tx, log) => {
+  return audited(ctx, async (tx, log) => {
     // The project as it is under the head: archived, or deleted, since the router found it, it takes nothing new.
     if ((await stillThere(tx, place)).project.archivedAt !== null) {
       throw new Refusal(
@@ -390,7 +361,6 @@ export async function putEnvironment(
     }));
     return { environment: { slug, name: input.name, archivedAt: null }, created: true };
   });
-  return { ...put, inherited: await inheritedGrants(ctx, project.id, slug) };
 }
 
 /** What renaming or removing a folder did: the folder they are in now, none for a removal, and what moved. */
@@ -427,21 +397,21 @@ export async function refileProjects(ctx: ApiContext, folder: string, to: string
 }
 
 /**
- * Rename, re-slug, archive or restore an environment. `inherited` is who
- * reaches it through grants on every project under its slug now: a new
- * slug can bring in those who hold it in every project.
+ * Rename, re-slug, archive or restore an environment. A new slug can bring
+ * in those whose instance role is scoped to it, and take out those scoped
+ * to the old one: scopes match environments by slug.
  */
 export async function patchEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   patch: PlacePatch,
-): Promise<{ environment: PlaceView; inherited: InheritedGrant[] }> {
+): Promise<{ environment: PlaceView }> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
   const { renames, archivedAt } = placeChanges(environment, patch);
   const renamed = Object.keys(renames).length > 0;
   const scope = { projectId: project.id, environmentId: environment.id };
-  const patched = await audited(ctx, async (tx, log) => {
+  return audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
     if (archivedAt != null) await refuseIfRead(ctx, tx, `${project.slug}/${environment.slug}`, scope, 'environment.archive', scope);
     if (renamed || archivedAt !== undefined) {
@@ -475,7 +445,6 @@ export async function patchEnvironment(
       },
     };
   });
-  return { ...patched, inherited: await inheritedGrants(ctx, project.id, patched.environment.slug) };
 }
 
 /** What deleting a project or an environment takes, or took. */
@@ -535,7 +504,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
   const archived = (at: ResolvedPath) => (environment === null ? at.project.archivedAt : (at.environment?.archivedAt ?? null)) !== null;
 
   return withRefusals(ctx, async () => {
-    requireOwner(ctx, action, fields);
+    requireInstance(ctx, action, fields, `delete ${what === 'project' ? 'a project' : 'an environment'} for good`);
     if (!archived(place)) throw notArchived();
 
     const [scope, references] = await Promise.all([deletionScope(ctx.db, doomed), referencesAt(ctx.db, doomed)]);

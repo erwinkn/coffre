@@ -20,7 +20,7 @@ import type { Database, Transaction } from '@coffre/db';
 import { mcpConnections } from '@coffre/db/schema';
 
 import { callerFrom, type Caller } from '../api/caller.ts';
-import { allowed, audited, denied, Refusal, type ApiContext } from '../api/context.ts';
+import { allowed, audited, denied, Refusal, requireInstance, type ApiContext } from '../api/context.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
@@ -390,12 +390,7 @@ export class McpService {
       }
       if (row === null || row.revokedAt !== null || row.expiresAt <= row.now) throw unknown();
       const own = row.principal === principalOf(principal);
-      if (!own && !asker.caller.isOwner) {
-        throw new Refusal(
-          forbidden("only owners may disconnect other people's apps"),
-          denied(asker, 'mcp.disconnect', 'requires_instance_owner', { metadata: { connectionId: id } }),
-        );
-      }
+      if (!own) requireInstance(asker, 'mcp.disconnect', { metadata: { connectionId: id } }, "disconnect other people's apps");
       const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id, revokedAt: null }, { revokedAt: new Date(), revokedBy: principal.id });
       if (ended === 0) throw unknown();
       const member = memberOf(row.principal);

@@ -144,6 +144,8 @@ export function CommandPalette({
               path: '/users',
               run: closing(() => navigate({ to: '/users' })),
             },
+          ],
+          services: [
             {
               value: 'service accounts tokens machines ci oidc directory',
               icon: <Key size={15} />,

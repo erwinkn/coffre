@@ -2,15 +2,15 @@ import { useSuspenseQuery } from '@tanstack/react-query';
 
 import { DirectoryTable } from '../components/directory';
 import { useCoffre } from '../lib/coffre';
-import { queries } from '../lib/queries';
+import { listsServices, queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { RemovedList } from '../components/offboarding';
 import { Key } from '../components/icons';
 
 export function ServiceAccountsPage() {
-  const { capabilities } = useShell();
-  const { data: result } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
+  const shell = useShell();
+  const { data: result } = useSuspenseQuery(queries.directory(useCoffre(), listsServices(shell)));
 
   if (!result.ok) {
     return (
@@ -26,7 +26,11 @@ export function ServiceAccountsPage() {
     <>
       <PageHeader
         title="Service accounts"
-        description="Identities for CI and other automation."
+        description={
+          shell.capabilities.canManageGrants
+            ? 'Identities for CI and other automation.'
+            : 'Identities for CI and other automation: those you manage, which hold nothing you do not.'
+        }
       />
       <DirectoryTable
         principalType="service"

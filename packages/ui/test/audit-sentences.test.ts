@@ -58,7 +58,7 @@ test('a write says the version it made', () => {
   assert.equal(said(...mixed), 'wrote market/prod: 3 secrets');
 });
 
-test('a grant on every project names its place in words', () => {
+test("a grant on every project of 0.4 names its place in words, and what the vault replaced it by", () => {
   const grant = entry({
     action: 'access.grant',
     author: 'vault',
@@ -70,6 +70,12 @@ test('a grant on every project names its place in words', () => {
   assert.equal(
     said(entry({ ...grant, action: 'access.revoke', metadata: { previousRole: 'viewer', place: '*' } })),
     'took viewer on every project from carol@acme.example',
+  );
+  const replaced = { ...grant, action: 'access.revoke', actorId: 'vault', metadata: { previousRole: 'developer', place: '*/dev', replacedBy: { role: 'developer' } } };
+  assert.equal(said(entry(replaced)), 'took developer on dev in every project from carol@acme.example, replaced by the instance role Developer');
+  assert.equal(
+    said(entry({ ...replaced, metadata: { ...replaced.metadata, replacedBy: { role: 'member' } } })),
+    'took developer on dev in every project from carol@acme.example, replaced by project grants',
   );
 });
 
@@ -174,14 +180,23 @@ test('every other action has a sentence', () => {
     [{ action: 'member.restore', subject: 'user:eve@acme.example' }, 'brought back eve@acme.example'],
     [{ action: 'member.owner', subject: 'user:eve@acme.example', metadata: { owner: true } }, 'made eve@acme.example an owner'],
     [{ action: 'member.owner', subject: 'user:eve@acme.example', metadata: { owner: false } }, 'took owner from eve@acme.example'],
+    [{ action: 'member.add', subject: 'user:eve@acme.example', metadata: { role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } } } }, 'added eve@acme.example as a Developer, with a scope'],
+    [{ action: 'member.add', subject: 'user:eve@acme.example', metadata: { role: 'member', scope: { projects: 'all', environments: 'all' } } }, 'added eve@acme.example'],
+    [{ action: 'member.role', subject: 'user:eve@acme.example', metadata: { role: 'admin', scope: { projects: 'all', environments: 'all' }, previousRole: 'member' } }, 'made eve@acme.example an Admin, was Member'],
+    [{ action: 'member.role', actor: 'system:vault', subject: 'user:eve@acme.example', metadata: { role: 'developer', scope: { projects: 'all', environments: 'all' }, previousRole: 'member', reason: 'every-project' } }, 'made eve@acme.example a Developer, was Member, for their grants on every project'],
+    [{ action: 'member.role', decision: 'deny', reason: 'own_role', subject: 'user:eve@acme.example', metadata: { role: 'owner' } }, 'tried to make eve@acme.example an Owner: nobody changes their own role'],
+    [{ action: 'member.add', decision: 'deny', reason: 'requires_instance_admin', metadata: { principalType: 'user', principalId: 'eve@acme.example', role: 'owner' } }, 'tried to add eve@acme.example as an Owner: requires an admin or owner of the whole instance'],
     [{ action: 'vault.tampered', subject: 'user:eve@acme.example', reason: 'mac' }, "found eve@acme.example's record tampered with: it does not carry the vault's seal"],
+    [{ action: 'settings.change', metadata: { serviceAccounts: { projects: 'all', environments: { except: ['prod'] } }, previous: { serviceAccounts: { projects: 'all', environments: 'all' } } } }, 'set where people set up service accounts: All projects · all but prod, was All projects'],
+    [{ action: 'settings.change', metadata: { serviceAccounts: { projects: { only: ['3f2c', '9a1b'] }, environments: { only: ['dev'] } } } }, 'set where people set up service accounts: 2 projects · dev only'],
+    [{ action: 'token.create', decision: 'deny', reason: 'not_service_manager', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'tried to issue a bearer token to service:ci-deploy: they hold less than the service account, or than they gave it'],
     [{ action: 'key.rotate', metadata: { from: 'vault:1a2b3c4d' } }, 'rotated its key'],
     [{ action: 'sign_in', metadata: { kind: 'cli' } }, 'signed in to the CLI'],
     [{ action: 'sign_out' }, 'signed out'],
     [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a bearer token to service:ci-deploy'],
     [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'trusted CI runs to sign in as service:api-deploy'],
     [{ action: 'token.unbind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'stopped trusting CI runs to sign in as service:api-deploy'],
-    [{ action: 'token.unbind', decision: 'deny', reason: 'requires_instance_owner', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'tried to stop trusting CI runs to sign in as service:api-deploy: requires instance owner'],
+    [{ action: 'token.unbind', decision: 'deny', reason: 'requires_instance_owner', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'tried to stop trusting CI runs to sign in as service:api-deploy: requires an instance owner'],
     [{ action: 'device.approve' }, 'approved a CLI sign-in'],
     [{ action: 'mcp.connect', metadata: { clientName: 'Claude' } }, 'connected Claude'],
     [{ action: 'mcp.read', metadata: { tool: 'list_secrets', names: ['market/prod'], via: { clientName: 'Claude Code' } } }, 'used list_secrets on market/prod via Claude Code'],

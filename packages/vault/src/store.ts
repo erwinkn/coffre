@@ -1,9 +1,9 @@
-import type { GrantPlace } from '@coffre/core/access';
+import { EVERYWHERE, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
-import { readGrants, type GrantRow } from '@coffre/db/grants';
+import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -20,7 +20,9 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, or, sql, 
 export type Member = {
   principal: string;
   status: 'active' | 'removed';
-  owner: boolean;
+  /** A person's instance role and its scope; `member` everywhere for anyone else (`memberOf`). */
+  role: InstanceRole;
+  scope: Scope;
   generation: number;
   createdAt: number;
   createdBy: string;
@@ -36,11 +38,12 @@ export type Member = {
 export { ACCESS_ACTIONS };
 
 /**
- * Where a grant applies: a project, one of its environments (with its
- * project, which its row finds through `environments`), every project, or
- * one environment slug in every project.
+ * Where a grant applies: a project, or one of its environments (with its
+ * project, which its row finds through `environments`); or, for a grant on
+ * every project of 0.4, until the vault replaces it, neither, with the one
+ * environment slug it covers in each, if any.
  */
-export type Place = GrantPlace;
+export type Place = Pick<GrantRow, 'projectId' | 'environmentId' | 'environmentSlug'>;
 
 /** A grant as stored, which `@coffre/db/grants` reads and writes. */
 export type { GrantRow };
@@ -69,6 +72,8 @@ function memberColumns(db: Queryable) {
     principal: vaultMembers.principal,
     status: vaultMembers.status,
     owner: vaultMembers.owner,
+    role: vaultMembers.role,
+    scope: vaultMembers.scope,
     generation: vaultMembers.generation,
     createdAt: vaultMembers.createdAt,
     createdBy: vaultMembers.createdBy,
@@ -79,15 +84,29 @@ function memberColumns(db: Queryable) {
   };
 }
 
+/** A row as stored: `role` and `scope` as their columns hold them. */
+type StoredMember = Omit<Member, 'role' | 'scope'> & { owner: boolean; role: string | null; scope: string | null };
+
+/** A member as their row says (`storedRole`). */
+function memberOf({ owner, role, scope, ...row }: StoredMember): Member {
+  return { ...row, ...storedRole({ owner, role, scope }) };
+}
+
+function storedChange(change: Partial<Omit<Member, 'principal'>>): Record<string, unknown> {
+  const { role, scope, ...rest } = change;
+  if (role === undefined) return rest;
+  return { ...rest, ...roleColumns(role, scope ?? EVERYWHERE) };
+}
+
 export async function member(db: Queryable, principal: string): Promise<Member | undefined> {
   const { vaultMembers } = tablesOf(db);
   const [row] = await db.select(memberColumns(db)).from(vaultMembers).where(eq(vaultMembers.principal, principal));
-  return row as Member | undefined;
+  return row === undefined ? undefined : memberOf(row as StoredMember);
 }
 
 export async function allMembers(db: Queryable): Promise<Member[]> {
   const { vaultMembers } = tablesOf(db);
-  return (await db.select(memberColumns(db)).from(vaultMembers).orderBy(asc(vaultMembers.principal))) as Member[];
+  return ((await db.select(memberColumns(db)).from(vaultMembers).orderBy(asc(vaultMembers.principal))) as StoredMember[]).map(memberOf);
 }
 
 /**
@@ -107,7 +126,7 @@ export async function lockMembers(tx: Transaction, principals: readonly string[]
       .orderBy(asc(vaultMembers.principal)),
     'no key update',
   );
-  return new Map((rows as Member[]).map((row) => [row.principal, row]));
+  return new Map((rows as StoredMember[]).map((row) => [row.principal, memberOf(row)]));
 }
 
 /**
@@ -116,7 +135,7 @@ export async function lockMembers(tx: Transaction, principals: readonly string[]
  */
 export async function insertMember(tx: Transaction, row: Member): Promise<void> {
   const { vaultMembers } = tablesOf(tx);
-  await tx.insert(vaultMembers).values(row);
+  await tx.insert(vaultMembers).values(storedChange(row) as typeof vaultMembers.$inferInsert);
 }
 
 export async function updateMember(
@@ -125,7 +144,7 @@ export async function updateMember(
   change: Partial<Omit<Member, 'principal'>>,
 ): Promise<void> {
   const { vaultMembers } = tablesOf(tx);
-  await tx.update(vaultMembers).set(change).where(eq(vaultMembers.principal, principal));
+  await tx.update(vaultMembers).set(storedChange(change)).where(eq(vaultMembers.principal, principal));
 }
 
 // --- grants ---------------------------------------------------------------------
@@ -211,12 +230,12 @@ export async function wrappedUnder(db: Queryable, provider: string, keyId: strin
   return rows.map((row) => ({ ...row, bytes: Buffer.from(row.bytes) }));
 }
 
-/** Of these projects and environments, the ones that exist, each environment with its project. */
+/** Of these projects and environments, the ones that exist, each environment with its project and slug. */
 export async function places(
   db: Queryable,
   projectIds: readonly string[],
   environmentIds: readonly string[],
-): Promise<{ projects: Set<string>; environments: Map<string, string>; deleted: Set<string> }> {
+): Promise<{ projects: Set<string>; environments: Map<string, { projectId: string; slug: string }>; deleted: Set<string> }> {
   const { projects, environments } = tablesOf(db);
   const [foundProjects, foundEnvironments] = await Promise.all([
     projectIds.length === 0
@@ -225,17 +244,41 @@ export async function places(
     environmentIds.length === 0
       ? []
       : db
-          .select({ id: environments.id, projectId: environments.projectId, deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!) })
+          .select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!) })
           .from(environments)
           .innerJoin(projects, eq(projects.id, environments.projectId))
           .where(inArray(environments.id, [...environmentIds])),
   ]);
   return {
     projects: new Set(foundProjects.map((row) => row.id)),
-    environments: new Map(foundEnvironments.map((row) => [row.id, row.projectId])),
+    environments: new Map(foundEnvironments.map((row) => [row.id, { projectId: row.projectId, slug: row.slug }])),
     // The projects and environments among them that were deleted, alone or with their project.
     deleted: new Set([...foundProjects, ...foundEnvironments].filter((row) => row.deleted).map((row) => row.id)),
   };
+}
+
+/** Every project not deleted, with its environments not deleted: what a grant on every project of 0.4 reached. */
+export async function liveProjects(db: Queryable): Promise<{ id: string; environments: { id: string; slug: string }[] }[]> {
+  const { projects, environments } = tablesOf(db);
+  const [found, inside] = await Promise.all([
+    db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).orderBy(asc(projects.id)),
+    db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, deleted: truth(tombstone(environments.slug)) }).from(environments).orderBy(asc(environments.id)),
+  ]);
+  return found.filter((project) => !project.deleted).map((project) => ({
+    id: project.id,
+    environments: inside.filter((environment) => environment.projectId === project.id && !environment.deleted).map(({ id, slug }) => ({ id, slug })),
+  }));
+}
+
+/** Who holds a grant on every project of 0.4, lapsed or not, which the vault replaces (`#convert`). */
+export async function everyProjectHolders(db: Queryable): Promise<string[]> {
+  const { vaultGrants } = tablesOf(db);
+  const rows = await db
+    .selectDistinct({ principal: vaultGrants.principal })
+    .from(vaultGrants)
+    .where(and(isNull(vaultGrants.projectId), isNull(vaultGrants.environmentId)))
+    .orderBy(asc(vaultGrants.principal));
+  return rows.map((row) => row.principal);
 }
 
 // --- the log --------------------------------------------------------------------
@@ -447,6 +490,18 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
   return row === undefined ? undefined : stored([row])[0];
 }
 
+/** Up to `limit` of the vault's allowed entries of `action`, newest first. */
+export async function newestVaultEntries(db: Queryable, action: string, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
 /** Up to `limit` of the vault's allowed access entries about `principal`, newest first. */
 export async function accessEntriesAbout(db: Queryable, principal: string, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
@@ -459,6 +514,29 @@ export async function accessEntriesAbout(db: Queryable, principal: string, limit
         eq(auditLog.subjectPrincipal, principal),
         inArray(auditLog.action, [...ACCESS_ACTIONS]),
         eq(auditLog.decision, 'allow'),
+      ),
+    )
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
+/**
+ * Up to `limit` of the vault's reports that `principal`'s row was changed
+ * around it (`vault.tampered`, for their row or an older one put back),
+ * newest first: what `tamperedMembers` in @coffre/db/grants reads too.
+ */
+export async function tamperReportsAbout(db: Queryable, principal: string, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.author, 'vault'),
+        eq(auditLog.subjectPrincipal, principal),
+        eq(auditLog.action, 'vault.tampered'),
+        inArray(auditLog.code, ['mac', 'stale']),
       ),
     )
     .orderBy(desc(auditLog.seq))

@@ -1,5 +1,7 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
+import { normalScope, unscoped } from '@coffre/core/access';
+
 import type { GrantRow, Member } from './store.ts';
 
 /**
@@ -24,8 +26,8 @@ export function rowKey(signingKey: Uint8Array): Buffer {
 /**
  * A member's grants as the MAC covers them: each one's place, role, end and
  * grant, as a sorted set. A grant is kept by what its row names first: its
- * environment, its project, or neither, which is a grant on every project,
- * with the slug it covers, or null. A member who holds none of those has the
+ * environment, its project, or neither, which is a grant on every project
+ * of 0.4, with the slug it covers, or null, until the vault replaces it. A member who holds none of those has the
  * set, and so the MAC, they had before there were any.
  */
 export function grantSet(grants: readonly GrantRow[]): string[] {
@@ -48,13 +50,25 @@ export function sameGrants(a: readonly GrantRow[], b: readonly GrantRow[]): bool
   return x.length === y.length && x.every((tuple, i) => tuple === y[i]);
 }
 
+/**
+ * A member's instance role and its scope, as the MAC covers them: as 0.4
+ * did, whether they are an owner, for a Member or an Admin everywhere, so
+ * that every row 0.4 sealed holds as it is; otherwise the role and the
+ * scope, which no row of 0.4 can match.
+ */
+export function standing(member: Pick<Member, 'role' | 'scope'>): boolean | [string, unknown] {
+  const scope = normalScope(member.scope);
+  if (unscoped(scope) && (member.role === 'member' || member.role === 'admin')) return member.role === 'admin';
+  return [member.role, scope];
+}
+
 export function memberMac(key: Buffer, member: Omit<Member, 'mac'>, grants: readonly GrantRow[]): Buffer {
   const held = grantSet(grants);
   const tuple = [
     'coffre.vault.member.v1',
     member.principal,
     member.status,
-    member.owner,
+    standing(member),
     member.generation,
     member.accessSeq.toString(),
     member.createdAt,

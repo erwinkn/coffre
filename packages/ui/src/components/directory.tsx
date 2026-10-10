@@ -1,15 +1,18 @@
 import { Fragment, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Menu } from '@base-ui/react/menu';
-import { changeRole, directoryList, invite, removeMember, type InviteVars } from '../lib/changes';
+import { EVERYWHERE, INSTANCE_ROLES, scopeInWords, unscoped } from '@coffre/core/access';
+import { changeRole, directoryList, invite, removeMember, type InviteVars, type RoleVars } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
-import { queries } from '../lib/queries';
+import { scopeComplete } from '../lib/validation';
+import { queries, waysFor } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { ConfirmDialog, EmptyState, MenuPopup, Modal, Spinner, Timestamp, Toggletip } from './ui';
 import { PrincipalLink } from './principal';
+import { RoleField } from './role-field';
 import { Clock, Folder, GitHub, Key, Link, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
 /**
@@ -28,9 +31,15 @@ export const memberOf = (principal: Pick<DirectoryPrincipal, 'principalType' | '
 
 export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
   'root-admin': 'Root admin',
-  owner: 'Owner',
-  user: 'Member',
-};
+  ...Object.fromEntries(Object.entries(INSTANCE_ROLES).map(([role, { name }]) => [role, name])),
+} as Record<DirectoryPrincipal['instanceRole'], string>;
+
+/** A new person's role: a Member, everywhere. */
+const MEMBER: RoleVars = { role: 'member', scope: EVERYWHERE };
+
+/** The role a principal holds, as the role field edits it. */
+const roleOf = (principal: DirectoryPrincipal): RoleVars =>
+  principal.instanceRole === 'root-admin' ? MEMBER : { role: principal.instanceRole, scope: principal.scope ?? EVERYWHERE };
 
 /** What each kind of principal is called in the interface. */
 export const KIND: Record<PrincipalType, string> = {
@@ -50,6 +59,7 @@ export function DirectoryTable({
 }) {
   const users = principalType === 'user';
   const columns = users ? 4 : 6;
+  const { capabilities } = useShell();
   const { status, failedAdds, dismiss } = useChangeStatus(directoryList.queryKey);
   const refused = failedAdds<InviteVars>(principals.map(memberOf)).filter(
     ({ vars }) => vars.principalType === principalType,
@@ -171,9 +181,11 @@ export function DirectoryTable({
           </div>
         )}
       </section>
-      <div className="table-actions">
-        <AddPrincipal principalType={principalType} />
-      </div>
+      {(capabilities.runsInstance || (!users && capabilities.setsUpServices)) && (
+        <div className="table-actions">
+          <AddPrincipal principalType={principalType} />
+        </div>
+      )}
     </>
   );
 }
@@ -193,13 +205,13 @@ const PLATFORM: Record<string, string> = {
  */
 function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
   const client = useCoffre();
-  const { auth, capabilities, features } = useShell();
+  const shell = useShell();
   const member = memberOf(principal);
-  // As `loadServiceDirectory` read them, so these come from its cache.
-  const allowed = capabilities.canManageGrants && auth.signin !== null;
+  // As `loadServiceDirectory` read them, so these come from its cache; an account just added is yours.
+  const ways = waysFor(shell, principal.managed !== false);
   // Not suspended: an account added here is shown at once, its facts when they come.
-  const { data: bindings } = useQuery(queries.bindings(client, member, capabilities.canManageGrants && features.workloads));
-  const { data: credentials } = useQuery(queries.credentials(client, member, allowed));
+  const { data: bindings } = useQuery(queries.bindings(client, member, ways.workloads));
+  const { data: credentials } = useQuery(queries.credentials(client, member, ways.tokens));
 
   const platforms = new Map<string, number>();
   const bindingList = bindings?.ok === true ? bindings.bindings : [];
@@ -305,15 +317,21 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
     );
   }
   return (
-    <span className={`tag${principal.instanceRole === 'user' ? '' : ' tag-violet'}`}>
-      {ROLE_LABEL[principal.instanceRole]}
-    </span>
+    <>
+      <span className={`tag${principal.instanceRole === 'member' ? '' : ' tag-violet'}`}>
+        {ROLE_LABEL[principal.instanceRole]}
+      </span>
+      {principal.instanceRole !== 'member' && principal.scope !== null && !unscoped(principal.scope) && (
+        <span className="role-scope">{scopeInWords(principal.scope)}</span>
+      )}
+    </>
   );
 }
 
 /**
- * Change role and Remove, behind one menu. Root admins get none: the
- * deployment's configuration owns them.
+ * Change role and Remove, behind one menu, for those who run the instance;
+ * Remove, for a service account you manage. Root admins get none: the
+ * deployment's configuration owns them. Nobody changes their own role.
  */
 export function PrincipalActions({
   principal,
@@ -325,17 +343,18 @@ export function PrincipalActions({
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>(
-    principal.instanceRole === 'owner' ? 'owner' : 'user',
-  );
+  const [role, setRole] = useState<RoleVars>(roleOf(principal));
+  const { capabilities, principal: me } = useShell();
   const coffre = useCoffre();
-  const setRole = useChange(changeRole(coffre));
+  const saveRole = useChange(changeRole(coffre));
   const remove = useChange(removeMember(coffre));
   const { status } = useChangeStatus(directoryList.queryKey);
   const pending = status(memberOf(principal)).state === 'pending';
   const kind = KIND[principal.principalType];
 
-  if (principal.isRootAdmin) return null;
+  const self = me?.type === principal.principalType && me.id === principal.principalId;
+  const yours = principal.principalType === 'service' && principal.managed === true;
+  if (principal.isRootAdmin || !(capabilities.runsInstance || yours)) return null;
 
   return (
     <>
@@ -348,12 +367,12 @@ export function PrincipalActions({
           {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
         </Menu.Trigger>
         <MenuPopup align="end">
-          {principal.principalType === 'user' && (
+          {principal.principalType === 'user' && !self && capabilities.runsInstance && (
             <>
               <Menu.Item
                 className="menu-item"
                 onClick={() => {
-                  setInstanceRole(principal.instanceRole === 'owner' ? 'owner' : 'user');
+                  setRole(roleOf(principal));
                   setEditing(true);
                 }}
               >
@@ -388,16 +407,16 @@ export function PrincipalActions({
             onSubmit={(event) => {
               event.preventDefault();
               // Shown in the list at once; the row says if the server refuses.
-              setRole({ principalId: principal.principalId, owner: instanceRole === 'owner' });
+              saveRole({ principalId: principal.principalId, ...role });
               setEditing(false);
             }}
           >
-            <RoleField value={instanceRole} onChange={setInstanceRole} />
+            <RoleField value={role} onChange={setRole} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={() => setEditing(false)}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="submit">
+              <button className="btn btn-primary" type="submit" disabled={!scopeComplete(role)}>
                 Save
               </button>
             </div>
@@ -432,7 +451,7 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
   const { capabilities, features } = useShell();
   const person = principal.principalType === 'user';
   const { data, isPending } = useQuery({
-    ...queries.report(useCoffre(), memberOf(principal), capabilities.canManageGrants),
+    ...queries.report(useCoffre(), memberOf(principal), capabilities.runsInstance),
     enabled: open,
   });
   const report = data?.ok === true ? data.report : null;
@@ -476,14 +495,14 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
 export function AddPrincipal({ principalType }: { principalType: PrincipalType }) {
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
-  const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>('user');
+  const [role, setRole] = useState<RoleVars>(MEMBER);
   const add = useChange(invite(useCoffre()));
   const kind = KIND[principalType];
 
   function close() {
     setOpen(false);
     setPrincipalId('');
-    setInstanceRole('user');
+    setRole(MEMBER);
   }
 
   return (
@@ -497,14 +516,18 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
         title={`Add a ${kind}`}
-        description={`This gives the ${kind} no project access. Grant it afterwards, from its page or a project's.`}
+        description={
+          principalType === 'user'
+            ? 'Their instance role reaches every project in its scope. Grant more afterwards, from their page or a project\'s.'
+            : 'This gives the service account no project access. Grant it afterwards, from its page or a project\'s.'
+        }
       >
         <form
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
             // Shown in the list at once; the list says if the server refuses.
-            add({ principalType, principalId: principalId.trim(), owner: instanceRole === 'owner' });
+            add({ principalType, principalId: principalId.trim(), ...role });
             close();
           }}
         >
@@ -525,48 +548,18 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
             />
           </label>
 
-          {principalType === 'user' && (
-            <RoleField value={instanceRole} onChange={setInstanceRole} />
-          )}
+          {principalType === 'user' && <RoleField value={role} onChange={setRole} />}
 
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
             </button>
-            <button className="btn btn-primary" type="submit" disabled={principalId.trim() === ''}>
+            <button className="btn btn-primary" type="submit" disabled={principalId.trim() === '' || !scopeComplete(role)}>
               Add {kind}
             </button>
           </div>
         </form>
       </Modal>
     </>
-  );
-}
-
-function RoleField({
-  value,
-  onChange,
-}: {
-  value: 'user' | 'owner';
-  onChange: (value: 'user' | 'owner') => void;
-}) {
-  return (
-    <label className="field">
-      <span className="label">Instance role</span>
-      <select
-        className="select"
-        value={value}
-        onChange={(event) => onChange(event.target.value as 'user' | 'owner')}
-      >
-        <option value="user">Member</option>
-        <option value="owner">Owner</option>
-      </select>
-      {value === 'owner' && (
-        <span className="hint">
-          Owners manage users and service accounts, create projects, and read the whole audit log. Like members,
-          they read no secret without a project grant.
-        </span>
-      )}
-    </label>
   );
 }
