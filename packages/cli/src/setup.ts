@@ -47,7 +47,14 @@ export type Login = {
   url: string | null;
 };
 
-export type SetupResult = { keys: Keys | null; app: Login; vault: Login; version: string };
+export type SetupResult = {
+  keys: Keys | null;
+  app: Login;
+  vault: Login;
+  version: string;
+  /** The most connections each Hyperdrive config may open (`hyperdriveLimit`); null when the database has too few for both. */
+  hyperdriveLimit: number | null;
+};
 
 class SetupError extends Error {}
 
@@ -69,6 +76,47 @@ export function loginUrl(administrator: URL, login: string, password: string): s
   return url.href;
 }
 
+/** Connections the two Hyperdrive configs leave free: for the administrator, `coffre migrate` and the host's own tools. */
+const HELD_BACK = 3;
+
+/** The fewest connections Hyperdrive takes per config, and the most Free allows, which is plenty for coffre. */
+const HYPERDRIVE_CONNECTIONS = { fewest: 5, most: 20 } as const;
+
+/**
+ * The most connections each of the two Hyperdrive configs may open, out of
+ * the `budget` the database lets its logins open (`connectionBudget`):
+ * an even share, less what is held back. Hyperdrive opens connections up to
+ * its limit before it queues a query, and left at Cloudflare's default, 60
+ * on Paid, the two configs outgrow a small database, such as PlanetScale's
+ * smallest: it refuses the connection a burst of requests needs ("remaining
+ * connection slots are reserved", 53300), and they fail. Under the limit, a
+ * query waits its turn instead, which a query holding a connection only
+ * while it runs keeps short. Null when the budget is short of the fewest.
+ */
+export function hyperdriveLimit(budget: number): number | null {
+  const share = Math.floor((budget - HELD_BACK) / 2);
+  return share < HYPERDRIVE_CONNECTIONS.fewest ? null : Math.min(share, HYPERDRIVE_CONNECTIONS.most);
+}
+
+/** Why a database with `budget` connections can have no Hyperdrive config for each login. */
+export function tooFewConnections(budget: number): string {
+  const needed = 2 * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK;
+  return (
+    `the database lets its logins open ${budget} connections, and Hyperdrive takes at least ${HYPERDRIVE_CONNECTIONS.fewest} for each of coffre's two configs, ` +
+    `with ${HELD_BACK} left for the administrator: raise its max_connections by ${needed - budget}, or move to a larger plan`
+  );
+}
+
+/** How many connections Postgres lets anyone but a superuser open: max_connections, less the slots it reserves. */
+async function connectionBudget(client: pg.Client): Promise<number> {
+  const [row] = (await client.query<{ budget: number }>(
+    `SELECT current_setting('max_connections')::int
+       - current_setting('superuser_reserved_connections')::int
+       - coalesce(current_setting('reserved_connections', true), '0')::int AS budget`,
+  )).rows;
+  return row!.budget;
+}
+
 /**
  * A wrangler hyperdrive command that reads the URL at a silent prompt, so
  * that no password reaches the shell's history, and drops its parameters:
@@ -76,8 +124,9 @@ export function loginUrl(administrator: URL, login: string, password: string): s
  * public CAs, and takes no `sslrootcert`. `${v%%[?]*}` holds in bash and
  * zsh alike.
  */
-export function hyperdriveCommand(target: string): string {
-  return `read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive ${target} --connection-string="\${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL`;
+export function hyperdriveCommand(target: string, limit: number | null): string {
+  const connections = limit === null ? '' : ` --origin-connection-limit=${limit}`;
+  return `read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive ${target}${connections} --connection-string="\${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL`;
 }
 
 /**
@@ -272,9 +321,11 @@ async function run(
   const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  let budget = 0;
   try {
     await step(0, async () => {
       await client.connect();
+      budget = await connectionBudget(client);
       // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
       cloudflare?.checkKeys(await holdsData(client));
       return `Connected to ${where} as ${user}`;
@@ -339,14 +390,18 @@ async function run(
       return { text: 'Each login holds only its rights', details };
     });
     if (cloudflare !== null) {
-      await step(5, () => cloudflare.hyperdrive(logins));
+      await step(5, async () => {
+        const limit = hyperdriveLimit(budget);
+        if (limit === null) throw new SetupError(tooFewConnections(budget));
+        return cloudflare.hyperdrive(logins, limit);
+      });
       await step(6, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
       await step(7, async () => cloudflare.write());
-      return { keys: null, ...logins, version };
+      return { keys: null, ...logins, version, hyperdriveLimit: hyperdriveLimit(budget) };
     }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
     const fresh = !used && (logins.app.url !== null || logins.vault.url !== null);
-    return { keys: fresh ? generateKeys() : null, ...logins, version };
+    return { keys: fresh ? generateKeys() : null, ...logins, version, hyperdriveLimit: hyperdriveLimit(budget) };
   } finally {
     steps.end();
     await client.end().catch(() => {});
@@ -518,7 +573,7 @@ export function setupScreen(result: SetupResult): Screen {
   const hyperdrive = set.map((component) => {
     const login = result[component];
     const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <the ${component}'s config id>`;
-    return { command: hyperdriveCommand(target) };
+    return { command: hyperdriveCommand(target, result.hyperdriveLimit) };
   });
   const workers = [
     ...(set.length === 0

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**Hyperdrive no longer opens more connections than the database takes.**
+Left at Cloudflare's default, 60 per config on Paid, the app's and the
+vault's configs together could outgrow a small database such as
+PlanetScale's smallest, which then refused the connections a burst of
+requests needed ("remaining connection slots are reserved", 53300). A
+user's or service account's Access tab and the service accounts list each
+send one request per project or account at once, and some of them failed
+as "coffre is unavailable". `coffre setup` now reads the database's
+`max_connections`, less what it reserves, and caps each config at half of
+what is left after 3 for the administrator (at most 20), so that a burst
+waits in Hyperdrive instead. A run on an existing deployment lowers a
+higher limit. To fix one now, without setup:
+`wrangler hyperdrive update <id> --origin-connection-limit=<n>` for each
+config.
+
+**A project whose grants could not be read keeps its row** on a user's or
+service account's Access tab, with the error and a Retry button. Before, a
+notice sat above the table and the project's row was missing, as if the
+member held nothing there.
+
 ## 0.4.6 (2026-10-07)
 
 **MCP approvals are harder to misread or misuse**, after a security review.

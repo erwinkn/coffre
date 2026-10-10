@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
-import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
+import { asJson, hyperdriveCommand, hyperdriveLimit, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, tooFewConnections, type SetupResult } from '../src/setup.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster } from './cluster.ts';
 import { fakeOpener, fakeWrangler } from './fakes.ts';
@@ -119,6 +119,7 @@ const made: SetupResult = {
   app: { role: 'coffre_runtime', login: 'coffre_runtime', password: 'created', url: 'postgresql://coffre_runtime:p1@db.example.com:5432/coffre?sslmode=verify-full' },
   vault: { role: 'coffre_vault_runtime', login: 'coffre_vault_runtime', password: 'created', url: 'postgresql://coffre_vault_runtime:p2@db.example.com:5432/coffre?sslmode=verify-full' },
   version: '0.1.3',
+  hyperdriveLimit: 9,
 };
 
 test('--json carries the same values as the screen, under the names the examples give them', () => {
@@ -142,13 +143,28 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   const commands = (result: SetupResult) =>
     setupScreen(result).guide.flatMap(({ lines }) => lines.flatMap((line) => (typeof line === 'string' ? [] : [line.command])));
   assert.deepEqual(commands(made).slice(0, 2), [
-    hyperdriveCommand('create coffre --caching-disabled'),
-    hyperdriveCommand('create coffre-vault --caching-disabled'),
+    hyperdriveCommand('create coffre --caching-disabled', 9),
+    hyperdriveCommand('create coffre-vault --caching-disabled', 9),
   ]);
   const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const } };
-  assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>"), hyperdriveCommand("update <the vault's config id>")]);
+  assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>", 9), hyperdriveCommand("update <the vault's config id>", 9)]);
+  // A database too small for both configs: the commands leave the limit to Cloudflare, and setup on Cloudflare stops.
+  assert.ok(!commands({ ...made, hyperdriveLimit: null }).some((command) => command.includes('--origin-connection-limit')));
   for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|postgresql:/.test(command), command);
   assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL']);
+});
+
+test("each Hyperdrive config opens at most an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
+  // PlanetScale's smallest cluster: max_connections 25, 3 kept for superusers.
+  // Left at Cloudflare's default, 60 each, both configs opened more than its
+  // 22, and a page's parallel reads failed with 53300 (T78).
+  assert.equal(hyperdriveLimit(22), 9);
+  // Postgres's default, 100 less 3: no more than Free allows, which a query that holds a connection only while it runs never needs.
+  assert.equal(hyperdriveLimit(97), 20);
+  // The fewest Hyperdrive takes is 5 per config.
+  assert.equal(hyperdriveLimit(13), 5);
+  assert.equal(hyperdriveLimit(12), null);
+  assert.match(tooFewConnections(12), /lets its logins open 12 connections.*at least 5 for each of coffre's two configs.*raise its max_connections by 1,/);
 });
 
 test('a Hyperdrive command reads the URL without echo, and hands wrangler it without its parameters', { skip: spawnSync('bash', ['-c', 'true']).status !== 0 && 'needs bash' }, () => {
@@ -157,14 +173,14 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
     writeFileSync(join(dir, 'pnpm'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv"\n`);
     chmodSync(join(dir, 'pnpm'), 0o755);
     const url = 'postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre?sslmode=verify-full&sslrootcert=system';
-    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled')}; echo "left:[$COFFRE_DB_URL]"`], {
+    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled', 9)}; echo "left:[$COFFRE_DB_URL]"`], {
       input: `${url}\n`,
       env: { PATH: `${dir}:${process.env.PATH}` },
       encoding: 'utf8',
     });
     assert.equal(run.stdout, 'left:[]\n', 'nothing echoed, and the variable gone');
     assert.deepEqual(readFileSync(join(dir, 'argv'), 'utf8').trim().split('\n'), [
-      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled',
+      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled', '--origin-connection-limit=9',
       '--connection-string=postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre',
     ]);
   } finally {

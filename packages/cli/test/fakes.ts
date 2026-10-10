@@ -24,7 +24,8 @@ function listen(server: Server): Promise<string> {
 }
 
 export type Origin = { scheme?: string; host: string; port: number; database: string; user: string; password: string };
-export type FakeConfig = { id: string; name: string; origin: Origin; caching: { disabled: boolean } };
+/** A Hyperdrive config; its connection limit Cloudflare's default on Paid when it is made without one. */
+export type FakeConfig = { id: string; name: string; origin: Origin; caching: { disabled: boolean }; origin_connection_limit: number };
 export type FakeZone = { id: string; name: string; status?: string; name_servers?: string[] };
 export type FakeHostname = {
   id: string;
@@ -221,7 +222,7 @@ export async function fakeCloudflare(token: string) {
         return send(200, listed);
       }
       if (id === undefined && request.method === 'POST') {
-        const made = { id: `hd-${randomBytes(4).toString('hex')}`, caching: { disabled: false }, ...JSON.parse(text) } as FakeConfig;
+        const made = { id: `hd-${randomBytes(4).toString('hex')}`, caching: { disabled: false }, origin_connection_limit: 60, ...JSON.parse(text) } as FakeConfig;
         configs.push(made);
         return send(200, visible(made));
       }

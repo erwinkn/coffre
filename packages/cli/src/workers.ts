@@ -430,11 +430,13 @@ export class Cloudflare {
 
   /**
    * A Hyperdrive config for each login, made, given its new password, or
-   * kept; with caching off, always. Setup listed the configs as it began: one
-   * deleted since is made again when its login has a new password, and stops
-   * the run when it does not, Hyperdrive needing a password setup can't read.
+   * kept; with caching off, always, and opening at most `limit` connections
+   * to the database, or fewer when someone set it lower. Setup listed the
+   * configs as it began: one deleted since is made again when its login has
+   * a new password, and stops the run when it does not, Hyperdrive needing
+   * a password setup can't read.
    */
-  async hyperdrive(logins: Record<Component, Login>): Promise<Outcome> {
+  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<Outcome> {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
     const details: string[] = [];
@@ -445,11 +447,12 @@ export class Cloudflare {
       let what: string;
       if (login.url !== null) {
         const origin = originOf(login.url);
-        if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin))) {
+        const kept = Math.min(config?.origin_connection_limit ?? limit, limit);
+        if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin, kept))) {
           what = `given ${login.login}'s new password`;
         } else {
           what = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
-          config = { id: await api.createHyperdrive(account.id, name, origin), name, origin };
+          config = { id: await api.createHyperdrive(account.id, name, origin, limit), name, origin };
         }
       } else {
         const now = config === undefined ? null : await api.hyperdriveConfig(account.id, config.id);
@@ -460,18 +463,23 @@ export class Cloudflare {
           );
         }
         config = now;
-        if (config.caching?.disabled !== true) {
-          await api.disableCaching(account.id, config.id);
-          what = 'kept, its caching turned off';
-        } else {
-          what = 'kept';
+        // Unset is Cloudflare's default, 60 on Paid: more than a small database takes.
+        const lower = config.origin_connection_limit === undefined || config.origin_connection_limit > limit;
+        const cache = config.caching?.disabled !== true;
+        if (cache || lower) {
+          await api.patchHyperdrive(account.id, config.id, {
+            ...(cache ? { caching: { disabled: true } } : {}),
+            ...(lower ? { origin_connection_limit: limit } : {}),
+          });
         }
+        const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
+        what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
       details.push(`${name.padEnd(width)}${what}`);
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off`, details };
+    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, at most ${limit} connections each`, details };
   }
 
   /**

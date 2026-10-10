@@ -4517,6 +4517,12 @@ a.env-card-name:hover {
     grid-template-areas: none;
   }
 
+  /* A project whose grants could not be read: why, under its name. */
+  .dt.grants.stacks td.col-unread {
+    grid-area: access / access / access / expires;
+    padding-left: 2rem;
+  }
+
   /* Secrets: key, version and actions on one line, the value beneath. */
   .dt.secrets.stacks tr.secret-row {
     grid-template-columns: minmax(0, 1fr) auto auto;

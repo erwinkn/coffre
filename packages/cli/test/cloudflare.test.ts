@@ -214,17 +214,20 @@ test("Cloudflare's API: the token as a bearer, a database password only in a bod
     assert.deepEqual(await api.secretNames('acc-acme', 'coffre'), ['APP_KEY']);
     const origin = originOf('postgresql://coffre_runtime.br4nch:p%40ss-word@db.acme.test:6432/coffre?sslmode=verify-full');
     assert.deepEqual(origin, { host: 'db.acme.test', port: 6432, database: 'coffre', user: 'coffre_runtime.br4nch', password: 'p@ss-word' });
-    const id = await api.createHyperdrive('acc-acme', 'coffre', origin);
+    const id = await api.createHyperdrive('acc-acme', 'coffre', origin, 9);
     const made = cloudflare.state.configs.get('acc-acme')![0]!;
     assert.equal(made.id, id);
     assert.deepEqual(made.origin, { scheme: 'postgres', ...origin });
     assert.deepEqual(made.caching, { disabled: true });
+    assert.equal(made.origin_connection_limit, 9);
     const listed = await api.hyperdriveConfigs('acc-acme');
     assert.ok(!JSON.stringify(listed).includes('p@ss-word'));
-    await api.disableCaching('acc-acme', id);
+    assert.equal(listed[0]!.origin_connection_limit, 9);
+    await api.patchHyperdrive('acc-acme', id, { origin_connection_limit: 7 });
+    assert.deepEqual([made.origin_connection_limit, made.caching, made.origin.password], [7, { disabled: true }, 'p@ss-word'], 'the limit alone changed');
 
     const refused = new CloudflareApi('not-the-token', cloudflare.url);
-    await assert.rejects(refused.createHyperdrive('acc-acme', 'coffre', origin), (error: Error) => {
+    await assert.rejects(refused.createHyperdrive('acc-acme', 'coffre', origin, 9), (error: Error) => {
       assert.match(error.message, /^Cloudflare answered 401 to POST \/accounts\/acc-acme\/hyperdrive\/configs: Authentication error \(10000\)$/);
       assert.ok(!error.message.includes('p@ss-word') && !error.message.includes('not-the-token'));
       return true;
@@ -240,14 +243,14 @@ test('a Hyperdrive config deleted once listed: its update and its read say it is
   try {
     const api = new CloudflareApi(TOKEN, cloudflare.url);
     const origin = originOf('postgresql://coffre_runtime:p4ss@db.acme.test/coffre');
-    const id = await api.createHyperdrive('acc-acme', 'coffre', origin);
+    const id = await api.createHyperdrive('acc-acme', 'coffre', origin, 9);
     assert.equal((await api.hyperdriveConfig('acc-acme', id))?.name, 'coffre');
-    assert.equal(await api.updateHyperdrive('acc-acme', id, 'coffre', origin), true);
+    assert.equal(await api.updateHyperdrive('acc-acme', id, 'coffre', origin, 9), true);
     cloudflare.state.vanishing.add('coffre');
     assert.deepEqual((await api.hyperdriveConfigs('acc-acme')).map(({ id }) => id), [id], 'listed, then deleted');
     assert.equal(await api.hyperdriveConfig('acc-acme', id), null);
-    assert.equal(await api.updateHyperdrive('acc-acme', id, 'coffre', origin), false);
-    await assert.rejects(new CloudflareApi('not-the-token', cloudflare.url).updateHyperdrive('acc-acme', id, 'coffre', origin), /Cloudflare answered 401/);
+    assert.equal(await api.updateHyperdrive('acc-acme', id, 'coffre', origin, 9), false);
+    await assert.rejects(new CloudflareApi('not-the-token', cloudflare.url).updateHyperdrive('acc-acme', id, 'coffre', origin, 9), /Cloudflare answered 401/);
   } finally {
     cloudflare.close();
   }

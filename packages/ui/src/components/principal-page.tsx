@@ -1,17 +1,17 @@
-import { useState } from 'react';
-import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
+import { useState, type ReactNode } from 'react';
+import { useQueryClient, useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, Outlet } from '@tanstack/react-router';
 import { ROLES } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { directoryList, disconnectMemberApp } from '../lib/changes';
-import { affects, managedProjects, queries, signInWays } from '../lib/queries';
+import { affects, keys, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { useMounted } from '../lib/mounted';
 import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
-import { projectAccessLabel } from '../lib/project-access';
+import { accessRows, projectAccessLabel, type ProjectAccess } from '../lib/project-access';
 import {
   accessChanges,
   accessPatch,
@@ -24,7 +24,7 @@ import {
   type AccessChange,
   type AccessPlan,
 } from '../lib/access-plan';
-import type { DirectoryPrincipal, GrantRow, PrincipalReport, ProjectSummary } from '../shared/models';
+import type { DirectoryPrincipal, PrincipalReport, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
@@ -39,8 +39,6 @@ import { Activity, Archive, Clock, Folder, Key, Link as LinkIcon, Pencil, Users,
 import { PageTabs } from './tabs';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
-
-type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError: string | null };
 
 /** Who a user or service account is to the instance, as an owner reads it; null for anyone else. */
 function useReport(principalType: PrincipalType, principalId: string) {
@@ -221,10 +219,7 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
   const found = report?.ok === true ? report.report : null;
   const removed = found?.status === 'removed';
 
-  const rows = access.flatMap(({ project, grants }) =>
-    grants.map((grant) => ({ project, grant })),
-  );
-  const errors = access.filter((entry) => entry.grantsError !== null);
+  const rows = accessRows(access);
   // Grants to someone removed are refused until they are added back.
   const editable = removed
     ? []
@@ -239,14 +234,6 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
       {/* Removal ends every grant, so there is no access left to show. */}
       {!removed && (
         <>
-          {errors.map(({ project, grantsError }) => (
-            <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
-              <Notice tone="bad">
-                <span className="mono">{project.slug}</span>: {grantsError}
-              </Notice>
-            </div>
-          ))}
-
           <section className="card" aria-label="Project access">
             {rows.length === 0 ? (
               <EmptyState title="No project access yet">
@@ -263,28 +250,33 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
                   </span>
                 }
               >
-                {rows.map(({ project, grant }, index) => (
-                  <GrantRowView
-                    key={grant.id}
-                    number={index + 1}
-                    project={project.slug}
-                    grant={grant}
-                    leadLabel="Project"
-                    lead={
-                      <span className="cell-project">
-                        <Tile name={project.slug} />
-                        <Link
-                          className="cell-link"
-                          to={people ? '/projects/$project/users' : '/projects/$project/service-accounts'}
-                          params={{ project: project.slug }}
-                        >
-                          {project.name}
-                        </Link>
-                        {project.archivedAt !== null && <span className="tag tag-red">Archived</span>}
-                      </span>
-                    }
-                  />
-                ))}
+                {rows.map(({ project, grant, error }, index) => {
+                  const lead = (
+                    <span className="cell-project">
+                      <Tile name={project.slug} />
+                      <Link
+                        className="cell-link"
+                        to={people ? '/projects/$project/users' : '/projects/$project/service-accounts'}
+                        params={{ project: project.slug }}
+                      >
+                        {project.name}
+                      </Link>
+                      {project.archivedAt !== null && <span className="tag tag-red">Archived</span>}
+                    </span>
+                  );
+                  return grant === null ? (
+                    <UnreadProject key={`${project.slug} unread`} number={index + 1} project={project.slug} lead={lead} error={error} />
+                  ) : (
+                    <GrantRowView
+                      key={grant.id}
+                      number={index + 1}
+                      project={project.slug}
+                      grant={grant}
+                      leadLabel="Project"
+                      lead={lead}
+                    />
+                  );
+                })}
               </GrantsTable>
             )}
           </section>
@@ -311,6 +303,37 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
 
       {found !== null && <PrincipalReportCards report={found} />}
     </>
+  );
+}
+
+/** A project whose grants could not be read, in the row its grants would have: why, and another try. */
+function UnreadProject({ number, project, lead, error }: { number: number; project: string; lead: ReactNode; error: string }) {
+  const queryClient = useQueryClient();
+  const [retrying, setRetrying] = useState(false);
+  return (
+    <tr className="row-unread">
+      <td className="n">{number}</td>
+      <td className="col-lead" data-label="Project">
+        {lead}
+      </td>
+      <td className="col-unread" colSpan={3}>
+        <div className="row-failure-line">
+          <ErrorLine error={`Its grants could not be read. ${error}`} />
+          <button
+            type="button"
+            className="act"
+            disabled={retrying}
+            onClick={() => {
+              setRetrying(true);
+              void queryClient.refetchQueries({ queryKey: keys.grants(project) }).finally(() => setRetrying(false));
+            }}
+          >
+            {retrying && <Spinner size={13} />}
+            Retry
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }
 

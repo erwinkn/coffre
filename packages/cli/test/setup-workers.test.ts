@@ -211,7 +211,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.match(text, /✓ coffre's address {2}secrets\.acme\.test/);
   assert.match(text, /✓ Root admins {2}ops@acme\.test/);
   assert.match(text, /✓ Created coffre_runtime and coffre_vault_runtime/);
-  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime/);
+  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, at most 20 connections each\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime/);
   assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
   // Its logo, which only its page sets: the file from the deployment's own CLI, and where it goes.
   assert.match(
@@ -230,9 +230,10 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
 
   // Hyperdrive has each login, with a password that works, and caching off.
   const configs = cloudflare.state.configs.get('acc-acme')!;
-  assert.deepEqual(configs.map(({ name, origin, caching }) => [name, origin.user, caching.disabled]), [
-    ['coffre', 'coffre_runtime', true],
-    ['coffre-vault', 'coffre_vault_runtime', true],
+  // And each opens an even share of the cluster's 97 connections at most, Free's 20, not Paid's default 60.
+  assert.deepEqual(configs.map(({ name, origin, caching, origin_connection_limit }) => [name, origin.user, caching.disabled, origin_connection_limit]), [
+    ['coffre', 'coffre_runtime', true, 20],
+    ['coffre-vault', 'coffre_vault_runtime', true, 20],
   ]);
   for (const { origin } of configs) {
     secrets.add(origin.password);
@@ -270,6 +271,9 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
 
 test('the run after: the vault keeps its key; the app gets a new one, and a new client secret for the same GitHub App', { skip }, async () => {
   unlinkSync(join(dir, 'wrangler', 'fail-coffre'));
+  // The app's config at Cloudflare's default, as earlier setups left both.
+  const [appConfig, vaultConfig] = cloudflare.state.configs.get('acc-acme')!;
+  appConfig!.origin_connection_limit = 60;
   const clientSecret = 'f'.repeat(40);
   secrets.add(clientSecret);
   const { output, code } = await setup(async (terminal) => {
@@ -287,7 +291,8 @@ test('the run after: the vault keeps its key; the app gets a new one, and a new 
   const text = mainText(output);
   assert.equal(code, 0, text);
   assert.match(text, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords/);
-  assert.match(text, /coffre\s+kept\n\s+coffre-vault\s+kept/);
+  assert.match(text, /coffre\s+kept, its connections capped at 20\n\s+coffre-vault\s+kept\n/);
+  assert.deepEqual([appConfig!.origin_connection_limit, vaultConfig!.origin_connection_limit], [20, 20]);
   assert.match(text, /✓ Took a new client secret for coffre's GitHub App/);
   assert.match(text, /✓ Deployed the vault, coffre-vault\n/);
   assert.match(text, /✓ Deployed the app, coffre, with its key and GitHub's secret/);
