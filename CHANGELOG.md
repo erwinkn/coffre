@@ -27,9 +27,11 @@ auditor grant. Where no grant can hold both, as maintainer on `*` beside
 access-manager on billing for a service account, the one that reads stays.
 `coffre migrate` says what it will make of each before you deploy, and
 names what is lost: "loses access-manager on billing (keeps maintainer)".
-A member the vault has reported tampered with is left as they are, as
-`coffre migrate` says, until their access next changes or they are
-started over.
+A member the vault has reported tampered with is left as they are, until
+their access next changes or they are started over. `coffre migrate`,
+which holds no key to tell the vault's reports from forged ones, marks
+such a member and still says what the conversion would be, so a forged
+report never hides one the vault makes.
 The first request after the upgrade converts every member holding one,
 one after another, before it answers, so on an instance with many it may
 be slow; one cut short leaves the rest to the next.

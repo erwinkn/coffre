@@ -254,10 +254,21 @@ has reported tampered with (`vault.tampered`), until their access next
 changes or they are started over, and a root admin while they are one,
 who holds everything anyway; once they are not, the next process converts
 theirs. The first is the vault's report in the log, not whether their row
-checks out now: a genuine row put back after a report stays left, as
-`coffre migrate`, which holds no key to check a row, says. `coffre migrate`
-leaves out the first; the second it cannot tell, since the vault's
-configuration names root admins and the database does not.
+checks out now: a genuine row put back after a report stays left.
+
+One rule says whether a report stands, `reportStands` in
+`@coffre/db/grants`: the vault applies it to its own entries, passing over
+those forged in its name, and `coffre migrate`, which holds no key to tell
+them apart, to every entry in its name. So `coffre migrate` lists every
+member the vault may convert, with what it makes of them, and marks one
+with a standing report: "left as it is: the vault reported their row
+tampered with (if that report is forged: …)". What a key decides, it
+cannot: the vault converts a marked member whose reports are all forged,
+unless more are forged than it reads past (1024), and leaves an unmarked
+one whose row was changed and not yet reported, or whose genuine report an
+access entry forged after it covers. A forged report never hides a
+conversion. Root admins it cannot tell either: the vault's configuration
+names them, and the database does not.
 
 The rule (`convertEveryProjectGrants`, in core, with a property test that
 nobody ends up holding more anywhere, at any time, including in a project

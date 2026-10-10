@@ -171,11 +171,13 @@ async function previewEveryProject(url: URL): Promise<EveryProjectPreview[]> {
  *                           viewer on billing only through its environments, not those made later
  *   service:deploy          maintainer on every project → maintainer on market, billing; not projects made later;
  *                           loses access-manager on billing (keeps maintainer)
+ *   service:old             viewer on every project → left as it is: the vault reported their row tampered with
+ *                           (if that report is forged: viewer on market, billing; not projects made later)
  */
 export function describeEveryProject(previews: readonly EveryProjectPreview[]): string {
   if (previews.length === 0) return '';
   const lines = ['', 'Grants on every project are gone in this version. When it first runs, the vault replaces them:'];
-  for (const { principal, before, conversion, paths } of previews) {
+  for (const { principal, before, conversion, paths, reported } of previews) {
     const was = before.map((grant) => `${grant.role} on ${grant.place === '*' ? 'every project' : `${grant.place.slice(2)} in every project`}`).join(', ');
     const role = conversion.role === 'member' ? [] : [unscoped(conversion.scope) ? INSTANCE_ROLES[conversion.role].name : `${INSTANCE_ROLES[conversion.role].name}, ${scopeInWords(conversion.scope)}`];
     const byRole = new Map<string, string[]>();
@@ -198,10 +200,12 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
     });
     const later = conversion.narrowed.some((loss) => loss.kind === 'later-projects') ? ['not projects made later'] : [];
     const after = [[...role, ...grants].join(', and ') || 'nothing', ...later, ...narrower].join('; ');
-    lines.push(`  ${shownMember(principal)}: ${was} → ${after}`);
+    // Whether the vault's report is its own, only the vault can tell: either way, what it does is said.
+    const then = reported ? `left as it is: the vault reported their row tampered with (if that report is forged: ${after})` : after;
+    lines.push(`  ${shownMember(principal)}: ${was} → ${then}`);
   }
   lines.push(
-    "A root admin's stay as they are while they are one; so do those of a member whose row was tampered with, who is not listed.",
+    "A root admin's stay as they are while they are one, and so do those of a member whose row the vault finds tampered with: migrate holds no key to check a row, nor whether a report is the vault's own.",
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   );

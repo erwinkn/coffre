@@ -11,11 +11,13 @@ import {
   type Role,
   type Scope,
 } from '@coffre/core/access';
+import type { StoredEntry } from '@coffre/core/audit';
 import { isTombstone } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
-import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { tablesOf, type Queryable } from './database.ts';
+import { entryColumns, KEYLESS, LOOK_BACK, newestAuthentic, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `vault_grants` holds it: on a project (`environmentId`
@@ -99,6 +101,12 @@ export type EveryProjectPreview = {
   conversion: Conversion;
   /** The places the conversion names, by id: `market`, `market/dev`. */
   paths: Record<string, string>;
+  /**
+   * Whether the vault has reported their row changed around it since the
+   * last change to what they hold (`reportStands`), by the entries in its
+   * name: then it leaves them as they are, unless the report is forged.
+   */
+  reported: boolean;
 };
 
 /**
@@ -106,23 +114,30 @@ export type EveryProjectPreview = {
  * members hold, by the rule it converts them with
  * (`convertEveryProjectGrants`), from the rows as they are: what
  * `coffre migrate` says before the vault does it. A display: the vault
- * reads again, under its locks, when it converts. Left out, as the vault
- * leaves them: a member it found changed around it (`tamperedMembers`).
- * A root admin's it leaves too while they are one, until they are not;
- * which they are, the vault's configuration says and the database does
- * not, so they are listed.
+ * reads again, under its locks, when it converts, and checks what this
+ * cannot, holding no key: each row's MAC, and each entry's in its name. So
+ * a member it has reported changed around it is listed, and marked
+ * `reported`, by the vault's own rule (`reportStands`) over the entries as
+ * they read: whether that report is the vault's own, or forged so as to
+ * hide what it will do, only the vault can tell. Any member the vault
+ * converts is listed. A root admin's it leaves while they are one, until
+ * they are not; which they are, the vault's configuration says and the
+ * database does not, so they are listed too.
  */
 export async function everyProjectPreview(db: Queryable, at: number): Promise<EveryProjectPreview[]> {
   const { vaultMembers, projects, environments } = tablesOf(db);
   const held = (await readGrants(db, { liveAt: at })).filter((grant) => grant.projectId === null && grant.environmentId === null);
   if (held.length === 0) return [];
-  const [members, grants, places, inside, tampered] = await Promise.all([
+  const holders = [...new Set(held.map((grant) => grant.principal))].sort();
+  const [members, grants, places, inside, standing] = await Promise.all([
     db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope }).from(vaultMembers),
     readGrants(db, { liveAt: at }),
     db.select({ id: projects.id, slug: projects.slug }).from(projects),
     db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug }).from(environments),
-    tamperedMembers(db),
+    // The vault's own rule, over every entry in its name: holders are few, and this runs once a deploy.
+    Promise.all(holders.map((principal) => reportStands(db, principal, KEYLESS))),
   ]);
+  const reported = new Set(holders.filter((_, i) => standing[i]));
   // A deleted place keeps its row under a tombstone's slug, its own or its project's: no grant reaches it.
   const live = places.filter((project) => !isTombstone(project.slug)).map((project) => ({
     id: project.id,
@@ -132,10 +147,9 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
     [project.id, project.slug],
     ...inside.filter((environment) => environment.projectId === project.id).map((environment) => [environment.id, `${project.slug}/${environment.slug}`]),
   ]));
-  return [...new Set(held.map((grant) => grant.principal))].sort().flatMap((principal) => {
+  return holders.flatMap((principal) => {
     const member = members.find((row) => row.principal === principal);
-    // The vault leaves a member it found changed around it as they are, as it does anyone not active.
-    if (member?.status !== 'active' || tampered.has(principal)) return [];
+    if (member?.status !== 'active') return [];
     const theirs = held.filter((grant) => grant.principal === principal);
     return [{
       principal,
@@ -150,18 +164,19 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
         projects: live,
       }),
       paths,
+      reported: reported.has(principal),
     }];
   });
 }
 
 /**
  * The members the vault has found changed around it, and not started over
- * since: its newest `vault.tampered` about them, for their row (`mac`) or
- * an older one put back (`stale`), is newer than its newest entry changing
- * what they hold. Read from the log, which the vault writes and the app
- * reads: the vault's own findings, which the app has no key to make. Both
- * reads go by the log's (author, action, seq) and (author, subject, seq)
- * indexes, and findings are few.
+ * since, as a reader without its key can tell (`reportStands` with
+ * `KEYLESS`), for everyone at once, where the app lists members: its
+ * newest `vault.tampered` about them, for their row (`mac`) or an older
+ * one put back (`stale`), is newer than its newest entry changing what
+ * they hold. Both reads go by the log's (author, action, seq) and (author,
+ * subject, seq) indexes, and findings are few.
  */
 export async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
   const { auditLog } = tablesOf(db);
@@ -178,11 +193,83 @@ export async function tamperedMembers(db: Queryable, principal?: string): Promis
         ),
       )
       .groupBy(auditLog.subjectPrincipal);
-  const found = await newest(['vault.tampered'], inArray(auditLog.code, ['mac', 'stale']));
+  const found = await newest(['vault.tampered'], inArray(auditLog.code, [...TAMPER_CODES]));
   if (found.length === 0) return new Set();
   const changed = new Map(
     (await newest(ACCESS_ACTIONS, and(eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, found.map((row) => row.principal!)))))
       .map((row) => [row.principal!, row.seq]),
   );
   return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
+}
+
+/** The codes of the vault's reports that a member's row was changed around it: their row's MAC fails (`mac`), or an older one was put back (`stale`). */
+const TAMPER_CODES = ['mac', 'stale'] as const;
+
+/**
+ * Whether the vault's report that `principal`'s row was changed around it
+ * stands: one of its own is newer than its newest entry changing what they
+ * hold, and only starting them over, or another change, settles it. While
+ * one stands the vault leaves their grants on every project of 0.4 as they
+ * are. Both entries as `check` tells them apart: the vault by their MACs,
+ * passing over those forged in its name; a reader without its key
+ * (`KEYLESS`) by what they say. Only reports after that entry are read, so
+ * older ones, forged or not, never hide one. Past LOOK_BACK forged entries,
+ * of either kind, one may stand, so it is taken to.
+ */
+export async function reportStands(db: Queryable, principal: string, check: Authenticity): Promise<boolean> {
+  const access = await newestAccess(db, principal, check);
+  if (access === 'unreached') return true;
+  const after = typeof access === 'string' ? -1n : access.seq;
+  const report = await newestAuthentic((before) => tamperReportsAbout(db, principal, LOOK_BACK.page, after, before), check);
+  return report === 'unreached' || typeof report !== 'string';
+}
+
+/** The newest access entry about `principal` that `check` finds the vault's own. */
+export function newestAccess(db: Queryable, principal: string, check: Authenticity): Promise<Newest> {
+  return newestAuthentic((before) => accessEntriesAbout(db, principal, LOOK_BACK.page, before), check);
+}
+
+/** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */
+export async function accessEntriesAbout(db: Queryable, principal: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.author, 'vault'),
+        eq(auditLog.subjectPrincipal, principal),
+        inArray(auditLog.action, [...ACCESS_ACTIONS]),
+        eq(auditLog.decision, 'allow'),
+        before === undefined ? undefined : lt(auditLog.seq, before),
+      ),
+    )
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return rows as StoredEntry[];
+}
+
+/**
+ * Up to `limit` of the vault's reports that `principal`'s row was changed
+ * around it (`TAMPER_CODES`), after `after` and before `before` (the newest
+ * when undefined), newest first.
+ */
+async function tamperReportsAbout(db: Queryable, principal: string, limit: number, after: bigint, before?: bigint): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.author, 'vault'),
+        eq(auditLog.subjectPrincipal, principal),
+        eq(auditLog.action, 'vault.tampered'),
+        inArray(auditLog.code, [...TAMPER_CODES]),
+        gt(auditLog.seq, after),
+        before === undefined ? undefined : lt(auditLog.seq, before),
+      ),
+    )
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return rows as StoredEntry[];
 }

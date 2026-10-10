@@ -31,6 +31,7 @@ test('migrate says what the vault will make of each grant on every project of 0.
       before: [{ place: '*/dev', role: 'developer', expiresAt: null }],
       conversion: { role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } }, grants: [], narrowed: [] },
       paths,
+      reported: false,
     },
     {
       principal: 'user:bob@acme.example',
@@ -45,6 +46,7 @@ test('migrate says what the vault will make of each grant on every project of 0.
         ],
       },
       paths,
+      reported: false,
     },
     {
       principal: 'user:cy@acme.example',
@@ -62,6 +64,7 @@ test('migrate says what the vault will make of each grant on every project of 0.
         ],
       },
       paths,
+      reported: false,
     },
     {
       principal: 'token:deploy',
@@ -76,6 +79,7 @@ test('migrate says what the vault will make of each grant on every project of 0.
         ],
       },
       paths,
+      reported: false,
     },
     {
       principal: 'token:ci',
@@ -87,6 +91,19 @@ test('migrate says what the vault will make of each grant on every project of 0.
         narrowed: [{ kind: 'later-projects', grant: { environmentSlug: 'dev', role: 'viewer', expiresAt: null } }],
       },
       paths,
+      reported: false,
+    },
+    {
+      principal: 'token:old',
+      before: [{ place: '*', role: 'viewer', expiresAt: null }],
+      conversion: {
+        role: 'member',
+        scope: { projects: 'all', environments: 'all' },
+        grants: [{ projectId: 'b', environmentId: null, role: 'viewer', expiresAt: null, replaces: null }],
+        narrowed: [{ kind: 'later-projects', grant: { environmentSlug: null, role: 'viewer', expiresAt: null } }],
+      },
+      paths,
+      reported: true,
     },
   ]);
   assert.equal(said, [
@@ -97,7 +114,8 @@ test('migrate says what the vault will make of each grant on every project of 0.
     '  user:cy@acme.example: viewer on every project → viewer on billing, market/dev; not projects made later; viewer on market only through its environments, not those made later',
     '  service:deploy: maintainer on every project → maintainer on market; not projects made later; loses access-manager on market (keeps maintainer)',
     '  service:ci: viewer on dev in every project → viewer on market/dev; not projects made later',
-    "A root admin's stay as they are while they are one; so do those of a member whose row was tampered with, who is not listed.",
+    '  service:old: viewer on every project → left as it is: the vault reported their row tampered with (if that report is forged: viewer on billing; not projects made later)',
+    "A root admin's stay as they are while they are one, and so do those of a member whose row the vault finds tampered with: migrate holds no key to check a row, nor whether a report is the vault's own.",
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   ].join('\n'));

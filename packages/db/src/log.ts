@@ -1,8 +1,8 @@
-import { GENESIS_HASH, sealEntry, type LogFields, type LogKey } from '@coffre/core/audit';
+import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { desc, eq } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
-import { tablesOf, type Transaction } from './database.ts';
+import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { clockMillis, forUpdate } from './dialect.ts';
 
 /**
@@ -186,4 +186,74 @@ export async function appendEntries(
   const written = { nextSeq: seq, headHash: prevHash };
   afterCommit(tx, () => remember(key, written));
   return { seqStart: head.nextSeq, ...written, occurredAt: now };
+}
+
+// --- reading the vault's entries back ---------------------------------------------
+
+/** An entry's columns, as the chain's codec reads them (`StoredEntry`). */
+export function entryColumns(db: Queryable) {
+  const { auditLog } = tablesOf(db);
+  return {
+    seq: auditLog.seq,
+    author: auditLog.author,
+    keyId: auditLog.keyId,
+    occurredAt: auditLog.occurredAt,
+    actor: auditLog.actor,
+    action: auditLog.action,
+    decision: auditLog.decision,
+    code: auditLog.code,
+    subjectPrincipal: auditLog.subjectPrincipal,
+    projectId: auditLog.projectId,
+    environmentId: auditLog.environmentId,
+    secretId: auditLog.secretId,
+    secretVersionId: auditLog.secretVersionId,
+    operationId: auditLog.operationId,
+    requestId: auditLog.requestId,
+    sourceIp: auditLog.sourceIp,
+    relatedSeq: auditLog.relatedSeq,
+    metadata: auditLog.metadata,
+    prevHash: auditLog.prevHash,
+    mac: auditLog.mac,
+    hash: auditLog.hash,
+  };
+}
+
+/**
+ * How a reader tells the vault's own entries from those forged in its name:
+ * by their MAC, which only the vault holds the key to check. Each it finds
+ * forged goes to `forged`.
+ */
+export type Authenticity = { authentic: (entry: StoredEntry) => boolean; forged: (entry: StoredEntry) => void };
+
+/**
+ * All a reader without the vault's key can do: take every entry in its name
+ * as its own. `coffre migrate` and the app read the log so.
+ */
+export const KEYLESS: Authenticity = { authentic: () => true, forged: () => {} };
+
+/** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
+export const LOOK_BACK = { page: 32, pages: 32 };
+
+/** What `newestAuthentic` finds: the entry, or why there is none. */
+export type Newest = StoredEntry | 'none' | 'forged' | 'unreached';
+
+/**
+ * The newest of the entries `page` reads, newest first and before a seq,
+ * that `check` finds authentic, read back a page at a time: 'none' when
+ * there are none at all, 'forged' when every one is in the vault's name but
+ * not its own, and 'unreached' when LOOK_BACK such entries still leave more
+ * unread.
+ */
+export async function newestAuthentic(page: (before: bigint | undefined) => Promise<StoredEntry[]>, check: Authenticity): Promise<Newest> {
+  let before: bigint | undefined;
+  for (let read = 0; read < LOOK_BACK.pages; read += 1) {
+    const entries = await page(before);
+    for (const entry of entries) {
+      if (check.authentic(entry)) return entry;
+      check.forged(entry);
+    }
+    if (entries.length < LOOK_BACK.page) return before === undefined && entries.length === 0 ? 'none' : 'forged';
+    before = entries.at(-1)!.seq;
+  }
+  return 'unreached';
 }

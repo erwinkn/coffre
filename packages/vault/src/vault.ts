@@ -75,7 +75,8 @@ import {
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
-import { appendEntries, lockLogHead, type Appended, type NewEntry } from '@coffre/db/log';
+import { newestAccess, reportStands } from '@coffre/db/grants';
+import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -211,12 +212,6 @@ const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
 
 /** The settings when the log has some, but none the vault wrote within reach: people set up no service accounts. */
 const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, environments: 'all' } };
-
-/** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`#newestAuthentic`). */
-const LOOK_BACK = { page: 32, pages: 32 };
-
-/** What `#newestAuthentic` finds: the entry, or why there is none. */
-type Newest = StoredEntry | 'none' | 'forged' | 'unreached';
 
 /** Why a person's change to a service account is refused. */
 const NOT_THEIRS = 'a person gives a service account at most what they hold, where the instance lets them set one up, and only to one whose every grant they hold';
@@ -490,56 +485,17 @@ class VaultService implements Vault {
     return 'stale';
   }
 
-  /** The newest access entry about `principal` that carries the vault's MAC (`#newestAuthentic`). */
+  /** The newest access entry about `principal` that carries the vault's MAC (`newestAccess` in @coffre/db/grants). */
   #newestAccess(db: Queryable, principal: string, reports: NewEntry[]): Promise<Newest> {
-    return this.#newestAuthentic(
-      (before) => store.accessEntriesAbout(db, principal, LOOK_BACK.page, before),
-      (entry) => this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq),
-    );
+    return newestAccess(db, principal, this.#check(reports, principal));
   }
 
-  /**
-   * Whether the vault has reported `principal`'s row changed around it
-   * since its newest entry changing what they hold: only starting them
-   * over, or another change, settles it. Both by their MACs, and only
-   * reports after that entry are read, so older ones, forged or not, never
-   * hide it.
-   */
-  async #reportStands(db: Queryable, principal: string, reports: NewEntry[]): Promise<boolean> {
-    const access = await this.#newestAccess(db, principal, reports);
-    // Too many forged to see past, either one: it may stand, so they are left as they are.
-    if (access === 'unreached') return true;
-    const after = typeof access === 'string' ? -1n : access.seq;
-    const report = await this.#newestAuthentic(
-      (before) => store.tamperReportsAbout(db, principal, LOOK_BACK.page, after, before),
-      (entry) => this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq),
-    );
-    // One of its own after that entry stands, and so may one past too many forged.
-    return report === 'unreached' || typeof report !== 'string';
-  }
-
-  /**
-   * The newest of the entries `page` reads, newest first and before a seq,
-   * that carries the vault's MAC, read back a page at a time: 'none' when
-   * there are none at all, 'forged' when every one is in its name but not
-   * its own, and 'unreached' when LOOK_BACK such entries still leave more
-   * unread. Each it did not write goes to `forged`.
-   */
-  async #newestAuthentic(
-    page: (before: bigint | undefined) => Promise<StoredEntry[]>,
-    forged: (entry: StoredEntry) => void,
-  ): Promise<Newest> {
-    let before: bigint | undefined;
-    for (let read = 0; read < LOOK_BACK.pages; read += 1) {
-      const entries = await page(before);
-      for (const entry of entries) {
-        if (this.#authentic(entry)) return entry;
-        forged(entry);
-      }
-      if (entries.length < LOOK_BACK.page) return before === undefined && entries.length === 0 ? 'none' : 'forged';
-      before = entries.at(-1)!.seq;
-    }
-    return 'unreached';
+  /** Entries in the vault's name told apart by their MACs, each it did not write reported, about `principal`. */
+  #check(reports: NewEntry[], principal: string | null): Authenticity {
+    return {
+      authentic: (entry) => this.#authentic(entry),
+      forged: (entry) => this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq),
+    };
   }
 
   /** Whether `entry` carries the vault's MAC: under any of its keys before `since`, and only its current one from there. */
@@ -619,8 +575,10 @@ class VaultService implements Vault {
    * their lock. A member whose row fails its check is left as they are, and
    * so is one the vault has reported changed around it since the last
    * change to what they hold, even if their row checks out again now (a
-   * genuine row put back): `coffre migrate`, which holds no key, can tell
-   * only that, and says the same. Removing them clears both.
+   * genuine row put back). `reportStands` is the rule, which `coffre
+   * migrate` applies too, holding no key, to every entry in the vault's
+   * name: it lists and marks a member so reported, forged or not.
+   * Removing them clears both.
    */
   async #convert(): Promise<void> {
     for (const principal of await store.everyProjectHolders(this.#db)) {
@@ -636,7 +594,7 @@ class VaultService implements Vault {
     if (row === undefined || subject.status !== 'active') return;
     const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
     if (everyProject.length === 0) return;
-    if (await this.#reportStands(d.tx, principal, d.reports)) return;
+    if (await reportStands(d.tx, principal, this.#check(d.reports, principal))) return;
     // The projects there are now, read under the log's head, which a deletion holds.
     await lockLogHead(d.tx);
     const before = roleOf(principal, row);
@@ -1800,9 +1758,9 @@ class VaultService implements Vault {
    * the default: otherwise whoever can insert rows could open it again.
    */
   async #settingsAt(db: Queryable, reports: NewEntry[]): Promise<Settings> {
-    const entry = await this.#newestAuthentic(
+    const entry = await newestAuthentic(
       (before) => store.newestVaultEntries(db, SETTINGS, LOOK_BACK.page, before),
-      (forged) => this.#report(reports, null, 'forged_entry', String(forged.seq), forged.seq),
+      this.#check(reports, null),
     );
     if (entry === 'none') return DEFAULT_SETTINGS;
     if (typeof entry === 'string') return CLOSED_SETTINGS;

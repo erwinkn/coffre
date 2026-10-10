@@ -4,6 +4,7 @@ import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/va
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
+import { entryColumns } from '@coffre/db/log';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -47,7 +48,7 @@ export type Place = Pick<GrantRow, 'projectId' | 'environmentId' | 'environmentS
 
 /** A grant as stored, which `@coffre/db/grants` reads and writes. */
 export type { GrantRow };
-export { insertGrant } from '@coffre/db/grants';
+export { accessEntriesAbout, insertGrant } from '@coffre/db/grants';
 
 /**
  * On Postgres, fail a lock wait in this transaction after `ms`, rather than
@@ -304,33 +305,6 @@ export async function releasesSince(db: Queryable, principal: string, after: num
   return Number(n);
 }
 
-function entryColumns(db: Queryable) {
-  const { auditLog } = tablesOf(db);
-  return {
-    seq: auditLog.seq,
-    author: auditLog.author,
-    keyId: auditLog.keyId,
-    occurredAt: auditLog.occurredAt,
-    actor: auditLog.actor,
-    action: auditLog.action,
-    decision: auditLog.decision,
-    code: auditLog.code,
-    subjectPrincipal: auditLog.subjectPrincipal,
-    projectId: auditLog.projectId,
-    environmentId: auditLog.environmentId,
-    secretId: auditLog.secretId,
-    secretVersionId: auditLog.secretVersionId,
-    operationId: auditLog.operationId,
-    requestId: auditLog.requestId,
-    sourceIp: auditLog.sourceIp,
-    relatedSeq: auditLog.relatedSeq,
-    metadata: auditLog.metadata,
-    prevHash: auditLog.prevHash,
-    mac: auditLog.mac,
-    hash: auditLog.hash,
-  };
-}
-
 /** Rows of the log as the chain's codec reads them: `author` and `decision` are checked by the table. */
 function stored(rows: object[]): StoredEntry[] {
   return rows as StoredEntry[];
@@ -501,52 +475,6 @@ export async function newestVaultEntries(db: Queryable, action: string, limit: n
         eq(auditLog.author, 'vault'),
         eq(auditLog.action, action),
         eq(auditLog.decision, 'allow'),
-        before === undefined ? undefined : lt(auditLog.seq, before),
-      ),
-    )
-    .orderBy(desc(auditLog.seq))
-    .limit(limit);
-  return stored(rows);
-}
-
-/** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */
-export async function accessEntriesAbout(db: Queryable, principal: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.subjectPrincipal, principal),
-        inArray(auditLog.action, [...ACCESS_ACTIONS]),
-        eq(auditLog.decision, 'allow'),
-        before === undefined ? undefined : lt(auditLog.seq, before),
-      ),
-    )
-    .orderBy(desc(auditLog.seq))
-    .limit(limit);
-  return stored(rows);
-}
-
-/**
- * Up to `limit` of the vault's reports that `principal`'s row was changed
- * around it (`vault.tampered`, for their row or an older one put back),
- * after `after` and before `before` (the newest when undefined), newest
- * first: what `tamperedMembers` in @coffre/db/grants reads too.
- */
-export async function tamperReportsAbout(db: Queryable, principal: string, limit: number, after: bigint, before?: bigint): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.subjectPrincipal, principal),
-        eq(auditLog.action, 'vault.tampered'),
-        inArray(auditLog.code, ['mac', 'stale']),
-        gt(auditLog.seq, after),
         before === undefined ? undefined : lt(auditLog.seq, before),
       ),
     )

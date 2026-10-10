@@ -1188,7 +1188,7 @@ test('the conversion takes no read away: viewer on every project beside auditor 
   assert.equal((await upgraded.verifyLog({})).ok, true);
 });
 
-test('migrate does not list a member whose row the vault found tampered with, whose grants it leaves as they are', async () => {
+test('migrate marks a member whose row the vault found tampered with, whose grants it leaves as they are', async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   await member(w, ADA, []);
@@ -1197,7 +1197,7 @@ test('migrate does not list a member whose row the vault found tampered with, wh
   await everyProjectGrant(BOB, null, 'viewer');
   await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'tampered');
-  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => preview.principal), [ADA]);
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[ADA, false], [BOB, true]]);
   await (await fresh()).access(ADA);
   assert.deepEqual((await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`)).map((grant) => grant.principal), [BOB]);
 });
@@ -1213,15 +1213,15 @@ test('a genuine row put back after a tamper report is left as migrate says, unti
   await db.owner.update(vaultGrants).set({ role: 'viewer' }).where(eq(vaultGrants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'active');
 
-  // migrate, which holds no key, leaves BOB out; the vault leaves him as he is too.
-  assert.deepEqual(await everyProjectPreview(db.owner, Date.now()), []);
+  // migrate, which holds no key, marks BOB reported; the vault leaves him as he is.
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[BOB, true]]);
   await (await fresh()).access(BOB);
   const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
   assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
 
   // A change to what he holds is newer than the report: both convert him again.
   assert.ok((await w.vault.setAccess({ actor: ROOT, principal: BOB, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })).ok);
-  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => preview.principal), [BOB]);
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[BOB, false]]);
   await (await fresh()).access(BOB);
   assert.deepEqual(await db.owner.select().from(vaultGrants).where(everyProject), []);
 });
@@ -1238,7 +1238,7 @@ test('tamper reports forged in the vault\'s name above its own leave the one it 
 
   // More forged reports than a page holds, above the vault's own: it still stands, as migrate says.
   await forgeEntries(33, { action: 'vault.tampered', code: 'stale', subjectPrincipal: BOB });
-  assert.deepEqual(await everyProjectPreview(db.owner, Date.now()), []);
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[BOB, true]]);
   await (await fresh()).access(BOB);
   const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
   assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
@@ -1252,11 +1252,62 @@ test('tamper reports forged in the vault\'s name before a change to what a membe
   // As many as the vault reads back, all before the grant: none can stand.
   await forgeEntries(32 * 32, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
   await everyProjectGrant('token:legacy', null, 'viewer');
-  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map(({ principal, conversion }) => [principal, conversion.grants.length]), [['token:legacy', 1]]);
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map(({ principal, conversion, reported }) => [principal, conversion.grants.length, reported]), [['token:legacy', 1, false]]);
   const converted = await (await fresh()).access('token:legacy');
   assert.deepEqual(converted.grants.map((grant) => [grant.projectId, grant.environmentId, grant.role]), [[w.project, null, 'viewer']]);
   assert.deepEqual(await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`), []);
 });
+
+// Forged after the grant, they are what the vault would leave the grant for, were they its own: migrate cannot tell.
+for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
+  const within = forged < 32 * 32;
+  test(`after ${forged} tamper report${forged === 1 ? '' : 's'} forged in the vault's name, ${within ? 'migrate lists the conversion of a grant on every project, which the vault makes' : 'more than it reads past, the vault leaves a grant on every project, as migrate warns'}`, async () => {
+    const w = await world();
+    const { vaultGrants } = tablesOf(db.owner);
+    await member(w, 'token:legacy', []);
+    await everyProjectGrant('token:legacy', null, 'viewer');
+    await forgeEntries(forged, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
+
+    // Listed with its conversion, and marked: the vault, which checks the reports, decides between the two.
+    const preview = await everyProjectPreview(db.owner, Date.now());
+    assert.deepEqual(preview.map(({ principal, conversion, reported }) => [principal, conversion.grants.map((grant) => [grant.projectId, grant.role]), reported]), [
+      ['token:legacy', [[w.project, 'viewer']], true],
+    ]);
+    const converted = await (await fresh()).access('token:legacy');
+    const left = await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`);
+    if (within) {
+      assert.deepEqual(converted.grants.map((grant) => [grant.projectId, grant.environmentId, grant.role]), [[w.project, null, 'viewer']]);
+      assert.deepEqual(left, []);
+    } else {
+      assert.deepEqual(left.map((grant) => grant.principal), ['token:legacy']);
+    }
+  });
+}
+
+for (const history of ['none', 'forged'] as const) {
+  test(`a member with ${history === 'none' ? 'no access entry' : 'only access entries forged in the vault\'s name'} is left as they are under forged reports, and migrate marks them`, async () => {
+    const w = await world();
+    const { auditLog, vaultGrants, vaultMembers } = tablesOf(db.owner);
+    const LEGACY = 'token:legacy';
+    await member(w, ADA, []);
+    if (history === 'forged') await forgeEntries(3, { action: 'member.add', subjectPrincipal: LEGACY });
+    // ADA's row, as LEGACY's, naming the newest entry about LEGACY, or one about nobody, and sealed with a grant on every project.
+    const [newest] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+    const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+    await db.owner.insert(vaultMembers).values({ ...row, principal: LEGACY, accessSeq: newest.seq });
+    await db.owner.insert(vaultGrants).values({ principal: LEGACY, projectId: null, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT });
+    await reseal(LEGACY);
+    await forgeEntries(1, { action: 'vault.tampered', code: 'stale', subjectPrincipal: LEGACY });
+
+    assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map(({ principal, reported }) => [principal, reported]), [[LEGACY, true]]);
+    // Its row names no entry of the vault's own: stale, so it never comes to the reports.
+    await (await fresh()).access(ADA);
+    const left = await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`);
+    assert.deepEqual(left.map((grant) => grant.principal), [LEGACY]);
+    const reported = (await vaultLog(w)).filter((entry) => entry.action === 'vault.tampered' && entry.actor === 'system:vault' && entry.subject === LEGACY);
+    assert.deepEqual(reported.map((entry) => entry.code).filter((code) => code !== 'forged_entry'), ['stale']);
+  });
+}
 
 test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {
   const key = rowKey(SIGNING_KEY);
