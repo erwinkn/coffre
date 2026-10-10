@@ -20,6 +20,7 @@ import { postgresConnection } from '@coffre/db/connect';
 import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import pg from 'pg';
 
+import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
 import { deploymentKind, install, installAsLocked, installed } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
@@ -47,7 +48,14 @@ export type Login = {
   url: string | null;
 };
 
-export type SetupResult = { keys: Keys | null; app: Login; vault: Login; version: string };
+export type SetupResult = {
+  keys: Keys | null;
+  app: Login;
+  vault: Login;
+  version: string;
+  /** What the database lets in, which each Hyperdrive config's limit is a share of (`hyperdriveLimit`). */
+  connections: Connections;
+};
 
 class SetupError extends Error {}
 
@@ -76,8 +84,9 @@ export function loginUrl(administrator: URL, login: string, password: string): s
  * public CAs, and takes no `sslrootcert`. `${v%%[?]*}` holds in bash and
  * zsh alike.
  */
-export function hyperdriveCommand(target: string): string {
-  return `read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive ${target} --connection-string="\${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL`;
+export function hyperdriveCommand(target: string, limit: number | null): string {
+  const connections = limit === null ? '' : ` --origin-connection-limit=${limit}`;
+  return `read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive ${target}${connections} --connection-string="\${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL`;
 }
 
 /**
@@ -129,6 +138,8 @@ export async function setup(args: string[]): Promise<void> {
       command: 'coffre setup',
     });
     secrets.push(...typed);
+    // A Workers deployment whose database can't hold both Hyperdrive configs stops here, before setup asks about Cloudflare.
+    const connections = kind === 'workers' ? await roomForHyperdrive(administrator, out, clean) : null;
     let cloudflare: Cloudflare | null = null;
     if (offers && kind === 'workers') {
       const choice = await select(terminal.keys, out, s, 'Set Cloudflare up too?', [
@@ -141,7 +152,7 @@ export async function setup(args: string[]): Promise<void> {
         cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
       }
     }
-    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare }, secrets, clean);
+    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, connections }, secrets, clean);
     if (cloudflare !== null) {
       if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
       await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
@@ -230,6 +241,37 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
   return kind;
 }
 
+/**
+ * What the database lets in, read before anything that changes it or
+ * Cloudflare: a Workers deployment needs room for both Hyperdrive configs.
+ * Without it, setup stops here, before Cloudflare's questions, its domain
+ * added or a custom hostname made, and before any login gets a new password
+ * its config would never have.
+ */
+async function roomForHyperdrive(administrator: URL, out: Output, clean: (error: unknown) => string): Promise<Connections> {
+  const steps = new Steps(out, [`Check ${whereOf(administrator)} has room for Hyperdrive`], () => null, clean);
+  const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  let connections!: Connections;
+  try {
+    await steps.run(0, async () => {
+      await client.connect();
+      connections = await connectionsOf(client);
+      const limit = hyperdriveLimit(connections);
+      if (limit === null) throw new SetupError(tooFewConnections(connections));
+      return `${whereOf(administrator)} has room for both Hyperdrive configs, with a connection limit of ${limit} each`;
+    });
+  } finally {
+    steps.end();
+    await client.end().catch(() => {});
+  }
+  return connections;
+}
+
+/** The database setup was given, as its steps name it: `db.example.com/coffre`. */
+function whereOf(administrator: URL): string {
+  return `${administrator.hostname}${decodeURIComponent(administrator.pathname)}`;
+}
+
 /** The deployment's packages, installed as its lockfile says when they are not, shown as a step of its own. */
 async function installFirst(dir: string, out: Output, clean: (error: unknown) => string): Promise<void> {
   if (installed(dir)) return;
@@ -248,13 +290,13 @@ async function run(
   administrator: URL,
   out: Output,
   questions: () => Keyboard | null,
-  options: { resetPasswords: boolean; cloudflare: Cloudflare | null },
+  options: { resetPasswords: boolean; cloudflare: Cloudflare | null; connections: Connections | null },
   secrets: string[],
   clean: (error: unknown) => string,
 ): Promise<SetupResult> {
   const { cloudflare } = options;
   const user = decodeURIComponent(administrator.username);
-  const where = `${administrator.hostname}${decodeURIComponent(administrator.pathname)}`;
+  const where = whereOf(administrator);
   const version = cliVersion();
   const steps = new Steps(
     out,
@@ -272,9 +314,12 @@ async function run(
   const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  let connections!: Connections;
   try {
     await step(0, async () => {
       await client.connect();
+      // A Workers deployment's were read before Cloudflare was asked (`roomForHyperdrive`).
+      connections = options.connections ?? (await connectionsOf(client));
       // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
       cloudflare?.checkKeys(await holdsData(client));
       return `Connected to ${where} as ${user}`;
@@ -339,14 +384,19 @@ async function run(
       return { text: 'Each login holds only its rights', details };
     });
     if (cloudflare !== null) {
-      await step(5, () => cloudflare.hyperdrive(logins));
+      await step(5, async () => {
+        // Checked before Cloudflare was asked, and before any of this run's changes.
+        const limit = hyperdriveLimit(connections)!;
+        const { text, details } = await cloudflare.hyperdrive(logins, limit);
+        return { text, details: [...details, limitReason(connections, limit)] };
+      });
       await step(6, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
       await step(7, async () => cloudflare.write());
-      return { keys: null, ...logins, version };
+      return { keys: null, ...logins, version, connections };
     }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
     const fresh = !used && (logins.app.url !== null || logins.vault.url !== null);
-    return { keys: fresh ? generateKeys() : null, ...logins, version };
+    return { keys: fresh ? generateKeys() : null, ...logins, version, connections };
   } finally {
     steps.end();
     await client.end().catch(() => {});
@@ -515,20 +565,31 @@ export function setupScreen(result: SetupResult): Screen {
   const set = (['app', 'vault'] as const).filter((component) => result[component].url !== null);
   const created = set.some((component) => result[component].password === 'created');
   const keys = keyGuide();
+  const limit = hyperdriveLimit(result.connections);
+  const updated = set.filter((component) => result[component].password !== 'created');
   const hyperdrive = set.map((component) => {
     const login = result[component];
     const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <the ${component}'s config id>`;
-    return { command: hyperdriveCommand(target) };
+    // Setup can't see what a config allows now, so an update sets the limit too (`cappedLimit`), and says so.
+    return { command: hyperdriveCommand(target, limit === null ? null : cappedLimit(null, limit)) };
   });
   const workers = [
     ...(set.length === 0
       ? []
-      : [
-          `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
-          ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
-          'Or make them in the Cloudflare dashboard, under Hyperdrive.',
-          ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
-        ]),
+      : limit === null
+        ? [`No Hyperdrive config for each database URL: ${tooFewConnections(result.connections)}.`]
+        : [
+            `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
+            ...(updated.length === 0
+              ? []
+              : [
+                  `Setup can't see the limit each config has now, and the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}. Check it first with pnpm exec wrangler hyperdrive get <id>: for one you set lower on purpose, leave --origin-connection-limit out of its command.`,
+                ]),
+            ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
+            `Each command sets its config's connection limit to ${limit}, so that both fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
+            'Or make them in the Cloudflare dashboard, under Hyperdrive.',
+            ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
+          ]),
     ...(result.keys === null ? [] : keys.workers),
   ];
   const node = [

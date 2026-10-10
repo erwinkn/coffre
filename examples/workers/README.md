@@ -76,7 +76,10 @@ Run the two `wrangler hyperdrive create` commands from setup's screen: one
 config per login, each `--caching-disabled`. Hyperdrive otherwise caches
 reads for up to a minute, and a revoked token or a signed-out session could
 keep working that long. `wrangler.jsonc` cannot set it, so for a config made
-another way, check `caching` in `wrangler hyperdrive get <id>`.
+another way, check `caching` in `wrangler hyperdrive get <id>`. Each
+command also caps the connections its config opens, so that both fit under
+the database's `max_connections`: past it, the database refuses them, and
+requests fail.
 
 Put the ids they print under `hyperdrive`, the first in
 `app/wrangler.jsonc` and the second in `vault/wrangler.jsonc`, and

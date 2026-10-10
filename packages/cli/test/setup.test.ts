@@ -2,7 +2,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,9 +10,10 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
+import { cappedLimit, hyperdriveLimit, limitReason, tooFewConnections } from '../src/connections.ts';
 import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
 import { templateDir } from '../src/init.ts';
-import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster } from './cluster.ts';
+import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, SMALL_CLUSTER } from './cluster.ts';
 import { fakeOpener, fakeWrangler } from './fakes.ts';
 import { inTerminal, ptySkip, screens, typingUrl, visible } from './pty.ts';
 
@@ -20,9 +21,18 @@ const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
 type Run = { status: number | null; stdout: string; stderr: string };
 
-/** `coffre setup` as an operator runs it, in an empty directory with no home: the URL piped in. */
-function setup(args: string[], how: { stdin?: string }): Run {
+/**
+ * `coffre setup` as an operator runs it, in an empty directory with no home,
+ * or in a Workers deployment's, as its two wrangler.jsonc files make it: the
+ * URL piped in.
+ */
+function setup(args: string[], how: { stdin?: string; workers?: boolean }): Run {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-setup-'));
+  const files = how.workers === true ? ['app', 'vault'] : [];
+  for (const component of files) {
+    mkdirSync(join(dir, component));
+    writeFileSync(join(dir, component, 'wrangler.jsonc'), '{}\n');
+  }
   try {
     const result = spawnSync(process.execPath, ['--conditions=coffre:source', main, 'setup', ...args], {
       cwd: dir,
@@ -30,7 +40,7 @@ function setup(args: string[], how: { stdin?: string }): Run {
       input: how.stdin ?? '',
       encoding: 'utf8',
     });
-    assert.deepEqual(readdirSync(dir), [], 'it writes no file');
+    assert.deepEqual(readdirSync(dir).sort(), files, 'it writes no file');
     return { status: result.status, stdout: result.stdout, stderr: result.stderr };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -119,6 +129,8 @@ const made: SetupResult = {
   app: { role: 'coffre_runtime', login: 'coffre_runtime', password: 'created', url: 'postgresql://coffre_runtime:p1@db.example.com:5432/coffre?sslmode=verify-full' },
   vault: { role: 'coffre_vault_runtime', login: 'coffre_vault_runtime', password: 'created', url: 'postgresql://coffre_vault_runtime:p2@db.example.com:5432/coffre?sslmode=verify-full' },
   version: '0.1.3',
+  // PlanetScale's smallest cluster, by the count third parties give: 9 connections for each config.
+  connections: { max: 25, reserved: 3 },
 };
 
 test('--json carries the same values as the screen, under the names the examples give them', () => {
@@ -142,13 +154,55 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   const commands = (result: SetupResult) =>
     setupScreen(result).guide.flatMap(({ lines }) => lines.flatMap((line) => (typeof line === 'string' ? [] : [line.command])));
   assert.deepEqual(commands(made).slice(0, 2), [
-    hyperdriveCommand('create coffre --caching-disabled'),
-    hyperdriveCommand('create coffre-vault --caching-disabled'),
+    hyperdriveCommand('create coffre --caching-disabled', 9),
+    hyperdriveCommand('create coffre-vault --caching-disabled', 9),
   ]);
   const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const } };
-  assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>"), hyperdriveCommand("update <the vault's config id>")]);
+  assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>", 9), hyperdriveCommand("update <the vault's config id>", 9)]);
+  for (const command of commands(reset)) assert.match(command, / --origin-connection-limit=9 /);
+  // Setup can't see what each config allows now: the screen says the updates set it, and how to keep one set lower.
+  const lines = (result: SetupResult) => setupScreen(result).guide[0]!.lines.filter((line): line is string => typeof line === 'string');
+  const check = "Setup can't see the limit each config has now, and the update commands set it to 9. Check it first with pnpm exec wrangler hyperdrive get <id>: for one you set lower on purpose, leave --origin-connection-limit out of its command.";
+  // Said before the commands, so that one set lower on purpose is not raised by copying them as they are.
+  const guide = setupScreen(reset).guide[0]!.lines;
+  assert.ok(guide.includes(check) && guide.indexOf(check) < guide.findIndex((line) => typeof line !== 'string'));
+  assert.ok(!lines(made).some((line) => line.startsWith("Setup can't see")), 'new configs have no limit yet');
+  // A database too small for both configs: no command that would leave Cloudflare's default in place, but why not.
+  const small = { ...made, connections: { max: 15, reserved: 3 } };
+  assert.ok(!commands(small).some((command) => command.includes('hyperdrive')));
+  assert.deepEqual(lines(small).slice(0, 1), [`No Hyperdrive config for each database URL: ${tooFewConnections(small.connections)}.`]);
   for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|postgresql:/.test(command), command);
   assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL']);
+});
+
+test("each Hyperdrive config's connection limit is an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
+  // PlanetScale's smallest cluster: max_connections 25, 3 kept for superusers.
+  // Left at Cloudflare's default, 60 each, both configs opened more than its
+  // 22, and a page's parallel reads failed with 53300 (T78).
+  const small = { max: 25, reserved: 3 };
+  assert.equal(hyperdriveLimit(small), 9);
+  assert.equal(limitReason(small, 9), 'max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each');
+  // Postgres's default: no more than Free allows, which a query that holds a connection only while it runs never needs.
+  const standard = { max: 100, reserved: 3 };
+  assert.equal(hyperdriveLimit(standard), 20);
+  assert.equal(limitReason(standard, 20), 'max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20');
+  // The fewest Hyperdrive takes is 5 per config: below it, setup refuses rather than write a smaller limit.
+  assert.equal(hyperdriveLimit({ max: 16, reserved: 3 }), 5);
+  assert.equal(hyperdriveLimit({ max: 15, reserved: 3 }), null);
+  assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's two configs.*raise max_connections to 16 or more/);
+  // The guide on setup's screen says what the commands' limit is for, and how it came to it.
+  assert.ok(setupScreen(made).guide[0]!.lines.includes(
+    "Each command sets its config's connection limit to 9, so that both fit under the database's max_connections, with some left for migrations (max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each).",
+  ));
+});
+
+test('a limit is only ever lowered: one set lower on purpose is kept, and one not known is set', () => {
+  assert.equal(cappedLimit(60, 20), 20, "Cloudflare's default on Paid, lowered");
+  assert.equal(cappedLimit(21, 20), 20);
+  assert.equal(cappedLimit(20, 20), null, 'at the limit: left alone');
+  assert.equal(cappedLimit(5, 20), null, 'set lower on purpose: kept');
+  assert.equal(cappedLimit(undefined, 20), 20, 'unset: Cloudflare would apply its default');
+  assert.equal(cappedLimit(null, 20), 20, 'not known, as on the manual path');
 });
 
 test('a Hyperdrive command reads the URL without echo, and hands wrangler it without its parameters', { skip: spawnSync('bash', ['-c', 'true']).status !== 0 && 'needs bash' }, () => {
@@ -157,14 +211,14 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
     writeFileSync(join(dir, 'pnpm'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv"\n`);
     chmodSync(join(dir, 'pnpm'), 0o755);
     const url = 'postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre?sslmode=verify-full&sslrootcert=system';
-    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled')}; echo "left:[$COFFRE_DB_URL]"`], {
+    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled', 9)}; echo "left:[$COFFRE_DB_URL]"`], {
       input: `${url}\n`,
       env: { PATH: `${dir}:${process.env.PATH}` },
       encoding: 'utf8',
     });
     assert.equal(run.stdout, 'left:[]\n', 'nothing echoed, and the variable gone');
     assert.deepEqual(readFileSync(join(dir, 'argv'), 'utf8').trim().split('\n'), [
-      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled',
+      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled', '--origin-connection-limit=9',
       '--connection-string=postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre',
     ]);
   } finally {
@@ -175,7 +229,9 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
 /**
  * A Workers deployment as a fresh clone has it: its files and lockfile, no
  * node_modules. Its pnpm installs the fake wrangler, as pnpm would the real
- * one, and keeps its arguments; or, `refusing`, fails as pnpm does.
+ * one, and keeps its arguments; or, `refusing`, fails as pnpm does. Its
+ * database is the disposable cluster's: setup reads what it lets in before
+ * it asks about Cloudflare, and gets no further with it here.
  */
 function freshClone(refusing?: string) {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-clone-'));
@@ -195,11 +251,11 @@ function freshClone(refusing?: string) {
   );
   chmodSync(join(bin, 'pnpm'), 0o755);
   const env = { PATH: `${bin}:${process.env.PATH}`, HOME: dir };
-  const url = 'postgresql://postgres:unused@127.0.0.1:1/coffre';
+  const url = `${CLUSTER}/postgres`;
   return { dir, deployment, state, env, url, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("a fresh clone of a Workers deployment: setup installs it as its lockfile says, then signs in with its own wrangler", { skip: ptySkip }, async () => {
+test("a fresh clone of a Workers deployment: setup installs it as its lockfile says, then signs in with its own wrangler", { skip: ptySkip || needsCluster.skip }, async () => {
   const clone = freshClone();
   try {
     const { output } = await inTerminal(
@@ -231,7 +287,7 @@ test("a fresh clone of a Workers deployment: setup installs it as its lockfile s
   }
 });
 
-test('when its install fails, setup says why in a sentence, and runs nothing of the deployment', { skip: ptySkip }, async () => {
+test('when its install fails, setup says why in a sentence, and runs nothing of the deployment', { skip: ptySkip || needsCluster.skip }, async () => {
   const clone = freshClone(' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with package.json');
   try {
     const { output, code } = await inTerminal(
@@ -323,6 +379,45 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.ok(reset.vault.VAULT_KEY !== undefined && reset.vault.VAULT_KEY !== shown.vault.VAULT_KEY);
   });
 }
+
+test("a Workers deployment whose database can't hold both Hyperdrive configs: setup refuses before anything else, and every login keeps its password", { skip: SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh' }, async () => {
+  // 15 connections, 3 of them for superusers: 4 for each config, short of Hyperdrive's 5.
+  await emptyCluster(SMALL_CLUSTER);
+  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_small'), SMALL_CLUSTER);
+  const url = `${SMALL_CLUSTER}/setup_small`;
+  const verifiers = () =>
+    asSuperuser('postgres', async (client) =>
+      (await client.query<{ rolname: string; rolpassword: string }>(
+        "SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime') ORDER BY rolname",
+      )).rows, SMALL_CLUSTER);
+  try {
+    // A fresh database: nothing made, nothing migrated, and the commands it would show never shown.
+    const fresh = setup(['--json'], { stdin: `${url}\n`, workers: true });
+    assert.equal(fresh.status, 1, fresh.stderr);
+    assert.match(fresh.stderr, /✗ Check 127\.0\.0\.1\/setup_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's two configs, .*raise max_connections to 16 or more/s);
+    assert.equal(fresh.stdout, '');
+    assert.deepEqual(await verifiers(), []);
+    assertNoAdministrator(fresh, url);
+
+    // Not a Workers deployment, which needs no Hyperdrive: set up as ever.
+    const node = json(setup(['--json'], { stdin: `${url}\n` }));
+    const before = await verifiers();
+    assert.equal(before.length, 2);
+
+    // --reset-passwords in the Workers deployment: refused before the new
+    // passwords, which Hyperdrive would never have got, so the running app
+    // keeps logging in with the ones it has.
+    const reset = setup(['--reset-passwords', '--json'], { stdin: `${url}\n`, workers: true });
+    assert.equal(reset.status, 1, reset.stderr);
+    assert.match(reset.stderr, /✗ Check .*raise max_connections to 16 or more/s);
+    assert.doesNotMatch(reset.stderr, /Connected to|✓ (Set new passwords|Created|Migrated|The database is up to date)/, 'no step after it ran');
+    assert.deepEqual(await verifiers(), before);
+    assert.ok(await connects(node.app.DATABASE_URL!));
+    assert.ok(await connects(node.vault.DATABASE_URL!));
+  } finally {
+    await emptyCluster(SMALL_CLUSTER);
+  }
+});
 
 test('a database that holds data gets new passwords but no keys: its keys are the ones it was set up with', needsCluster, async () => {
   const url = await database('setup_used', 'superuser');

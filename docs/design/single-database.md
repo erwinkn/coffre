@@ -901,7 +901,9 @@ Hyperdrive, for both Workers:
   database per config on Free, and 100 on Paid; with KMS, each read in
   flight holds one of the vault's (question 2). PlanetScale does not
   publish PS-5's `max_connections`; it is in the branch's Parameters tab,
-  and both configs must fit under it.
+  and both configs must fit under it, or a burst of requests is refused
+  (53300) rather than queued. `coffre setup` reads it and sets each
+  config's `origin_connection_limit` to half of what is left.
 - **Placement.** Both Workers near the database's region, with Cloudflare's
   placement hint, since a decision makes several round trips.
 

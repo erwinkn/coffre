@@ -33,6 +33,7 @@ import {
   type Wrangler,
   type Zone,
 } from './cloudflare.ts';
+import { cappedLimit } from './connections.ts';
 import { deployOnPush, gitRemote, repositoryOf, SECRETS, WORKFLOW } from './deploy-on-push.ts';
 import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub, logoPath } from './github-app.ts';
@@ -430,11 +431,13 @@ export class Cloudflare {
 
   /**
    * A Hyperdrive config for each login, made, given its new password, or
-   * kept; with caching off, always. Setup listed the configs as it began: one
-   * deleted since is made again when its login has a new password, and stops
-   * the run when it does not, Hyperdrive needing a password setup can't read.
+   * kept; with caching off, always, and opening at most `limit` connections
+   * to the database, or fewer when someone set it lower. Setup listed the
+   * configs as it began: one deleted since is made again when its login has
+   * a new password, and stops the run when it does not, Hyperdrive needing
+   * a password setup can't read.
    */
-  async hyperdrive(logins: Record<Component, Login>): Promise<Outcome> {
+  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[] }> {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
     const details: string[] = [];
@@ -445,11 +448,13 @@ export class Cloudflare {
       let what: string;
       if (login.url !== null) {
         const origin = originOf(login.url);
-        if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin))) {
+        // A PUT replaces the whole config: the limit it has goes back in, lowered to `limit` when above it.
+        const kept = cappedLimit(config?.origin_connection_limit, limit) ?? config?.origin_connection_limit ?? limit;
+        if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin, kept))) {
           what = `given ${login.login}'s new password`;
         } else {
           what = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
-          config = { id: await api.createHyperdrive(account.id, name, origin), name, origin };
+          config = { id: await api.createHyperdrive(account.id, name, origin, limit), name, origin };
         }
       } else {
         const now = config === undefined ? null : await api.hyperdriveConfig(account.id, config.id);
@@ -460,18 +465,22 @@ export class Cloudflare {
           );
         }
         config = now;
-        if (config.caching?.disabled !== true) {
-          await api.disableCaching(account.id, config.id);
-          what = 'kept, its caching turned off';
-        } else {
-          what = 'kept';
+        const lower = cappedLimit(config.origin_connection_limit, limit) !== null;
+        const cache = config.caching?.disabled !== true;
+        if (cache || lower) {
+          await api.patchHyperdrive(account.id, config.id, {
+            ...(cache ? { caching: { disabled: true } } : {}),
+            ...(lower ? { origin_connection_limit: limit } : {}),
+          });
         }
+        const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
+        what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
       details.push(`${name.padEnd(width)}${what}`);
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off`, details };
+    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, a connection limit of ${limit} each`, details };
   }
 
   /**

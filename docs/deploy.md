@@ -503,8 +503,8 @@ password stays out of your shell's history: run it, paste the URL from
 commands, ready to copy.
 
 ```sh
-read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
-read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --origin-connection-limit=9 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --origin-connection-limit=9 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
 ```
 
 The first takes the app's database URL, the second the vault's. They drop
@@ -520,6 +520,18 @@ Keep `--caching-disabled` on **both** configs. A cached session or grant
 could otherwise survive its revocation. `wrangler.jsonc` cannot set this:
 check `caching` with `wrangler hyperdrive get <id>`. Fix an existing config
 with `wrangler hyperdrive update <id> --caching-disabled`.
+
+Keep both configs' connections under the database's. Hyperdrive opens
+connections up to its `origin_connection_limit`, 60 by default on Paid,
+before it makes a query wait (a soft limit, which a network failure can
+briefly exceed), and the database refuses any past its
+`max_connections`: a page's parallel reads then fail with "remaining
+connection slots are reserved" (53300). `coffre setup` reads the database's
+`max_connections`, less the slots it reserves for superusers, keeps 3 for
+the administrator and `coffre migrate`, and gives each config half the rest,
+at most 20; the commands it shows carry that number, here 9, for a
+`max_connections` of 25. Fix an existing config with
+`wrangler hyperdrive update <id> --origin-connection-limit=<n>`.
 
 ### 3. Keys and secrets
 

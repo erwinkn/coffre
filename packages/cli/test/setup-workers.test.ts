@@ -20,9 +20,9 @@ import pg from 'pg';
 
 import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
-import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
+import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER, SMALL_CLUSTER } from './cluster.ts';
 import { fakeCloudflare, fakeGh, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
-import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
+import { answering, ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
@@ -211,7 +211,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.match(text, /✓ coffre's address {2}secrets\.acme\.test/);
   assert.match(text, /✓ Root admins {2}ops@acme\.test/);
   assert.match(text, /✓ Created coffre_runtime and coffre_vault_runtime/);
-  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime/);
+  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, a connection limit of 20 each\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime\n\s+max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20\n/);
   assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
   // Its logo, which only its page sets: the file from the deployment's own CLI, and where it goes.
   assert.match(
@@ -230,9 +230,10 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
 
   // Hyperdrive has each login, with a password that works, and caching off.
   const configs = cloudflare.state.configs.get('acc-acme')!;
-  assert.deepEqual(configs.map(({ name, origin, caching }) => [name, origin.user, caching.disabled]), [
-    ['coffre', 'coffre_runtime', true],
-    ['coffre-vault', 'coffre_vault_runtime', true],
+  // And each opens an even share of the cluster's 97 connections at most, Free's 20, not Paid's default 60.
+  assert.deepEqual(configs.map(({ name, origin, caching, origin_connection_limit }) => [name, origin.user, caching.disabled, origin_connection_limit]), [
+    ['coffre', 'coffre_runtime', true, 20],
+    ['coffre-vault', 'coffre_vault_runtime', true, 20],
   ]);
   for (const { origin } of configs) {
     secrets.add(origin.password);
@@ -270,6 +271,9 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
 
 test('the run after: the vault keeps its key; the app gets a new one, and a new client secret for the same GitHub App', { skip }, async () => {
   unlinkSync(join(dir, 'wrangler', 'fail-coffre'));
+  // The app's config at Cloudflare's default, as earlier setups left both.
+  const [appConfig, vaultConfig] = cloudflare.state.configs.get('acc-acme')!;
+  appConfig!.origin_connection_limit = 60;
   const clientSecret = 'f'.repeat(40);
   secrets.add(clientSecret);
   const { output, code } = await setup(async (terminal) => {
@@ -287,7 +291,8 @@ test('the run after: the vault keeps its key; the app gets a new one, and a new 
   const text = mainText(output);
   assert.equal(code, 0, text);
   assert.match(text, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords/);
-  assert.match(text, /coffre\s+kept\n\s+coffre-vault\s+kept/);
+  assert.match(text, /coffre\s+kept, its connections capped at 20\n\s+coffre-vault\s+kept\n/);
+  assert.deepEqual([appConfig!.origin_connection_limit, vaultConfig!.origin_connection_limit], [20, 20]);
   assert.match(text, /✓ Took a new client secret for coffre's GitHub App/);
   assert.match(text, /✓ Deployed the vault, coffre-vault\n/);
   assert.match(text, /✓ Deployed the app, coffre, with its key and GitHub's secret/);
@@ -497,6 +502,46 @@ test("a deployment on another's database server: setup stops before giving their
   assert.deepEqual(await firstConnects(), [true, true], "the first deployment's logins keep their passwords");
   assert.equal(cloudflare.state.configs.get('acc-acme')!.length, before);
   assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+});
+
+test("--reset-passwords on a database too small for both Hyperdrive configs: setup stops before Cloudflare's questions, and the running instance's logins keep their passwords", { skip: skip || (SMALL_CLUSTER === undefined && 'needs the small cluster') }, async () => {
+  // The logins a running instance logs in with, its Hyperdrive configs holding these passwords.
+  await emptyCluster(SMALL_CLUSTER);
+  await asSuperuser('postgres', async (client) => {
+    await client.query('CREATE DATABASE setup_workers_small');
+    await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'running-app'");
+    await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'running-vault'");
+  }, SMALL_CLUSTER);
+  const verifiers = () =>
+    asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows, SMALL_CLUSTER);
+  const held = await verifiers();
+  const configs = JSON.stringify(cloudflare.state.configs.get('acc-acme'));
+  const requests = cloudflare.state.requests.length;
+  const small = another('small');
+  try {
+    const { output, code } = await setup(
+      // Cloudflare's questions, were setup to ask them: it stops before.
+      (terminal) =>
+        answering(
+          terminal,
+          { 'Set Cloudflare up too?': '\r', 'Which Cloudflare account?': '\r', "coffre's address": 'coffre-small.acme.test\r', "This deployment's name": '\r', 'Root admins': '\r' },
+          ['raise max_connections'],
+        ),
+      small,
+      `${SMALL_CLUSTER}/setup_workers_small`,
+      ['setup', '--reset-passwords'],
+    );
+    const text = mainText(output);
+    assert.equal(code, 1, text);
+    assert.match(text, /✗ Check 127\.0\.0\.1\/setup_workers_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5/);
+    assert.doesNotMatch(text, /Set Cloudflare up too\?|Connect to|✓ (Set new passwords|Created|Migrated|The database is up to date)/, 'nothing asked, and no step after it ran');
+    assert.equal(cloudflare.state.requests.length, requests, 'nothing asked of Cloudflare');
+    assert.deepEqual(await verifiers(), held, 'no new password the Hyperdrive configs lack');
+    assert.equal(JSON.stringify(cloudflare.state.configs.get('acc-acme')), configs, 'no Hyperdrive config made or changed');
+    assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+  } finally {
+    await emptyCluster(SMALL_CLUSTER);
+  }
 });
 
 test('a Worker without its key over a database in use: setup stops before changing anything', { skip }, async () => {
