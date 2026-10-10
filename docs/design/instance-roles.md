@@ -165,7 +165,7 @@ Every step is in the log, with who took it. A person's lists show them
 only the accounts they manage, each with everything it holds, which they
 reach anyway; no other account, no person, and no scope (D95).
 
-Three rules close what reaching every grant leaves open:
+Four rules close what reaching every grant leaves open:
 
 - **An account with no grant is its maker's.** Only the person who added
   it, as its row says, and those who run the instance, manage it until it
@@ -180,10 +180,31 @@ Three rules close what reaching every grant leaves open:
   account a Developer set up for dev gives it to the tokens and bindings
   that Developer made, which the account's page lists, by who made each.
   Read them before granting it more.
+- **A removed account is its remover's.** A person brings back only an
+  account they removed themselves, as its row says; one someone else
+  removed, an Admin or another person, comes back only through those who
+  run the instance. Otherwise anyone who sets up accounts could undo an
+  Admin's removal.
 
 No one grants a person through this, nor themselves (D91), nor a role any
 wider than their own: a service account a person sets up reads, at most,
 what that person reads.
+
+The setting names environments by slug, so it is policy, not a boundary,
+for those who rename environments. A Maintainer of `market` renames
+`market/prod` to `market/production`, and `all except [prod]` no longer
+keeps it to Admins: they set up accounts for it, giving them what they
+hold. They gain no read, since they already hold it; they only skip
+asking an Admin. Each rename is in the log (`environment.update`). Keep
+prod to Admins against them with `only [dev, staging]` instead, which a
+rename leaves out, or give them less than Maintainer there.
+
+The vault reads the setting from its newest `settings.change` that carries
+its MAC, and reports each one in its name it did not write. It reads back
+up to 1024 of those, 32 at a time; when there are such entries but none of
+its own within reach, the setting is closed (`projects only []`), never
+the default, so inserting rows into the log never opens it. Only a log
+with no `settings.change` at all is everywhere.
 
 ## Where it lives
 

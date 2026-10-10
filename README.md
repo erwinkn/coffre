@@ -313,7 +313,12 @@ token or trusts its workflow by OIDC, with no Admin: at most what they hold
 themselves, and only on an account whose every grant they hold. The
 setting **Who sets up service accounts** (Settings, or `coffre settings
 service-accounts --except-environments prod`) keeps the rest to Admins
-([docs/design/instance-roles.md](docs/design/instance-roles.md)).
+([docs/design/instance-roles.md](docs/design/instance-roles.md)). It names
+environments by slug, so a Maintainer who renames `prod` takes it out of
+`all except prod`; they hold it already, so it is policy rather than a
+boundary, and `only dev, staging` holds against a rename. A person brings
+back only an account they removed; one someone else removed, only those
+who run the instance bring back.
 
 ## Design decisions worth knowing
 

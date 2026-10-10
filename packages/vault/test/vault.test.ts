@@ -882,6 +882,80 @@ test('a person sets up a service account in the vault too: no more than they hol
   assert.equal(code(await grant(ADA, w.dev, 'developer')), 'not_allowed');
 });
 
+/**
+ * `count` entries in the vault's name, linked to the chain, each with a
+ * made-up MAC: what anyone who can insert rows can write.
+ */
+async function forgeEntries(count: number, entry: { action: string; code?: string; subjectPrincipal?: string; metadata?: string }): Promise<void> {
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  const [head] = await db.owner.select().from(auditChainHead);
+  const mac = Buffer.alloc(32, 7);
+  let [seq, prevHash] = [head.nextSeq, head.headHash];
+  const rows = [];
+  for (let i = 0; i < count; i += 1) {
+    const fields = {
+      seq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: ROOT,
+      action: entry.action, decision: entry.action === 'vault.tampered' ? 'deny' : 'allow', code: entry.code ?? null,
+      subjectPrincipal: entry.subjectPrincipal ?? null, projectId: null, environmentId: null, secretId: null, secretVersionId: null,
+      operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: entry.metadata ?? '{}',
+    };
+    const hash = entryHash(prevHash, fields, mac);
+    rows.push({ ...fields, prevHash, mac, hash });
+    [seq, prevHash] = [seq + 1n, hash];
+  }
+  for (let i = 0; i < rows.length; i += 100) await db.owner.insert(auditLog).values(rows.slice(i, i + 100));
+  await db.owner.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash });
+}
+
+test('settings forged in the vault\'s name above its own are passed over and reported; too many to see past, or none of its own, close the setting', async () => {
+  const w = await world();
+  const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
+  const CLOSED: Scope = { projects: { only: [] }, environments: 'all' };
+  const forgedSetting = { action: 'settings.change', metadata: JSON.stringify({ serviceAccounts: EVERYWHERE }) };
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
+
+  // No setting at all is the default; one the vault did not write, with none of its own, closes it.
+  assert.deepEqual(await w.vault.settings(), { serviceAccounts: EVERYWHERE });
+  await forgeEntries(1, forgedSetting);
+  assert.deepEqual(await w.vault.settings(), { serviceAccounts: CLOSED });
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci' })), 'not_allowed');
+
+  // Its own, under more forged ones than a page holds, still holds.
+  assert.ok((await w.vault.setSettings({ actor: ROOT, settings: { serviceAccounts: DEV_ONLY } })).ok);
+  await forgeEntries(33, forgedSetting);
+  assert.deepEqual(await w.vault.settings(), { serviceAccounts: DEV_ONLY });
+  const give = (environmentId: string) => w.vault.setAccess({ actor: ADA, principal: 'token:ci', changes: [{ projectId: w.project, environmentId, role: 'viewer', expiresAt: null }] });
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci' })), 'ok');
+  assert.equal(code(await give(w.dev)), 'ok');
+  assert.equal(code(await give(w.prod)), 'not_allowed');
+  const reports = await tamperings(w);
+  assert.equal(reports.length, 34);
+  assert.ok(reports.every(([subject, fault]) => subject === null && fault === 'forged_entry'));
+
+  // More than the vault reads back: closed, never the default.
+  await forgeEntries(32 * 32, forgedSetting);
+  assert.deepEqual(await w.vault.settings(), { serviceAccounts: CLOSED });
+  assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci-2' })), 'not_allowed');
+  assert.equal(code(await give(w.dev)), 'not_allowed');
+  assert.equal(code(await w.vault.remove({ actor: ADA, principal: 'token:ci' })), 'not_allowed');
+});
+
+test('a person brings back a service account they removed, never one someone else did', async () => {
+  const w = await world();
+  const code = (outcome: { ok: boolean; refusal?: { code: string; message: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'developer', scope: DEV_ONLY })).ok);
+  for (const account of ['token:hers', 'token:theirs']) assert.equal(code(await w.vault.admit({ actor: ADA, principal: account })), 'ok');
+
+  assert.equal(code(await w.vault.remove({ actor: ADA, principal: 'token:hers' })), 'ok');
+  assert.equal(code(await w.vault.remove({ actor: ROOT, principal: 'token:theirs' })), 'ok');
+  assert.equal(code(await w.vault.admit({ actor: BOB, principal: 'token:hers' })), 'not_allowed', 'not one Ada removed');
+  const refused = await w.vault.admit({ actor: ADA, principal: 'token:theirs' });
+  assert.match(refused.ok ? '' : refused.refusal.message, /^user:root@acme\.example removed this service account/);
+  assert.deepEqual(await w.vault.admit({ actor: ADA, principal: 'token:hers' }), { ok: true, created: true, role: 'member', scope: EVERYWHERE, generation: 1 });
+  assert.equal(code(await w.vault.admit({ actor: ROOT, principal: 'token:theirs' })), 'ok', 'who runs the instance brings back any');
+});
+
 test('an instance role reaches every project in its scope, the ones made later too, and grants add to it', async () => {
   const w = await world();
   const { environments } = tablesOf(db.owner);
@@ -1125,6 +1199,25 @@ test('a genuine row put back after a tamper report is left as migrate says, unti
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => preview.principal), [BOB]);
   await (await fresh()).access(BOB);
   assert.deepEqual(await db.owner.select().from(vaultGrants).where(everyProject), []);
+});
+
+test('tamper reports forged in the vault\'s name above its own leave the one it wrote standing', async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  await member(w, BOB, []);
+  await everyProjectGrant(BOB, null, 'viewer');
+  await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
+  assert.equal((await w.vault.access(BOB)).status, 'tampered');
+  await db.owner.update(vaultGrants).set({ role: 'viewer' }).where(eq(vaultGrants.principal, BOB));
+  assert.equal((await w.vault.access(BOB)).status, 'active');
+
+  // More forged reports than a page holds, above the vault's own: it still stands, as migrate says.
+  await forgeEntries(33, { action: 'vault.tampered', code: 'stale', subjectPrincipal: BOB });
+  assert.deepEqual(await everyProjectPreview(db.owner, Date.now()), []);
+  await (await fresh()).access(BOB);
+  const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
+  assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
+  assert.equal((await tamperings(w)).filter(([, fault]) => fault === 'forged_entry').length, 33);
 });
 
 test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {

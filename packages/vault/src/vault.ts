@@ -209,6 +209,12 @@ const SETTINGS = 'settings.change';
 /** The settings before anyone changed them: people set up service accounts anywhere they hold access. */
 const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
 
+/** The settings when the log has some, but none the vault wrote within reach: people set up no service accounts. */
+const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, environments: 'all' } };
+
+/** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`#newestAuthentic`). */
+const LOOK_BACK = { page: 32, pages: 32 };
+
 /** Why a person's change to a service account is refused. */
 const NOT_THEIRS = 'a person gives a service account at most what they hold, where the instance lets them set one up, and only to one whose every grant they hold';
 
@@ -494,9 +500,38 @@ class VaultService implements Vault {
    * starting them over, or another change, settles it. Both by their MACs.
    */
   async #reportStands(db: Queryable, principal: string, reports: NewEntry[]): Promise<boolean> {
-    const report = (await store.tamperReportsAbout(db, principal, 32)).find((entry) => this.#authentic(entry));
-    if (report === undefined) return false;
+    const report = await this.#newestAuthentic(
+      (before) => store.tamperReportsAbout(db, principal, LOOK_BACK.page, before),
+      (entry) => this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq),
+    );
+    // Too many forged to see past: it may stand, so they are left as they are.
+    if (report === 'unreached') return true;
+    if (report === 'none' || report === 'forged') return false;
     return report.seq > ((await this.#newestAccessSeq(db, principal, reports)) ?? -1n);
+  }
+
+  /**
+   * The newest of the entries `page` reads, newest first and before a seq,
+   * that carries the vault's MAC, read back a page at a time: 'none' when
+   * there are none at all, 'forged' when every one is in its name but not
+   * its own, and 'unreached' when LOOK_BACK such entries still leave more
+   * unread. Each it did not write goes to `forged`.
+   */
+  async #newestAuthentic(
+    page: (before: bigint | undefined) => Promise<StoredEntry[]>,
+    forged: (entry: StoredEntry) => void,
+  ): Promise<StoredEntry | 'none' | 'forged' | 'unreached'> {
+    let before: bigint | undefined;
+    for (let read = 0; read < LOOK_BACK.pages; read += 1) {
+      const entries = await page(before);
+      for (const entry of entries) {
+        if (this.#authentic(entry)) return entry;
+        forged(entry);
+      }
+      if (entries.length < LOOK_BACK.page) return before === undefined && entries.length === 0 ? 'none' : 'forged';
+      before = entries.at(-1)!.seq;
+    }
+    return 'unreached';
   }
 
   /** Whether `entry` carries the vault's MAC: under any of its keys before `since`, and only its current one from there. */
@@ -517,7 +552,7 @@ class VaultService implements Vault {
   }
 
   /** A `vault.tampered` entry, once per process for each thing found: `#reported` marks it once committed. */
-  #report(reports: NewEntry[], principal: string, code: Fault | 'forged_entry', detail: string, relatedSeq: bigint | null = null): void {
+  #report(reports: NewEntry[], principal: string | null, code: Fault | 'forged_entry', detail: string, relatedSeq: bigint | null = null): void {
     const key = `${principal}|${code}|${detail}`;
     if (this.#prepared.reported.has(key) || reports.some((entry) => REPORTED.get(entry) === key)) return;
     const entry: NewEntry = {
@@ -1518,7 +1553,7 @@ class VaultService implements Vault {
       if (row === undefined) throw refused('not_a_member');
       if (!manages) {
         // The setting as of the log's head, which a change to it takes too.
-        const setting = (await this.#settingsAt(d.tx)).serviceAccounts;
+        const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
         const account = await this.#account(d.tx, subject, row);
         // Each place's new role they must hold, and what it held before: taking a grant away is changing it.
         const gives = changes.every((change, i) => {
@@ -1601,9 +1636,14 @@ class VaultService implements Vault {
       if (!runsInstance(acting.live)) {
         // A service account, with no grant yet, any person who could give it one sets up (`setsUpServices`).
         const service = SERVICE.test(principal) && (input.role ?? 'member') === 'member' && input.scope === undefined;
-        const setting = (await this.#settingsAt(d.tx)).serviceAccounts;
+        const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
         if (!service || !PERSON.test(actor) || !setsUpServices(acting.live, setting, placesOf(await store.liveProjects(d.tx)))) {
           throw refused('not_allowed', 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up');
+        }
+        // One removed they bring back only if they removed it themselves, never one someone else took away.
+        const removed = d.members.get(principal);
+        if (removed?.status === 'removed' && removed.statusChangedBy !== actor) {
+          throw refused('not_allowed', `${shownMember(removed.statusChangedBy)} removed this service account: only they, or someone who runs the whole instance, may bring it back`);
         }
       }
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
@@ -1680,7 +1720,7 @@ class VaultService implements Vault {
       if (!runsInstance(holder)) {
         // A service account its manager removes: they reach everything it holds (`managesService`).
         const theirs = SERVICE.test(principal) && PERSON.test(actor) && row?.status === 'active' &&
-          managesService(holder, (await this.#settingsAt(d.tx)).serviceAccounts, actor, await this.#account(d.tx, subject, row));
+          managesService(holder, (await this.#settingsAt(d.tx, d.reports)).serviceAccounts, actor, await this.#account(d.tx, subject, row));
         if (!theirs) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members, and a service account whoever manages it');
       }
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
@@ -1739,20 +1779,27 @@ class VaultService implements Vault {
 
   async settings(): Promise<Settings> {
     await this.#settled();
-    return this.#settingsAt(this.#db);
+    const reports: NewEntry[] = [];
+    const settings = await this.#settingsAt(this.#db, reports);
+    await this.#record(reports);
+    return settings;
   }
 
   /**
    * The settings the vault's newest `settings.change` says, by its MAC: one
-   * in its name it did not write is passed over, as a `key.check` is.
+   * in its name it did not write is passed over, and reported. With such
+   * entries and none of its own within reach, the setting is closed, never
+   * the default: otherwise whoever can insert rows could open it again.
    */
-  async #settingsAt(db: Queryable): Promise<Settings> {
-    for (const entry of await store.newestVaultEntries(db, SETTINGS, 32)) {
-      if (!this.#authentic(entry)) continue;
-      const { serviceAccounts } = JSON.parse(entry.metadata) as { serviceAccounts?: unknown };
-      if (isScope(serviceAccounts)) return { serviceAccounts };
-    }
-    return DEFAULT_SETTINGS;
+  async #settingsAt(db: Queryable, reports: NewEntry[]): Promise<Settings> {
+    const entry = await this.#newestAuthentic(
+      (before) => store.newestVaultEntries(db, SETTINGS, LOOK_BACK.page, before),
+      (forged) => this.#report(reports, null, 'forged_entry', String(forged.seq), forged.seq),
+    );
+    if (entry === 'none') return DEFAULT_SETTINGS;
+    if (typeof entry === 'string') return CLOSED_SETTINGS;
+    const { serviceAccounts } = JSON.parse(entry.metadata) as { serviceAccounts?: unknown };
+    return isScope(serviceAccounts) ? { serviceAccounts } : CLOSED_SETTINGS;
   }
 
   setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>> {
@@ -1776,7 +1823,7 @@ class VaultService implements Vault {
       if (!isScope(input.settings?.serviceAccounts)) throw refused('invalid', 'who sets up service accounts is a scope: { projects, environments }, each all, only or except');
       // Under the log's head, so two changes at once each name the one before.
       await lockLogHead(d.tx);
-      const previous = await this.#settingsAt(d.tx);
+      const previous = await this.#settingsAt(d.tx, d.reports);
       const settings: Settings = { serviceAccounts: normalScope(input.settings.serviceAccounts) };
       if (JSON.stringify(settings) !== JSON.stringify(previous)) d.log.push(entry('allow', { ...settings, previous }));
       return { settings };
