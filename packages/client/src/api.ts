@@ -585,7 +585,7 @@ export type Api = {
         issuer: string;
         jwksUri: string;
         claims: {
-          [key: string]: string;
+          [key: string]: string | string[];
         };
         label: string | null;
         createdAt: string;
@@ -598,7 +598,7 @@ export type Api = {
     input: {
       profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
       claims: {
-        [key: string]: string;
+        [key: string]: string | string[];
       };
       issuer?: string | null;
       label?: string | null;
@@ -609,7 +609,7 @@ export type Api = {
       issuer: string;
       jwksUri: string;
       claims: {
-        [key: string]: string;
+        [key: string]: string | string[];
       };
       replaces: {
         id: string;
@@ -622,7 +622,7 @@ export type Api = {
         issuer: string;
         jwksUri: string;
         claims: {
-          [key: string]: string;
+          [key: string]: string | string[];
         };
         label: string | null;
         createdAt: string;
@@ -1072,7 +1072,7 @@ export type BindingPlan = {
   issuer: string;
   jwksUri: string;
   claims: {
-    [key: string]: string;
+    [key: string]: string | string[];
   };
   replaces: {
     id: string;
@@ -1086,7 +1086,7 @@ export type BindingView = {
   issuer: string;
   jwksUri: string;
   claims: {
-    [key: string]: string;
+    [key: string]: string | string[];
   };
   label: string | null;
   createdAt: string;

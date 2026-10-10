@@ -101,6 +101,17 @@ test("a 0.4 deployment gains the account page's tabs, under its account.tsx as i
   }
 });
 
+test("a 0.4.6 deployment gains a person's Connected apps tab", () => {
+  const dir = deployment('workers');
+  try {
+    const apps = 'app/src/routes/_coffre/users.$user.apps.tsx';
+    rmSync(join(dir, apps));
+    assert.deepEqual(changesOf(pageMove(dir, templateDir('workers'), '0.4.6')).map(({ path, was }) => [path, was]), [[apps, null]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a deployment without coffre's layouts as file routes is refused, not given pages", () => {
   const dir = deployment('workers');
   try {

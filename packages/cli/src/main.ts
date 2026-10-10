@@ -16,7 +16,7 @@ import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
-import { bindingsFrom, describeBindings, describeEvents, describePlan, serviceMember, TRUST_USAGE, type TrustArgs } from './trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describePlan, serviceMember, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
@@ -987,26 +987,22 @@ async function trust(args: string[]): Promise<void> {
     process.stdout.write(describeBindings(member, (await coffre.bindings.list(member)).bindings));
     return;
   }
-  // A repository or project the lookup cannot see comes back here, for bindingsFrom to say how to give its IDs.
+  // A repository or project the lookup cannot see comes back here, for bindingFrom to say how to give its IDs.
   const lookup = client(target(), undefined, [400, 404]);
-  const bindings = await bindingsFrom(flags as TrustArgs, (input) => lookup.bindings.lookup(input)).catch((error: unknown) =>
+  const binding = await bindingFrom(flags, (input) => lookup.bindings.lookup(input)).catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
-  if (replace !== undefined && bindings.length > 1) fail('--replace goes with one binding at a time: name one --event or --source');
-  const inputs = bindings.map((binding) => ({ ...binding, label: label ?? null, replaces: replace ?? [] }));
-  const plans = [];
-  for (const input of inputs) plans.push(await coffre.bindings.preview(member, input));
-  const events = describeEvents(plans);
+  const input = { ...binding, label: label ?? null, replaces: replace ?? [] };
+  const plan = await coffre.bindings.preview(member, input);
+  const events = describeEvents(plan);
   if (!apply) {
-    for (const plan of plans) process.stdout.write(describePlan(member, plan, null));
+    process.stdout.write(describePlan(member, plan, null));
     if (events !== null) process.stdout.write(`${events}\n`);
-    process.stdout.write(`Run it again with --apply to save ${plans.length === 1 ? 'it' : 'them'}.\n`);
+    process.stdout.write('Run it again with --apply to save it.\n');
     return;
   }
-  for (const [i, input] of inputs.entries()) {
-    const saved = await coffre.bindings.create(member, input);
-    process.stdout.write(describePlan(member, plans[i]!, saved.binding));
-  }
+  const saved = await coffre.bindings.create(member, input);
+  process.stdout.write(describePlan(member, plan, saved.binding));
   if (events !== null) process.stdout.write(`${events}\n`);
 }
 

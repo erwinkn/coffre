@@ -38,7 +38,7 @@ type View = {
   basis: string | null;
   status: string;
   summary: string;
-  details: { label: string; value: string; note?: string }[];
+  details: { label: string; value: string; note?: string; warn?: true }[];
   asks: unknown;
   reveals: boolean;
   ready: boolean;
@@ -326,6 +326,17 @@ test("trust_workload's page names each ID from GitHub or GitLab, says when it ca
     claims: { repository_owner_id: '5150', ref: 'refs/heads/main', event_name: 'push', job_workflow_ref: 'acme/ci/.github/workflows/deploy.yml@refs/heads/main', job_workflow_sha: 'a'.repeat(40) },
   });
   assert.equal(organization.repository_owner_id, 'the GitHub account evil-org');
+
+  // Pull requests and workflow_run: the page says what they expose, as a line to check.
+  const ci = (await view(await opened(DEV, 'trust_workload', {
+    service: 'ci-deploy',
+    profile: 'github',
+    claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/web/.github/workflows/ci.yml@refs/heads/main', ref: 'refs/heads/main', event_name: ['push', 'pull_request'] },
+  }))).body.approval.details.find((line) => line.label === 'event_name')!;
+  assert.equal(ci.value, 'push, pull_request');
+  assert.equal(ci.warn, true);
+  assert.match(ci.note!, /^Anyone who can push a branch to the repository can open a pull request/);
+  assert.equal((await view(await opened(DEV, 'trust_workload', { service: 'ci-deploy', profile: 'github', claims: { event_name: 'push' } }))).body.approval.details.find((line) => line.label === 'event_name')!.warn, undefined);
 });
 
 test('an approved change that never answered is reported failed, its outcome unknown, never as nothing changed; the person is warned before approving it again (L2)', async () => {

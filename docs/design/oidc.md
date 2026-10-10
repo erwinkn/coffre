@@ -24,14 +24,21 @@ steps:
 ## 1. Trust bindings
 
 A binding belongs to one service. It names a profile, an issuer, and the
-claims a token must carry, each a top-level string matched exactly:
+claims a token must carry, each a top-level string matched exactly. The
+claim that says what started the run, `event_name` on GitHub and
+`pipeline_source` on GitLab, may list several values, and a token matches
+with any one of them:
 
 ```json
 { "profile": "github", "issuer": "https://token.actions.githubusercontent.com",
   "claims": { "repository_owner_id": "9919", "repository_id": "41532",
               "workflow_ref": "acme/api/.github/workflows/deploy.yml@refs/heads/main",
-              "ref": "refs/heads/main", "event_name": "push" } }
+              "ref": "refs/heads/main", "event_name": ["push", "workflow_dispatch"] } }
 ```
+
+A list is stored once each, in the profile's order, and a single value as
+a plain string, so a binding made before lists existed reads as a binding
+of one event.
 
 **The server enforces each profile's minimum.** It checks every binding
 against its profile, whether it comes from the UI, the CLI or the API, and
@@ -46,10 +53,11 @@ profile. A GitHub Enterprise Server or a self-managed GitLab picks its own.
 | `custom`, any other issuer | `sub`, and the UI says the owner vouches for what it means: a Google Cloud service account's unique ID, say |
 
 Some rules within the profiles:
-- **GitHub events.** `event_name` must be `push`, `workflow_dispatch`,
-  `schedule` or `release`. Each is triggered by someone with write access,
-  at a ref the binding names exactly. They don't make everything the job
-  runs safe (section 5).
+- **GitHub events.** `event_name` is one or more of `push`,
+  `workflow_dispatch`, `schedule`, `release`, `pull_request` and
+  `workflow_run`. The first four are triggered by someone with write
+  access, at a ref the binding names exactly. They don't make everything
+  the job runs safe (section 5). The ref must suit every event listed.
   - `push`: the branch or tag ref, and a tag `main` is not `refs/heads/main`.
   - `workflow_dispatch`: the ref the writer dispatches, whatever the default
     branch has.
@@ -59,9 +67,24 @@ Some rules within the profiles:
     tag. It doesn't tell `published` from `edited`; the workflow restricts
     that.
 
-  The server refuses `pull_request`, `pull_request_target` and
-  `workflow_run`, even when their ref happens to match. Their runs can carry
-  a stranger's code.
+  - `pull_request`: the branch the pull request merges into. Its run is at
+    `refs/pull/<n>/merge`, so the exchange reads its `ref`, and the ref its
+    `workflow_ref` ends in, as `refs/heads/<base_ref>`, for GitHub's
+    profiles only. A merged pull request's run is at that branch already.
+    The run executes the pull request's code and workflow file, unreviewed,
+    so the binding trusts whoever can push a branch to the repository.
+    Forks get no ID token: GitHub turns `id-token: write` off for their
+    pull requests, and Dependabot's, unless an admin of a private
+    repository sends write tokens to them.
+  - `workflow_run`: the default branch, whose workflow it runs. A fork's
+    pull request can start it, so it is safe only while it runs none of
+    the triggering run's code or artifacts.
+
+  The owner picks these two knowing that; the form, the CLI and the MCP
+  approval page say what each exposes. The server refuses
+  `pull_request_target` and every other event, even when their ref
+  happens to match: they act on anyone's pull request with the base
+  repository's tokens.
 - **Reusable workflows.** A reusable workflow is trusted at one commit:
   `job_workflow_sha` pins it, since its path can be reused and its branch
   changed. A new version needs a new binding.

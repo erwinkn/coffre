@@ -219,6 +219,15 @@ export const userActivity = {
   },
 };
 
+/** `/users/$user/apps`, the MCP clients they connected, for an owner where the deployment serves MCP; the others are sent to the first tab. */
+export const userApps = {
+  loader: async ({ context, params }: Loader<{ user: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (!shell.features.mcp || !shell.capabilities.canManageGrants) throw redirect({ to: '/users/$user', params });
+  },
+};
+
 /** `/service-accounts`. */
 export const serviceAccounts = {
   loader: ({ context }: Loader) => {

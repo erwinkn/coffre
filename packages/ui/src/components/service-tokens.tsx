@@ -27,12 +27,15 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
       <Card
         labelledBy="service-tokens"
         title="Bearer tokens"
-        description="For CI without OIDC: tokens this service account presents to the API. Each is shown once, when it is issued; coffre keeps only a hash."
+        description={
+          <>
+            A long-lived secret, for CI that can't use OIDC. For example, a cron job on your own server runs{' '}
+            <span className="mono nowrap">coffre login &lt;url&gt; --token</span> with one. coffre shows it once.
+          </>
+        }
       >
         {tokens.length === 0 ? (
-          <EmptyState title="No bearer tokens">
-            None is needed for CI that signs in with OIDC; issue one for CI that cannot.
-          </EmptyState>
+          <EmptyState title="No bearer tokens">CI that signs in with OIDC needs none.</EmptyState>
         ) : (
           <div className="dt-wrap">
             <table className="dt">

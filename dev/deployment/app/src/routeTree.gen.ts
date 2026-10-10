@@ -46,6 +46,7 @@ import { Route as CoffreServiceAccountsAccountAccessRouteImport } from './routes
 import { Route as CoffreServiceAccountsAccountActivityRouteImport } from './routes/_coffre/service-accounts.$account.activity'
 import { Route as CoffreUsersUserIndexRouteImport } from './routes/_coffre/users.$user.index'
 import { Route as CoffreUsersUserActivityRouteImport } from './routes/_coffre/users.$user.activity'
+import { Route as CoffreUsersUserAppsRouteImport } from './routes/_coffre/users.$user.apps'
 
 const CoffreRoute = CoffreRouteImport.update({
   id: '/_coffre',
@@ -240,6 +241,11 @@ const CoffreUsersUserActivityRoute = CoffreUsersUserActivityRouteImport.update({
   path: '/activity',
   getParentRoute: () => CoffreUsersUserRoute,
 } as any)
+const CoffreUsersUserAppsRoute = CoffreUsersUserAppsRouteImport.update({
+  id: '/apps',
+  path: '/apps',
+  getParentRoute: () => CoffreUsersUserRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof CoffreIndexRoute
@@ -274,6 +280,7 @@ export interface FileRoutesByFullPath {
   '/service-accounts/$account/access': typeof CoffreServiceAccountsAccountAccessRoute
   '/service-accounts/$account/activity': typeof CoffreServiceAccountsAccountActivityRoute
   '/users/$user/activity': typeof CoffreUsersUserActivityRoute
+  '/users/$user/apps': typeof CoffreUsersUserAppsRoute
   '/projects/$project/': typeof CoffreProjectsProjectIndexRoute
   '/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
   '/users/$user/': typeof CoffreUsersUserIndexRoute
@@ -307,6 +314,7 @@ export interface FileRoutesByTo {
   '/service-accounts/$account/access': typeof CoffreServiceAccountsAccountAccessRoute
   '/service-accounts/$account/activity': typeof CoffreServiceAccountsAccountActivityRoute
   '/users/$user/activity': typeof CoffreUsersUserActivityRoute
+  '/users/$user/apps': typeof CoffreUsersUserAppsRoute
   '/projects/$project': typeof CoffreProjectsProjectIndexRoute
   '/service-accounts/$account': typeof CoffreServiceAccountsAccountIndexRoute
   '/users/$user': typeof CoffreUsersUserIndexRoute
@@ -347,6 +355,7 @@ export interface FileRoutesById {
   '/_coffre/service-accounts/$account/access': typeof CoffreServiceAccountsAccountAccessRoute
   '/_coffre/service-accounts/$account/activity': typeof CoffreServiceAccountsAccountActivityRoute
   '/_coffre/users/$user/activity': typeof CoffreUsersUserActivityRoute
+  '/_coffre/users/$user/apps': typeof CoffreUsersUserAppsRoute
   '/_coffre/projects/$project/': typeof CoffreProjectsProjectIndexRoute
   '/_coffre/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
   '/_coffre/users/$user/': typeof CoffreUsersUserIndexRoute
@@ -386,6 +395,7 @@ export interface FileRouteTypes {
     | '/service-accounts/$account/access'
     | '/service-accounts/$account/activity'
     | '/users/$user/activity'
+    | '/users/$user/apps'
     | '/projects/$project/'
     | '/service-accounts/$account/'
     | '/users/$user/'
@@ -419,6 +429,7 @@ export interface FileRouteTypes {
     | '/service-accounts/$account/access'
     | '/service-accounts/$account/activity'
     | '/users/$user/activity'
+    | '/users/$user/apps'
     | '/projects/$project'
     | '/service-accounts/$account'
     | '/users/$user'
@@ -458,6 +469,7 @@ export interface FileRouteTypes {
     | '/_coffre/service-accounts/$account/access'
     | '/_coffre/service-accounts/$account/activity'
     | '/_coffre/users/$user/activity'
+    | '/_coffre/users/$user/apps'
     | '/_coffre/projects/$project/'
     | '/_coffre/service-accounts/$account/'
     | '/_coffre/users/$user/'
@@ -735,6 +747,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CoffreUsersUserActivityRouteImport
       parentRoute: typeof CoffreUsersUserRoute
     }
+    '/_coffre/users/$user/apps': {
+      id: '/_coffre/users/$user/apps'
+      path: '/apps'
+      fullPath: '/users/$user/apps'
+      preLoaderRoute: typeof CoffreUsersUserAppsRouteImport
+      parentRoute: typeof CoffreUsersUserRoute
+    }
   }
 }
 
@@ -799,11 +818,13 @@ const CoffreServiceAccountsAccountRouteWithChildren =
 
 interface CoffreUsersUserRouteChildren {
   CoffreUsersUserActivityRoute: typeof CoffreUsersUserActivityRoute
+  CoffreUsersUserAppsRoute: typeof CoffreUsersUserAppsRoute
   CoffreUsersUserIndexRoute: typeof CoffreUsersUserIndexRoute
 }
 
 const CoffreUsersUserRouteChildren: CoffreUsersUserRouteChildren = {
   CoffreUsersUserActivityRoute: CoffreUsersUserActivityRoute,
+  CoffreUsersUserAppsRoute: CoffreUsersUserAppsRoute,
   CoffreUsersUserIndexRoute: CoffreUsersUserIndexRoute,
 }
 

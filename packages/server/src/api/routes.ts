@@ -314,8 +314,9 @@ export const routes = {
       profile: z.enum(WORKLOAD_PROFILES),
       // github.com's or gitlab.com's when left out; a custom binding names its own.
       issuer: z.string().max(400).nullable().default(null),
+      // A value, or for what started the run (event_name, pipeline_source), a list of them.
       claims: z
-        .record(z.string().max(64), z.string().max(1024))
+        .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
         .refine((claims) => Object.keys(claims).length <= MAX_CLAIMS, `a binding names at most ${MAX_CLAIMS} claims`),
       label: z.string().trim().min(1).max(120).nullable().default(null),
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),

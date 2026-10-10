@@ -35,6 +35,7 @@ import {
   user,
   userAccess,
   userActivity,
+  userApps,
   users,
   type CoffreContext,
 } from './options';
@@ -52,7 +53,7 @@ import { ServiceAccountAccessPage, ServiceAccountActivityPage, ServiceAccountLay
 import { ServiceAccountsPage } from './pages/service-accounts';
 import { SettingsPage } from './pages/settings';
 import { UnregisteredPage } from './pages/unregistered';
-import { UserAccessPage, UserActivityPage, UserLayout } from './pages/user';
+import { UserAccessPage, UserActivityPage, UserAppsPage, UserLayout } from './pages/user';
 import { UsersPage } from './pages/users';
 
 const root = createRootRouteWithContext<CoffreContext>()({});
@@ -88,6 +89,7 @@ const routeTree = root.addChildren([
     userPage.addChildren([
       createRoute({ ...tab(userPage, '/'), ...userAccess, component: UserAccessPage }),
       createRoute({ ...tab(userPage, '/activity'), ...userActivity, component: UserActivityPage }),
+      createRoute({ ...tab(userPage, '/apps'), ...userApps, component: UserAppsPage }),
     ]),
     createRoute({ ...under('/service-accounts'), ...serviceAccounts, component: ServiceAccountsPage }),
     serviceAccountPage.addChildren([

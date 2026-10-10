@@ -565,6 +565,39 @@ test('an exchange racing a removal never leaves a credential the removal missed'
   assert.equal((await trade(token(rsa))).body.reason, 'no_match');
 });
 
+test('one binding trusts a workflow on several events: a pull request into its branch, by its own run, and the push, but no other event', async () => {
+  const ci = {
+    ...DEPLOY,
+    workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main',
+    event_name: ['push', 'pull_request'],
+  };
+  await bind(ci, [await bindingId()]);
+  const pr = {
+    workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/pull/12/merge',
+    ref: 'refs/pull/12/merge',
+    base_ref: 'main',
+    head_ref: 'feature',
+    event_name: 'pull_request',
+    sub: 'repo:acme/api:pull_request',
+  };
+  assert.equal((await trade(token(rsa, { workflow_ref: ci.workflow_ref }))).status, 200);
+  const { status, body } = await trade(token(rsa, pr));
+  assert.equal(status, 200, JSON.stringify(body));
+  // Its entry says which pull request: its merge ref, and the branches it goes from and into.
+  const run = (await appEntries('token.exchange')).at(-1)!.metadata.run as Record<string, unknown>;
+  assert.deepEqual([run.event_name, run.ref, run.base_ref, run.head_ref], ['pull_request', 'refs/pull/12/merge', 'main', 'feature']);
+  // Into another branch, or another event at the same ref, no binding takes it.
+  const elsewhere = await trade(token(rsa, { ...pr, base_ref: 'release' }));
+  assert.deepEqual([elsewhere.body.reason, elsewhere.body.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: ref, workflow_ref differ`]);
+  assert.equal((await trade(token(rsa, { workflow_ref: ci.workflow_ref, event_name: 'workflow_dispatch' }))).body.reason, 'no_match');
+});
+
+/** The service's one live binding. */
+async function bindingId(): Promise<string> {
+  const [binding] = await db.owner.select({ id: serviceBindings.id }).from(serviceBindings);
+  return binding!.id;
+}
+
 test("a reusable workflow's binding names its caller's ref: a feature branch calling the same pinned commit is refused", async () => {
   const called = { job_workflow_ref: 'acme/workflows/.github/workflows/deploy.yml@refs/tags/v1', job_workflow_sha: 'a'.repeat(40) };
   const id = await bind({ repository_owner_id: '9919', repository_id: '41532', ref: 'refs/heads/main', event_name: 'push', ...called }, [], 'github-reusable');

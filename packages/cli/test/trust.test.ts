@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { CoffreError } from '@coffre/client';
 import { checkBinding } from '@coffre/core/workloads';
 
-import { bindingFrom, bindingsFrom, describeBindings, describeEvents, describePlan, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describePlan, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
 
 const SHA = 'b'.repeat(40);
 
@@ -16,11 +16,10 @@ const lookup: Lookup = async (input) => {
   throw new CoffreError(404, 'not_found', 'api.github.com did not find it: a private one\'s IDs are typed in');
 };
 
-/** Each binding the flags build is one the server accepts. */
+/** Each binding the flags build is one the server accepts: here as it stores it. */
 async function built(flags: TrustFlags) {
   const binding = await bindingFrom(flags, lookup);
-  checkBinding(binding);
-  return binding;
+  return { ...binding, claims: checkBinding(binding).claims };
 }
 
 test('a workflow of the repository, on a branch, a tag or a release, with its IDs looked up', async () => {
@@ -35,7 +34,7 @@ test('a workflow of the repository, on a branch, a tag or a release, with its ID
       event_name: 'push',
     },
   });
-  const release = await built({ github: 'acme/api', workflow: '.github/workflows/ship.yml', tag: 'v2.0.0', event: 'release' });
+  const release = await built({ github: 'acme/api', workflow: '.github/workflows/ship.yml', tag: 'v2.0.0', event: ['release'] });
   assert.deepEqual([release.claims.ref, release.claims.workflow_ref, release.claims.event_name], [
     'refs/tags/v2.0.0', 'acme/api/.github/workflows/ship.yml@refs/tags/v2.0.0', 'release',
   ]);
@@ -71,7 +70,7 @@ test('a GitLab project, by its namespace and project IDs, a branch or a tag, and
     issuer: null,
     claims: { namespace_id: '12', project_id: '345', ref_type: 'branch', ref: 'main', pipeline_source: 'push' },
   });
-  const tag = await built({ gitlab: 'acme/api', tag: 'v1', source: 'web' });
+  const tag = await built({ gitlab: 'acme/api', tag: 'v1', source: ['web'] });
   assert.deepEqual([tag.claims.ref_type, tag.claims.ref, tag.claims.pipeline_source], ['tag', 'v1', 'web']);
   const selfManaged = await built({ gitlab: 'acme/api', branch: 'main', 'gitlab-url': 'https://gitlab.acme.example', 'project-id': '5', 'namespace-id': '6' });
   assert.equal(selfManaged.issuer, 'https://gitlab.acme.example');
@@ -134,6 +133,10 @@ test('a binding says, in a sentence, which CI runs it lets sign in: platform, re
     "GitHub Actions runs of acme/api's workflow deploy.yml, on branch main, by push",
   );
   assert.equal(
+    runsOf({ profile: 'github', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main', ref: 'refs/heads/main', event_name: ['push', 'pull_request'] } }),
+    "GitHub Actions runs of acme/api's workflow ci.yml, on branch main or a pull request into it, by push or pull_request",
+  );
+  assert.equal(
     runsOf({ profile: 'github-reusable', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', ref: 'refs/tags/v2', event_name: 'release', job_workflow_ref: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', job_workflow_sha: SHA } }),
     'GitHub Actions runs of repository 41532 that call the reusable workflow acme/deploy/.github/workflows/release.yml@refs/heads/main at commit aaaaaaaaaaaa, on tag v2, by release',
   );
@@ -171,35 +174,38 @@ test('a private repository or project: said in a line, then the command that get
   await assert.rejects(bindingFrom({ github: 'nope', workflow: 'deploy.yml', branch: 'main' }, malformed), { message: 'a GitHub repository is <owner>/<name>' });
 });
 
-test('one binding for each event or pipeline source named, push unless told; the IDs looked up once', async () => {
-  let asked = 0;
-  const counting: Lookup = async (input) => (asked++, lookup(input));
-  const three = await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['push,workflow_dispatch', 'schedule'] }, counting);
-  assert.deepEqual(three.map(({ claims }) => claims.event_name), ['push', 'workflow_dispatch', 'schedule']);
-  assert.equal(asked, 1);
-  for (const binding of three) checkBinding(binding);
-  assert.deepEqual((await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main' }, lookup)).map(({ claims }) => claims.event_name), ['push']);
-  assert.deepEqual((await bindingsFrom({ gitlab: 'acme/api', branch: 'main', source: ['web', 'schedule'] }, lookup)).map(({ claims }) => claims.pipeline_source), ['web', 'schedule']);
-  await assert.rejects(bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['pull_request'] }, lookup), /--event takes push, workflow_dispatch, schedule, release, not pull_request/);
-  await assert.rejects(bindingsFrom({ gitlab: 'acme/api', branch: 'main', event: ['push'] }, lookup), /--event is a GitHub run's/);
+test('one binding for every event or pipeline source named, push unless told', async () => {
+  const three = await built({ github: 'acme/api', workflow: 'ci.yml', branch: 'main', event: ['schedule,push', 'workflow_dispatch', 'push'] });
+  // Stored once each, in GitHub's order.
+  assert.deepEqual(three.claims.event_name, ['push', 'workflow_dispatch', 'schedule']);
+  assert.equal((await built({ github: 'acme/api', workflow: 'ci.yml', branch: 'main' })).claims.event_name, 'push');
+  assert.deepEqual((await built({ gitlab: 'acme/api', branch: 'main', source: ['web', 'schedule'] })).claims.pipeline_source, ['web', 'schedule']);
+  // Pull requests, by the branch they merge into, and workflow_run.
+  const ci = await built({ github: 'acme/api', workflow: 'ci.yml', branch: 'main', event: ['push,pull_request,workflow_run'] });
+  assert.deepEqual(ci.claims.event_name, ['push', 'pull_request', 'workflow_run']);
+  await assert.rejects(bindingFrom({ github: 'acme/api', workflow: 'ci.yml', branch: 'main', event: ['pull_request_target'] }, lookup), /--event takes push, workflow_dispatch, schedule, release, pull_request, workflow_run, not pull_request_target/);
+  await assert.rejects(bindingFrom({ gitlab: 'acme/api', branch: 'main', event: ['push'] }, lookup), /--event is a GitHub run's/);
 });
 
-test('the preview says which events the bindings accept, and the flag that adds those the ref allows', async () => {
-  const push = await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main' }, lookup);
+test('the preview says which events the binding accepts, the flag that adds those the ref allows, and what a pull request exposes', async () => {
+  const push = await built({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main' });
   assert.equal(
     describeEvents(push),
     'Accepts runs started by push. Not by workflow_dispatch or schedule: add them with --event, as --event push,workflow_dispatch,schedule.',
   );
   // At a tag, a release runs, and a schedule never does.
-  const tag = await bindingsFrom({ github: 'acme/api', workflow: 'ship.yml', tag: 'v1', event: ['push', 'release'] }, lookup);
-  assert.equal(describeEvents(tag), 'Accepts runs started by push and release, a binding each. Not by workflow_dispatch: add them with --event, as --event push,release,workflow_dispatch.');
-  const all = await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['push,workflow_dispatch,schedule'] }, lookup);
-  assert.equal(describeEvents(all), 'Accepts runs started by push, workflow_dispatch and schedule, a binding each.');
+  const tag = await built({ github: 'acme/api', workflow: 'ship.yml', tag: 'v1', event: ['push', 'release'] });
+  assert.equal(describeEvents(tag), 'Accepts runs started by push and release. Not by workflow_dispatch: add them with --event, as --event push,release,workflow_dispatch.');
+  const all = await built({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['push,workflow_dispatch,schedule'] });
+  assert.equal(describeEvents(all), 'Accepts runs started by push, workflow_dispatch and schedule.');
+  // Never suggested; said what it exposes once chosen.
+  const ci = await built({ github: 'acme/api', workflow: 'ci.yml', branch: 'main', event: ['push,workflow_dispatch,schedule,pull_request'] });
+  assert.match(describeEvents(ci)!, /^Accepts runs started by push, workflow_dispatch, schedule and pull_request\.\npull_request: Anyone who can push a branch to the repository/);
   assert.equal(
-    describeEvents(await bindingsFrom({ gitlab: 'acme/api', branch: 'main' }, lookup)),
+    describeEvents(await built({ gitlab: 'acme/api', branch: 'main' })),
     'Accepts pipelines started by push. Not by web or schedule: add them with --source, as --source push,web,schedule.',
   );
-  assert.equal(describeEvents(await bindingsFrom({ issuer: 'https://accounts.google.com', claim: ['sub=1'] }, lookup)), null);
+  assert.equal(describeEvents(await built({ issuer: 'https://accounts.google.com', claim: ['sub=1'] })), null);
 });
 
 test('the CLI hands a refused lookup back to trust, which says how to give the IDs, rather than ending on "not found"', async (t) => {

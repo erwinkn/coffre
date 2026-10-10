@@ -561,10 +561,12 @@ function RoleField({
         <option value="user">Member</option>
         <option value="owner">Owner</option>
       </select>
-      <span className="hint">
-        Owners manage users and service accounts, can create projects, and read the whole audit log.
-        Neither role reads a secret without a project grant.
-      </span>
+      {value === 'owner' && (
+        <span className="hint">
+          Owners manage users and service accounts, create projects, and read the whole audit log. Like members,
+          they read no secret without a project grant.
+        </span>
+      )}
     </label>
   );
 }

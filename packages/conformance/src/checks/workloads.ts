@@ -128,7 +128,8 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
     ['for another instance', await mint(deployment, {}, { audience: 'https://secrets.elsewhere.example' }), 'audience'],
     ['expired', await mint(deployment, { iat: now - 600, nbf: now - 600, exp: now - 120 }), 'expired'],
     ['from a feature branch', await mint(deployment, { ref: feature, workflow_ref: GITHUB_RUN.workflow_ref.replace(/@.*/, `@${feature}`), sub: `repo:acme/api:ref:${feature}` }), 'no_match'],
-    ['from a pull request', await mint(deployment, { event_name: 'pull_request' }), 'no_match'],
+    // Into the very branch the binding names: it lists push alone.
+    ['from a pull request', await mint(deployment, { event_name: 'pull_request', ref: 'refs/pull/1/merge', base_ref: 'main', workflow_ref: GITHUB_RUN.workflow_ref.replace(/@.*/, '@refs/pull/1/merge'), sub: 'repo:acme/api:pull_request' }), 'no_match'],
     ['from another repository', await mint(deployment, { repository_id: '1', repository: 'acme/fork' }), 'no_match'],
   ] as const;
   const before = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange').length;

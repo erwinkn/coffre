@@ -38,8 +38,8 @@ that moment, whatever happens next. The vault logs one `member.remove`, and
 one `access.revoke` per grant, so each project's log shows who lost access to
 it. Then the app marks the sessions, tokens, linked accounts and connected
 apps revoked, so they no longer list as live. The removal dialog names the
-apps it disconnects, and so does the person's page, for owners, under
-**Connected apps**, where each can be disconnected on its own.
+apps it disconnects, and so does the person's page, for owners, on its
+**Connected apps** tab, where each can be disconnected on its own.
 
 A sign-in racing a removal either finishes first and is cut off by the new
 generation, or is refused. Every request checks the member, in both sign-in
