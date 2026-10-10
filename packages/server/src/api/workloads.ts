@@ -7,6 +7,7 @@ import {
   checkFetchUrl,
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
+  differingClaims,
   GITLAB_ISSUER,
   issuedRefusal,
   MAX_BINDINGS,
@@ -107,7 +108,7 @@ let inFlight = 0;
  * its run. What the issuer says, not proof of which run sent the request.
  */
 const RUN_CLAIMS = [
-  'sub', 'jti', 'actor', 'event_name', 'ref', 'sha', 'repository', 'repository_id', 'run_id', 'run_attempt',
+  'sub', 'jti', 'actor', 'event_name', 'ref', 'base_ref', 'head_ref', 'sha', 'repository', 'repository_id', 'run_id', 'run_attempt',
   'workflow_ref', 'job_workflow_ref', 'job_workflow_sha', 'environment',
   'project_path', 'project_id', 'namespace_id', 'pipeline_id', 'pipeline_source', 'job_id',
 ] as const;
@@ -143,7 +144,7 @@ export type BindingPlan = {
 export type BindingInput = {
   profile: string;
   issuer: string | null;
-  claims: Record<string, string>;
+  claims: BindingClaims;
   label: string | null;
   /** Bindings this one takes the place of, as a change to them: they are removed in the same step. */
   replaces: string[];
@@ -449,15 +450,14 @@ function refused(error: unknown): ExchangeRefused {
 }
 
 /**
- * The binding whose every claim the token carries, exactly. None: the
- * claims that differ from the closest binding, by name, never the values it
- * expects.
+ * The binding whose every claim the token carries (`differingClaims`). None:
+ * the claims that differ from the closest binding, by name, never the
+ * values it expects.
  */
 function matching(bindings: BindingRow[], claims: Record<string, unknown>, member: string): BindingRow {
   let closest: string[] | null = null;
   for (const binding of bindings) {
-    const expected = JSON.parse(binding.claims) as BindingClaims;
-    const differ = Object.entries(expected).filter(([name, value]) => claims[name] !== value).map(([name]) => name);
+    const differ = differingClaims(binding.profile as WorkloadProfile, JSON.parse(binding.claims) as BindingClaims, claims);
     if (differ.length === 0) return binding;
     if (closest === null || differ.length < closest.length) closest = differ;
   }

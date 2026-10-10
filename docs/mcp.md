@@ -134,7 +134,7 @@ second laptop say, stays.
 Your account's Connected apps tab lists every client you connected: its
 website, what it may do, when it was last used and when it expires.
 **Disconnect** ends it at its next request. So do `coffre apps` and
-`coffre apps revoke <id> --apply`. An owner sees anyone's on that person's page, and may disconnect
+`coffre apps revoke <id> --apply`. An owner sees anyone's on the Connected apps tab of that person's page, and may disconnect
 them there, as with sessions. Removing someone from coffre disconnects
 theirs: the removal dialog and `coffre offboard` name them first
 ([offboarding.md](offboarding.md)). Each connection, its tokens and its end

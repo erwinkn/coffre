@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+**One OIDC binding per workflow, on several events, pull requests
+included.** A GitHub binding now lists the events it trusts, so a workflow
+that runs on push, by hand and on a schedule is one entry, not three. It
+may also trust `pull_request`, matched by the branch the pull request
+merges into, and `workflow_run`. Both can run code nobody reviewed: the
+form, `coffre trust` and the MCP approval page say what each exposes when
+it is chosen. Pull requests from forks get no ID token. `pull_request_target`
+is still refused. Existing bindings keep working as they are, each a
+one-event binding. GitLab bindings list pipeline sources the same way, and
+`coffre trust --event a,b` now makes one binding, not one for each.
+`@coffre/core/workloads`' `githubWorkflow`, `githubReusable` and
+`gitlabProject` still take one `event` or `source`, as before, and now
+also a list, `events` or `sources`; naming both, or neither, is refused.
+
+**A person's connected apps are a tab of their page**, for owners, beside
+Access and Activity. A deployment gains `users.$user.apps.tsx` through
+`coffre update`.
+
+**Shorter explainers.** "Sign in with OIDC" and "Bearer tokens" say what
+each is, when to use it, and give one example. Adding a user says what an
+owner can do only when Owner is chosen.
+
 ## 0.4.6 (2026-10-07)
 
 **MCP approvals are harder to misread or misuse**, after a security review.

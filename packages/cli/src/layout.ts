@@ -70,6 +70,8 @@ export const ROUTE_FILES: Record<string, string> = {
   ]),
   // The account page's tabs: `_coffre/account.tsx`, the page itself before, is now their layout.
   ...since('0.4.2', ['_coffre/account.index.tsx', '_coffre/account.sessions.tsx', '_coffre/account.apps.tsx', '_coffre/account.appearance.tsx']),
+  // A person's connected apps, a tab of their page rather than a card of its Access tab.
+  ...since('0.4.7', ['_coffre/users.$user.apps.tsx']),
 };
 
 /** Route files, under `app/src/routes/`, that `release` first wrote. */

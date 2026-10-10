@@ -441,6 +441,17 @@ export function signInWays(shell: Shell, report: MemberReport): { tokens: boolea
   return active && (ways.tokens || ways.workloads) ? ways : null;
 }
 
+/**
+ * Whether a user has a Connected apps tab: for an owner, where the
+ * deployment serves MCP, and while the user is registered and not removed,
+ * since removal disconnects every app. The tab, and the route under it,
+ * both ask.
+ */
+export function hasAppsTab(shell: Shell, report: MemberReport): boolean {
+  const found = report?.ok === true ? report.report : null;
+  return Boolean(shell.features.mcp) && shell.capabilities.canManageGrants && found !== null && found.status !== 'removed';
+}
+
 export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {
   return projects.filter((project) => project.permissions.includes('grant.manage'));
 }

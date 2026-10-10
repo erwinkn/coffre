@@ -38,6 +38,7 @@ export {
   user,
   userAccess,
   userActivity,
+  userApps,
   users,
   type CoffreContext,
 } from './options.ts';

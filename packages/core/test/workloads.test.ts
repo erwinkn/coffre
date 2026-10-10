@@ -5,6 +5,8 @@ import {
   canonicalClaims,
   checkBinding,
   checkFetchUrl,
+  differingClaims,
+  githubEventsAt,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
   MAX_CLAIMS,
@@ -52,17 +54,61 @@ test('a GitHub binding names the repository by ID, the workflow, the ref and a t
   refused({ profile: 'github', issuer: null, claims: { ...GITHUB, workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/dev' } }, /at the binding's ref/);
 });
 
-test('GitHub events: only those triggered by a writer, at a ref named exactly, and the ref fits the event', () => {
-  for (const event of ['pull_request', 'pull_request_target', 'workflow_run', 'issue_comment']) {
-    refused({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: event } }, /event_name must be one of push, workflow_dispatch, schedule, release/);
+test('GitHub events: those a writer starts, and pull_request and workflow_run when chosen; the ref fits each event', () => {
+  for (const event of ['pull_request_target', 'issue_comment', 'dynamic']) {
+    refused({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: event } }, /event_name must be one or more of push, workflow_dispatch, schedule, release, pull_request, workflow_run/);
+    refused({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: ['push', event] } }, /event_name must be one or more of/);
   }
-  for (const event of ['push', 'workflow_dispatch', 'schedule']) checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: event } });
+  for (const event of ['push', 'workflow_dispatch', 'schedule', 'pull_request', 'workflow_run']) {
+    checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: event } });
+  }
+  refused({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: [] } }, /one or more/);
   // A release runs at its tag, and a tag `main` is not the branch.
   const tag = { ...GITHUB, event_name: 'release', ref: 'refs/tags/v1.2.0', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/tags/v1.2.0' };
   checkBinding({ profile: 'github', issuer: null, claims: tag });
   refused({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: 'release' } }, /a release runs at its tag/);
   refused({ profile: 'github', issuer: null, claims: { ...tag, event_name: 'schedule' } }, /default branch/);
+  // A pull request is matched by the branch it merges into; a workflow_run runs on the default branch.
+  refused({ profile: 'github', issuer: null, claims: { ...tag, event_name: ['push', 'pull_request'] } }, /the branch it merges into/);
+  refused({ profile: 'github', issuer: null, claims: { ...tag, event_name: 'workflow_run' } }, /default branch/);
+  checkBinding({ profile: 'github', issuer: null, claims: { ...tag, event_name: ['push', 'release'] } });
+  assert.deepEqual(githubEventsAt('tag'), ['push', 'workflow_dispatch', 'release']);
+  assert.deepEqual(githubEventsAt('branch'), ['push', 'workflow_dispatch', 'schedule', 'pull_request', 'workflow_run']);
   refused({ profile: 'github', issuer: null, claims: { ...GITHUB, ref: 'main' } }, /ref is a full ref/);
+});
+
+test('a binding names several events, stored once each in GitHub\'s order, a single one as a plain value; no other claim lists', () => {
+  const checked = checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: ['pull_request', 'push', 'workflow_dispatch', 'push'] } });
+  assert.deepEqual(checked.claims.event_name, ['push', 'workflow_dispatch', 'pull_request']);
+  assert.equal(checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: ['push'] } }).claims.event_name, 'push');
+  refused({ profile: 'github', issuer: null, claims: { ...GITHUB, ref: ['refs/heads/main', 'refs/heads/dev'] } }, /claim ref must be a nonempty string: only event_name lists several/);
+  assert.deepEqual(checkBinding({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, pipeline_source: ['web', 'push'] } }).claims.pipeline_source, ['push', 'web']);
+  refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, pipeline_source: ['push', 'merge_request_event'] } }, /pipeline_source must be one or more of push, web, schedule/);
+});
+
+test('a token matches when it carries every claim, one of a list; a pull request at the branch it merges into', () => {
+  const binding = checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main', event_name: ['push', 'pull_request'] } });
+  const push = {
+    repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main',
+    ref: 'refs/heads/main', base_ref: '', event_name: 'push', sub: 'repo:acme/api:ref:refs/heads/main',
+  };
+  const pr = { ...push, event_name: 'pull_request', ref: 'refs/pull/12/merge', base_ref: 'main', head_ref: 'feature', workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/pull/12/merge' };
+  const match = (token: Record<string, unknown>, claims: BindingClaims = binding.claims) => differingClaims('github', claims, token);
+  assert.deepEqual(match(push), []);
+  assert.deepEqual(match(pr), []);
+  // Merged, its run is at the branch it went into.
+  assert.deepEqual(match({ ...pr, ref: 'refs/heads/main', workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main' }), []);
+  // Into another branch, or another workflow file.
+  assert.deepEqual(match({ ...pr, base_ref: 'dev' }), ['ref', 'workflow_ref']);
+  assert.deepEqual(match({ ...pr, workflow_ref: 'acme/api/.github/workflows/other.yml@refs/pull/12/merge' }), ['workflow_ref']);
+  // A push to another branch is no pull request; an event not listed, at the same ref, is refused.
+  assert.deepEqual(match({ ...push, ref: 'refs/heads/dev', workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/dev' }), ['ref', 'workflow_ref']);
+  assert.deepEqual(match({ ...push, event_name: 'pull_request_target' }), ['event_name']);
+  // A binding made before, for push alone, takes no pull request, whatever its base.
+  assert.deepEqual(match(pr, { ...binding.claims, event_name: 'push' }), ['event_name']);
+  // Only GitHub's profiles read a pull request at its base, and a claim that is no string never matches.
+  assert.deepEqual(differingClaims('custom', { ref: 'refs/heads/main' }, pr), ['ref']);
+  assert.deepEqual(match({ ...push, repository_id: 41532 }), ['repository_id']);
 });
 
 test('a reusable workflow is pinned to one commit and called from one ref; the whole organization is an explicit profile', () => {
@@ -88,7 +134,7 @@ test('a GitLab binding names the namespace and the project by ID, the ref and it
   // A transferred project keeps its ID: the namespace is required too (review R4).
   const { namespace_id: _, ...noNamespace } = GITLAB;
   refused({ profile: 'gitlab', issuer: null, claims: noNamespace }, /requires namespace_id/);
-  refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, pipeline_source: 'merge_request_event' } }, /pipeline_source must be one of push, web, schedule/);
+  refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, pipeline_source: 'merge_request_event' } }, /pipeline_source must be one or more of push, web, schedule/);
   refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, ref_type: 'commit' } }, /ref_type is branch or tag/);
   refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, ref: 'refs/heads/main' } }, /without refs\//);
   refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, project_id: 'acme/api' } }, /numeric ID/);
@@ -103,7 +149,7 @@ test('a known issuer forces its profile; any other issuer is custom, by its subj
   refused({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { email: 'deploy@acme.iam.gserviceaccount.com' } }, /requires sub/);
   checkBinding({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104000000000000000000' } });
   // A GitHub Enterprise Server is checked as GitHub.
-  refused({ profile: 'github', issuer: 'https://github.acme.example/_services/token', claims: { ...GITHUB, event_name: 'pull_request' } }, /event_name/);
+  refused({ profile: 'github', issuer: 'https://github.acme.example/_services/token', claims: { ...GITHUB, event_name: 'pull_request_target' } }, /event_name/);
   refused({ profile: 'nope', issuer: null, claims: {} }, /unknown profile "nope"/);
 });
 

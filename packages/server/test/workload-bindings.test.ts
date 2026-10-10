@@ -116,7 +116,7 @@ test('the server holds every binding to its profile, from the API as from anywhe
   const create = (input: Parameters<ReturnType<typeof as>['bindings']['create']>[1]) => as(LEAD).bindings.create(MEMBER, input);
   const { event_name: _, ...noEvent } = DEPLOY;
   await assert.rejects(create({ profile: 'github', claims: noEvent }), /the github profile requires event_name/);
-  await assert.rejects(create({ profile: 'github', claims: { ...DEPLOY, event_name: 'pull_request_target' } }), /event_name must be one of/);
+  await assert.rejects(create({ profile: 'github', claims: { ...DEPLOY, event_name: 'pull_request_target' } }), /event_name must be one or more of/);
   await assert.rejects(create({ profile: 'github-reusable', claims: { ...DEPLOY } }), /requires job_workflow_ref, job_workflow_sha/);
   await assert.rejects(create({ profile: 'gitlab', claims: { project_id: '345', ref_type: 'branch', ref: 'main', pipeline_source: 'push' } }), /requires namespace_id/);
   await assert.rejects(create({ profile: 'gitlab', issuer: GITHUB, claims: {} }), /signs only for the github profiles/);

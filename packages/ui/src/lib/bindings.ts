@@ -1,5 +1,5 @@
 import type { BindingPlan, BindingView } from '@coffre/client';
-import { fullRef, githubReusable, githubWorkflow, gitlabProject, type BindingClaims } from '@coffre/core/workloads';
+import { claimValues, fullRef, githubReusable, githubWorkflow, gitlabProject, type BindingClaims } from '@coffre/core/workloads';
 
 /**
  * Trust bindings as the pages show and make them. A binding is its claims;
@@ -9,20 +9,22 @@ import { fullRef, githubReusable, githubWorkflow, gitlabProject, type BindingCla
 
 /** A binding in a line: what it trusts, and at which ref. */
 export function summary(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims'>): { title: string; detail: string } {
-  const { claims } = binding;
+  // Every claim is one value, but what started the run, which may be several.
+  const claims = binding.claims as Record<string, string | undefined>;
+  const events = claimValues(binding.claims.event_name).join(', ');
   const short = (ref: string | undefined) => ref?.replace(/^refs\/(heads|tags)\//, '') ?? '';
   const [workflow, at] = (claims.workflow_ref ?? '').split('@');
   if (binding.profile === 'github') {
     const [owner, repository, , , file] = (workflow ?? '').split('/');
-    return { title: `${owner}/${repository} · ${file}`, detail: `${claims.event_name} at ${short(at)}` };
+    return { title: `${owner}/${repository} · ${file}`, detail: `${events} at ${short(at)}` };
   }
   if (binding.profile.startsWith('github-reusable')) {
     const called = (claims.job_workflow_ref ?? '').split('@')[0]!.replace('/.github/workflows/', ' · ');
     const from = binding.profile === 'github-reusable-organization' ? 'any repository of the organization' : `repository ${claims.repository_id}`;
-    return { title: `${called} @ ${claims.job_workflow_sha?.slice(0, 7)}`, detail: `${claims.event_name} at ${short(claims.ref)}, from ${from}` };
+    return { title: `${called} @ ${claims.job_workflow_sha?.slice(0, 7)}`, detail: `${events} at ${short(claims.ref)}, from ${from}` };
   }
   if (binding.profile === 'gitlab') {
-    return { title: `GitLab project ${claims.project_id}`, detail: `${claims.pipeline_source} at ${claims.ref_type} ${claims.ref}` };
+    return { title: `GitLab project ${claims.project_id}`, detail: `${claimValues(binding.claims.pipeline_source).join(', ')} at ${claims.ref_type} ${claims.ref}` };
   }
   return { title: new URL(binding.issuer).host, detail: `sub ${claims.sub}` };
 }
@@ -40,7 +42,7 @@ export const EMPTY_FORM = {
   repositoryId: '',
   ownerId: '',
   workflow: '',
-  event: 'push' as string,
+  events: ['push'] as string[],
   refKind: 'branch' as RefKind,
   refName: 'main',
   called: '',
@@ -51,7 +53,7 @@ export const EMPTY_FORM = {
   project: '',
   projectId: '',
   namespaceId: '',
-  source: 'push' as string,
+  sources: ['push'] as string[],
   // Any other issuer
   issuer: '',
   sub: '',
@@ -66,6 +68,10 @@ export function bindingOf(form: Form): { profile: BindingPlan['profile']; issuer
     if (value.trim() === '') throw new Error(`${what} is needed`);
     return value.trim();
   };
+  const some = (values: string[], what: string) => {
+    if (values.length === 0) throw new Error(`Choose at least one ${what}`);
+    return values;
+  };
   if (form.platform === 'github') {
     const ref = fullRef(form.refKind, needed(form.refName, form.refKind === 'branch' ? 'The branch' : 'The tag'));
     if (form.reusable) {
@@ -74,7 +80,7 @@ export function bindingOf(form: Form): { profile: BindingPlan['profile']; issuer
       const ownerId = needed(form.ownerId, "The owner's ID");
       const caller = form.workflow.trim() === '' ? undefined : { repository: needed(form.repository, 'The repository'), workflow: form.workflow.trim() };
       const repositoryId = form.anyRepository ? null : needed(form.repositoryId, "The repository's ID");
-      return { ...githubReusable({ repositoryId, ownerId, ref, event: form.event, called, sha, caller }), issuer: null };
+      return { ...githubReusable({ repositoryId, ownerId, ref, events: some(form.events, 'event'), called, sha, caller }), issuer: null };
     }
     return {
       ...githubWorkflow({
@@ -83,7 +89,7 @@ export function bindingOf(form: Form): { profile: BindingPlan['profile']; issuer
         ownerId: needed(form.ownerId, "The owner's ID"),
         workflow: needed(form.workflow, 'The workflow file'),
         ref,
-        event: form.event,
+        events: some(form.events, 'event'),
       }),
       issuer: null,
     };
@@ -95,7 +101,7 @@ export function bindingOf(form: Form): { profile: BindingPlan['profile']; issuer
         projectId: needed(form.projectId, "The project's ID"),
         refType: form.refKind,
         ref: needed(form.refName, form.refKind === 'branch' ? 'The branch' : 'The tag'),
-        source: form.source,
+        sources: some(form.sources, 'pipeline source'),
       }),
       issuer: form.gitlabUrl.trim() === '' ? null : form.gitlabUrl.trim(),
     };
