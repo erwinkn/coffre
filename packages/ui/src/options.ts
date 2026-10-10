@@ -23,6 +23,7 @@ import { ShellLayout, SoloLayout } from './layout';
 import { memberRef, uiResult } from './lib/coffre';
 import { stringsOf } from './lib/search';
 import {
+  hasAppsTab,
   loadAccess,
   loadDirectory,
   loadMember,
@@ -219,12 +220,18 @@ export const userActivity = {
   },
 };
 
-/** `/users/$user/apps`, the MCP clients they connected, for an owner where the deployment serves MCP; the others are sent to the first tab. */
+/**
+ * `/users/$user/apps`, the MCP clients they connected, for an owner where the
+ * deployment serves MCP, and while they are not removed (removal disconnects
+ * every one); the others are sent to the first tab, which for someone removed
+ * is their offboarding.
+ */
 export const userApps = {
   loader: async ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
     const shell = await loadShell(queryClient, coffre);
-    if (!shell.features.mcp || !shell.capabilities.canManageGrants) throw redirect({ to: '/users/$user', params });
+    const report = await loadMember(queryClient, coffre, memberRef('user', params.user));
+    if (!hasAppsTab(shell, report)) throw redirect({ to: '/users/$user', params });
   },
 };
 

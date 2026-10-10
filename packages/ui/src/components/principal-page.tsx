@@ -6,7 +6,7 @@ import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { directoryList } from '../lib/changes';
-import { affects, managedProjects, queries, signInWays } from '../lib/queries';
+import { affects, hasAppsTab, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { useMounted } from '../lib/mounted';
 import { ItemFailure } from './row-state';
@@ -145,7 +145,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
           {access}
         </Link>,
         // Only an owner reads the report that lists them; removal disconnects them.
-        shell.features.mcp && found !== null && !removed && mounted('/users/$user/apps') && (
+        hasAppsTab(shell, report) && mounted('/users/$user/apps') && (
           <Link key="apps" to="/users/$user/apps" params={{ user: principalId }}>
             <LinkIcon size={15} />
             Connected apps

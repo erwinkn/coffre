@@ -330,6 +330,27 @@ export function workflowRef(repository: string, file: string, ref: string): stri
   return `${repository}/.github/workflows/${file.replace(/^\.github\/workflows\//, '')}@${ref}`;
 }
 
+/**
+ * What started the run, as the presets take it: `event` (`source`, for
+ * GitLab), the one value 0.4.6's presets took, or `events` (`sources`), any
+ * of several. Naming both, or neither, is a type error and, for a caller the
+ * types do not reach, a `BindingInvalid` at run time: a preset never guesses
+ * which one was meant.
+ */
+export type Starts<One extends string, Many extends string> =
+  | ({ [K in One]: string } & { [K in Many]?: never })
+  | ({ [K in Many]: string[] } & { [K in One]?: never });
+
+function started(input: Record<string, unknown>, one: string, many: string): ClaimValue {
+  const single = input[one];
+  const list = input[many];
+  if (single !== undefined && list !== undefined) throw new BindingInvalid(`name ${one} or ${many}, not both`);
+  // As 0.4.6 made it: the plain value, so a one-event binding is the same claim either way.
+  if (single !== undefined) return single as string;
+  if (list === undefined) throw new BindingInvalid(`name ${one} or ${many}`);
+  return list as string[];
+}
+
 /** A workflow of the repository, run at `ref` by any of `events`; a pull request, by the branch it merges into. */
 export function githubWorkflow(input: {
   repository: string;
@@ -337,8 +358,7 @@ export function githubWorkflow(input: {
   ownerId: string;
   workflow: string;
   ref: string;
-  events: string[];
-}): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
   return {
     profile: 'github',
     claims: {
@@ -346,7 +366,7 @@ export function githubWorkflow(input: {
       repository_id: input.repositoryId,
       workflow_ref: workflowRef(input.repository, input.workflow, input.ref),
       ref: input.ref,
-      event_name: input.events,
+      event_name: started(input, 'event', 'events'),
     },
   };
 }
@@ -360,16 +380,15 @@ export function githubReusable(input: {
   repositoryId: string | null;
   ownerId: string;
   ref: string;
-  events: string[];
   called: string;
   sha: string;
   caller?: { repository: string; workflow: string };
-}): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
   const claims: BindingClaims = {
     repository_owner_id: input.ownerId,
     ...(input.repositoryId === null ? {} : { repository_id: input.repositoryId }),
     ref: input.ref,
-    event_name: input.events,
+    event_name: started(input, 'event', 'events'),
     job_workflow_ref: input.called,
     job_workflow_sha: input.sha,
   };
@@ -383,8 +402,7 @@ export function gitlabProject(input: {
   projectId: string;
   refType: 'branch' | 'tag';
   ref: string;
-  sources: string[];
-}): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'source', 'sources'>): Omit<BindingPolicy, 'issuer'> {
   return {
     profile: 'gitlab',
     claims: {
@@ -392,7 +410,7 @@ export function gitlabProject(input: {
       project_id: input.projectId,
       ref_type: input.refType,
       ref: input.ref,
-      pipeline_source: input.sources,
+      pipeline_source: started(input, 'source', 'sources'),
     },
   };
 }

@@ -12,6 +12,9 @@ it is chosen. Pull requests from forks get no ID token. `pull_request_target`
 is still refused. Existing bindings keep working as they are, each a
 one-event binding. GitLab bindings list pipeline sources the same way, and
 `coffre trust --event a,b` now makes one binding, not one for each.
+`@coffre/core/workloads`' `githubWorkflow`, `githubReusable` and
+`gitlabProject` still take one `event` or `source`, as before, and now
+also a list, `events` or `sources`; naming both, or neither, is refused.
 
 **A person's connected apps are a tab of their page**, for owners, beside
 Access and Activity. A deployment gains `users.$user.apps.tsx` through
