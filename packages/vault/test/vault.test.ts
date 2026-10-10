@@ -1005,6 +1005,48 @@ test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding n
   assert.equal((await vaultLog(w)).length, entries);
 });
 
+test('the conversion takes no read away: viewer on every project beside auditor on a project reads its environments still', async () => {
+  const w = await world();
+  const EVE = 'user:eve@acme.example';
+  await member(w, EVE, [[null, 'auditor']]);
+  const other = await laterProject();
+  await everyProjectGrant(EVE, null, 'viewer');
+  const secret = await w.secret(w.prod);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+
+  const [preview] = await everyProjectPreview(db.owner, Date.now());
+  assert.deepEqual(preview?.conversion.narrowed.map(({ grant: _, ...loss }) => loss), [{ kind: 'later-projects' }, { kind: 'environments', projectId: w.project, role: 'viewer' }]);
+
+  const upgraded = await fresh();
+  const eve = await upgraded.access(EVE);
+  assert.deepEqual(eve.grants.map((grant) => [grant.projectId, grant.environmentId, grant.role]).sort(), [
+    [other.project, null, 'viewer'],
+    [w.project, null, 'auditor'],
+    [w.project, w.dev, 'viewer'],
+    [w.project, w.prod, 'viewer'],
+  ].sort());
+  // Read through the vault that wrapped it: one started afresh holds a key of its own.
+  const read = await w.vault.unwrap({ principal: EVE, purpose: 'reveal', items });
+  assert.ok(read.ok, JSON.stringify(read));
+  const revoked = (await vaultLog(w)).find((entry) => entry.actor === 'system:vault' && entry.action === 'access.revoke');
+  assert.deepEqual(revoked?.detail.narrowed, [{ kind: 'later-projects' }, { kind: 'environments', projectId: w.project, role: 'viewer' }]);
+  assert.equal((await upgraded.verifyLog({})).ok, true);
+});
+
+test('migrate does not list a member whose row the vault found tampered with, whose grants it leaves as they are', async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  await member(w, ADA, []);
+  await member(w, BOB, []);
+  await everyProjectGrant(ADA, null, 'viewer');
+  await everyProjectGrant(BOB, null, 'viewer');
+  await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
+  assert.equal((await w.vault.access(BOB)).status, 'tampered');
+  assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => preview.principal), [ADA]);
+  await (await fresh()).access(ADA);
+  assert.deepEqual((await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`)).map((grant) => grant.principal), [BOB]);
+});
+
 test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {
   const key = rowKey(SIGNING_KEY);
   const row = {

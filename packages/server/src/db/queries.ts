@@ -4,7 +4,7 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { readGrants, storedRole } from '@coffre/db/grants';
+import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -533,39 +533,6 @@ export type MemberRow = {
     lastSignInAt: Date | null;
   }[];
 };
-
-/**
- * The members the vault has found changed around it, and not started over
- * since: its newest `vault.tampered` about them, for their row (`mac`) or
- * an older one put back (`stale`), is newer than its newest entry changing
- * what they hold. Read from the log, which the vault writes and the app
- * reads: the vault's own findings, which the app has no key to make. Both
- * reads go by the log's (author, action, seq) and (author, subject, seq)
- * indexes, and findings are few.
- */
-async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
-  const { auditLog } = tablesOf(db);
-  const newest = (actions: readonly string[], extra?: SQL) =>
-    db
-      .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`max(${auditLog.seq})`.mapWith(BigInt) })
-      .from(auditLog)
-      .where(
-        and(
-          eq(auditLog.author, 'vault'),
-          inArray(auditLog.action, [...actions]),
-          principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal),
-          extra,
-        ),
-      )
-      .groupBy(auditLog.subjectPrincipal);
-  const found = await newest(['vault.tampered'], inArray(auditLog.code, ['mac', 'stale']));
-  if (found.length === 0) return new Set();
-  const changed = new Map(
-    (await newest(ACCESS_ACTIONS, and(eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, found.map((row) => row.principal!)))))
-      .map((row) => [row.principal!, row.seq]),
-  );
-  return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
-}
 
 /** What one member holds, as stored: their row, their live grants by place, and the projects' slugs a scope names by id. */
 export type MemberAccessRows = {

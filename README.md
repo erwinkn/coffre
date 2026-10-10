@@ -297,7 +297,12 @@ nothing, or a root admin, **runs the instance**: adds and removes people and
 service accounts, sets instance roles, issues tokens, and reads the
 instance's own log entries. A scoped Admin manages environments and grants
 inside its scope only, and sets no role. Nobody changes their own role or
-grants themselves one ([docs/design/instance-roles.md](docs/design/instance-roles.md)).
+grants themselves one, which stops a quiet read of one's own; it is no
+boundary. An Admin holds no secret permission, but one who runs the
+instance can still reach any value by admitting a service account, granting
+it a reading role and issuing its token, each step in the log, as a 0.4
+owner could: make Admins only people you would trust with the values
+([docs/design/instance-roles.md](docs/design/instance-roles.md)).
 
 ## Design decisions worth knowing
 

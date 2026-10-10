@@ -12,7 +12,8 @@ import {
   type Scope,
 } from '@coffre/core/access';
 import { isTombstone } from '@coffre/core/schemas';
-import { and, eq, gt, isNull, or } from 'drizzle-orm';
+import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 
 import { tablesOf, type Queryable } from './database.ts';
 
@@ -105,17 +106,22 @@ export type EveryProjectPreview = {
  * members hold, by the rule it converts them with
  * (`convertEveryProjectGrants`), from the rows as they are: what
  * `coffre migrate` says before the vault does it. A display: the vault
- * reads again, under its locks, when it converts.
+ * reads again, under its locks, when it converts. Left out, as the vault
+ * leaves them: a member it found changed around it (`tamperedMembers`).
+ * A root admin's it leaves too while they are one, until they are not;
+ * which they are, the vault's configuration says and the database does
+ * not, so they are listed.
  */
 export async function everyProjectPreview(db: Queryable, at: number): Promise<EveryProjectPreview[]> {
   const { vaultMembers, projects, environments } = tablesOf(db);
   const held = (await readGrants(db, { liveAt: at })).filter((grant) => grant.projectId === null && grant.environmentId === null);
   if (held.length === 0) return [];
-  const [members, grants, places, inside] = await Promise.all([
+  const [members, grants, places, inside, tampered] = await Promise.all([
     db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope }).from(vaultMembers),
     readGrants(db, { liveAt: at }),
     db.select({ id: projects.id, slug: projects.slug }).from(projects),
     db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug }).from(environments),
+    tamperedMembers(db),
   ]);
   // A deleted place keeps its row under a tombstone's slug, its own or its project's: no grant reaches it.
   const live = places.filter((project) => !isTombstone(project.slug)).map((project) => ({
@@ -128,7 +134,8 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
   ]));
   return [...new Set(held.map((grant) => grant.principal))].sort().flatMap((principal) => {
     const member = members.find((row) => row.principal === principal);
-    if (member?.status !== 'active') return [];
+    // The vault leaves a member it found changed around it as they are, as it does anyone not active.
+    if (member?.status !== 'active' || tampered.has(principal)) return [];
     const theirs = held.filter((grant) => grant.principal === principal);
     return [{
       principal,
@@ -145,4 +152,37 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
       paths,
     }];
   });
+}
+
+/**
+ * The members the vault has found changed around it, and not started over
+ * since: its newest `vault.tampered` about them, for their row (`mac`) or
+ * an older one put back (`stale`), is newer than its newest entry changing
+ * what they hold. Read from the log, which the vault writes and the app
+ * reads: the vault's own findings, which the app has no key to make. Both
+ * reads go by the log's (author, action, seq) and (author, subject, seq)
+ * indexes, and findings are few.
+ */
+export async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
+  const { auditLog } = tablesOf(db);
+  const newest = (actions: readonly string[], extra?: SQL) =>
+    db
+      .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`max(${auditLog.seq})`.mapWith(BigInt) })
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.author, 'vault'),
+          inArray(auditLog.action, [...actions]),
+          principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal),
+          extra,
+        ),
+      )
+      .groupBy(auditLog.subjectPrincipal);
+  const found = await newest(['vault.tampered'], inArray(auditLog.code, ['mac', 'stale']));
+  if (found.length === 0) return new Set();
+  const changed = new Map(
+    (await newest(ACCESS_ACTIONS, and(eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, found.map((row) => row.principal!)))))
+      .map((row) => [row.principal!, row.seq]),
+  );
+  return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
 }

@@ -11,7 +11,7 @@
 // terminal, only with --yes.
 import { parseArgs } from 'node:util';
 
-import { INSTANCE_ROLES, scopeInWords, unscoped } from '@coffre/core/access';
+import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, type EveryProjectPreview } from '@coffre/db/grants';
@@ -167,6 +167,10 @@ async function previewEveryProject(url: URL): Promise<EveryProjectPreview[]> {
  *
  *   user:ada@acme.example   developer on dev in every project → Developer, All projects · dev only
  *   service:ci              viewer on every project → viewer on market, billing; not projects made later
+ *   user:bo@acme.example    viewer on every project → viewer on market, billing/dev; not projects made later;
+ *                           viewer on billing only through its environments, not those made later
+ *   service:deploy          maintainer on every project → maintainer on market, billing; not projects made later;
+ *                           loses access-manager on billing (keeps maintainer)
  */
 export function describeEveryProject(previews: readonly EveryProjectPreview[]): string {
   if (previews.length === 0) return '';
@@ -177,12 +181,30 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
     const byRole = new Map<string, string[]>();
     for (const grant of conversion.grants) byRole.set(grant.role, [...(byRole.get(grant.role) ?? []), paths[grant.environmentId ?? grant.projectId] ?? grant.projectId]);
     const grants = [...byRole].map(([held, places]) => `${held} on ${places.join(', ')}`);
+    const narrower = conversion.narrowed.flatMap((loss) => {
+      switch (loss.kind) {
+        case 'later-projects':
+          return [];
+        case 'environments': {
+          const project = paths[loss.projectId] ?? loss.projectId;
+          const log = roleGrants(loss.role, 'audit.read') ? `, nor ${project}'s own log entries` : '';
+          return [`${loss.role} on ${project} only through its environments, not those made later${log}`];
+        }
+        case 'lost': {
+          const until = loss.keptUntil === null ? '' : ` until ${new Date(loss.keptUntil).toISOString().slice(0, 10)}`;
+          return [`loses ${loss.lost} on ${paths[loss.environmentId ?? loss.projectId] ?? loss.projectId} (keeps ${loss.kept}${until})`];
+        }
+      }
+    });
     const later = conversion.narrowed.some((loss) => loss.kind === 'later-projects') ? ['not projects made later'] : [];
-    const kept = conversion.narrowed.flatMap((loss) => (loss.kind === 'kept' ? [`kept ${loss.kept} on ${paths[loss.environmentId ?? loss.projectId] ?? loss.projectId}`] : []));
-    const after = [[...role, ...grants].join(', and ') || 'nothing', ...later, ...kept].join('; ');
+    const after = [[...role, ...grants].join(', and ') || 'nothing', ...later, ...narrower].join('; ');
     lines.push(`  ${shownMember(principal)}: ${was} → ${after}`);
   }
-  lines.push('Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).', '');
+  lines.push(
+    "A root admin's stay as they are while they are one; so do those of a member whose row was tampered with, who is not listed.",
+    'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
+    '',
+  );
   return lines.join('\n');
 }
 

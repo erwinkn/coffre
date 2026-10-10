@@ -187,6 +187,24 @@ test("a project's access list shows who reaches it by their instance role, with 
   assert.deepEqual(await reach('billing/dev'), [[ADA, 'developer', 0, true], [BOSS, 'admin', 0, true], [LEAD, 'auditor', 0, true]]);
 });
 
+test("where someone's role applies is told only to those who run the instance: a scope names projects others may not see", async () => {
+  await root.members.add(ADA, { role: 'developer', scope: { projects: { except: ['billing'] } } });
+  await root.access.set(ADA, { 'market/prod': 'viewer' });
+  await root.access.set(LEAD, { market: 'access-manager' });
+  const scope = { projects: { except: ['billing'] }, environments: 'all' };
+  const listed = async (client: CoffreClient, query?: { path: string }) =>
+    (await client.members.list(query?.path)).members.find((member) => member.member === ADA);
+  assert.deepEqual([(await listed(root))?.scope, (await root.members.access(ADA)).scope], [scope, scope]);
+  // W59's case: an access manager on market, who sees only market, read that Ada was "developer, all projects but billing".
+  for (const seen of [await listed(lead), await listed(lead, { path: 'market' }), await lead.members.access(ADA)]) {
+    assert.deepEqual([seen?.instanceRole, seen?.scope], ['developer', null]);
+  }
+  assert.equal((await listed(lead, { path: 'market' }))?.reachesByRole, true, 'who reaches their project by role, they still see');
+  // A scoped admin runs no instance either.
+  await root.members.add(BOSS, { role: 'admin', scope: { projects: { only: ['market'] } } });
+  assert.deepEqual([(await listed(boss))?.scope, (await boss.members.access(ADA)).scope], [null, null]);
+});
+
 test('an auditor reads the log of the places in its scope, and never the instance\'s', async () => {
   await root.members.add(ADA, { role: 'auditor', scope: { projects: { only: ['market'] }, environments: { only: ['dev'] } } });
   const { entries } = await ada.audit.list({ detail: '1' });

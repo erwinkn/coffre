@@ -5,6 +5,7 @@ import * as gs from '@hegeldev/hegel/generators';
 
 import {
   allows,
+  assignableToEnvironment,
   convertEveryProjectGrants,
   EVERYWHERE,
   PERMISSIONS,
@@ -55,18 +56,61 @@ test('the common cases convert as the design says', () => {
   }
 });
 
+const held = (place: string, role: Role, expiresAt: number | null = null) => {
+  const [projectId, environment] = place.split('/');
+  return { projectId: projectId!, environmentId: environment === undefined ? null : place, role, expiresAt };
+};
+const given = (conversion: ReturnType<typeof convertEveryProjectGrants>) =>
+  conversion.grants.map((grant) => `${grant.role} ${grant.environmentId ?? grant.projectId}${grant.expiresAt === null ? '' : ` until ${grant.expiresAt}`}`);
+const losses = (conversion: ReturnType<typeof convertEveryProjectGrants>) =>
+  conversion.narrowed.flatMap((loss) => {
+    if (loss.kind === 'environments') return [`${loss.role} on ${loss.projectId}'s environments`];
+    if (loss.kind === 'lost') return [`lost ${loss.lost} on ${loss.environmentId ?? loss.projectId}, kept ${loss.kept}`];
+    return [];
+  });
+
 test('a project grant they hold stays when the new one would not hold all it does, for as long', () => {
-  const kept = convertEveryProjectGrants(person([all('viewer')], { grants: [{ projectId: 'market', environmentId: null, role: 'access-manager', expiresAt: null }] }));
-  assert.deepEqual(kept.grants.map((grant) => grant.projectId), ['billing']);
-  assert.deepEqual(kept.narrowed.filter((loss) => loss.kind === 'kept').map((loss) => loss.kind === 'kept' && loss.kept), ['access-manager']);
-  const replaced = convertEveryProjectGrants(person([all('maintainer')], { grants: [{ projectId: 'market', environmentId: null, role: 'viewer', expiresAt: null }] }));
+  const replaced = convertEveryProjectGrants(person([all('maintainer')], { grants: [held('market', 'viewer')] }));
   assert.deepEqual(replaced.grants.find((grant) => grant.projectId === 'market')?.replaces, 'viewer');
-  // A grant held for good is not given up for one that ends.
-  const lasting = convertEveryProjectGrants(person([all('maintainer', 5_000)], { grants: [{ projectId: 'market', environmentId: null, role: 'viewer', expiresAt: null }] }));
-  assert.equal(lasting.grants.some((grant) => grant.projectId === 'market'), false);
   // Where they hold it all already, nothing is added.
-  const covered = convertEveryProjectGrants(person([all('viewer')], { grants: [{ projectId: 'market', environmentId: null, role: 'owner', expiresAt: null }] }));
-  assert.deepEqual(covered.grants.map((grant) => grant.projectId), ['billing']);
+  const covered = convertEveryProjectGrants(person([all('viewer')], { grants: [held('market', 'owner')] }));
+  assert.deepEqual(given(covered), ['viewer billing']);
+});
+
+test('where one grant cannot hold both, a project\'s goes on to its environments, and nothing is lost', () => {
+  // W59's case: viewer on every project and auditor on billing kept auditor alone, and billing's values were lost.
+  const auditor = convertEveryProjectGrants(person([all('viewer')], { grants: [held('billing', 'auditor')] }));
+  assert.deepEqual(given(auditor), ['viewer market', 'viewer billing/dev']);
+  assert.deepEqual(losses(auditor), ["viewer on billing's environments"]);
+  assert.ok(allows({ isRootAdmin: false, role: auditor.role, scope: auditor.scope, grants: [held('billing', 'auditor'), ...auditor.grants] }, 'secret.read', { projectId: 'billing', environmentId: 'billing/dev', environmentSlug: 'dev' }));
+  // The other way round, the auditor's goes down instead, and billing reads on.
+  const service = convertEveryProjectGrants({ ...person([all('auditor')], { grants: [held('billing', 'viewer')] }), person: false });
+  assert.deepEqual(given(service), ['auditor market', 'auditor billing', 'viewer billing/dev']);
+  // A project grant that holds all of the new one but ends sooner stays, and the new one goes on to the environments, for good.
+  const sooner = convertEveryProjectGrants(person([all('viewer')], { grants: [held('market', 'developer', 5_000)] }));
+  assert.deepEqual(given(sooner), ['viewer market/dev', 'viewer market/prod', 'viewer billing']);
+  assert.deepEqual(losses(sooner), ["viewer on market's environments"]);
+  // A grant held for good is not given up for one that ends: the one that ends goes on to the environments.
+  const lasting = convertEveryProjectGrants(person([all('maintainer', 5_000)], { grants: [held('market', 'viewer')] }));
+  assert.deepEqual(given(lasting), ['maintainer market until 5000', 'viewer market/dev', 'viewer market/prod', 'maintainer billing until 5000']);
+  // An environment where they read already needs nothing more.
+  const below = convertEveryProjectGrants(person([all('viewer')], { grants: [held('billing', 'auditor'), held('billing/dev', 'developer')] }));
+  assert.deepEqual(given(below), ['viewer market']);
+});
+
+test('where no grant can hold both, the one that reads stays and the loss is named', () => {
+  // Neither maintainer nor access-manager goes on an environment.
+  const service = convertEveryProjectGrants({ ...person([all('maintainer')], { grants: [held('market', 'access-manager')] }), person: false });
+  assert.deepEqual(given(service), ['maintainer market', 'maintainer billing']);
+  assert.equal(service.grants[0]?.replaces, 'access-manager');
+  assert.deepEqual(losses(service), ['lost access-manager on market, kept maintainer']);
+  // On an environment there is nowhere further to go.
+  const environment = convertEveryProjectGrants(person([on('dev', 'viewer')], { grants: [held('market/dev', 'auditor')] }));
+  assert.deepEqual(given(environment), ['viewer market/dev', 'viewer billing/dev']);
+  assert.deepEqual(losses(environment), ['lost auditor on market/dev, kept viewer']);
+  // Of two that read, the one they had stays.
+  const both = convertEveryProjectGrants({ ...person([on('dev', 'developer', 5_000)], { grants: [held('market/dev', 'viewer')] }), person: false });
+  assert.deepEqual(losses(both), ['lost developer on market/dev, kept viewer']);
 });
 
 // What a member held in 0.4, independently of the conversion: a grant on
@@ -113,7 +157,7 @@ const projectGrants = gs.arrays(
 const later = { id: 'later', environments: [{ id: 'later/dev', slug: 'dev' }, { id: 'later/prod', slug: 'prod' }, { id: 'later/other', slug: 'other' }] };
 
 const settings = propertySettings(128);
-test(`nobody holds more after the conversion than before, anywhere, at any time, seed ${settings.seed}`, () => hegel.test((tc) => {
+test(`nobody holds more after the conversion than before, nor less than it names, anywhere, at any time, seed ${settings.seed}`, () => hegel.test((tc) => {
   const input: ConversionInput = {
     person: tc.draw(gs.booleans()),
     role: 'member',
@@ -143,18 +187,27 @@ test(`nobody holds more after the conversion than before, anywhere, at any time,
       }
     }
   }
-  // And what they held in the projects there are now, they hold still, but where a grant they had stays (`kept`).
-  const keptAt = new Set(conversion.narrowed.flatMap((loss) => (loss.kind === 'kept' ? [loss.environmentId ?? loss.projectId] : [])));
-  const now: Holdings = { isRootAdmin: false, role: conversion.role, scope: conversion.scope, grants };
-  for (const project of projects) {
-    const places: Place[] = [{ projectId: project.id }, ...project.environments.map((environment) => ({ projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug }))];
-    for (const place of places) {
-      if (keptAt.has(place.environmentId ?? place.projectId) || keptAt.has(place.projectId)) continue;
-      for (const permission of ['secret.read', 'secret.write', 'secret.archive', 'audit.read'] as Permission[]) {
-        if (heldBefore({ admin, ...input }, permission, place, 0)) {
-          assert.ok(allows(now, permission, place), JSON.stringify({ input, conversion, permission, place }));
+  // What they held in the projects there are now, they hold still, at any
+  // time, but for what the conversion names: a role that went on to a
+  // project's environments, on the project itself, and a role lost there.
+  const exempt = (permission: Permission, place: Place) => conversion.narrowed.some((loss) =>
+    (loss.kind === 'environments' && place.environmentId == null && loss.projectId === place.projectId && (ROLES[loss.role].permissions as readonly Permission[]).includes(permission))
+    || (loss.kind === 'lost' && loss.projectId === place.projectId && (loss.environmentId === null || loss.environmentId === place.environmentId) && (ROLES[loss.lost].permissions as readonly Permission[]).includes(permission)));
+  for (const at of [0, 1_500, 2_500]) {
+    const after: Holdings = { isRootAdmin: false, role: conversion.role, scope: conversion.scope, grants: grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > at) };
+    for (const project of projects) {
+      const places: Place[] = [{ projectId: project.id }, ...project.environments.map((environment) => ({ projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug }))];
+      for (const place of places) {
+        for (const permission of PERMISSIONS) {
+          if (place.environmentId != null && PROJECT_ONLY_PERMISSIONS.includes(permission)) continue;
+          if (heldBefore({ admin, ...input }, permission, place, at) && !exempt(permission, place)) {
+            assert.ok(allows(after, permission, place), JSON.stringify({ input, conversion, permission, place, at }));
+          }
         }
       }
     }
   }
+  // One grant to a place, and only roles an environment takes on one.
+  assert.equal(given.size, conversion.grants.length);
+  for (const grant of conversion.grants) assert.ok(grant.environmentId === null || assignableToEnvironment(grant.role), JSON.stringify(grant));
 }, settings));

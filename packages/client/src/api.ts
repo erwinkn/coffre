@@ -375,7 +375,7 @@ export type Api = {
         principalType: "service" | "user";
         principalId: string;
         instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
-        scope: {
+        scope: null | {
           projects: "all" | {
             only: string[];
           } | {
@@ -1009,7 +1009,7 @@ export type Api = {
       principalId: string;
       status: "active" | "removed" | "tampered";
       instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
-      scope: {
+      scope: null | {
         projects: "all" | {
           only: string[];
         } | {
@@ -1315,7 +1315,7 @@ export type Member = {
   principalType: "service" | "user";
   principalId: string;
   instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
-  scope: {
+  scope: null | {
     projects: "all" | {
       only: string[];
     } | {
@@ -1347,7 +1347,7 @@ export type MemberAccess = {
   principalId: string;
   status: "active" | "removed" | "tampered";
   instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
-  scope: {
+  scope: null | {
     projects: "all" | {
       only: string[];
     } | {

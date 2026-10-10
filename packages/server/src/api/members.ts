@@ -62,8 +62,12 @@ export type Member = {
   principalId: string;
   /** `member` for every service account. */
   instanceRole: InstanceRole | 'root-admin';
-  /** Where their instance role applies, projects by slug; everywhere for a member or a root admin. */
-  scope: Scope;
+  /**
+   * Where their instance role applies, projects by slug; everywhere for a
+   * member or a root admin. Null unless the caller runs the instance: a
+   * scope names projects the caller may not see.
+   */
+  scope: Scope | null;
   /** Asked of a place (`?path=`): whether their instance role reaches it, beside any grant there. False otherwise. */
   reachesByRole: boolean;
   isRootAdmin: boolean;
@@ -259,7 +263,8 @@ function byPlace(a: PlacedGrant, b: PlacedGrant): number {
  * Anyone else sees the grants in the places where they hold
  * `grant.manage`, and the members those grants belong to. `path` narrows
  * it to who reaches one project or environment: by a grant there, or by an
- * instance role whose scope takes it in, listed with no grant.
+ * instance role whose scope takes it in, listed with no grant. Where a
+ * role applies (`scope`) only those who run the instance see.
  */
 export async function listMembers(
   ctx: ApiContext,
@@ -300,7 +305,7 @@ export async function listMembers(
       principalType: ref.type,
       principalId: ref.id,
       instanceRole: role,
-      scope: scopeView(scope, known),
+      scope: runsInstance(caller) ? scopeView(scope, known) : null,
       reachesByRole: byRole,
       isRootAdmin: listed.isRootAdmin,
       tampered: listed.status === 'tampered',
@@ -504,8 +509,8 @@ export type MemberAccess = {
   principalId: string;
   status: 'active' | 'removed' | 'tampered';
   instanceRole: InstanceRole | 'root-admin';
-  /** Projects by slug; everywhere for a member or a root admin. */
-  scope: Scope;
+  /** Projects by slug; everywhere for a member or a root admin. Null unless the caller runs the instance, as in `Member`. */
+  scope: Scope | null;
   isRootAdmin: boolean;
   /** Their live grants the caller manages: all of them, for those who run the instance. None unless active. */
   grants: MemberGrant[];
@@ -561,7 +566,7 @@ export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<
     principalId: member.id,
     status,
     instanceRole: isRootAdmin ? 'root-admin' : role,
-    scope: shown,
+    scope: runsInstance(caller) ? shown : null,
     isRootAdmin,
     grants,
   };

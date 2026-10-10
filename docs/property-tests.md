@@ -34,8 +34,9 @@ The conversion target holds the vault's replacement of the grants on every
 project of 0.4 (`convertEveryProjectGrants`) to an independent model of
 what they gave: nobody ends up holding a permission they did not, at any
 place, at any time, in a project made later included; and in the projects
-there are now, they keep each secret and audit permission they had, but
-where a grant they held already stays.
+there are now, they keep every permission they had, at any time, but what
+the conversion names: a role it put on a project's environments instead,
+on the project itself, and a role it says is lost.
 Credential validity is checked before that boundary, not by core's `allows`.
 
 ## Native dependencies

@@ -39,7 +39,7 @@ const MEMBER: RoleVars = { role: 'member', scope: EVERYWHERE };
 
 /** The role a principal holds, as the role field edits it. */
 const roleOf = (principal: DirectoryPrincipal): RoleVars =>
-  principal.instanceRole === 'root-admin' ? MEMBER : { role: principal.instanceRole, scope: principal.scope };
+  principal.instanceRole === 'root-admin' ? MEMBER : { role: principal.instanceRole, scope: principal.scope ?? EVERYWHERE };
 
 /** What each kind of principal is called in the interface. */
 export const KIND: Record<PrincipalType, string> = {
@@ -321,7 +321,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
       <span className={`tag${principal.instanceRole === 'member' ? '' : ' tag-violet'}`}>
         {ROLE_LABEL[principal.instanceRole]}
       </span>
-      {principal.instanceRole !== 'member' && !unscoped(principal.scope) && (
+      {principal.instanceRole !== 'member' && principal.scope !== null && !unscoped(principal.scope) && (
         <span className="role-scope">{scopeInWords(principal.scope)}</span>
       )}
     </>

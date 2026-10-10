@@ -8,20 +8,33 @@ which applies in every project its scope takes in, the ones made later
 too. A scope has two filters, Projects and Environments, each all, only
 some, or all except some; environments match by name, so "Developer,
 environments only dev" reads and writes every project's `dev`. Admin is
-0.4's instance owner: it manages people, projects and access, and reads no
-value; Owner adds every secret. A scoped Admin manages only inside its
-scope and sets no role, and nobody changes their own role or grants
-themselves one, which 0.4 let an owner or an access manager do. Grants are on a
+0.4's instance owner: it manages people, projects and access, and holds no
+secret permission; Owner adds every secret. An Admin of the whole instance
+can still reach any value, as a 0.4 owner could, by admitting a service
+account, granting it a reading role and issuing its token, each step in the
+log. A scoped Admin manages only inside its scope and sets no role, and
+nobody changes their own role or grants themselves one, which 0.4 let an
+owner or an access manager do: that stops a quiet read of one's own, not
+an Admin set on reading. Grants are on a
 project or an environment, and only add to the role. Service accounts hold
 grants only. `*` and `*/<env>` are gone from the API, the CLI, the MCP
 tools and the pages: the vault replaces the ones there are when this
 version first runs, never giving more than they did, and logs each
-(`docs/design/instance-roles.md` has the rule). `coffre migrate` says what
-it will make of each before you deploy.
+(`docs/design/instance-roles.md` has the rule). It takes away nothing it
+can keep in the projects there are now: viewer on `*` beside auditor on
+billing becomes viewer on each of billing's environments, beside the
+auditor grant. Where no grant can hold both, as maintainer on `*` beside
+access-manager on billing for a service account, the one that reads stays.
+`coffre migrate` says what it will make of each before you deploy, and
+names what is lost: "loses access-manager on billing (keeps maintainer)".
+The first request after the upgrade converts every member holding one,
+one after another, before it answers, so on an instance with many it may
+be slow; one cut short leaves the rest to the next.
 
 - **API.** `PUT /api/members/<member>` takes `{ role, scope }` instead of
   `{ owner }`; members list `instanceRole` (`member`, `auditor`,
-  `developer`, `admin`, `owner` or `root-admin`) and `scope`, and a
+  `developer`, `admin`, `owner` or `root-admin`) and `scope`, null but for
+  those who run the instance, since a scope names projects, and a
   place's list says who reaches it by their role (`reachesByRole`).
   `GET /api/me` adds `scope` and `runsInstance`. `GET /api/members/<member>/access`
   answers a member's role, scope and the grants you manage in one query: a

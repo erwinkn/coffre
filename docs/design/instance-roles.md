@@ -90,11 +90,15 @@ Nobody hands out more than they reach:
   sets an instance role.
 - **Nobody changes their own instance role or scope**, not even an
   unscoped Admin: another admin does it, and the log says who.
-- Managing access never reads a value: an Admin reads none, scoped or not,
-  and **nobody grants themselves a role** (giving one up is fine). An Admin
-  can grant a project role that reads to someone else, as an access manager
-  can in a project, and the grant is in the log; only a root admin, who
-  reads everything anyway, is exempt.
+- An Admin holds no secret permission, scoped or not, and **nobody grants
+  themselves a role** (giving one up is fine; a root admin, who reads
+  everything anyway, is exempt). That stops a quiet read of one's own, and
+  is no boundary: an Admin can grant a project role that reads to someone
+  else, as an access manager can in a project, and an Admin of the whole
+  instance can reach any value in three steps, each in the log, by
+  admitting a service account, granting it `owner` on a project and issuing
+  its token, as a 0.4 owner could. Keep Admins to people you would trust
+  with the values, and read the log for those steps.
 - An Auditor reads the log of the projects and environments in its scope,
   never the instance's own entries.
 
@@ -134,7 +138,15 @@ Rows can only be sealed by the vault, so the vault replaces them, not the
 SQL migration: once per process, before its first call does anything else
 (`#convert`), one decision per member holding any, logged as
 `system:vault`. A grant on every project left behind reaches nothing
-anyway: core's `covers` knows only projects and environments.
+anyway: core's `covers` knows only projects and environments. The first
+request after the upgrade waits for it, one member after another, so on an
+instance with many holders it may be slow; one cut short leaves the rest
+to the next. Two kinds of holder it leaves as they are: a member whose row
+the vault found tampered with, until they are started over, and a root
+admin while they are one, who holds everything anyway; once they are not,
+the next process converts theirs. `coffre migrate` leaves out the first;
+the second it cannot tell, since the vault's configuration names root
+admins and the database does not.
 
 The rule (`convertEveryProjectGrants`, in core, with a property test that
 nobody ends up holding more anywhere, at any time, including in a project
@@ -157,9 +169,29 @@ latter.
 | any grant on `*` with an end date | the same role and end date on each project there is now | later projects |
 | service account, developer on `*/dev` | `developer` on each `dev` there is now | later projects |
 
-Where a member already holds a project grant at a place, it stays unless
-the new one holds all it does for at least as long; otherwise it is kept
-and the case is logged (`narrowed: [{ kind: 'kept', ... }]`). Each grant
+A place holds one grant per member. Where a member already holds one
+there, the new one takes its place if it holds all the old one does, for
+at least as long, and is left out if the old one holds all of it. Neither
+taking away what they hold in a project there is now:
+
+| Before (0.4) | After (0.5) | Narrower? |
+|---|---|---|
+| viewer on `*`, auditor on billing | auditor on billing, `viewer` on each of billing's environments | billing's later environments |
+| viewer on `*`, developer on billing until June | developer on billing until June, `viewer` on each of its environments | the same |
+| service account, auditor on `*`, viewer on billing | auditor on billing, `viewer` on each of its environments | the same |
+| service account, maintainer on `*`, access-manager on billing | maintainer on billing | loses access-manager there |
+| viewer on `*/dev`, auditor on billing/dev | viewer on billing/dev | loses auditor there |
+
+On a project, one of the two goes on to each of its environments instead,
+which reaches what it did but for environments made later (`narrowed:
+[{ kind: 'environments', ... }]`); the one that reads no log goes, as an
+environment's grant reads none of its project's entries. Only roles an
+environment takes can go (viewer, developer, auditor). Where neither can,
+or on an environment, one is lost: the one that reads stays, else the one
+they held (`narrowed: [{ kind: 'lost', ... }]`), and `coffre migrate`
+names it before you deploy ("loses access-manager on billing (keeps
+maintainer)"). The property test holds the conversion to taking nothing
+away, at any time, in any place there is now, but what it names. Each grant
 replaced is an `access.revoke` whose payload says what replaced it
 (`replacedBy`) and what it no longer reaches (`narrowed`); each project
 grant given is an `access.grant` with `reason: 'every-project'`.
@@ -169,7 +201,8 @@ grant given is an `access.grant` with `reason: 'every-project'`.
 - **API.** `PUT /api/members/<member>` takes `{ role, scope }`, the scope's
   projects by slug: `{ "role": "developer", "scope": { "environments": { "only": ["dev"] } } }`
   (either filter left out is `all`). Members list `instanceRole` and
-  `scope`; `GET /api/members?path=market` lists those who reach `market` by
+  `scope`, which is null but for those who run the instance: a scope names
+  projects the caller may not see. `GET /api/members?path=market` lists those who reach `market` by
   their instance role too, with no grant. `GET /api/members/<member>/access`
   answers one member's role, scope and the grants the caller manages in one
   SQL query, for their page. `PATCH /api/access/<member>`

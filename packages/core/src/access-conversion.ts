@@ -1,6 +1,7 @@
 import {
   admits,
   allows,
+  assignableToEnvironment,
   EVERYWHERE,
   INSTANCE_ROLES,
   instanceRoleGrants,
@@ -32,9 +33,18 @@ import {
  *   any, for a service        the same role on each project, or each environment of the slug, there is now
  *
  * What a grant leaves to project grants reaches the projects there are
- * now, not those made later (`narrowed`, `later-projects`). A project grant
- * the member holds already stays when the new one would not hold all it
- * does for as long (`kept`).
+ * now, not those made later (`narrowed`, `later-projects`). A place holds
+ * one grant: where they hold one already that neither it nor the new one
+ * holds all of, for as long, a project's goes on to each of its
+ * environments instead, the one that does not read the log first
+ * (`environments`: not environments made later, nor, for an auditor, the
+ * project's own entries). Only where neither can, or on an environment, is
+ * something lost, the one that reads kept (`lost`):
+ *
+ *   viewer on *, auditor on billing      auditor on billing, viewer on each of billing's environments
+ *   viewer on *, developer on billing    developer on billing
+ *   maintainer on *, access-manager on billing, as a service
+ *                                        maintainer on billing: access-manager there is lost
  */
 
 /** A grant on every project of 0.4: on all of each (`environmentSlug` null), or on the environment of one slug in each. */
@@ -56,40 +66,81 @@ export type ConversionInput = {
 /** A project grant the conversion gives: new, or in place of the one they held there (`replaces`). */
 export type ConvertedGrant = { projectId: string; environmentId: string | null; role: Role; expiresAt: number | null; replaces: Role | null };
 
-/** Where the conversion gives less than a grant on every project did. */
+/** Where the conversion gives less than a grant on every project did, each naming the grant it comes of. */
 export type Narrowed =
   /** It reaches the projects there are now as project grants, and none made later. */
   | { kind: 'later-projects'; grant: EveryProjectGrant }
-  /** They held `kept` at this place already, which the grant's role would not have held all of, or for as long: it stays. */
-  | { kind: 'kept'; grant: EveryProjectGrant; projectId: string; environmentId: string | null; kept: Role };
+  /**
+   * `role` on this project, the grant's or the one they held there, is on
+   * each of its environments instead: not on environments made later, nor
+   * on the project's own log entries.
+   */
+  | { kind: 'environments'; grant: EveryProjectGrant; projectId: string; role: Role }
+  /** No grant here holds both: `kept` stays (until `keptUntil`), and what `lost` held beyond it is gone. */
+  | { kind: 'lost'; grant: EveryProjectGrant; projectId: string; environmentId: string | null; lost: Role; kept: Role; keptUntil: number | null };
 
 export type Conversion = { role: InstanceRole; scope: Scope; grants: ConvertedGrant[]; narrowed: Narrowed[] };
 
+type Held = GrantPlace & { role: Role; expiresAt: number | null };
+type Wanted = { role: Role; expiresAt: number | null };
+type At = { project: ConversionInput['projects'][number]; environment: { id: string; slug: string } | null };
+
 export function convertEveryProjectGrants(input: ConversionInput): Conversion {
   const { role, scope } = input.person ? instanceRoleFor(input.role, input.everyProject) : { role: input.role, scope: EVERYWHERE };
-  const held = new Map(input.grants.map((grant) => [placeKey(grant), grant]));
-  const grants: ConvertedGrant[] = [];
+  const before = new Map(input.grants.map((grant) => [placeKey(grant), grant]));
+  const held = new Map<string, Held>(before);
+  const given = new Map<string, ConvertedGrant>();
   const narrowed: Narrowed[] = [];
+
+  const give = (at: At, wanted: Wanted) => {
+    const place = { projectId: at.project.id, environmentId: at.environment?.id ?? null, role: wanted.role, expiresAt: wanted.expiresAt };
+    held.set(placeKey(place), place);
+    given.set(placeKey(place), { ...place, replaces: before.get(placeKey(place))?.role ?? null });
+  };
+  // What `grant` held at `at`, as `wanted`, added to what they hold there already.
+  const settle = (grant: EveryProjectGrant, at: At, wanted: Wanted) => {
+    const place: Place = at.environment === null
+      ? { projectId: at.project.id }
+      : { projectId: at.project.id, environmentId: at.environment.id, environmentSlug: at.environment.slug };
+    if (holdsAlready(role, scope, [...held.values()], wanted, place)) return;
+    const existing = held.get(at.environment?.id ?? at.project.id);
+    if (existing === undefined || (within(existing.role, wanted.role) && outlasts(wanted.expiresAt, existing.expiresAt))) {
+      give(at, wanted);
+      return;
+    }
+    // One place, one grant, and neither holds the other for as long: on a
+    // project, one of them goes on to its environments, as far as it reached
+    // but for environments made later; the one that reads no log first, as
+    // an environment's grant reads none of its project's entries.
+    if (at.environment === null) {
+      const down = [wanted, existing]
+        .filter((candidate) => assignableToEnvironment(candidate.role))
+        .sort((a, b) => Number(roleGrants(a.role, 'audit.read')) - Number(roleGrants(b.role, 'audit.read')))[0];
+      if (down !== undefined) {
+        if (down === existing) give(at, wanted);
+        narrowed.push({ kind: 'environments', grant, projectId: at.project.id, role: down.role });
+        for (const environment of at.project.environments) settle(grant, { project: at.project, environment }, { role: down.role, expiresAt: down.expiresAt });
+        return;
+      }
+    }
+    // Nothing holds both: the one that reads stays, else the one they had.
+    const keep = !roleGrants(wanted.role, 'secret.read') || roleGrants(existing.role, 'secret.read') ? existing : wanted;
+    const lose = keep === existing ? wanted : existing;
+    if (keep === wanted) give(at, wanted);
+    narrowed.push({ kind: 'lost', grant, projectId: at.project.id, environmentId: at.environment?.id ?? null, lost: lose.role, kept: keep.role, keptUntil: keep.expiresAt });
+  };
 
   for (const grant of input.everyProject) {
     if (byRole(role, scope, grant)) continue;
     narrowed.push({ kind: 'later-projects', grant });
-    for (const place of reached(grant, input.projects)) {
-      const at: Place = place.environmentId === null
-        ? { projectId: place.projectId }
-        : { projectId: place.projectId, environmentId: place.environmentId, environmentSlug: grant.environmentSlug };
-      if (holdsAlready(role, scope, [...held.values()], grant, at)) continue;
-      const existing = held.get(placeKey(place));
-      if (existing !== undefined && !(within(existing.role, grant.role) && outlasts(grant.expiresAt, existing.expiresAt))) {
-        narrowed.push({ kind: 'kept', grant, ...place, kept: existing.role });
-        continue;
-      }
-      const given = { ...place, role: grant.role, expiresAt: grant.expiresAt };
-      held.set(placeKey(place), given);
-      grants.push({ ...given, replaces: existing?.role ?? null });
+    for (const project of input.projects) {
+      const reached = grant.environmentSlug === null
+        ? [null]
+        : project.environments.filter((environment) => environment.slug === grant.environmentSlug);
+      for (const environment of reached) settle(grant, { project, environment }, grant);
     }
   }
-  return { role, scope, grants, narrowed };
+  return { role, scope, grants: [...given.values()], narrowed };
 }
 
 /**
@@ -128,21 +179,12 @@ function byRole(role: InstanceRole, scope: Scope, grant: EveryProjectGrant): boo
 function holdsAlready(
   role: InstanceRole,
   scope: Scope,
-  held: readonly (GrantPlace & { role: Role; expiresAt: number | null })[],
-  grant: EveryProjectGrant,
+  held: readonly Held[],
+  grant: Wanted,
   at: Place,
 ): boolean {
   const lasting = held.filter((other) => outlasts(other.expiresAt, grant.expiresAt));
   return ROLES[grant.role].permissions.every((permission) => allows({ isRootAdmin: false, role, scope, grants: lasting }, permission, at));
-}
-
-/** The places a grant on every project reached: each project, or each environment of its slug. */
-function reached(grant: EveryProjectGrant, projects: ConversionInput['projects']): { projectId: string; environmentId: string | null }[] {
-  return projects.flatMap((project): { projectId: string; environmentId: string | null }[] =>
-    grant.environmentSlug === null
-      ? [{ projectId: project.id, environmentId: null }]
-      : project.environments.filter((environment) => environment.slug === grant.environmentSlug).map((environment) => ({ projectId: project.id, environmentId: environment.id })),
-  );
 }
 
 /** Whether `role` holds nothing `wider` does not. */

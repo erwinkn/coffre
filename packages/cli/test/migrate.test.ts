@@ -41,7 +41,38 @@ test('migrate says what the vault will make of each grant on every project of 0.
         grants: [{ projectId: 'b', environmentId: null, role: 'maintainer', expiresAt: null, replaces: null }],
         narrowed: [
           { kind: 'later-projects', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null } },
-          { kind: 'kept', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null }, projectId: 'm', environmentId: null, kept: 'access-manager' },
+          { kind: 'lost', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null }, projectId: 'm', environmentId: null, lost: 'maintainer', kept: 'owner', keptUntil: Date.UTC(2026, 10, 1) },
+        ],
+      },
+      paths,
+    },
+    {
+      principal: 'user:cy@acme.example',
+      before: [{ place: '*', role: 'viewer', expiresAt: null }],
+      conversion: {
+        role: 'member',
+        scope: { projects: 'all', environments: 'all' },
+        grants: [
+          { projectId: 'b', environmentId: null, role: 'viewer', expiresAt: null, replaces: null },
+          { projectId: 'm', environmentId: 'm-dev', role: 'viewer', expiresAt: null, replaces: null },
+        ],
+        narrowed: [
+          { kind: 'later-projects', grant: { environmentSlug: null, role: 'viewer', expiresAt: null } },
+          { kind: 'environments', grant: { environmentSlug: null, role: 'viewer', expiresAt: null }, projectId: 'm', role: 'viewer' },
+        ],
+      },
+      paths,
+    },
+    {
+      principal: 'token:deploy',
+      before: [{ place: '*', role: 'maintainer', expiresAt: null }],
+      conversion: {
+        role: 'member',
+        scope: { projects: 'all', environments: 'all' },
+        grants: [{ projectId: 'm', environmentId: null, role: 'maintainer', expiresAt: null, replaces: 'access-manager' }],
+        narrowed: [
+          { kind: 'later-projects', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null } },
+          { kind: 'lost', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null }, projectId: 'm', environmentId: null, lost: 'access-manager', kept: 'maintainer', keptUntil: null },
         ],
       },
       paths,
@@ -62,8 +93,11 @@ test('migrate says what the vault will make of each grant on every project of 0.
     '',
     'Grants on every project are gone in this version. When it first runs, the vault replaces them:',
     '  user:ada@acme.example: developer on dev in every project → Developer, All projects · dev only',
-    '  user:bob@acme.example: maintainer on every project → Developer, and maintainer on billing; not projects made later; kept access-manager on market',
+    '  user:bob@acme.example: maintainer on every project → Developer, and maintainer on billing; not projects made later; loses maintainer on market (keeps owner until 2026-11-01)',
+    '  user:cy@acme.example: viewer on every project → viewer on billing, market/dev; not projects made later; viewer on market only through its environments, not those made later',
+    '  service:deploy: maintainer on every project → maintainer on market; not projects made later; loses access-manager on market (keeps maintainer)',
     '  service:ci: viewer on dev in every project → viewer on market/dev; not projects made later',
+    "A root admin's stay as they are while they are one; so do those of a member whose row was tampered with, who is not listed.",
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   ].join('\n'));
