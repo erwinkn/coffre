@@ -140,6 +140,13 @@ export function adminsProblem(answer: string): string | null {
   return wrong.length === 0 ? null : `not an email: ${wrong.map((email) => email || '(empty)').join(', ')}`;
 }
 
+/**
+ * The database, as setup read it: its administrator, whether it holds
+ * data, and each runtime login, by what it logs in as, and whether it
+ * exists.
+ */
+export type Database = { administrator: URL; used: boolean; logins: Record<Component, { login: string; exists: boolean }> };
+
 /** What setup found on Cloudflare, before it changes anything. */
 type Found = {
   api: CloudflareApi;
@@ -174,6 +181,69 @@ async function othersUnder(
   return others;
 }
 
+/** Whether a Hyperdrive config points at this run's database server: the same host, the same port. */
+function sameServer(origin: HyperdriveConfig['origin'], administrator: URL): boolean {
+  return origin.host === administrator.hostname && (origin.port ?? 5432) === Number(administrator.port || 5432);
+}
+
+/**
+ * Which logins get a new password: Hyperdrive must have it, and the
+ * database keeps only its verifier. So each whose config is missing, or
+ * logs in elsewhere, or both, when asked. Setup stops before a login that
+ * exists gets one, when it is also the login of another deployment's
+ * Hyperdrive config, on the same server: a login is the server's, not a
+ * database's, and that deployment would be cut off. On PlanetScale, a
+ * login names its branch, and never is.
+ */
+function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Component, boolean> {
+  const { administrator } = database;
+  const ourOwn = (component: Component) => ourConfig(configs, workers[component].name, workers[component].hyperdrive, administrator);
+  const ours = new Set(COMPONENTS.map(ourOwn));
+  const resets = {} as Record<Component, boolean>;
+  // Both checked before either changes.
+  for (const component of COMPONENTS) {
+    const { login, exists } = database.logins[component];
+    const origin = ourOwn(component)?.origin;
+    resets[component] = all || origin === undefined || !sameServer(origin, administrator) || !sameDatabase(origin, administrator) || origin.user !== login;
+    if (!resets[component] || !exists) continue;
+    const other = configs.find((config) => !ours.has(config) && sameServer(config.origin, administrator) && config.origin.user === login);
+    if (other === undefined) continue;
+    throw new Error(
+      `${login} is also the login of the Hyperdrive config ${other.name}, another deployment's, on this database server: ` +
+        `a new password for the ${component}'s config would cut that deployment off. Two deployments can't share a server's logins: ` +
+        'give this one a server of its own. Neither login was changed.',
+    );
+  }
+  return resets;
+}
+
+/**
+ * Which Workers have no key, for which this run makes one: for a database
+ * that holds no data yet. One that does has its keys already, and a new
+ * one would leave what it holds unreadable: setup stops, before changing
+ * anything.
+ */
+function missingKeys(workers: Record<Component, WorkerConfig>, secrets: Record<Component, Set<string>>, used: boolean): Record<Component, boolean> {
+  const missing = { app: !secrets.app.has('APP_KEY'), vault: !secrets.vault.has('VAULT_KEY') };
+  for (const component of COMPONENTS) {
+    if (!used || !missing[component]) continue;
+    const { name, path } = workers[component];
+    const key = component === 'app' ? 'APP_KEY' : 'VAULT_KEY';
+    throw new Error(
+      `The ${component} Worker ${name} has no ${key}, but the database already holds data, which needs the key it was set up with. ` +
+        `Put that key back, with pnpm exec wrangler secret put ${key} -c ${path}, then run setup again. Setup never makes a new key for a database in use.`,
+    );
+  }
+  return missing;
+}
+
+/** What setup does to this deployment's keys and logins, given the database as read; or the refusal, before any of it. */
+function checked(found: Found, workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Checked {
+  return { missing: missingKeys(workers, found.secrets, database.used), newPasswords: newPasswords(found.configs, workers, database, all) };
+}
+
+type Checked = { missing: Record<Component, boolean>; newPasswords: Record<Component, boolean> };
+
 export class Cloudflare {
   readonly #dir: string;
   readonly #wrangler: Wrangler;
@@ -186,9 +256,13 @@ export class Cloudflare {
   readonly address: string;
   readonly rootAdmins: string;
   readonly serving: Serving;
-  /** The keys this run makes, for the Workers without theirs, once `checkKeys` has run. */
-  keys: Keys | null = null;
-  #missing: Record<Component, boolean> = { app: false, vault: false };
+  /** The keys this run makes, for the Workers without theirs. */
+  readonly keys: Keys | null;
+  readonly #missing: Record<Component, boolean>;
+  /** Which logins this run gives a new password (`newPasswords`). */
+  readonly newPasswords: Record<Component, boolean>;
+  /** Whether every login gets a new password: --reset-passwords. */
+  readonly #resetPasswords: boolean;
   /** The GitHub App's client secret, when this run has it to install. */
   #clientSecret: string | null = null;
   /** The Cloudflare API token setup was given, for what wrangler's login was refused: its wranglers deploy under it. */
@@ -207,6 +281,8 @@ export class Cloudflare {
     found: Found,
     administrator: URL,
     answers: { address: string; rootAdmins: string; serving: Serving; token: string | null },
+    checked: Checked,
+    resetPasswords: boolean,
     secrets: string[],
   ) {
     this.#dir = dir;
@@ -219,6 +295,11 @@ export class Cloudflare {
     this.serving = answers.serving;
     this.#secrets = secrets;
     this.#token = answers.token;
+    this.#missing = checked.missing;
+    this.newPasswords = checked.newPasswords;
+    this.#resetPasswords = resetPasswords;
+    this.keys = checked.missing.app || checked.missing.vault ? generateKeys() : null;
+    if (this.keys !== null) secrets.push(this.keys.APP_KEY, this.keys.VAULT_KEY);
     const vars = workers.app.vars;
     this.#github = { web: vars.GITHUB_URL ?? GITHUB.web, api: vars.GITHUB_API_URL ?? GITHUB.api };
     const remote = gitRemote(dir);
@@ -228,7 +309,9 @@ export class Cloudflare {
   /**
    * Sign in to Cloudflare, choose the account, read what is there, and ask
    * what setup cannot know: coffre's address, its root admins, and, when
-   * another deployment has its names, a name of its own.
+   * another deployment has its names, a name of its own. Every refusal
+   * comes before its first change, a domain added or a custom hostname
+   * made: a run refused leaves nothing behind.
    */
   static async connect(
     dir: string,
@@ -236,9 +319,11 @@ export class Cloudflare {
     keys: Keyboard,
     describe: (error: unknown) => string,
     secrets: string[],
-    administrator: URL,
+    database: Database,
+    options: { resetPasswords: boolean },
   ): Promise<Cloudflare> {
     const s = style(out);
+    const { administrator } = database;
     const workers = { app: readWorker(dir, 'app/wrangler.jsonc'), vault: readWorker(dir, 'vault/wrangler.jsonc') };
     const records = recordsOf(workers);
     const wrangler = deploymentWrangler(dir);
@@ -283,22 +368,9 @@ export class Cloudflare {
         },
       }),
     );
-    let kind: Serving['kind'] = 'domain';
     const under = zoneOf(address, found.zones);
-    if (address.endsWith('.workers.dev')) {
-      kind = 'workers.dev';
-    } else if (under?.status !== undefined && under.status !== 'active') {
+    if (!address.endsWith('.workers.dev') && under?.status !== undefined && under.status !== 'active') {
       throw new Later(nameservers(out, under, 'is on Cloudflare, waiting for its nameservers'));
-    } else if (under === undefined) {
-      out.write(`${s.dim(paragraph(out, `${address}'s DNS isn't on this Cloudflare account.`, 2))}\n`);
-      if (active.length > 0) {
-        out.write(
-          `${s.dim(paragraph(out, `Setup serves it through ${active.length === 1 ? active[0]!.name : 'one of your domains'}, with Cloudflare for SaaS: you add a CNAME and TXT records where its DNS is, and setup waits for them.`, 2))}\n`,
-        );
-        kind = 'saas';
-      } else {
-        kind = await noDomain(api, account, address, workers.app.name, ownSubdomain, out, keys, secrets);
-      }
     }
     if (found.others.length > 0) {
       // Another deployment's, under these names: setup leaves it be, and this one takes names of its own.
@@ -316,11 +388,27 @@ export class Cloudflare {
       workers.app.name = name;
       workers.vault.name = `${name}-vault`;
     }
-    // The workers.dev address names the app Worker: its name, once settled.
-    if (kind === 'workers.dev') address = workersDev(workers.app.name, (await ownSubdomain())!);
     for (const component of COMPONENTS) {
       found.secrets[component] = new Set((await found.api.secretNames(found.account.id, workers[component].name)) ?? []);
     }
+    // Its names settled, what this deployment has on Cloudflare is known: whatever refuses the run does so here, before anything changes.
+    const settled = checked(found, workers, database, options.resetPasswords);
+    let kind: Serving['kind'] = 'domain';
+    if (address.endsWith('.workers.dev')) {
+      kind = 'workers.dev';
+    } else if (under === undefined) {
+      out.write(`${s.dim(paragraph(out, `${address}'s DNS isn't on this Cloudflare account.`, 2))}\n`);
+      if (active.length > 0) {
+        out.write(
+          `${s.dim(paragraph(out, `Setup serves it through ${active.length === 1 ? active[0]!.name : 'one of your domains'}, with Cloudflare for SaaS: you add a CNAME and TXT records where its DNS is, and setup waits for them.`, 2))}\n`,
+        );
+        kind = 'saas';
+      } else {
+        kind = await noDomain(api, account, address, workers.app.name, ownSubdomain, out, keys, secrets);
+      }
+    }
+    // The workers.dev address names the app Worker: its name, once settled.
+    if (kind === 'workers.dev') address = workersDev(workers.app.name, (await ownSubdomain())!);
     const admins = workers.vault.vars.ROOT_ADMINS;
     const prefilled = placeholder(admins) && found.email !== null;
     const rootAdmins = (
@@ -336,76 +424,23 @@ export class Cloudflare {
       .join(',');
     out.write('\n');
     const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
-    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, secrets);
+    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, settled, options.resetPasswords, secrets);
+  }
+
+  /**
+   * The same refusals again, right before the logins change, against the
+   * database as it is now: while setup asked its questions, it may have
+   * come to hold data, or another deployment may have made the logins.
+   * Cloudflare is as read, so a run they let through does as decided then.
+   */
+  recheck(database: Database): void {
+    checked(this.#found, this.workers, database, this.#resetPasswords);
   }
 
   /** A Worker's Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
   #config(component: Component): HyperdriveConfig | undefined {
     const worker = this.workers[component];
     return ourConfig(this.#found.configs, worker.name, worker.hyperdrive, this.#administrator);
-  }
-
-  /**
-   * Whether a login needs a new password: Hyperdrive must have it, and the
-   * database keeps only its verifier. So when its config is missing, or
-   * points elsewhere, or when asked.
-   */
-  needsPassword(component: Component, administrator: URL, login: string): boolean {
-    const origin = this.#config(component)?.origin;
-    return (
-      origin === undefined ||
-      origin.host !== administrator.hostname ||
-      (origin.port ?? 5432) !== Number(administrator.port || 5432) ||
-      origin.database !== decodeURIComponent(administrator.pathname.slice(1)) ||
-      origin.user !== login
-    );
-  }
-
-  /**
-   * Stop before a login that exists gets a new password, when it is also
-   * the login of another deployment's Hyperdrive config, on the same
-   * server: a login is the server's, not a database's, and that deployment
-   * would be cut off. On PlanetScale, a login names its branch, and never is.
-   */
-  refuseShared(component: Component, administrator: URL, login: string): void {
-    const ours = new Set(COMPONENTS.map((each) => this.#config(each)));
-    const other = this.#found.configs.find(
-      (config) =>
-        !ours.has(config) &&
-        config.origin.host === administrator.hostname &&
-        (config.origin.port ?? 5432) === Number(administrator.port || 5432) &&
-        config.origin.user === login,
-    );
-    if (other === undefined) return;
-    throw new Error(
-      `${login} is also the login of the Hyperdrive config ${other.name}, another deployment's, on this database server: ` +
-        `a new password for the ${component}'s config would cut that deployment off. Two deployments can't share a server's logins: ` +
-        'give this one a server of its own. Nothing was changed.',
-    );
-  }
-
-  /**
-   * The keys this run makes: one for each Worker without its own, for a
-   * database that holds no data yet. One that does has its keys already,
-   * and a new one would leave what it holds unreadable: setup stops, before
-   * changing anything.
-   */
-  checkKeys(used: boolean): void {
-    const missing = { app: !this.#found.secrets.app.has('APP_KEY'), vault: !this.#found.secrets.vault.has('VAULT_KEY') };
-    for (const component of COMPONENTS) {
-      if (!used || !missing[component]) continue;
-      const { name, path } = this.workers[component];
-      const key = component === 'app' ? 'APP_KEY' : 'VAULT_KEY';
-      throw new Error(
-        `The ${component} Worker ${name} has no ${key}, but the database already holds data, which needs the key it was set up with. ` +
-          `Put that key back, with pnpm exec wrangler secret put ${key} -c ${path}, then run setup again. Setup never makes a new key for a database in use.`,
-      );
-    }
-    this.#missing = missing;
-    if (missing.app || missing.vault) {
-      this.keys = generateKeys();
-      this.#secrets.push(this.keys.APP_KEY, this.keys.VAULT_KEY);
-    }
   }
 
   /** What each Cloudflare step does while it runs. */
@@ -441,6 +476,8 @@ export class Cloudflare {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
     const details: string[] = [];
+    /** Each config's connection limit, as this run leaves it. */
+    const limits = {} as Record<Component, number>;
     for (const component of COMPONENTS) {
       const { name } = this.workers[component];
       const login = logins[component];
@@ -452,9 +489,11 @@ export class Cloudflare {
         const kept = cappedLimit(config?.origin_connection_limit, limit) ?? config?.origin_connection_limit ?? limit;
         if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin, kept))) {
           what = `given ${login.login}'s new password`;
+          limits[component] = kept;
         } else {
           what = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
           config = { id: await api.createHyperdrive(account.id, name, origin, limit), name, origin };
+          limits[component] = limit;
         }
       } else {
         const now = config === undefined ? null : await api.hyperdriveConfig(account.id, config.id);
@@ -473,6 +512,7 @@ export class Cloudflare {
             ...(lower ? { origin_connection_limit: limit } : {}),
           });
         }
+        limits[component] = lower ? limit : config.origin_connection_limit!;
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
         what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
@@ -480,7 +520,9 @@ export class Cloudflare {
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, a connection limit of ${limit} each`, details };
+    // A limit someone set lower is kept: each config's own, then.
+    const each = limits.app === limits.vault ? `a connection limit of ${limits.app} each` : `connection limits of ${limits.app} and ${limits.vault}`;
+    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details };
   }
 
   /**

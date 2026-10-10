@@ -410,7 +410,7 @@ test("a Workers deployment whose database can't hold both Hyperdrive configs: se
     const reset = setup(['--reset-passwords', '--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(reset.status, 1, reset.stderr);
     assert.match(reset.stderr, /✗ Check .*raise max_connections to 16 or more/s);
-    assert.doesNotMatch(reset.stderr, /Connected to|✓ (Set new passwords|Created|Migrated|The database is up to date)/, 'no step after it ran');
+    assert.doesNotMatch(reset.stderr, /✓ (Set new passwords|Created|Kept|Migrated|The database is up to date)/, 'no step after it ran');
     assert.deepEqual(await verifiers(), before);
     assert.ok(await connects(node.app.DATABASE_URL!));
     assert.ok(await connects(node.vault.DATABASE_URL!));
