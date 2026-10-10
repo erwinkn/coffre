@@ -523,7 +523,8 @@ with `wrangler hyperdrive update <id> --caching-disabled`.
 
 Keep both configs' connections under the database's. Hyperdrive opens
 connections up to its `origin_connection_limit`, 60 by default on Paid,
-before it makes a query wait, and the database refuses any past its
+before it makes a query wait (a soft limit, which a network failure can
+briefly exceed), and the database refuses any past its
 `max_connections`: a page's parallel reads then fail with "remaining
 connection slots are reserved" (53300). `coffre setup` reads the database's
 `max_connections`, less the slots it reserves for superusers, keeps 3 for

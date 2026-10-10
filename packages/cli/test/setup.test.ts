@@ -162,7 +162,10 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   for (const command of commands(reset)) assert.match(command, / --origin-connection-limit=9 /);
   // Setup can't see what each config allows now: the screen says the updates set it, and how to keep one set lower.
   const lines = (result: SetupResult) => setupScreen(result).guide[0]!.lines.filter((line): line is string => typeof line === 'string');
-  assert.ok(lines(reset).includes("Setup can't see the limit each config has now, so the update commands set it to 9: one you set lower on purpose keeps its own if you leave --origin-connection-limit out of its command."));
+  const check = "Setup can't see the limit each config has now, and the update commands set it to 9. Check it first with pnpm exec wrangler hyperdrive get <id>: for one you set lower on purpose, leave --origin-connection-limit out of its command.";
+  // Said before the commands, so that one set lower on purpose is not raised by copying them as they are.
+  const guide = setupScreen(reset).guide[0]!.lines;
+  assert.ok(guide.includes(check) && guide.indexOf(check) < guide.findIndex((line) => typeof line !== 'string'));
   assert.ok(!lines(made).some((line) => line.startsWith("Setup can't see")), 'new configs have no limit yet');
   // A database too small for both configs: no command that would leave Cloudflare's default in place, but why not.
   const small = { ...made, connections: { max: 15, reserved: 3 } };
@@ -172,7 +175,7 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL']);
 });
 
-test("each Hyperdrive config opens at most an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
+test("each Hyperdrive config's connection limit is an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
   // PlanetScale's smallest cluster: max_connections 25, 3 kept for superusers.
   // Left at Cloudflare's default, 60 each, both configs opened more than its
   // 22, and a page's parallel reads failed with 53300 (T78).
@@ -189,7 +192,7 @@ test("each Hyperdrive config opens at most an even share of the database's conne
   assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's two configs.*raise max_connections to 16 or more/);
   // The guide on setup's screen says what the commands' limit is for, and how it came to it.
   assert.ok(setupScreen(made).guide[0]!.lines.includes(
-    'Each opens at most 9 connections to the database, so that both fit under its max_connections, with some left for migrations (max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each).',
+    "Each command sets its config's connection limit to 9, so that both fit under the database's max_connections, with some left for migrations (max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each).",
   ));
 });
 

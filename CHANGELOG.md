@@ -24,7 +24,7 @@ Access and Activity. A deployment gains `users.$user.apps.tsx` through
 each is, when to use it, and give one example. Adding a user says what an
 owner can do only when Owner is chosen.
 
-**Hyperdrive no longer opens more connections than the database takes.**
+**Hyperdrive's connection limits now fit the database.**
 Left at Cloudflare's default, 60 per config on Paid, the app's and the
 vault's configs together could outgrow a small database such as
 PlanetScale's smallest, which then refused the connections a burst of
@@ -32,17 +32,19 @@ requests needed ("remaining connection slots are reserved", 53300). A
 user's or service account's Access tab and the service accounts list each
 send one request per project or account at once, and some of them failed
 as "coffre is unavailable". `coffre setup` now reads the database's
-`max_connections`, less what it reserves, and caps each config at half of
-what is left after 3 for the administrator (at most 20), so that a burst
-waits in Hyperdrive instead. It says how it chose, as in "max_connections
+`max_connections`, less what it reserves, and sets each config's connection
+limit to half of what is left after 3 for the administrator (at most 20),
+so that a burst waits in Hyperdrive instead. Cloudflare treats the limit as
+a soft one, which a network failure can briefly exceed. It says how it chose, as in "max_connections
 25, 3 reserved, 3 kept for the administrator and migrations: 9 each". A
 run on an existing deployment lowers a higher limit, and keeps one set
 lower. On a Workers deployment, setup refuses a database too small for
 Hyperdrive's 5 per config right after asking for its URL: before it asks
 about Cloudflare, so before any domain, custom hostname, login, password or
 config changes. Without Cloudflare, its update commands set the limit too,
-since setup can't see what each config allows now, and it says so: one set
-lower on purpose keeps its own if the flag is left out. To fix one now,
+since setup can't see what each config allows now: it says to check each
+with `wrangler hyperdrive get <id>` first, and to leave the flag out for one
+set lower on purpose. To fix one now,
 without setup: `wrangler hyperdrive update <id>
 --origin-connection-limit=<n>` for each config.
 

@@ -258,7 +258,7 @@ async function roomForHyperdrive(administrator: URL, out: Output, clean: (error:
       connections = await connectionsOf(client);
       const limit = hyperdriveLimit(connections);
       if (limit === null) throw new SetupError(tooFewConnections(connections));
-      return `${whereOf(administrator)} has room for both Hyperdrive configs, at most ${limit} connections each`;
+      return `${whereOf(administrator)} has room for both Hyperdrive configs, with a connection limit of ${limit} each`;
     });
   } finally {
     steps.end();
@@ -580,13 +580,13 @@ export function setupScreen(result: SetupResult): Screen {
         ? [`No Hyperdrive config for each database URL: ${tooFewConnections(result.connections)}.`]
         : [
             `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
-            ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
-            `Each opens at most ${limit} connections to the database, so that both fit under its max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
             ...(updated.length === 0
               ? []
               : [
-                  `Setup can't see the limit each config has now, so the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}: one you set lower on purpose keeps its own if you leave --origin-connection-limit out of its command.`,
+                  `Setup can't see the limit each config has now, and the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}. Check it first with pnpm exec wrangler hyperdrive get <id>: for one you set lower on purpose, leave --origin-connection-limit out of its command.`,
                 ]),
+            ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
+            `Each command sets its config's connection limit to ${limit}, so that both fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
             'Or make them in the Cloudflare dashboard, under Hyperdrive.',
             ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
           ]),

@@ -480,7 +480,7 @@ export class Cloudflare {
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, at most ${limit} connections each`, details };
+    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, a connection limit of ${limit} each`, details };
   }
 
   /**
