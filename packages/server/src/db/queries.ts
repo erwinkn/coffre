@@ -567,6 +567,89 @@ async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<s
   return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
 }
 
+/** What one member holds, as stored: their row, their live grants by place, and the projects' slugs a scope names by id. */
+export type MemberAccessRows = {
+  /** Null when they have no row. */
+  member: { status: 'active' | 'removed'; role: InstanceRole; scope: Scope; tampered: boolean } | null;
+  grants: { projectId: string; projectSlug: string; environmentId: string | null; environmentSlug: string | null; role: string; expiresAt: number | null }[];
+  /** Every project's slug, by id, when their scope names projects; empty otherwise. */
+  projectSlugs: Map<string, string>;
+};
+
+/**
+ * One member's access in one query, whatever they hold: their row (and
+ * whether the vault's newest finding about it is newer than its newest
+ * change, as `tamperedMembers` says), each live grant with the slugs of
+ * its place, and, when their scope names projects, every project's slug,
+ * to name them by. A member page reads this once, not one list per project.
+ *
+ *   SELECT m.status, m.owner, m.role, m.scope, <finding>, <change>, x.*
+ *   FROM vault_members m LEFT JOIN (
+ *     SELECT 'grant', g.principal, project, slugs, role, end FROM vault_grants g … WHERE g.principal = $1 AND live
+ *     UNION ALL
+ *     SELECT 'project', $1, p.id, p.slug, … FROM projects p WHERE m's scope is set
+ *   ) x ON x.principal = m.principal
+ *   WHERE m.principal = $1
+ */
+export async function memberAccess(db: Queryable, principal: string, now: Date): Promise<MemberAccessRows> {
+  const { vaultMembers: m, vaultGrants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
+  const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
+  const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
+  const query = sql`
+    SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope,
+      (SELECT max(${log.seq}) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.action} = 'vault.tampered'
+        AND ${log.code} IN ('mac', 'stale') AND ${log.subjectPrincipal} = ${m.principal}) AS found_seq,
+      (SELECT max(${log.seq}) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
+        AND ${log.action} IN (${actions}) AND ${log.subjectPrincipal} = ${m.principal}) AS changed_seq,
+      x.kind, x.project_id, x.project_slug, x.environment_id, x.environment_slug, x.role, x.expires_at
+    FROM ${m}
+    LEFT JOIN (
+      SELECT 'grant' AS kind, ${g.principal} AS principal, ${place} AS project_id, ${p.slug} AS project_slug,
+        ${g.environmentId} AS environment_id, ${e.slug} AS environment_slug, ${g.role} AS role, ${g.expiresAt} AS expires_at
+      FROM ${g}
+      LEFT JOIN ${e} ON ${e.id} = ${g.environmentId}
+      JOIN ${p} ON ${p.id} = ${place}
+      WHERE ${g.principal} = ${principal} AND (${g.expiresAt} IS NULL OR ${g.expiresAt} > ${now.getTime()})
+      UNION ALL
+      SELECT 'project', CAST(${principal} AS text), ${p.id}, ${p.slug}, NULL, NULL, NULL, NULL
+      FROM ${p}
+      WHERE EXISTS (SELECT 1 FROM ${m} WHERE ${m.principal} = ${principal} AND ${m.scope} IS NOT NULL)
+    ) x ON x.principal = ${m.principal}
+    WHERE ${m.principal} = ${principal}`;
+  type Row = {
+    status: string; owner: boolean | number; member_role: string | null; scope: string | null;
+    found_seq: string | number | null; changed_seq: string | number | null;
+    kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
+    environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
+  };
+  const rows: Row[] = dialect.engineOf(db) === 'postgres'
+    ? ((await (db as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(query)).rows as Row[])
+    : await (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
+  const [first] = rows;
+  if (first === undefined) return { member: null, grants: [], projectSlugs: new Map() };
+  const seq = (value: string | number | null) => (value === null ? -1n : BigInt(value));
+  return {
+    member: {
+      status: first.status as 'active' | 'removed',
+      ...storedRole({ owner: first.owner === true || first.owner === 1, role: first.member_role, scope: first.scope }),
+      tampered: seq(first.found_seq) > seq(first.changed_seq),
+    },
+    grants: rows.flatMap((row) =>
+      row.kind === 'grant'
+        ? [{
+            projectId: row.project_id!,
+            projectSlug: row.project_slug!,
+            environmentId: row.environment_id,
+            environmentSlug: row.environment_slug,
+            role: row.role!,
+            expiresAt: row.expires_at === null ? null : Number(row.expires_at),
+          }]
+        : [],
+    ),
+    projectSlugs: new Map(rows.flatMap((row) => (row.kind === 'project' ? [[row.project_id!, row.project_slug!] as const] : []))),
+  };
+}
+
 /** The vault retains removed members too: an access entry without its row means tampering. */
 export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
   const { auditLog, vaultMembers } = tablesOf(db);

@@ -170,7 +170,9 @@ grant given is an `access.grant` with `reason: 'every-project'`.
   projects by slug: `{ "role": "developer", "scope": { "environments": { "only": ["dev"] } } }`
   (either filter left out is `all`). Members list `instanceRole` and
   `scope`; `GET /api/members?path=market` lists those who reach `market` by
-  their instance role too, with no grant. `PATCH /api/access/<member>`
+  their instance role too, with no grant. `GET /api/members/<member>/access`
+  answers one member's role, scope and the grants the caller manages in one
+  SQL query, for their page. `PATCH /api/access/<member>`
   takes projects and environments only: `*` is a 400. Making a project or
   an environment no longer answers `inherited`.
 - **CLI.** `coffre members add <member> --role <role> [--projects …]

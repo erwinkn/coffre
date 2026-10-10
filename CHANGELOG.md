@@ -23,7 +23,10 @@ it will make of each before you deploy.
   `{ owner }`; members list `instanceRole` (`member`, `auditor`,
   `developer`, `admin`, `owner` or `root-admin`) and `scope`, and a
   place's list says who reaches it by their role (`reachesByRole`).
-  `GET /api/me` adds `scope` and `runsInstance`. Making a project or an
+  `GET /api/me` adds `scope` and `runsInstance`. `GET /api/members/<member>/access`
+  answers a member's role, scope and the grants you manage in one query: a
+  person's or service account's Access tab reads it once, not one list per
+  project (`coffre access <member>`). Making a project or an
   environment no longer answers `inherited`, nor `GET /api/projects`
   `everyProject`. Refusals of what only an Admin or Owner of the whole
   instance may do log `requires_instance_admin`.

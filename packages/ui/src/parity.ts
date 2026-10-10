@@ -110,6 +110,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: '⋯ › Remove…: what removing would revoke, before it does', in: 'components/directory.tsx', call: 'members.get' },
     ],
   },
+  'GET /members/:member/access': {
+    ui: [{ does: "a user's or service account's page › Access: their role and the grants you manage, in one read", in: 'components/principal-page.tsx', call: 'members.access' }],
+  },
   'PUT /members/:member': {
     ui: [
       { does: 'Users › Add user; Service accounts › Add service account', in: 'components/directory.tsx', call: 'members.add' },

@@ -52,6 +52,7 @@ export const keys = {
   missing: ({ project, environment }: Place) => ['missing', project, environment],
   directory: ['directory'],
   report: (member: string) => ['report', member],
+  memberAccess: (member: string) => ['member-access', member],
   credentials: (member: string) => ['credentials', member],
   bindings: (member: string) => ['bindings', member],
   identities: ['identities'],
@@ -184,6 +185,17 @@ export const queries = {
               error: 'Only admins and owners can manage users and service accounts.',
               signedOut: false,
             }),
+    }),
+
+  /**
+   * One member's instance role and scope, and the grants you manage, in one
+   * read: their page's Access tab. Null for whoever may list nobody, which
+   * asking would only log as a refusal.
+   */
+  memberAccess: (client: CoffreClient, member: string, allowed: boolean) =>
+    queryOptions({
+      queryKey: [...keys.memberAccess(member), { allowed }],
+      queryFn: () => (allowed ? uiResult(() => client.members.access(member)) : Promise.resolve(null)),
     }),
 
   /** What one member can reach and has seen; null for anyone but owners, who alone may ask. */
@@ -433,16 +445,18 @@ export async function loadMember(queryClient: QueryClient, client: CoffreClient,
 export type MemberReport = Awaited<ReturnType<typeof loadMember>>;
 
 /**
- * What a user's or service account's Access tab reads: the grants of every
- * project where you manage access. There is no "grants of this member"
- * call, so each project you manage is asked for its grants and the tab
- * keeps this member's. Projects where you do not hold grant.manage are
- * skipped rather than asked: the refusal would land in the audit log as a
- * denial in your name.
+ * What a user's or service account's Access tab reads: their role, scope
+ * and the grants you manage, in one request, which the server answers in
+ * one query, however many projects they hold grants in.
  */
-export async function loadAccess(queryClient: QueryClient, client: CoffreClient) {
+export async function loadAccess(queryClient: QueryClient, client: CoffreClient, member: string) {
   const shell = await loadShell(queryClient, client);
-  await Promise.all(managedProjects(shell.projects).map((project) => queryClient.fetchQuery(queries.grants(client, project.slug))));
+  await queryClient.fetchQuery(queries.memberAccess(client, member, listsAccess(shell)));
+}
+
+/** Whether the caller may ask what someone holds: admins and owners, and whoever manages a project's access. */
+export function listsAccess(shell: Shell): boolean {
+  return shell.capabilities.canManageGrants || managedProjects(shell.projects).length > 0;
 }
 
 /**
@@ -488,25 +502,20 @@ export const affects = {
    */
   access: (project: string, member: string): QueryKey[] => [
     keys.grants(project),
+    keys.memberAccess(member),
     keys.report(member),
     keys.projects,
     keys.me,
   ],
-  /**
-   * Someone's access on every project changed: every project's grants, which
-   * list it where it reaches, the list of them, their report, and what you
-   * can see, as it may be your own.
-   */
-  everyProject: (member: string): QueryKey[] => [['grants'], keys.projects, keys.report(member), keys.me],
   /** Someone let in: the directory. */
   admission: (): QueryKey[] => [keys.directory],
   /**
    * An instance role changed: the directory, their report, and, as it may be
    * your own, what you can see and do.
    */
-  role: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.me, keys.projects],
+  role: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), keys.me, keys.projects],
   /** Someone removed: the directory, their report, and every grant, which removal ends, those on every project too. */
-  removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), ['grants'], keys.projects],
+  removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), ['grants'], keys.projects],
   credentials: (member: string): QueryKey[] => [keys.credentials(member)],
   bindings: (member: string): QueryKey[] => [keys.bindings(member)],
   /** Unlinking an account also ends the sessions it signed in. */

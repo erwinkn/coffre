@@ -34,6 +34,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'POST /reveals': 'reveal',
   'GET /members': 'read',
   'GET /members/:member': 'read',
+  'GET /members/:member/access': 'read',
   'PUT /members/:member': 'manage-access',
   'DELETE /members/:member': 'manage-access',
   'GET /members/:member/tokens': 'read',

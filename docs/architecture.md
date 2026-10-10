@@ -308,6 +308,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | the references into and out of a place, and who reads through them; break one | `GET /api/references?path=market/prod`, `DELETE /api/secrets/billing/prod/DATABASE_URL/reference` |
 | list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
+| a member's instance role and scope, and the grants you manage, in one query | `GET /api/members/user:ada@acme.example/access` |
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
 | a public GitHub repository's or GitLab project's IDs, for a binding | `GET /api/workloads/lookup?github=acme/api` |

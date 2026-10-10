@@ -18,6 +18,7 @@ import {
   type Role,
   type Scope,
 } from '@coffre/core/access';
+import { isTombstone } from '@coffre/core/schemas';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 
@@ -25,6 +26,7 @@ import { actorParts } from '../db/audit.ts';
 import {
   revokePriorMembership,
   liveConnections,
+  memberAccess as readMemberAccess,
   memberActivity,
   members as loadMembers,
   missingMembers,
@@ -493,6 +495,76 @@ function rootAdminRefusal(ctx: ApiContext, action: string, member: MemberRef): R
       metadata: { principalType: member.type, principalId: member.id },
     }),
   );
+}
+
+/** One member's access, as a member page shows it: their instance role and scope, and the grants the caller sees. */
+export type MemberAccess = {
+  member: string;
+  principalType: 'user' | 'service';
+  principalId: string;
+  status: 'active' | 'removed' | 'tampered';
+  instanceRole: InstanceRole | 'root-admin';
+  /** Projects by slug; everywhere for a member or a root admin. */
+  scope: Scope;
+  isRootAdmin: boolean;
+  /** Their live grants the caller manages: all of them, for those who run the instance. None unless active. */
+  grants: MemberGrant[];
+};
+
+/**
+ * One member's access, for their page: one query (`memberAccess` in
+ * db/queries.ts), however many projects they hold grants in, rather than
+ * a project's list per project. For whoever may list members; the grants
+ * are those the caller manages, as `listMembers` shows them.
+ */
+export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<MemberAccess> {
+  const { caller } = ctx;
+  const administrator = caller.isRootAdmin || administers(caller.role);
+  if (!administrator && !canAnywhere(caller, 'grant.manage')) {
+    throw forbidden('only admins, owners and members with grant.manage on a project can see what someone holds');
+  }
+  const principal = formatMember(member);
+  const [stored, { rootAdmins }] = await Promise.all([readMemberAccess(ctx.db, principal, new Date()), ctx.vault.about()]);
+  const isRootAdmin = rootAdmins.includes(principal);
+  if (stored.member === null && !isRootAdmin) throw notFound('no such member');
+  const status = isRootAdmin ? 'active' : stored.member!.tampered ? 'tampered' : stored.member!.status;
+  const role: InstanceRole = status === 'active' && member.type === 'user' && !isRootAdmin ? stored.member!.role : 'member';
+  const scope = role === 'member' ? EVERYWHERE : stored.member!.scope;
+  // A scope names projects by id: by slug here, those still there, as `scopeView` names them.
+  const named = (ids: string[]) => ids.flatMap((id) => stored.projectSlugs.get(id) ?? []).filter((slug) => !isTombstone(slug)).sort();
+  const shown: Scope = {
+    projects: scope.projects === 'all' ? 'all' : 'only' in scope.projects ? { only: named(scope.projects.only) } : { except: named(scope.projects.except) },
+    environments: scope.environments,
+  };
+  const grants = status !== 'active' ? [] : stored.grants
+    // A grant on a place that is gone names nothing anyone can reach.
+    .filter((grant) => !isTombstone(grant.projectSlug) && (grant.environmentSlug === null || !isTombstone(grant.environmentSlug)))
+    .filter((grant) => runsInstance(caller) || mayManageAccess(caller, grant.environmentId === null
+      ? { projectId: grant.projectId }
+      : { projectId: grant.projectId, environmentId: grant.environmentId, environmentSlug: grant.environmentSlug }))
+    .map((grant) => {
+      const held = grant.role as Role;
+      return {
+        id: `${principal}/${grant.projectSlug}${grant.environmentSlug === null ? '' : `/${grant.environmentSlug}`}`,
+        project: grant.projectSlug,
+        environment: grant.environmentSlug,
+        role: held,
+        roleName: ROLES[held].name,
+        permissions: [...ROLES[held].permissions],
+        expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
+      };
+    })
+    .sort((a, b) => compare(a.project, b.project) || (a.environment === null ? 1 : b.environment === null ? -1 : compare(a.environment, b.environment)));
+  return {
+    member: principal,
+    principalType: member.type,
+    principalId: member.id,
+    status,
+    instanceRole: isRootAdmin ? 'root-admin' : role,
+    scope: shown,
+    isRootAdmin,
+    grants,
+  };
 }
 
 /** A filter as the API takes one, projects by slug. */

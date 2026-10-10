@@ -1001,6 +1001,38 @@ export type Api = {
       }[];
     };
   };
+  "GET /members/:member/access": {
+    input: undefined;
+    output: {
+      member: string;
+      principalType: "service" | "user";
+      principalId: string;
+      status: "active" | "removed" | "tampered";
+      instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+      scope: {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
+      isRootAdmin: boolean;
+      grants: {
+        id: string;
+        project: string;
+        environment: string | null;
+        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        roleName: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+        expiresAt: string | null;
+      }[];
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
@@ -1298,6 +1330,36 @@ export type Member = {
   reachesByRole: boolean;
   isRootAdmin: boolean;
   tampered: boolean;
+  grants: {
+    id: string;
+    project: string;
+    environment: string | null;
+    role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    roleName: string;
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+    expiresAt: string | null;
+  }[];
+};
+
+export type MemberAccess = {
+  member: string;
+  principalType: "service" | "user";
+  principalId: string;
+  status: "active" | "removed" | "tampered";
+  instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+  scope: {
+    projects: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+    environments: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+  };
+  isRootAdmin: boolean;
   grants: {
     id: string;
     project: string;

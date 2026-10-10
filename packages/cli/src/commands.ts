@@ -170,8 +170,8 @@ export const SECTIONS = [
       { command: 'roles', usage: ['roles'] },
       {
         command: 'access',
-        usage: ['access [<project>[/<environment>]] [--json]'],
-        about: ['the members, their instance roles and grants; or who', 'reaches a place'],
+        usage: ['access [<project>[/<environment>] | <member> [--service]] [--json]'],
+        about: ['the members, their instance roles and grants; who reaches', 'a place; or what one member holds'],
       },
       {
         command: 'admit',
@@ -330,6 +330,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'POST /reveals': { commands: ['get', 'run', 'export'] },
   'GET /members': { commands: ['access'] },
   'GET /members/:member': { commands: ['offboard'] },
+  'GET /members/:member/access': { commands: ['access'] },
   'PUT /members/:member': { commands: ['admit'] },
   'DELETE /members/:member': { commands: ['offboard'] },
   'GET /members/:member/tokens': { commands: ['tokens'] },

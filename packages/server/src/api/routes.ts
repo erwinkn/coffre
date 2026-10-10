@@ -7,7 +7,7 @@ import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
-import { listMembers, memberReport, putMember, readersAt, removeMember } from './members.ts';
+import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
@@ -278,6 +278,9 @@ export const routes = {
   }),
   ...route('GET /members/:member', {
     run: (ctx, { params }) => memberReport(ctx, parseMember(params.member)),
+  }),
+  ...route('GET /members/:member/access', {
+    run: (ctx, { params }) => memberAccess(ctx, parseMember(params.member)),
   }),
   ...route('PUT /members/:member', {
     input: z.object({ role: instanceRole.optional(), scope: scopeInput.optional() }).strict(),

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { and, asc, eq } from 'drizzle-orm';
 
+import { memberAccess } from '../src/db/queries.ts';
 import { auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
@@ -208,4 +209,45 @@ test('offboarding takes the role with the grants, and coming back starts as a me
   assert.equal((await root.members.add(ADA)).instanceRole, 'member');
   await assert.rejects(ada.secrets.reveal('market/dev'), { status: 403 });
   assert.equal((await root.audit.verify()).ok, true);
+});
+
+test("a member's page reads their whole access in one request, which the server answers in one query", async () => {
+  await root.members.add(ADA, { role: 'developer', scope: { projects: { except: ['billing'] }, environments: { only: ['dev'] } } });
+  for (let i = 0; i < 12; i++) {
+    await root.projects.create(`p${i}`, { name: `P${i}` });
+    await root.environments.create(`p${i}/dev`, { name: 'dev' });
+    await root.access.set(ADA, { [`p${i}`]: 'viewer', [`p${i}/dev`]: { role: 'developer', until: '2099-01-01' } });
+  }
+  await root.access.set(ADA, { 'billing/prod': 'viewer' });
+
+  // However many grants: one statement, the member row, their grants and the projects their scope names.
+  let statements = 0;
+  const counted = new Proxy(db.owner, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (['execute', 'all', 'select', 'selectDistinct', 'transaction'].includes(String(key))) statements += 1;
+        return value.apply(target, args);
+      };
+    },
+  });
+  const stored = await memberAccess(counted, ADA, new Date());
+  assert.equal(statements, 1);
+  assert.equal(stored.grants.length, 25);
+
+  const seen = await root.members.access(ADA);
+  assert.deepEqual([seen.instanceRole, seen.scope, seen.status], ['developer', { projects: { except: ['billing'] }, environments: { only: ['dev'] } }, 'active']);
+  assert.equal(seen.grants.length, 25);
+  assert.deepEqual(seen.grants.slice(0, 2).map((grant) => grant.id), [`${ADA}/billing/prod`, `${ADA}/p0/dev`]);
+  // Each caller sees the grants they manage: an admin scoped to billing, billing's alone.
+  await root.members.add(BOSS, { role: 'admin', scope: { projects: { only: ['billing'] } } });
+  assert.deepEqual((await boss.members.access(ADA)).grants.map((grant) => grant.id), [`${ADA}/billing/prod`]);
+  // Nobody who manages no access asks; nobody who is no member is found.
+  await assert.rejects(ada.members.access(ADA), { status: 403 });
+  await assert.rejects(root.members.access('user:nobody@acme.example'), { status: 404 });
+  // A root admin, with no row, is one; a removed member holds nothing.
+  assert.equal((await root.members.access(`user:${ROOT}`)).instanceRole, 'root-admin');
+  await root.members.remove(ADA);
+  assert.deepEqual(await root.members.access(ADA).then(({ status, grants, instanceRole }) => [status, grants, instanceRole]), ['removed', [], 'member']);
 });

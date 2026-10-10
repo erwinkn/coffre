@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
+import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link, Outlet } from '@tanstack/react-router';
 import { INSTANCE_ROLES, ROLES, scopeInWords, unscoped } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { directoryList } from '../lib/changes';
-import { affects, hasAppsTab, managedProjects, queries, signInWays } from '../lib/queries';
+import { affects, hasAppsTab, listsAccess, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { useMounted } from '../lib/mounted';
 import { ItemFailure } from './row-state';
@@ -24,6 +24,7 @@ import {
   type AccessChange,
   type AccessPlan,
 } from '../lib/access-plan';
+import type { MemberAccess } from '@coffre/client';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
@@ -47,31 +48,33 @@ function useReport(principalType: PrincipalType, principalId: string) {
 }
 
 /**
- * Its grants on every project where you manage access, which `loadAccess`
- * read: there is no call for one member's, so each project's are filtered.
+ * What `loadAccess` read in one request: their role and scope, and, for each
+ * project where you manage access, the grants they hold there.
  */
-function useProjectAccess(principalType: PrincipalType, principalId: string): ProjectAccess[] {
-  const client = useCoffre();
-  const managed = managedProjects(useShell().projects);
-  const grants = useSuspenseQueries({
-    queries: managed.map((project) => queries.grants(client, project.slug)),
-  });
-  return managed.map((project, index) => {
-    const result = grants[index]!.data;
-    return {
+function useMemberAccess(principalType: PrincipalType, principalId: string): { access: MemberAccess | null; projects: ProjectAccess[] } {
+  const shell = useShell();
+  const managed = managedProjects(shell.projects);
+  const { data } = useSuspenseQuery(queries.memberAccess(useCoffre(), memberRef(principalType, principalId), listsAccess(shell)));
+  const error = data !== null && !data.ok ? data.error : null;
+  const access = data?.ok === true ? data : null;
+  return {
+    access,
+    projects: managed.map((project) => ({
       project,
-      // What their instance role reaches is said once, above: not again in each project it reaches.
-      grants: result.ok
-        ? result.grants.filter(
-            (grant) =>
-              grant.principalType === principalType &&
-              grant.principalId === principalId &&
-              grant.scope !== 'instance-role',
-          )
-        : [],
-      grantsError: result.ok ? null : result.error,
-    };
-  });
+      grants: (access?.grants ?? []).filter((grant) => grant.project === project.slug).map((grant) => ({
+        id: grant.id,
+        principalType,
+        principalId,
+        role: grant.role,
+        roleName: grant.roleName,
+        permissions: grant.permissions,
+        scope: grant.environment === null ? 'project' : 'environment',
+        environmentSlug: grant.environment,
+        expiresAt: grant.expiresAt,
+      })),
+      grantsError: error,
+    })),
+  };
 }
 
 /**
@@ -221,7 +224,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
 export function PrincipalAccess({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
   const { instanceRole } = useShell();
   const report = useReport(principalType, principalId);
-  const access = useProjectAccess(principalType, principalId);
+  const { access: held, projects: access } = useMemberAccess(principalType, principalId);
   const kind = KIND[principalType];
   const people = principalType === 'user';
   const found = report?.ok === true ? report.report : null;
@@ -230,7 +233,8 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
   const rows = access.flatMap(({ project, grants }) =>
     grants.map((grant) => ({ project, grant })),
   );
-  const errors = access.filter((entry) => entry.grantsError !== null);
+  // One request, so one error: said once, not under every project.
+  const errors = access.filter((entry) => entry.grantsError !== null).slice(0, 1);
   // Grants to someone removed are refused until they are added back.
   const editable = removed
     ? []
@@ -247,13 +251,11 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
         <>
           {errors.map(({ project, grantsError }) => (
             <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
-              <Notice tone="bad">
-                <span className="mono">{project.slug}</span>: {grantsError}
-              </Notice>
+              <Notice tone="bad">{grantsError}</Notice>
             </div>
           ))}
 
-          {people && <InstanceRoleNote principalId={principalId} />}
+          {people && held !== null && <InstanceRoleNote access={held} />}
 
           <section className="card" aria-label="Project access">
             {rows.length === 0 ? (
@@ -318,21 +320,15 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
   );
 }
 
-/**
- * What a person's instance role gives them, above the grants that add to
- * it, as the directory lists them: nothing for a Member.
- */
-function InstanceRoleNote({ principalId }: { principalId: string }) {
-  const { capabilities } = useShell();
-  const { data } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
-  const found = data.ok ? data.principals.find((entry) => entry.principalType === 'user' && entry.principalId === principalId) : undefined;
-  if (found === undefined || found.instanceRole === 'member' || found.instanceRole === 'root-admin') return null;
-  const { name } = INSTANCE_ROLES[found.instanceRole];
+/** What a person's instance role gives them, above the grants that add to it: nothing for a Member. */
+function InstanceRoleNote({ access }: { access: MemberAccess }) {
+  if (access.instanceRole === 'member' || access.instanceRole === 'root-admin') return null;
+  const { name } = INSTANCE_ROLES[access.instanceRole];
   return (
     <div className="report-notice">
       <Notice tone="info">
         <strong>{name}</strong>
-        {unscoped(found.scope) ? ' in every project' : `: ${scopeInWords(found.scope)}`}, from their instance role. The
+        {unscoped(access.scope) ? ' in every project' : `: ${scopeInWords(access.scope)}`}, from their instance role. The
         grants below add to it.
       </Notice>
     </div>

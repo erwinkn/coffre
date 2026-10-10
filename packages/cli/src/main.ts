@@ -859,7 +859,10 @@ async function importEnv(args: string[]): Promise<void> {
 }
 
 async function whoHasAccess(args: string[]): Promise<void> {
-  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false } }, ['<project>[/<environment>]'], 1);
+  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false }, service: { type: 'boolean', default: false } }, ['<project>[/<environment>] | <member>'], 1);
+  // A member's own access: an email, or a service account's name with --service or service:.
+  const asked = positionals[0];
+  if (asked !== undefined && (values.service || /[@:]/.test(asked))) return memberAccess(memberOf(asked, values.service), values.json);
   const result = await client().members.list(positionals[0]);
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -886,6 +889,18 @@ async function whoHasAccess(args: string[]): Promise<void> {
   for (const reference of into) {
     process.stdout.write(`  ${reference.source} through ${reference.holder}, made by ${shownMember(reference.createdBy).replace(/^user:/, '')}\n`);
     for (const reader of reference.readers!) process.stdout.write(`    ${shownMember(reader).replace(/^user:/, '')}\n`);
+  }
+}
+
+/** `coffre access ada@acme.example`: their instance role and the grants you manage, in one read. */
+async function memberAccess(member: string, json: boolean): Promise<void> {
+  const access = await client().members.access(member);
+  if (json) return void process.stdout.write(`${JSON.stringify(access, null, 2)}\n`);
+  const tampered = access.status === 'tampered' ? '  [record failed its integrity check: remove to start over]' : access.status === 'removed' ? '  [removed]' : '';
+  process.stdout.write(`${named(access.principalType, access.principalId)}  ${manage.roleInWords(access)}${tampered}\n`);
+  for (const g of access.grants) {
+    const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
+    process.stdout.write(`  ${place.padEnd(24)} ${g.role}${g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`}\n`);
   }
 }
 

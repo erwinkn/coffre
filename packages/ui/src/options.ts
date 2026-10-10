@@ -205,9 +205,9 @@ export const user = {
 
 /** `/users/$user/`, their access on every project where you manage it. */
 export const userAccess = {
-  loader: ({ context }: Loader) => {
+  loader: ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadAccess(queryClient, coffre);
+    return loadAccess(queryClient, coffre, memberRef('user', params.user));
   },
 };
 
@@ -272,9 +272,9 @@ export const serviceAccountSignIn = {
 
 /** `/service-accounts/$account/access`. */
 export const serviceAccountAccess = {
-  loader: ({ context }: Loader) => {
+  loader: ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadAccess(queryClient, coffre);
+    return loadAccess(queryClient, coffre, memberRef('service', params.account));
   },
 };
 

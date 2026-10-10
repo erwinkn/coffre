@@ -33,6 +33,7 @@ export type {
   ListedReference,
   Me,
   Member,
+  MemberAccess,
   MissingKey,
   OffboardingReport,
   ProjectSummary,
@@ -245,6 +246,8 @@ export function createClient(options: ClientOptions) {
       list: (path?: string) => call('GET /members', {}, { path }),
       /** What they hold, and what to rotate if they leave. */
       get: (member: string) => call('GET /members/:member', { member }),
+      /** Their instance role and scope, and the grants you manage, in one read. */
+      access: (member: string) => call('GET /members/:member/access', { member }),
       add: (member: string, input: RouteInput<'PUT /members/:member'> = {}) =>
         call('PUT /members/:member', { member }, input),
       /** Offboards; returns what to rotate. */
