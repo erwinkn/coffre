@@ -226,7 +226,9 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
 /**
  * A Workers deployment as a fresh clone has it: its files and lockfile, no
  * node_modules. Its pnpm installs the fake wrangler, as pnpm would the real
- * one, and keeps its arguments; or, `refusing`, fails as pnpm does.
+ * one, and keeps its arguments; or, `refusing`, fails as pnpm does. Its
+ * database is the disposable cluster's: setup reads what it lets in before
+ * it asks about Cloudflare, and gets no further with it here.
  */
 function freshClone(refusing?: string) {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-clone-'));
@@ -246,11 +248,11 @@ function freshClone(refusing?: string) {
   );
   chmodSync(join(bin, 'pnpm'), 0o755);
   const env = { PATH: `${bin}:${process.env.PATH}`, HOME: dir };
-  const url = 'postgresql://postgres:unused@127.0.0.1:1/coffre';
+  const url = `${CLUSTER}/postgres`;
   return { dir, deployment, state, env, url, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("a fresh clone of a Workers deployment: setup installs it as its lockfile says, then signs in with its own wrangler", { skip: ptySkip }, async () => {
+test("a fresh clone of a Workers deployment: setup installs it as its lockfile says, then signs in with its own wrangler", { skip: ptySkip || needsCluster.skip }, async () => {
   const clone = freshClone();
   try {
     const { output } = await inTerminal(
@@ -282,7 +284,7 @@ test("a fresh clone of a Workers deployment: setup installs it as its lockfile s
   }
 });
 
-test('when its install fails, setup says why in a sentence, and runs nothing of the deployment', { skip: ptySkip }, async () => {
+test('when its install fails, setup says why in a sentence, and runs nothing of the deployment', { skip: ptySkip || needsCluster.skip }, async () => {
   const clone = freshClone(' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with package.json');
   try {
     const { output, code } = await inTerminal(
@@ -375,7 +377,7 @@ for (const as of ['superuser', 'owner'] as const) {
   });
 }
 
-test("a Workers deployment whose database can't hold both Hyperdrive configs: setup refuses as it connects, and every login keeps its password", { skip: SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh' }, async () => {
+test("a Workers deployment whose database can't hold both Hyperdrive configs: setup refuses before anything else, and every login keeps its password", { skip: SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh' }, async () => {
   // 15 connections, 3 of them for superusers: 4 for each config, short of Hyperdrive's 5.
   await emptyCluster(SMALL_CLUSTER);
   await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_small'), SMALL_CLUSTER);
@@ -389,7 +391,7 @@ test("a Workers deployment whose database can't hold both Hyperdrive configs: se
     // A fresh database: nothing made, nothing migrated, and the commands it would show never shown.
     const fresh = setup(['--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(fresh.status, 1, fresh.stderr);
-    assert.match(fresh.stderr, /✗ Connect to 127\.0\.0\.1\/setup_small\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's two configs, .*raise max_connections to 16 or more/s);
+    assert.match(fresh.stderr, /✗ Check 127\.0\.0\.1\/setup_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's two configs, .*raise max_connections to 16 or more/s);
     assert.equal(fresh.stdout, '');
     assert.deepEqual(await verifiers(), []);
     assertNoAdministrator(fresh, url);
@@ -404,8 +406,8 @@ test("a Workers deployment whose database can't hold both Hyperdrive configs: se
     // keeps logging in with the ones it has.
     const reset = setup(['--reset-passwords', '--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(reset.status, 1, reset.stderr);
-    assert.match(reset.stderr, /✗ Connect to .*raise max_connections to 16 or more/s);
-    assert.doesNotMatch(reset.stderr, /✓ (Set new passwords|Created|Migrated|The database is up to date)/, "no step after the first ran");
+    assert.match(reset.stderr, /✗ Check .*raise max_connections to 16 or more/s);
+    assert.doesNotMatch(reset.stderr, /Connected to|✓ (Set new passwords|Created|Migrated|The database is up to date)/, 'no step after it ran');
     assert.deepEqual(await verifiers(), before);
     assert.ok(await connects(node.app.DATABASE_URL!));
     assert.ok(await connects(node.vault.DATABASE_URL!));

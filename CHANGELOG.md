@@ -16,7 +16,8 @@ waits in Hyperdrive instead. It says how it chose, as in "max_connections
 25, 3 reserved, 3 kept for the administrator and migrations: 9 each". A
 run on an existing deployment lowers a higher limit, and keeps one set
 lower. On a Workers deployment, setup refuses a database too small for
-Hyperdrive's 5 per config as it connects, before any login, password or
+Hyperdrive's 5 per config right after asking for its URL: before it asks
+about Cloudflare, so before any domain, custom hostname, login, password or
 config changes. Without Cloudflare, its update commands set the limit too,
 since setup can't see what each config allows now, and it says so: one set
 lower on purpose keeps its own if the flag is left out. To fix one now,

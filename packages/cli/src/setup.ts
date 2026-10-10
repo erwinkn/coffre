@@ -138,6 +138,8 @@ export async function setup(args: string[]): Promise<void> {
       command: 'coffre setup',
     });
     secrets.push(...typed);
+    // A Workers deployment whose database can't hold both Hyperdrive configs stops here, before setup asks about Cloudflare.
+    const connections = kind === 'workers' ? await roomForHyperdrive(administrator, out, clean) : null;
     let cloudflare: Cloudflare | null = null;
     if (offers && kind === 'workers') {
       const choice = await select(terminal.keys, out, s, 'Set Cloudflare up too?', [
@@ -150,7 +152,7 @@ export async function setup(args: string[]): Promise<void> {
         cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
       }
     }
-    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, workers: kind === 'workers' }, secrets, clean);
+    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, connections }, secrets, clean);
     if (cloudflare !== null) {
       if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
       await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
@@ -239,6 +241,37 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
   return kind;
 }
 
+/**
+ * What the database lets in, read before anything that changes it or
+ * Cloudflare: a Workers deployment needs room for both Hyperdrive configs.
+ * Without it, setup stops here, before Cloudflare's questions, its domain
+ * added or a custom hostname made, and before any login gets a new password
+ * its config would never have.
+ */
+async function roomForHyperdrive(administrator: URL, out: Output, clean: (error: unknown) => string): Promise<Connections> {
+  const steps = new Steps(out, [`Check ${whereOf(administrator)} has room for Hyperdrive`], () => null, clean);
+  const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  let connections!: Connections;
+  try {
+    await steps.run(0, async () => {
+      await client.connect();
+      connections = await connectionsOf(client);
+      const limit = hyperdriveLimit(connections);
+      if (limit === null) throw new SetupError(tooFewConnections(connections));
+      return `${whereOf(administrator)} has room for both Hyperdrive configs, at most ${limit} connections each`;
+    });
+  } finally {
+    steps.end();
+    await client.end().catch(() => {});
+  }
+  return connections;
+}
+
+/** The database setup was given, as its steps name it: `db.example.com/coffre`. */
+function whereOf(administrator: URL): string {
+  return `${administrator.hostname}${decodeURIComponent(administrator.pathname)}`;
+}
+
 /** The deployment's packages, installed as its lockfile says when they are not, shown as a step of its own. */
 async function installFirst(dir: string, out: Output, clean: (error: unknown) => string): Promise<void> {
   if (installed(dir)) return;
@@ -257,13 +290,13 @@ async function run(
   administrator: URL,
   out: Output,
   questions: () => Keyboard | null,
-  options: { resetPasswords: boolean; cloudflare: Cloudflare | null; workers: boolean },
+  options: { resetPasswords: boolean; cloudflare: Cloudflare | null; connections: Connections | null },
   secrets: string[],
   clean: (error: unknown) => string,
 ): Promise<SetupResult> {
   const { cloudflare } = options;
   const user = decodeURIComponent(administrator.username);
-  const where = `${administrator.hostname}${decodeURIComponent(administrator.pathname)}`;
+  const where = whereOf(administrator);
   const version = cliVersion();
   const steps = new Steps(
     out,
@@ -281,14 +314,12 @@ async function run(
   const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
-  let connections: Connections = { max: 0, reserved: 0 };
+  let connections!: Connections;
   try {
     await step(0, async () => {
       await client.connect();
-      connections = await connectionsOf(client);
-      // Before anything changes: a Workers deployment whose database can't hold both
-      // Hyperdrive configs stops here, its logins and their passwords as they were.
-      if (options.workers && hyperdriveLimit(connections) === null) throw new SetupError(tooFewConnections(connections));
+      // A Workers deployment's were read before Cloudflare was asked (`roomForHyperdrive`).
+      connections = options.connections ?? (await connectionsOf(client));
       // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
       cloudflare?.checkKeys(await holdsData(client));
       return `Connected to ${where} as ${user}`;
@@ -354,7 +385,7 @@ async function run(
     });
     if (cloudflare !== null) {
       await step(5, async () => {
-        // Checked as setup connected, before any of this run's changes.
+        // Checked before Cloudflare was asked, and before any of this run's changes.
         const limit = hyperdriveLimit(connections)!;
         const { text, details } = await cloudflare.hyperdrive(logins, limit);
         return { text, details: [...details, limitReason(connections, limit)] };
