@@ -5,7 +5,7 @@ import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
 import { openValues } from './keys.ts';
-import { putEnvironment, type InheritedGrant, type PlaceView } from './projects.ts';
+import { putEnvironment, type PlaceView } from './projects.ts';
 import { currentReferences, placeOfRow, readableValues } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
@@ -39,7 +39,7 @@ export async function forkEnvironment(
   place: ResolvedPath,
   slug: string,
   input: { name: string; from: string; references: boolean },
-): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[]; forked: Forked }> {
+): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
   const { project } = place;
   const { from } = input;
   return withRefusals(ctx, async () => {
@@ -60,7 +60,7 @@ export async function forkEnvironment(
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.join('; '));
     const plan = input.references ? await referencesFor(ctx, readable.items.map((item) => item.key), source) : new Map<string, string>();
 
-    const { environment, created, inherited } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
+    const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
     const copies = readable.items.filter((item) => !plan.has(item.key));
     const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy' }, copies);
     if (!opened.ok) throw vaultRefused(opened.refusal);
@@ -69,7 +69,7 @@ export async function forkEnvironment(
     copies.forEach((item, i) => (patch[item.key] = opened.values[i]!));
     for (const [key, path] of plan) patch[key] = { ref: path };
     const forked = { from, keys: readable.items.length, references: plan.size, copied: input.references ? copies.map((item) => item.key) : [] };
-    if (readable.items.length === 0) return { environment, created, inherited, forked };
+    if (readable.items.length === 0) return { environment, created, forked };
 
     const target = await resolvePath(ctx.db, { project: project.slug, environment: slug });
     if (target?.environment == null) throw notFound(`${project.slug}/${slug} went away while it was being forked`);
@@ -90,7 +90,7 @@ export async function forkEnvironment(
         await fileSecrets(tx, filed.map(({ key, folder }) => ({ secretId: ids.get(key)!, folder })));
       });
     }
-    return { environment, created, inherited, forked };
+    return { environment, created, forked };
   });
 }
 

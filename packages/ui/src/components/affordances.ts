@@ -9,6 +9,7 @@ import type { UiCapabilities } from '../lib/capabilities';
 type AdministrationItemsProps = {
   capabilities: UiCapabilities;
   users: ReactNode;
+  services: ReactNode;
   audit: ReactNode;
 };
 
@@ -16,27 +17,30 @@ type AdministrationItemsProps = {
 export function AdministrationItems({
   capabilities,
   users,
+  services,
   audit,
 }: AdministrationItemsProps): ReactElement {
   return createElement(
     Fragment,
     null,
-    ...administrationEntries(capabilities, { users: [users], audit: [audit] }),
+    ...administrationEntries(capabilities, { users: [users], services: [services], audit: [audit] }),
   );
 }
 
 /** The same rule, for destinations kept as data (the command palette's). */
 export function administrationEntries<T>(
   capabilities: UiCapabilities,
-  { users, audit }: { users: T[]; audit: T[] },
+  { users, services, audit }: { users: T[]; services: T[]; audit: T[] },
 ): T[] {
   return [
     ...(capabilities.canManageGrants ? users : []),
+    // Service accounts, to whoever sets one up too: they see those they manage.
+    ...(capabilities.canManageGrants || capabilities.setsUpServices ? services : []),
     ...(capabilities.canReadAudit ? audit : []),
   ];
 }
 
-/** Project creation exists before a grantable resource, so it is owner-only. */
+/** Project creation exists before a grantable resource, so it follows the instance role and its scope (`makesProjects`). */
 export function RootAdminOnly({
   capabilities,
   children,

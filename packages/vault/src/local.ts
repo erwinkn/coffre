@@ -15,6 +15,8 @@ export const METHODS = [
   'setAccess',
   'admit',
   'remove',
+  'settings',
+  'setSettings',
   'checkpoint',
   'about',
   'keyChecks',

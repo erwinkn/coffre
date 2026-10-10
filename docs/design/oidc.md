@@ -11,7 +11,9 @@ keeping a service token for up to a year in the CI's secret store. Service
 tokens stay as the fallback. This is for coffre's own sign-in; behind
 Cloudflare Access, CI keeps Access service tokens.
 
-Say `token:api-deploy` holds `viewer` on `market/prod`, and an owner binds it
+Say `token:api-deploy` holds `viewer` on `market/prod`, and someone who
+manages it, an Admin or a person who holds `viewer` there
+([instance-roles.md](instance-roles.md), "Setting up service accounts"), binds it
 to `deploy.yml` pushed to `main` of `acme/api`. The job holds no secret:
 
 ```yaml

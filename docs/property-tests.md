@@ -22,10 +22,21 @@ is valid to core's chain verifier. These properties do not claim freshness
 when the log and all its checkpoints are rolled back together.
 
 The access target compares every permission across project and environment
-scopes with an independent table transcribed from the README's role rules.
-It also compares role assignment and project grant management. Its boundary is core's `Holdings`: the vault has already checked
-membership and filtered expired grants. Service tokens have the same grant
-permissions as people, and cannot be root admins or instance owners.
+places with an independent table transcribed from the README's role rules:
+the instance roles inside their scopes, and the project roles of grants. It
+also compares grant management, running the instance and making projects,
+and that a scope written another way decides the same. Its boundary is
+core's `Holdings`: the vault has already checked membership and filtered
+expired grants. Service tokens hold the same grant permissions as people,
+and no instance role.
+
+The conversion target holds the vault's replacement of the grants on every
+project of 0.4 (`convertEveryProjectGrants`) to an independent model of
+what they gave: nobody ends up holding a permission they did not, at any
+place, at any time, in a project made later included; and in the projects
+there are now, they keep every permission they had, at any time, but what
+the conversion names: a role it put on a project's environments instead,
+on the project itself, and a role it says is lost.
 Credential validity is checked before that boundary, not by core's `allows`.
 
 ## Native dependencies
@@ -69,15 +80,17 @@ clone or copy. The standalone command removes its scratch data on exit.
 The operation list is drawn before execution, so Hegel can shrink its length
 and parameters: four to fourteen operations. It includes invitations, member
 removal, service token issue and revocation, writes and reads, and grants and
-revocations at four scopes: the project, one environment, every project
-(`*`) and one environment slug in every project (`*/qa`). Places change
+revocations on the project and on one environment, and refused on every
+project (`*`, and `*` on one slug), which no grant is on now. Places change
 too: environments are made, renamed, archived, restored and deleted, and
 the project is archived, restored, deleted and made again under its old
 slug. `retire-env` and `retire-project` archive and then delete in one
 step: a deletion needs both, and two independent draws rarely line up.
-The root makes ada an instance owner, or takes it back: as one she grants
-and sees every member's grants, and still reads a secret only with a grant
-of her own; removed and brought back, she is no owner.
+The root sets ada's instance role: an Admin, who grants and sees every
+member's grants and still reads a secret only with a grant of her own; a
+Developer everywhere, or scoped to one environment slug, who reads and writes
+it in every project; or a member again. Removed and brought back, she is a
+member. A service account is refused any role.
 Two fixed scenarios cover every operation, removal followed by
 re-admission, a grant on a slug before any environment has it, renames
 across slugs, and slugs used again after a deletion.

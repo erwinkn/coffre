@@ -1,5 +1,5 @@
 import type { CoffreClient, ConnectedApp, IdentityRow, OffboardingReport, SecretKey, SessionRow } from '@coffre/client';
-import type { Role } from '@coffre/core/access';
+import { EVERYWHERE, unscoped, type InstanceRole, type Role, type Scope } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
 import { failureMessage, memberRef, Refusal } from './coffre.ts';
@@ -42,10 +42,10 @@ const removing = (id: string): Target => ({ id, kind: 'removing' });
 
 type Grants = ({ ok: true; grants: GrantRow[] } | Failure);
 
-/** A grant's identity, before the server has given it an id: who, and where. */
+/** A grant's identity, before the server has given it an id: who, and where; or who, by their instance role. */
 export function grantId(grant: Pick<GrantRow, 'principalType' | 'principalId' | 'environmentSlug'> & { scope?: GrantRow['scope'] }): string {
-  const everywhere = grant.scope === 'every-project' ? '*/' : '';
-  return `${memberRef(grant.principalType, grant.principalId)}@${everywhere}${grant.environmentSlug ?? ''}`;
+  const member = memberRef(grant.principalType, grant.principalId);
+  return grant.scope === 'instance-role' ? `${member}#role` : `${member}@${grant.environmentSlug ?? ''}`;
 }
 
 export function grantsList(project: string) {
@@ -127,10 +127,18 @@ type Directory = ({ ok: true; principals: DirectoryPrincipal[] } | Failure);
 const principalId = (principal: Pick<DirectoryPrincipal, 'principalType' | 'principalId'>) =>
   memberRef(principal.principalType, principal.principalId);
 
-/** The directory as owners read it: the only ones who change it. */
+/** The directory as admins and owners read it: the only ones who change it. */
 export const directoryList = listOf<DirectoryPrincipal, Directory>([...keys.directory, { owner: true }], 'principals', principalId);
 
-export type InviteVars = { principalType: DirectoryPrincipal['principalType']; principalId: string; owner: boolean };
+/** A person's instance role and where it applies, projects by slug: what Add and Change role set. */
+export type RoleVars = { role: InstanceRole; scope: Scope };
+
+export type InviteVars = { principalType: DirectoryPrincipal['principalType']; principalId: string } & RoleVars;
+
+/** What the API takes for a role: the scope only when it narrows anything. */
+function roleInput({ role, scope }: RoleVars): RoleVars | { role: InstanceRole } {
+  return role === 'member' || unscoped(scope) ? { role } : { role, scope };
+}
 
 export function invite(client: CoffreClient): Change<Directory, DirectoryPrincipal, InviteVars, void> {
   return {
@@ -144,7 +152,8 @@ export function invite(client: CoffreClient): Change<Directory, DirectoryPrincip
       {
         principalType: vars.principalType,
         principalId: vars.principalId,
-        instanceRole: vars.owner ? 'owner' : 'user',
+        instanceRole: vars.principalType === 'user' ? vars.role : 'member',
+        scope: vars.principalType === 'user' ? vars.scope : EVERYWHERE,
         isRootAdmin: false,
       },
     ],
@@ -155,12 +164,12 @@ export function invite(client: CoffreClient): Change<Directory, DirectoryPrincip
       const member = memberRef(vars.principalType, vars.principalId);
       const { members } = await client.members.list();
       if (members.some((entry) => entry.member === member)) throw new Refusal('That principal already exists.');
-      await client.members.add(member, { owner: vars.principalType === 'user' && vars.owner });
+      await client.members.add(member, vars.principalType === 'user' ? roleInput(vars) : {});
     },
   };
 }
 
-export function changeRole(client: CoffreClient): Change<Directory, DirectoryPrincipal, { principalId: string; owner: boolean }, unknown> {
+export function changeRole(client: CoffreClient): Change<Directory, DirectoryPrincipal, { principalId: string } & RoleVars, unknown> {
   const id = (vars: { principalId: string }) => memberRef('user', vars.principalId);
   return {
     list: directoryList,
@@ -168,10 +177,10 @@ export function changeRole(client: CoffreClient): Change<Directory, DirectoryPri
     targets: (vars) => [saving(id(vars))],
     apply: (principals, vars) =>
       principals.map((principal) =>
-        principalId(principal) === id(vars) ? { ...principal, instanceRole: vars.owner ? 'owner' : 'user' } : principal,
+        principalId(principal) === id(vars) ? { ...principal, instanceRole: vars.role, scope: vars.scope } : principal,
       ),
     affects: (vars) => affects.role(id(vars)),
-    run: (vars) => client.members.add(id(vars), { owner: vars.owner }),
+    run: (vars) => client.members.add(id(vars), roleInput(vars)),
   };
 }
 
@@ -295,8 +304,8 @@ export function createProject(client: CoffreClient): Change<Projects, ProjectSum
         name: vars.name,
         archivedAt: null,
         folder: null,
-        // You become its owner.
-        permissions: ['project.manage', 'environment.manage', 'grant.manage'],
+        // Its maker manages it by their instance role, an Admin's or an Owner's.
+        permissions: ['audit.read', 'environment.manage', 'grant.manage', 'project.manage'],
         environments: [],
         secretCount: null,
       },

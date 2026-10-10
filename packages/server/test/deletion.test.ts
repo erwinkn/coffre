@@ -40,7 +40,7 @@ beforeEach(async () => {
   await root.members.add(LEAD);
   await root.members.add(DEV);
   await root.members.add(CI);
-  await root.members.add(OWNER, { owner: true });
+  await root.members.add(OWNER, { role: 'admin' });
 });
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -100,7 +100,7 @@ test('only instance owners delete, and only what is archived; each refusal is lo
   await assert.rejects(root.environments.delete('market/prod'), { status: 409, message: /not archived/ });
   assert.deepEqual(
     [...(await entries('project.delete')), ...(await entries('environment.delete'))].map((entry) => [entry.decision, entry.metadata.reason]),
-    [['deny', 'requires_instance_owner'], ['deny', 'requires_instance_owner'], ['deny', 'not_archived'], ['deny', 'not_archived']],
+    [['deny', 'requires_instance_admin'], ['deny', 'requires_instance_admin'], ['deny', 'not_archived'], ['deny', 'not_archived']],
   );
   assert.equal((await versionsOf(await projectId('market'))).every((version) => version.sealed), true);
 });

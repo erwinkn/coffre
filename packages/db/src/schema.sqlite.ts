@@ -204,6 +204,8 @@ export const vaultMembers = sqliteTable(
     principal: text().primaryKey(),
     status: text().notNull(),
     owner: flag('owner').notNull().default(false),
+    role: text(),
+    scope: text(),
     generation: integer().notNull().default(0),
     createdAt: integer('created_at', { mode: 'number' }).notNull(),
     createdBy: text('created_by').notNull(),

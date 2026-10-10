@@ -1,6 +1,25 @@
 import { randomUUID } from 'node:crypto';
 
-import { allows, EVERY_PROJECT, grantKind, ROLES, type Permission, type Role } from '@coffre/core/access';
+import {
+  administers,
+  allows,
+  EVERYWHERE,
+  grantKind,
+  INSTANCE_ROLES,
+  inScope,
+  managesService,
+  mayManageAccess,
+  normalScope,
+  ROLES,
+  runsInstance,
+  type Filter,
+  type InstanceRole,
+  type Permission,
+  type Place,
+  type Role,
+  type Scope,
+} from '@coffre/core/access';
+import { isTombstone } from '@coffre/core/schemas';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 
@@ -8,6 +27,7 @@ import { actorParts } from '../db/audit.ts';
 import {
   revokePriorMembership,
   liveConnections,
+  memberAccess as readMemberAccess,
   memberActivity,
   members as loadMembers,
   missingMembers,
@@ -17,19 +37,19 @@ import {
   type PlaceRow,
   type StoredGrant,
 } from '../db/queries.ts';
-import { can, canAnywhere, type Caller } from './caller.ts';
-import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
-import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { canAnywhere, instanceRoleOf, placeOf } from './caller.ts';
+import { audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
+import { accountOf, managedAccount, notManager, serviceSettingFor, setsUp } from './services.ts';
 
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
   id: string;
-  /** `*` for a grant on every project, the ones created later too. */
   project: string;
-  /** Null for a grant on the whole project; on every project, the environment slug it covers in each, or null for all. */
+  /** Null for a grant on the whole project. */
   environment: string | null;
   role: Role;
   roleName: string;
@@ -42,7 +62,22 @@ export type Member = {
   member: string;
   principalType: 'user' | 'service';
   principalId: string;
-  instanceRole: 'user' | 'owner' | 'root-admin';
+  /** `member` for every service account. */
+  instanceRole: InstanceRole | 'root-admin';
+  /**
+   * Where their instance role applies, projects by slug; everywhere for a
+   * member or a root admin. Null unless the caller runs the instance: a
+   * scope names projects the caller may not see.
+   */
+  scope: Scope | null;
+  /** Asked of a place (`?path=`): whether their instance role reaches it, beside any grant there. False otherwise. */
+  reachesByRole: boolean;
+  /**
+   * A service account the caller manages: its tokens, trust bindings and
+   * grants, and removing it (`managesService`), all of which they are then
+   * shown. Every one, for those who run the instance; never a person.
+   */
+  managed: boolean;
   isRootAdmin: boolean;
   /**
    * The vault found their record changed around it, and refuses them: they
@@ -87,6 +122,7 @@ export type OffboardingReport = {
   principalId: string;
   status: 'active' | 'removed' | 'tampered';
   instanceRole: Member['instanceRole'];
+  scope: Scope;
   isRootAdmin: boolean;
   removedAt: string | null;
   removedBy: string | null;
@@ -120,8 +156,8 @@ export type RemovedMember = {
   toRotate: number;
 };
 
-/** A stored grant, placed by slug; `project` is `*`, and `projectId` null, on every project. */
-type PlacedGrant = { project: string; environment: string | null; projectId: string | null; role: Role; expiresAt: string | null };
+/** A stored grant, placed by slug, and as a permission check names its place. */
+type PlacedGrant = { project: string; environment: string | null; place: Place; role: Role; expiresAt: string | null };
 
 /** The slugs of every project and environment, by id: grants name places only by id. */
 function slugs(known: PlaceRow[]): Map<string, string> {
@@ -133,50 +169,47 @@ function slugs(known: PlaceRow[]): Map<string, string> {
   );
 }
 
-function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[] {
+function placed(grants: StoredGrant[], known: PlaceRow[]): PlacedGrant[] {
   return grants.flatMap((grant): PlacedGrant[] => {
-    const expiresAt = grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString();
-    const kind = grantKind(grant);
-    if (kind === 'every-project') {
-      return [{ project: EVERY_PROJECT, environment: grant.environmentSlug, projectId: null, role: grant.role as Role, expiresAt }];
-    }
     // A grant whose fields name no coherent place reaches nothing, and is not listed.
-    if (kind === null || grant.projectId === null) return [];
-    const project = names.get(grant.projectId);
-    const environment = grant.environmentId === null ? null : names.get(grant.environmentId);
+    if (grantKind(grant) === null) return [];
+    const project = known.find((candidate) => candidate.id === grant.projectId);
+    const environment = grant.environmentId === null ? null : project?.environments.find((candidate) => candidate.id === grant.environmentId);
     // A grant on a place that is gone names nothing anyone can reach.
     if (project === undefined || environment === undefined) return [];
     return [{
-      project,
-      environment,
-      projectId: grant.projectId,
+      project: project.slug,
+      environment: environment?.slug ?? null,
+      place: placeOf(project, environment),
       role: grant.role as Role,
-      expiresAt,
+      expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
     }];
   });
 }
 
 /**
- * The projects a grant reaches, as they are now: its own, or, on every
- * project, each one, or each one with an environment of its slug.
+ * A scope as the API shows it: projects by slug, those that are still
+ * there. Its environments are slugs already.
  */
-function reached(grant: PlacedGrant, known: PlaceRow[]): PlaceRow[] {
-  if (grant.projectId !== null) return known.filter((project) => project.id === grant.projectId);
-  return known.filter((project) => everyProjectReaches(grant.environment, project));
-}
-
-/** Whether a grant on every project, on this slug or on all (null), reaches the project as it is now. */
-export function everyProjectReaches(environmentSlug: string | null, project: PlaceRow): boolean {
-  return environmentSlug === null || project.environments.some((environment) => environment.slug === environmentSlug);
+export function scopeView(scope: Scope, known: PlaceRow[]): Scope {
+  const names = slugs(known);
+  const named = (ids: string[]) => ids.flatMap((id) => names.get(id) ?? []).sort();
+  const projects: Filter = scope.projects === 'all' ? 'all' : 'only' in scope.projects ? { only: named(scope.projects.only) } : { except: named(scope.projects.except) };
+  return { projects, environments: scope.environments };
 }
 
 /**
- * Whether the caller sees who holds what in a project: owners, and members
- * with `grant.manage` on it. A grant on every project is shown to whoever
- * sees the grants of a project it reaches, by this one check.
+ * Whether someone's instance role, in its scope, reaches a project, or one
+ * environment of it: what a project's access list shows them for, beside
+ * the grants it lists.
  */
-export function seesGrantsIn(caller: Caller, projectId: string): boolean {
-  return caller.isOwner || can(caller, 'grant.manage', { projectId });
+function roleReaches(role: InstanceRole, scope: Scope, project: PlaceRow, environment: string | undefined): boolean {
+  if (INSTANCE_ROLES[role].permissions.length === 0) return false;
+  const places = [
+    ...(environment === undefined ? [placeOf(project, null)] : []),
+    ...project.environments.filter((candidate) => environment === undefined || candidate.slug === environment).map((candidate) => placeOf(project, candidate)),
+  ];
+  return places.some((place) => inScope(scope, place));
 }
 
 /** Someone in the directory, as the rows and the vault's findings say. */
@@ -214,10 +247,16 @@ async function directory(ctx: ApiContext, now: Date, member?: MemberRef): Promis
 }
 
 function instanceRole(listed: Listed): Member['instanceRole'] {
-  return listed.isRootAdmin ? 'root-admin' : listed.row?.owner === true && listed.status === 'active' ? 'owner' : 'user';
+  if (listed.isRootAdmin) return 'root-admin';
+  return listed.status === 'active' && listed.member.type === 'user' ? listed.row?.role ?? 'member' : 'member';
 }
 
-/** By project, then environment, with the project-wide grant after its environments; every project's, `*`, first. */
+/** Where their instance role applies, as stored: everywhere for anyone without one. */
+function scopeOf(listed: Listed): Scope {
+  return instanceRole(listed) === 'member' || listed.isRootAdmin ? EVERYWHERE : listed.row?.scope ?? EVERYWHERE;
+}
+
+/** By project, then environment, with the project-wide grant after its environments. */
 function byPlace(a: PlacedGrant, b: PlacedGrant): number {
   if (a.project !== b.project) return a.project < b.project ? -1 : 1;
   if (a.environment === b.environment) return 0;
@@ -227,49 +266,67 @@ function byPlace(a: PlacedGrant, b: PlacedGrant): number {
 }
 
 /**
- * Members and their live grants. Owners see everyone; anyone else sees the
- * grants in the projects where they hold `grant.manage`, and the grants on
- * every project that reach those, and the members those grants belong to.
- * `path` narrows it to who reaches one project or environment, or to the
- * grants on every project (`*`, or `*` and a slug).
+ * Members and their live grants. Admins and owners see everyone, with the
+ * grants they manage: all of them, or, scoped, those inside their scope.
+ * Anyone else sees the grants in the places where they hold
+ * `grant.manage`, and the members those grants belong to. `path` narrows
+ * it to who reaches one project or environment: by a grant there, or by an
+ * instance role whose scope takes it in, listed with no grant. Where a
+ * role applies (`scope`) only those who run the instance see. A person who
+ * sets up service accounts sees those they manage, with all they hold,
+ * which they reach, and no other.
  */
 export async function listMembers(
   ctx: ApiContext,
   query: { path?: Path },
 ): Promise<{ members: Member[]; removed: RemovedMember[] }> {
   const { caller } = ctx;
-  const manages = (projectId: string) => seesGrantsIn(caller, projectId);
-  if (!caller.isOwner && !canAnywhere(caller, 'grant.manage')) {
-    throw forbidden('only owners, and members with grant.manage on a project, can list members');
+  const administrator = caller.isRootAdmin || administers(caller.role);
+  const [all, known, setting] = await Promise.all([
+    directory(ctx, new Date()),
+    places(ctx.db),
+    runsInstance(caller) ? null : serviceSettingFor(ctx.vault, caller),
+  ]);
+  if (!administrator && !canAnywhere(caller, 'grant.manage') && !setsUp(caller, setting, known)) {
+    throw forbidden('only admins, owners, members with grant.manage on a project, and those who set up service accounts can list members');
   }
-  const everyone = query.path === undefined && caller.isOwner;
-  const [all, known] = await Promise.all([directory(ctx, new Date()), places(ctx.db)]);
-  const names = slugs(known);
+  const everyone = query.path === undefined && administrator;
+  const actor = formatMember(caller.principal);
+  const manages = (listed: Listed) =>
+    listed.member.type === 'service' && listed.status === 'active' && (runsInstance(caller) ||
+      (setting !== null && managesService(caller, setting, actor, accountOf(listed.grants, listed.row?.statusChangedBy ?? null, known))));
   const path = query.path;
-  const inPath = (grant: PlacedGrant): boolean => {
-    if (path === undefined) return true;
-    const environmentIn = (environment: string | null) => path.environment === undefined || environment === path.environment;
-    if (path.project === EVERY_PROJECT) return grant.projectId === null && environmentIn(grant.environment);
-    if (grant.projectId !== null) return grant.project === path.project && environmentIn(grant.environment);
-    // A grant on every project, where it reaches the path's project, and its environment if it names one.
-    const project = reached(grant, known).find((place) => place.slug === path.project);
-    return project !== undefined && (grant.environment === null || environmentIn(grant.environment));
-  };
+  const target = path === undefined ? undefined : known.find((project) => project.slug === path.project);
+  if (path !== undefined && target === undefined) throw notFound(`no project "${path.project}"`);
+  const inPath = (grant: PlacedGrant): boolean =>
+    path === undefined || (grant.project === path.project && (path.environment === undefined || grant.environment === path.environment));
+  // Who reaches the path by their instance role is shown to whoever manages access there.
+  const managesPath = target !== undefined && (runsInstance(caller) || [
+    ...(path?.environment === undefined ? [placeOf(target, null)] : []),
+    ...target.environments.filter((environment) => path?.environment === undefined || environment.slug === path.environment).map((environment) => placeOf(target, environment)),
+  ].some((place) => mayManageAccess(caller, place)));
 
   const members: Member[] = [];
   for (const listed of all) {
     if (listed.status === 'removed') continue;
-    const visible = placed(listed.grants, names)
-      .filter((grant) => (caller.isOwner || reached(grant, known).some((project) => manages(project.id))) && inPath(grant))
+    const managed = manages(listed);
+    const visible = placed(listed.grants, known)
+      .filter((grant) => (runsInstance(caller) || managed || mayManageAccess(caller, grant.place)) && inPath(grant))
       .sort(byPlace);
-    if (!everyone && visible.length === 0) continue;
+    const role = instanceRole(listed);
+    const scope = scopeOf(listed);
+    const byRole = target !== undefined && managesPath && role !== 'root-admin' && roleReaches(role, scope, target, path?.environment);
+    if (!everyone && visible.length === 0 && !byRole && !(managed && path === undefined)) continue;
     const ref = listed.member;
     const member = formatMember(ref);
     members.push({
       member,
       principalType: ref.type,
       principalId: ref.id,
-      instanceRole: instanceRole(listed),
+      instanceRole: role,
+      scope: runsInstance(caller) ? scopeView(scope, known) : null,
+      reachesByRole: byRole,
+      managed,
       isRootAdmin: listed.isRootAdmin,
       tampered: listed.status === 'tampered',
       grants: visible.map((grant) => ({
@@ -284,7 +341,8 @@ export async function listMembers(
     });
   }
   members.sort((a, b) => a.principalType.localeCompare(b.principalType) || a.principalId.localeCompare(b.principalId));
-  if (!everyone) return { members, removed: [] };
+  // Those removed are the instance's to see: their reports name what they saw anywhere.
+  if (!everyone || !runsInstance(caller)) return { members, removed: [] };
 
   // Everyone removed, so their reports stay reachable: removal ends access,
   // not the work of rotating what they saw.
@@ -380,13 +438,14 @@ function exposure(
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Who someone is to this instance and what to rotate if they leave. Owners
- * only. Works for removed members too: that is when it matters most.
+ * Who someone is to this instance and what to rotate if they leave, for
+ * those who run the instance. Works for removed members too: that is when
+ * it matters most.
  */
 export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<OffboardingReport> {
-  if (!ctx.caller.isOwner) throw forbidden('only owners may see what someone has access to');
+  if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
   // Everyone, not just them: the service tokens they issued belong to others.
-  const everyone = await directory(ctx, new Date());
+  const [everyone, known] = await Promise.all([directory(ctx, new Date()), places(ctx.db)]);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
@@ -410,6 +469,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     principalId: member.id,
     status,
     instanceRole: instanceRole(listed),
+    scope: scopeView(scopeOf(listed), known),
     isRootAdmin: listed.isRootAdmin,
     // When and by whom, as the vault wrote it: the removal is its decision.
     removedAt: status === 'removed' ? row!.statusChangedAt.toISOString() : null,
@@ -437,16 +497,16 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
 }
 
 /**
- * Who reads each of these environments by a grant, as members: those a
- * reference held there lets read its source. Root admins read everything,
- * and are not listed.
+ * Who reads each of these environments, by a grant or their instance role,
+ * as members: those a reference held there lets read its source. Root
+ * admins read everything, and are not listed.
  */
 export async function readersAt(ctx: ApiContext, places: readonly { projectId: string; environmentId: string; environmentSlug: string }[]): Promise<string[][]> {
   if (places.length === 0) return [];
   const all = await directory(ctx, new Date());
   return places.map((place) => all
     .filter((listed) => listed.status === 'active' && !listed.isRootAdmin && allows(
-      { isRootAdmin: false, isOwner: false, grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })) },
+      { isRootAdmin: false, role: instanceRole(listed) as InstanceRole, scope: scopeOf(listed), grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })) },
       'secret.read',
       place,
     ))
@@ -462,34 +522,144 @@ function rootAdminRefusal(ctx: ApiContext, action: string, member: MemberRef): R
   );
 }
 
+/** One member's access, as a member page shows it: their instance role and scope, and the grants the caller sees. */
+export type MemberAccess = {
+  member: string;
+  principalType: 'user' | 'service';
+  principalId: string;
+  status: 'active' | 'removed' | 'tampered';
+  instanceRole: InstanceRole | 'root-admin';
+  /** Projects by slug; everywhere for a member or a root admin. Null unless the caller runs the instance, as in `Member`. */
+  scope: Scope | null;
+  isRootAdmin: boolean;
+  /** A service account the caller manages, as in `Member`. */
+  managed: boolean;
+  /** Their live grants the caller manages: all of them, for those who run the instance or manage the account. None unless active. */
+  grants: MemberGrant[];
+};
+
 /**
- * Add a member, bring back a removed one, or change whether they are an
- * owner. Adding someone who is already a member as they are changes nothing.
- * The vault decides and keeps who is in, in the member row their sessions
- * and tokens hang off.
+ * One member's access, for their page: one query (`memberAccess` in
+ * db/queries.ts), however many projects they hold grants in, rather than
+ * a project's list per project. For whoever may list members, and a
+ * service account's manager; the grants are those the caller manages, as
+ * `listMembers` shows them.
+ */
+export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<MemberAccess> {
+  const { caller } = ctx;
+  const administrator = caller.isRootAdmin || administers(caller.role);
+  const principal = formatMember(member);
+  // A service account's manager is weighed by its grants: the setting, read only for one.
+  const asked = member.type === 'service' && !runsInstance(caller) && caller.principal.type === 'user';
+  const [stored, { rootAdmins }, setting] = await Promise.all([
+    readMemberAccess(ctx.db, principal, new Date()),
+    ctx.vault.about(),
+    asked ? serviceSettingFor(ctx.vault, caller) : null,
+  ]);
+  const isRootAdmin = rootAdmins.includes(principal);
+  const status = isRootAdmin ? 'active' : stored.member === null ? null : stored.member.tampered ? 'tampered' : stored.member.status;
+  // A grant on a place that is gone names nothing anyone can reach.
+  const live = stored.grants.filter((grant) => !isTombstone(grant.projectSlug) && (grant.environmentSlug === null || !isTombstone(grant.environmentSlug)));
+  const placeOfGrant = (grant: (typeof live)[number]): Place => grant.environmentId === null
+    ? { projectId: grant.projectId }
+    : { projectId: grant.projectId, environmentId: grant.environmentId, environmentSlug: grant.environmentSlug };
+  const managed = member.type === 'service' && status === 'active' && (runsInstance(caller) || (setting !== null && managesService(caller, setting, formatMember(caller.principal), {
+    grants: live.map((grant) => ({ role: grant.role as Role, place: placeOfGrant(grant) })),
+    admittedBy: stored.member!.admittedBy,
+  })));
+  if (!administrator && !canAnywhere(caller, 'grant.manage') && !managed) {
+    throw forbidden('only admins, owners, members with grant.manage on a project, and a service account\'s managers can see what someone holds');
+  }
+  if (status === null) throw notFound('no such member');
+  const role: InstanceRole = status === 'active' && member.type === 'user' && !isRootAdmin ? stored.member!.role : 'member';
+  const scope = role === 'member' ? EVERYWHERE : stored.member!.scope;
+  // A scope names projects by id: by slug here, those still there, as `scopeView` names them.
+  const named = (ids: string[]) => ids.flatMap((id) => stored.projectSlugs.get(id) ?? []).filter((slug) => !isTombstone(slug)).sort();
+  const shown: Scope = {
+    projects: scope.projects === 'all' ? 'all' : 'only' in scope.projects ? { only: named(scope.projects.only) } : { except: named(scope.projects.except) },
+    environments: scope.environments,
+  };
+  const grants = status !== 'active' ? [] : live
+    .filter((grant) => runsInstance(caller) || managed || mayManageAccess(caller, placeOfGrant(grant)))
+    .map((grant) => {
+      const held = grant.role as Role;
+      return {
+        id: `${principal}/${grant.projectSlug}${grant.environmentSlug === null ? '' : `/${grant.environmentSlug}`}`,
+        project: grant.projectSlug,
+        environment: grant.environmentSlug,
+        role: held,
+        roleName: ROLES[held].name,
+        permissions: [...ROLES[held].permissions],
+        expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
+      };
+    })
+    .sort((a, b) => compare(a.project, b.project) || (a.environment === null ? 1 : b.environment === null ? -1 : compare(a.environment, b.environment)));
+  return {
+    member: principal,
+    principalType: member.type,
+    principalId: member.id,
+    status,
+    instanceRole: isRootAdmin ? 'root-admin' : role,
+    scope: runsInstance(caller) ? shown : null,
+    isRootAdmin,
+    managed,
+    grants,
+  };
+}
+
+/** A filter as the API takes one, projects by slug. */
+export type FilterInput = 'all' | { only: string[] } | { except: string[] };
+
+/**
+ * Add a member, bring back a removed one, or set a person's instance role
+ * and its scope (left out, everywhere). Adding someone who is already a
+ * member as they are changes nothing. Those who run the instance do it,
+ * never about themselves; a service account, any person who sets one up
+ * too (`setsUpServices`). The vault decides and keeps who is in, in the
+ * member row their sessions and tokens hang off.
+ *
+ *   { "role": "developer", "scope": { "projects": "all", "environments": { "only": ["dev"] } } }
  */
 export async function putMember(
   ctx: ApiContext,
   member: MemberRef,
-  input: { owner?: boolean },
-): Promise<{ member: string; instanceRole: 'user' | 'owner'; created: boolean }> {
+  input: { role?: InstanceRole; scope?: { projects?: FilterInput; environments?: FilterInput } },
+): Promise<{ member: string; instanceRole: InstanceRole; scope: Scope; created: boolean }> {
   const principal = formatMember(member);
-  const fields = { principalType: member.type, principalId: member.id, instanceRole: input.owner === true ? 'owner' : 'user' };
+  const fields = { principalType: member.type, principalId: member.id, ...(input.role === undefined ? {} : { role: input.role }) };
   return withRefusals(ctx, async () => {
-    requireOwner(ctx, 'member.add', { metadata: fields });
-    if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.add', member);
-    if (member.type === 'service' && input.owner === true) {
+    const service = member.type === 'service' && (input.role ?? 'member') === 'member' && input.scope === undefined;
+    if (!service || runsInstance(ctx.caller)) {
+      requireInstance(ctx, 'member.add', { metadata: fields }, 'add members or set their roles');
+    } else if (!setsUp(ctx.caller, await serviceSettingFor(ctx.vault, ctx.caller), await places(ctx.db))) {
       throw new Refusal(
-        conflict('service accounts cannot be instance owners'),
-        denied(ctx, 'member.add', 'service_cannot_be_owner', { metadata: fields }),
+        forbidden('a service account takes access somewhere the instance lets people set them up, or someone who runs the instance'),
+        denied(ctx, 'member.add', 'not_service_manager', { metadata: fields }),
+      );
+    }
+    if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.add', member);
+    if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
+    if (member.type === 'service' && input.role !== undefined && input.role !== 'member') {
+      throw new Refusal(
+        conflict('service accounts hold project grants only, never an instance role'),
+        denied(ctx, 'member.add', 'service_cannot_hold_role', { metadata: fields }),
+      );
+    }
+    const known = await places(ctx.db);
+    const scope = input.role === undefined ? undefined : scopeIds(input.scope ?? {}, known);
+    const self = formatMember(ctx.caller.principal) === principal;
+    if (self && input.role !== undefined && (input.role !== ctx.caller.role || JSON.stringify(scope) !== JSON.stringify(ctx.caller.scope))) {
+      throw new Refusal(
+        conflict('nobody changes their own instance role: ask another admin'),
+        denied(ctx, 'member.add', 'own_role', { metadata: fields }),
       );
     }
 
-    // The vault logs the change, as `member.add`, `member.restore` or `member.owner`.
+    // The vault logs the change, as `member.add`, `member.restore` or `member.role`.
     const result = await ctx.vault.admit({
       actor: formatMember(ctx.caller.principal),
       principal,
-      owner: input.owner,
+      ...(input.role === undefined ? {} : { role: input.role, scope }),
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
@@ -497,7 +667,21 @@ export async function putMember(
     if (!result.ok) throw vaultRefused(result.refusal);
     // Housekeeping: rows of an earlier membership are dead already, by their generation.
     await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, result.generation, ctx.caller.principal.id));
-    return { member: principal, instanceRole: result.owner ? 'owner' : 'user', created: result.created };
+    return { member: principal, instanceRole: result.role, scope: scopeView(result.scope, known), created: result.created };
+  });
+}
+
+/** A scope as the vault keeps it, projects by id: a project the API names by slug must be there. */
+export function scopeIds(input: { projects?: FilterInput; environments?: FilterInput }, known: PlaceRow[]): Scope {
+  const id = (slug: string) => {
+    const project = known.find((candidate) => candidate.slug === slug);
+    if (project === undefined) throw notFound(`no project "${slug}"`);
+    return project.id;
+  };
+  const projects = input.projects ?? 'all';
+  return normalScope({
+    projects: projects === 'all' ? 'all' : 'only' in projects ? { only: projects.only.map(id) } : { except: projects.except.map(id) },
+    environments: input.environments ?? 'all',
   });
 }
 
@@ -506,16 +690,22 @@ export async function putMember(
  * then on, whatever sessions they still hold; the app signs out every
  * session and revokes their tokens, sign-in accounts and connected apps.
  * Re-adding them later is a fresh start. Returns their report, which is
- * what to rotate.
+ * what to rotate, to those who run the instance; a service account's
+ * manager removes it too (`managesService`), and reads no report: it names
+ * what it read anywhere.
  */
 export async function removeMember(
   ctx: ApiContext,
   member: MemberRef,
-): Promise<{ revoked: WaysIn; report: OffboardingReport }> {
+): Promise<{ revoked: WaysIn; report: OffboardingReport | null }> {
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id };
   const revoked = await withRefusals(ctx, async () => {
-    requireOwner(ctx, 'member.remove', { metadata: fields });
+    if (member.type !== 'service' || runsInstance(ctx.caller)) {
+      requireInstance(ctx, 'member.remove', { metadata: fields }, 'remove members');
+    } else if (!(await managedAccount(ctx, ctx.caller, member.id)).managed) {
+      throw notManager(ctx, 'member.remove', fields, 'remove it');
+    }
     if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.remove', member);
     // The vault logs the removal, and one `access.revoke` per grant it took, so each project's log shows it.
     const result = await ctx.vault.remove({
@@ -565,5 +755,5 @@ export async function removeMember(
       };
     });
   });
-  return { revoked, report: await memberReport(ctx, member) };
+  return { revoked, report: runsInstance(ctx.caller) ? await memberReport(ctx, member) : null };
 }

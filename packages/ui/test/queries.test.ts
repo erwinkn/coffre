@@ -30,8 +30,11 @@ const me = {
   principal: { type: 'user', id: 'ada@acme.example' },
   registered: true,
   tampered: false,
-  instanceRole: 'owner',
+  instanceRole: 'admin',
+  scope: { projects: 'all', environments: 'all' },
   isRootAdmin: false,
+  runsInstance: true,
+  setsUpServices: true,
   canReadAudit: true,
   environments: [],
 };

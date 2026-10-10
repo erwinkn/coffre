@@ -15,6 +15,13 @@
       "when": 1791242674488,
       "tag": "0001_mcp_approvals",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791619333441,
+      "tag": "0002_instance_roles",
+      "breakpoints": true
     }
   ]
 }

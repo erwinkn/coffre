@@ -1,4 +1,4 @@
-import { everyProjectPath } from '@coffre/core/access';
+import { EVERYWHERE, isInstanceRole, isScope, normalScope, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { StoredEntry } from '@coffre/core/audit';
 import type { AccessFault, FaultGrant } from '@coffre/core/vault';
 
@@ -28,7 +28,8 @@ export function replayFault(state: Replayed, rows: readonly Member[], storedGran
     const [inStore, inLog] = [stored.get(principal), members.get(principal)];
     if (inLog === undefined) return { kind: 'unlogged-member', principal };
     if (inStore === undefined) return { kind: 'missing-member', principal };
-    const fields = MEMBER_FIELDS.filter(([field]) => inStore[field] !== inLog[field]).map(([, column]) => column);
+    const same = (field: keyof LoggedMember) => (field === 'scope' ? JSON.stringify(inStore.scope) === JSON.stringify(inLog.scope) : inStore[field] === inLog[field]);
+    const fields = MEMBER_FIELDS.filter(([field]) => !same(field)).map(([, column]) => column);
     if (fields.length > 0) return { kind: 'member-differs', principal, fields };
   }
 
@@ -63,7 +64,7 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
       state.members.set(principal, {
         principal,
         status: 'active',
-        owner: detail.owner === true,
+        ...standingIn(detail),
         generation: before?.generation ?? 0,
         createdAt: before?.createdAt ?? row.occurredAt,
         createdBy: before?.createdBy ?? row.actor,
@@ -72,15 +73,16 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
       });
       return null;
     case 'member.owner':
+    case 'member.role':
       if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
-      state.members.set(principal, { ...before, owner: detail.owner === true, accessSeq: row.seq });
+      state.members.set(principal, { ...before, ...standingIn(detail), accessSeq: row.seq });
       return null;
     case 'member.remove': {
       if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
       // A removal names the generation it moved to; one before this format
       // was always the next.
       const generation = typeof detail.generation === 'number' ? detail.generation : before.generation + 1;
-      state.members.set(principal, { ...before, status: 'removed', owner: false, generation, accessSeq: row.seq, ...changed });
+      state.members.set(principal, { ...before, status: 'removed', role: 'member', scope: EVERYWHERE, generation, accessSeq: row.seq, ...changed });
       grantsOf.clear();
       return null;
     }
@@ -103,10 +105,21 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
   return null;
 }
 
+/**
+ * The instance role an entry gives: its `role` and `scope`, or, in one
+ * 0.4 wrote, whether it made them an owner, an Admin everywhere.
+ */
+function standingIn(detail: Record<string, unknown>): { role: InstanceRole; scope: Scope } {
+  if (typeof detail.role !== 'string') return { role: detail.owner === true ? 'admin' : 'member', scope: EVERYWHERE };
+  const role = isInstanceRole(detail.role) ? detail.role : 'member';
+  return { role, scope: role !== 'member' && isScope(detail.scope) ? normalScope(detail.scope) : EVERYWHERE };
+}
+
 /** A member's fields, and the columns a fault names them by. */
 const MEMBER_FIELDS = [
   ['status', 'status'],
-  ['owner', 'owner'],
+  ['role', 'role'],
+  ['scope', 'scope'],
   ['generation', 'generation'],
   ['createdAt', 'created_at'],
   ['createdBy', 'created_by'],
@@ -129,7 +142,7 @@ function placeOf(row: StoredEntry, detail: Record<string, unknown>): Place {
 
 /** A grant's place: its environment, or its project when it has none, or every project's path. */
 function placeKey(place: Place): string {
-  return place.environmentId ?? place.projectId ?? everyProjectPath(place.environmentSlug);
+  return place.environmentId ?? place.projectId ?? (place.environmentSlug === null ? '*' : `*/${place.environmentSlug}`);
 }
 
 function grantKey(grant: GrantRow): string {

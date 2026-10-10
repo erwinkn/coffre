@@ -170,32 +170,51 @@ export const SECTIONS = [
       { command: 'roles', usage: ['roles'] },
       {
         command: 'access',
-        usage: ['access [<project>[/<environment>]] [--json]'],
-        about: ["the members, or those who reach a place; '*' lists the grants", 'on every project'],
+        usage: ['access [<project>[/<environment>] | <member> [--service]] [--json]'],
+        about: ['the members, their instance roles and grants; who reaches', 'a place; or what one member holds'],
       },
       {
         command: 'admit',
-        usage: ['admit <principal> [--service] [--owner | --no-owner]'],
-        about: ['a member: a person by their email, or a service account,', 'service:<name> or --service; --owner makes a person an owner'],
+        usage: [
+          'admit <principal> [--service] [--role <role>]',
+          '      [--projects <a,b> | --except-projects <a,b>]',
+          '      [--environments <a,b> | --except-environments <a,b>]',
+        ],
+        about: [
+          'a member: a person by their email, or a service account,',
+          'service:<name> or --service. --role sets a person\'s',
+          'instance role, member, auditor, developer, admin or owner,',
+          'in every project and environment unless a scope flag',
+          'narrows it; never your own',
+        ],
       },
       {
         command: 'grant',
         usage: ['grant <project> <principal> --role <role> [--env <env>] [--service]', '      [--expires YYYY-MM-DD]'],
-        about: [
-          "a member, admitted first. '*' for every project, the ones made later",
-          'too, and with --env, the environment of that name in each: owners only',
-        ],
+        about: ['a member, admitted first: on a project, or one of its', 'environments with --env'],
       },
-      { command: 'revoke', usage: ['revoke <project> <principal> [--env <env>] [--service]'], about: ["their grant there, '*' too"] },
+      { command: 'revoke', usage: ['revoke <project> <principal> [--env <env>] [--service]'], about: ['their grant there'] },
       {
         command: 'offboard',
         usage: ['offboard <principal> [--service] [--apply]'],
         about: ['what removing them revokes, and what to rotate'],
       },
+      {
+        command: 'settings',
+        usage: [
+          'settings [service-accounts [--projects <a,b> | --except-projects <a,b>]',
+          '         [--environments <a,b> | --except-environments <a,b>]] [--json]',
+        ],
+        about: [
+          'the instance\'s settings; with service-accounts, where anyone',
+          'who holds access sets one up, giving it at most what they',
+          'hold: no flag is everywhere',
+        ],
+      },
     ],
   },
   {
-    title: 'Service accounts, for CI and other machines: admit, grant, then OIDC or a bearer token',
+    title: 'Service accounts, for CI and other machines: admit, grant, then OIDC or a bearer token; anyone with access sets one up where `coffre settings` lets them',
     entries: [
       {
         command: 'trust',
@@ -220,13 +239,13 @@ export const SECTIONS = [
     title: 'Verify',
     entries: [
       { command: 'verify', usage: ['verify'], about: ['asks which of these, on a terminal'] },
-      { command: 'verify instance', usage: ['verify instance [<url>]'], about: ['the instance from outside: as no one, then as you, an owner'] },
+      { command: 'verify instance', usage: ['verify instance [<url>]'], about: ['the instance from outside: as no one, then as you, an', 'admin or owner'] },
       {
         command: 'verify keys',
         usage: ['verify keys [--vault-id <id>]'],
         about: ['the vault key and app key you keep, checked on this machine'],
       },
-      { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an owner'] },
+      { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an auditor, admin or owner of all of it'] },
     ],
   },
 ] as const satisfies readonly Section[];
@@ -323,6 +342,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'POST /reveals': { commands: ['get', 'run', 'export'] },
   'GET /members': { commands: ['access'] },
   'GET /members/:member': { commands: ['offboard'] },
+  'GET /members/:member/access': { commands: ['access'] },
   'PUT /members/:member': { commands: ['admit'] },
   'DELETE /members/:member': { commands: ['offboard'] },
   'GET /members/:member/tokens': { commands: ['tokens'] },
@@ -333,6 +353,8 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /members/:member/bindings/:id': { commands: ['untrust'] },
   'GET /workloads/lookup': { commands: ['trust'] },
   'PATCH /access/:member': { commands: ['grant', 'revoke'] },
+  'GET /settings': { commands: ['settings'] },
+  'PUT /settings': { commands: ['settings'] },
   'GET /sessions': { commands: ['sessions'] },
   'DELETE /sessions/:id': { commands: ['sessions revoke'] },
   'GET /identities': { commands: ['identities'] },

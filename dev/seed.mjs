@@ -85,22 +85,24 @@ console.log('==> created project market with environments dev, prod');
 
 // Members first. Access refuses anyone who is not a member (HTTP 409):
 // membership is a separate write from project access.
-for (const principal of LOCAL_SEED_DIRECTORY) {
-    await put(admin, `/api/members/${member(principal)}`, {});
+// dev and auditor reach every project by their instance role:
+//   dev      -- Developer, on every project's dev
+//   auditor  -- Auditor, every project's log
+for (const { role, scope, ...principal } of LOCAL_SEED_DIRECTORY) {
+    await put(admin, `/api/members/${member(principal)}`, role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) });
 }
 console.log('==> registered directory principals (lead, dev, auditor, accessmgr, outsider, ci-deploy)');
 
-// A mix of scopes, so the UI shows both kinds of grant:
-//   lead     -- project admin: can add environments and manage access
-//   dev      -- write, but only on dev
-//   auditor  -- read across the whole project
-//   ci       -- a service, with a token of its own
+// A mix of grants, so the UI shows both kinds beside the roles:
+//   lead      -- project owner: can add environments and manage access
+//   accessmgr -- manages market's access, reads nothing
+//   ci        -- a service, reading prod, with a token of its own
 // outsider is in the directory with no grants — the login page's closed door.
 for (const grant of LOCAL_SEED_GRANTS) {
     const place = grant.environmentSlug === undefined ? 'market' : `market/${grant.environmentSlug}`;
     await patch(admin, `/api/access/${member(grant)}`, { [place]: grant.role });
 }
-console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy');
+console.log('==> granted access to lead, accessmgr and ci-deploy');
 
 const values = {
     dev: {

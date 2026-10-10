@@ -9,14 +9,19 @@ const LOCAL_SEED_CONFIG = Object.freeze({
  * Identities the login page lists as seeded personas.
  *
  * Root admin is deployment config (`COFFRE_ROOT_ADMINS`), not a directory row.
- * Everyone else must be registered here before `createGrant` will accept them.
- * `outsider@` is registered with no grants so the closed-door view is a denial,
- * not `/unregistered`.
+ * Everyone else must be registered here before `createGrant` will accept them,
+ * some with an instance role and its scope. `outsider@` is registered with no
+ * grants so the closed-door view is a denial, not `/unregistered`.
  */
 export const LOCAL_SEED_DIRECTORY = Object.freeze([
     Object.freeze({ principalType: 'user', principalId: 'lead@acme.example' }),
-    Object.freeze({ principalType: 'user', principalId: 'dev@acme.example' }),
-    Object.freeze({ principalType: 'user', principalId: 'auditor@acme.example' }),
+    Object.freeze({
+        principalType: 'user',
+        principalId: 'dev@acme.example',
+        role: 'developer',
+        scope: Object.freeze({ environments: Object.freeze({ only: Object.freeze(['dev']) }) }),
+    }),
+    Object.freeze({ principalType: 'user', principalId: 'auditor@acme.example', role: 'auditor' }),
     Object.freeze({ principalType: 'user', principalId: 'accessmgr@acme.example' }),
     Object.freeze({ principalType: 'user', principalId: 'outsider@acme.example' }),
     Object.freeze({ principalType: 'service', principalId: 'ci-deploy' }),
@@ -24,13 +29,6 @@ export const LOCAL_SEED_DIRECTORY = Object.freeze([
 
 export const LOCAL_SEED_GRANTS = Object.freeze([
     Object.freeze({ principalType: 'user', principalId: 'lead@acme.example', role: 'owner' }),
-    Object.freeze({
-        principalType: 'user',
-        principalId: 'dev@acme.example',
-        role: 'developer',
-        environmentSlug: 'dev',
-    }),
-    Object.freeze({ principalType: 'user', principalId: 'auditor@acme.example', role: 'auditor' }),
     Object.freeze({
         principalType: 'user',
         principalId: 'accessmgr@acme.example',

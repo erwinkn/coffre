@@ -264,7 +264,7 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   const result = listed.body.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[]; cacheScope?: string; ttlMs?: number } | undefined;
   const names = result?.tools?.map((tool) => tool.name) ?? [];
   // The reader's list: their role's tools, and none of an instance owner's; theirs alone to cache, and not for long, so a role's change shows.
-  expect(names.includes('list_secrets') && !names.includes('run_with_secrets') && !names.includes('admit_member') && result?.cacheScope === 'private' && typeof result.ttlMs === 'number' && result.ttlMs <= 600_000,
+  expect(names.includes('list_secrets') && !names.includes('run_with_secrets') && !names.includes('create_project') && !names.includes('read_audit_log') && result?.cacheScope === 'private' && typeof result.ttlMs === 'number' && result.ttlMs <= 600_000,
     "tools/list does not list the reader's tools alone, cached for them only and briefly", listed.body);
   const callTool = async (tool: string, args: Record<string, unknown>) => {
     const { response, body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args }, tool);

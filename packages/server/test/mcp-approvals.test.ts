@@ -218,7 +218,7 @@ test('a value comes from the page only: the person types it, coffre writes it, a
 
 test('a token issued through an approval is shown on the page, once, and never to the client', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   const token = await connect(DEV, 'read manage-access');
   const id = ((await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 })).body.result!.structuredContent!.approval as { id: string }).id;
   assert.ok((await view(id)).body.approval.details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
@@ -293,7 +293,7 @@ async function opened(email: string, tool: string, args: Record<string, unknown>
 }
 
 test("trust_workload's page names each ID from GitHub or GitLab, says when it cannot, and shows the label as the app's (M1)", async () => {
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   await connect(DEV, 'read manage-access');
   const notes = async (args: Record<string, unknown>) => {
     const { details } = (await view(await opened(DEV, 'trust_workload', { service: 'ci-deploy', ...args }))).body.approval;
@@ -469,20 +469,29 @@ test('the decision reads the approval and its connection again as it commits: ex
   assert.deepEqual((await entries('secret.write')).filter((entry) => entry.actor === `user:${DEV}`), [], 'nothing written');
 });
 
-test('a change the person could not make is refused before anyone is asked, for every tool: owners only, and access where they manage it (I3)', async () => {
+test('a change the person could not make is refused before anyone is asked, for every tool: admins and owners only, and access where they manage it (I3)', async () => {
   const dev = await connect(DEV, 'read write manage-access');
   const owners: [string, Record<string, unknown>][] = [
     ['create_project', { project: 'shop', name: 'Shop' }],
     ['admit_member', { member: 'user:new@acme.example' }],
     ['offboard_member', { member: `user:${OTHER}` }],
-    ['issue_service_token', { service: 'ci-deploy', expiresInDays: 1 }],
-    ['revoke_service_token', { service: 'ci-deploy', id: randomUUID() }],
-    ['untrust_workload', { service: 'ci-deploy', id: randomUUID() }],
   ];
   for (const [tool, args] of owners) {
     const refused = (await callRaw(dev, tool, args)).body.result!;
     assert.equal(refused.isError, true, tool);
-    assert.match(refused.content[0]!.text!, /only instance owners/, tool);
+    assert.match(refused.content[0]!.text!, /only an admin or owner (of the whole instance|whose scope takes in new projects) can do this/, tool);
+  }
+  // A service account's tools, for one it does not manage: it holds what DEV does not, or holds nothing DEV gave it.
+  const services: [string, Record<string, unknown>][] = [
+    ['issue_service_token', { service: 'ci-deploy', expiresInDays: 1 }],
+    ['revoke_service_token', { service: 'ci-deploy', id: randomUUID() }],
+    ['untrust_workload', { service: 'ci-deploy', id: randomUUID() }],
+    ['offboard_member', { member: 'service:ci-deploy' }],
+  ];
+  for (const [tool, args] of services) {
+    const refused = (await callRaw(dev, tool, args)).body.result!;
+    assert.equal(refused.isError, true, tool);
+    assert.match(refused.content[0]!.text!, /you do not manage service:ci-deploy/, tool);
   }
   const viewer = await connect(OTHER, 'read write manage-access');
   const access = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { market: 'viewer' } })).body.result!;
@@ -495,7 +504,7 @@ test('a change the person could not make is refused before anyone is asked, for 
 // --- W49's findings on the fixes -----------------------------------------------
 
 test("trust_workload names IDs only from github.com and gitlab.com: an issuer the app names is flagged, and never asked (M1)", async () => {
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   await connect(DEV, 'read manage-access');
   // The attacker's own GitLab would name its project anything.
   documents.set('https://attacker.example/api/v4/projects/55123', { id: 55123, path_with_namespace: 'acme/web', namespace: { id: 81234, full_path: 'acme' } });
@@ -540,7 +549,7 @@ test('the basis Approve compares is the state the page showed, read once: a vers
 
 test('a change made whose outcome is not stored reads as being made, then unknown, never failed, and is never reported (L2)', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   const token = await connect(DEV, 'read manage-access');
   const call = () => callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 });
   const id = idOf(await call());
@@ -578,18 +587,21 @@ test('a change made whose outcome is not stored reads as being made, then unknow
   assert.equal(after!.reportedAt, null, 'never heard as an end');
 });
 
-test("set_access takes every project, and an environment in each, from an owner, and places as the API reads them; from anyone else, they're refused up front (I3)", async () => {
+test("set_access takes places as the API reads them, and no grant on every project, from anyone, up front (I3)", async () => {
   const root = await connect(ROOT, 'read manage-access');
-  const asked = await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { '*': 'viewer', '*/prod': 'developer', ' /market/prod/ ': 'auditor' } });
+  const asked = await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { market: 'viewer', ' /market/prod/ ': 'auditor' } });
   assert.equal(asked.body.result!.structuredContent!.status, 'pending', JSON.stringify(asked.body.result));
   const { details } = (await view(idOf(asked), ROOT)).body.approval;
   assert.ok(details.some((line) => line.label === ' /market/prod/ ' && line.value === 'viewer → auditor'), 'the grant held there, found');
-  assert.ok(details.some((line) => line.label === '*' && line.value === 'nothing → viewer'));
+  assert.ok(details.some((line) => line.label === 'market' && line.value === 'nothing → viewer'));
 
-  const viewer = await connect(OTHER, 'read write manage-access');
-  for (const place of ['*', '*/prod']) {
-    const refused = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { [place]: 'viewer' } })).body.result!;
-    assert.match(refused.content[0]!.text!, /only instance owners/, place);
+  // A person reaches every project by their instance role: `*` is no project, whoever asks.
+  for (const [who, client] of [[ROOT, root], [OTHER, await connect(OTHER, 'read write manage-access')]] as const) {
+    for (const place of ['*', '*/prod']) {
+      const refused = (await callRaw(client, 'set_access', { member: `user:${DEV}`, changes: { [place]: 'viewer' } })).body.result!;
+      assert.equal(refused.isError, true, `${who} ${place}`);
+      assert.match(refused.content[0]!.text!, /grants are on a project or an environment: a person reaches every project by their instance role/, place);
+    }
   }
 });
 

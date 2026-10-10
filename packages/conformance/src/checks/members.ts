@@ -39,7 +39,8 @@ export async function memberTampering(deployment: Deployment, people: People, ki
       await query(sql, 'UPDATE vault_grants SET role = $1, granted_at = $2, granted_by = $3 WHERE principal = $4',
         [grants[0].role, grants[0].granted_at, grants[0].granted_by, person.member]);
     } else if (kind === 'member') {
-      await query(sql, 'UPDATE vault_members SET owner = $1 WHERE principal = $2', [sql.engine === 'sqlite' ? 1 : true, person.member]);
+      // The instance role, as the database's owner could set it: an Owner reads every value.
+      await query(sql, "UPDATE vault_members SET role = 'owner' WHERE principal = $1", [person.member]);
     } else {
       const [place] = await query<{ id: string }>(sql, `SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id
         WHERE p.slug = 'conformance' AND e.slug = 'prod'`);

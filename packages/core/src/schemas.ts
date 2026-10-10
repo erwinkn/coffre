@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { INSTANCE_ROLE_NAMES, type InstanceRole } from './access.ts';
 import { PROJECT_PAGES } from './pages.ts';
 
 export const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
@@ -42,6 +43,16 @@ export function shownMember(member: string): string {
 
 export const principalType = z.enum(['user', 'service']);
 export const principalId = z.string().trim().min(1).max(320);
-export const instanceRole = z.enum(['user', 'owner']);
+export const instanceRole = z.enum(INSTANCE_ROLE_NAMES as [InstanceRole, ...InstanceRole[]]);
+
+/** Which projects or environments a scope takes in, by slug: `all`, `{ only: [...] }` or `{ except: [...] }`. */
+export const scopeFilter = z.union([
+  z.literal('all'),
+  z.object({ only: z.array(slug).max(200) }).strict(),
+  z.object({ except: z.array(slug).min(1).max(200) }).strict(),
+]);
+
+/** Where an instance role applies, as the API takes it: either filter left out is `all`. */
+export const scopeInput = z.object({ projects: scopeFilter.optional(), environments: scopeFilter.optional() }).strict();
 export const grantId = z.string().uuid();
 export const emailAddress = z.string().email().max(320);

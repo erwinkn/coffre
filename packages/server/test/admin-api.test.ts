@@ -70,16 +70,14 @@ async function auditCount(): Promise<number> {
 }
 
 test('root admins and instance owners create projects without implicit secret grants', async () => {
-  await root.members.add(OWNER, { owner: true });
+  await root.members.add(OWNER, { role: 'admin' });
   assert.deepEqual(await root.projects.create('market', { name: 'Market' }), {
     project: { slug: 'market', name: 'Market', archivedAt: null },
     created: true,
-    inherited: [],
   });
   assert.deepEqual(await owner.projects.create('operations', { name: 'Operations' }), {
     project: { slug: 'operations', name: 'Operations', archivedAt: null },
     created: true,
-    inherited: [],
   });
   await assert.rejects(outsider.projects.create('sneaky', { name: 'Sneaky' }), { status: 403 });
   assert.deepEqual((await auditActions()).slice(-4), [
@@ -99,12 +97,10 @@ test('creating a project or environment that exists changes nothing and logs not
   assert.deepEqual(await root.projects.create('market', { name: 'Again' }), {
     project: { slug: 'market', name: 'Market', archivedAt: null },
     created: false,
-    inherited: [],
   });
   assert.deepEqual(await root.environments.create('market/prod', { name: 'Again' }), {
     environment: { slug: 'prod', name: 'Production', archivedAt: null },
     created: false,
-    inherited: [],
     forked: null,
   });
   assert.equal(await auditCount(), logged);
@@ -115,7 +111,7 @@ test('only configured bootstrap principals project as root admins', async () => 
   assert.equal(me.instanceRole, 'root-admin');
   assert.equal(me.canReadAudit, true);
   const them = await outsider.me();
-  assert.equal(them.instanceRole, 'user');
+  assert.equal(them.instanceRole, 'member');
   assert.equal(them.canReadAudit, false);
 });
 
@@ -169,7 +165,6 @@ test('project owners create environments; environment-scoped grants do not', asy
   assert.deepEqual(await lead.environments.create('market/staging', { name: 'Staging' }), {
     environment: { slug: 'staging', name: 'Staging', archivedAt: null },
     created: true,
-    inherited: [],
     forked: null,
   });
   await root.access.set(READER, { 'market/prod': 'developer' });
@@ -276,16 +271,19 @@ test('removing a member revokes every grant and is audited', async () => {
 
 test('instance owners manage every project without receiving secret access', async () => {
   await seedProject();
-  await root.members.add(OWNER, { owner: true });
+  await root.members.add(OWNER, { role: 'admin' });
   await owner.members.add('token:reporting');
   await owner.environments.create('market/staging', { name: 'Staging' });
   await owner.projects.update('market', { name: 'Market platform' });
   const me = await owner.me();
-  assert.equal(me.instanceRole, 'owner');
-  assert.deepEqual(me.environments, []);
+  assert.equal(me.instanceRole, 'admin');
+  // Every environment, to manage, and none to read.
+  assert.deepEqual(me.environments.map((environment) => environment.environment).sort(), ['prod', 'staging']);
+  assert.ok(me.environments.every((environment) => !environment.permissions.some((permission) => permission.startsWith('secret.'))));
   const project = (await owner.projects.list()).projects[0];
   assert.equal(project.name, 'Market platform');
   assert.deepEqual(project.permissions.sort(), [
+    'audit.read',
     'environment.manage',
     'grant.manage',
     'project.manage',
@@ -337,7 +335,7 @@ test('a project counts each secret name once, across the environments the caller
   assert.equal((await reader.projects.list()).projects[0].secretCount, 3);
 
   // Managing a project opens none of its secrets, so there is nothing to count.
-  await root.members.add(OWNER, { owner: true });
+  await root.members.add(OWNER, { role: 'admin' });
   assert.equal((await owner.projects.list()).projects[0].secretCount, null);
 });
 
@@ -352,7 +350,7 @@ test('removed members must be explicitly re-added before regranting access', asy
 });
 
 test('two owners adding the same member at once both succeed, and one of them creates it', async () => {
-  await root.members.add(OWNER, { owner: true });
+  await root.members.add(OWNER, { role: 'admin' });
   const added = await Promise.all([
     root.members.add('user:new@acme.example'),
     owner.members.add('user:new@acme.example'),
@@ -392,8 +390,8 @@ test('ordinary users cannot manage the instance directory', async () => {
 });
 
 test('service accounts cannot be owners and configured roots cannot be edited', async () => {
-  await assert.rejects(root.members.add('token:service', { owner: true }), { status: 409 });
-  await assert.rejects(root.members.add(`user:${ROOT}`, { owner: false }), { status: 409 });
+  await assert.rejects(root.members.add('token:service', { role: 'admin' }), { status: 409 });
+  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'member' }), { status: 409 });
   await assert.rejects(root.members.remove(`user:${ROOT}`), { status: 409 });
 });
 

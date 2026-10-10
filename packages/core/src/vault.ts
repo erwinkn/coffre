@@ -1,5 +1,5 @@
 import type { AccessFault } from './access-fault.ts';
-import type { GrantPlace, Role } from './access.ts';
+import type { GrantPlace, InstanceRole, Role, Scope, ServiceSetting } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -64,13 +64,21 @@ export interface Vault {
   /** Set roles at several places for one principal: all of it, or none. */
   setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>>;
   /**
-   * Add a member, bring back a removed one, or change whether they are an
-   * owner. `generation` is theirs now: sessions and tokens of an earlier
-   * one are dead.
+   * Add a member, bring back a removed one, or change a person's instance
+   * role and its scope. `generation` is theirs now: sessions and tokens of
+   * an earlier one are dead.
    */
-  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; owner: boolean; generation: number }>>;
+  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; role: InstanceRole; scope: Scope; generation: number }>>;
   /** Remove a member: revoke every grant and refuse them until admitted again, from `generation` on. */
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>>;
+  /**
+   * The instance's settings, as the vault's newest `settings.change` entry
+   * says, by its MAC: an entry is where they live, so each change is logged
+   * by being made. Everywhere, until someone narrows it.
+   */
+  settings(): Promise<Settings>;
+  /** Change the instance's settings: those who run it, never anyone else. */
+  setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>>;
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
@@ -105,7 +113,7 @@ export interface Vault {
    * from it. The links and hashes of the chain are the caller's to
    * recompute through `upTo`, as the app does first; with none, the vault
    * recomputes them all itself. A verdict and nothing else, so anyone may
-   * ask; the app asks for owners.
+   * ask; the app asks for those who read the whole log (`readsWholeLog`).
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
@@ -115,7 +123,7 @@ export interface Vault {
  * `access_seq` names, and what a finding about them is newer than while it
  * stands.
  */
-export const ACCESS_ACTIONS = ['member.add', 'member.restore', 'member.owner', 'member.remove', 'access.grant', 'access.revoke'] as const;
+export const ACCESS_ACTIONS = ['member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke'] as const;
 
 /** A refusal, already logged by the time the app sees it. */
 export type Refusal = { code: RefusalCode; message: string };
@@ -144,7 +152,7 @@ export type RefusalCode =
   | 'not_allowed'
   /** Root admins come from the vault's configuration and cannot be changed. */
   | 'root_admin'
-  /** Well-formed, but not something the rules allow: a project role on an environment, an owner token. */
+  /** Well-formed, but not something the rules allow: a project role on an environment, a service account with an instance role. */
   | 'invalid'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
   | 'log_broken'
@@ -250,9 +258,8 @@ export type RewrapInput = Correlation & {
 };
 
 /**
- * A grant: on a project, one of its environments (`projectId` is the
- * environment's project), every project, or one environment slug in every
- * project (`GrantPlace` in @coffre/core/access).
+ * A grant: on a project, or one of its environments (`projectId` is the
+ * environment's project; `GrantPlace` in @coffre/core/access).
  */
 export type Grant = GrantPlace & {
   role: Role;
@@ -273,8 +280,13 @@ export type Access = {
   /** Advanced by removal, even if the app cannot commit its credential revocations. */
   generation: number;
   isRootAdmin: boolean;
-  /** Root admins and users admitted as owners, while active. */
-  isOwner: boolean;
+  /**
+   * Their instance role and its scope, while active: `member` everywhere
+   * for service accounts and anyone not active, `owner` everywhere for
+   * root admins. Scopes name projects by id.
+   */
+  role: InstanceRole;
+  scope: Scope;
   /** Live grants only, and none unless active. */
   grants: Grant[];
   /** When the status last changed, and who changed it; null for root admins and strangers. */
@@ -284,11 +296,9 @@ export type Access = {
 
 /**
  * One place: a role to hold there, with an optional end, or null for none.
- * An environment's place names its project too; `environmentSlug` left out
- * is null.
+ * An environment's place names its project too.
  */
-export type GrantChange = Omit<GrantPlace, 'environmentSlug'> & {
-  environmentSlug?: string | null;
+export type GrantChange = GrantPlace & {
   role: Role | null;
   expiresAt: string | null;
 };
@@ -304,14 +314,30 @@ export type SetAccessInput = Correlation & {
 export type AdmitInput = Correlation & {
   actor: string;
   principal: string;
-  /** Left out, an existing member keeps their role and a new one is not an owner. */
-  owner?: boolean;
+  /**
+   * A person's instance role, and where it applies (everywhere, left out).
+   * Left out, an existing member keeps theirs and a new one is a `member`.
+   * Changing it takes someone who runs the instance, about someone else.
+   */
+  role?: InstanceRole;
+  scope?: Scope;
 };
 
 export type RemoveInput = Correlation & {
   actor: string;
   principal: string;
 
+};
+
+/** What the instance's settings hold. */
+export type Settings = {
+  /** Where people set up service accounts themselves (`ServiceSetting` in @coffre/core/access), projects by id. */
+  serviceAccounts: ServiceSetting;
+};
+
+export type SetSettingsInput = Correlation & {
+  actor: string;
+  settings: Settings;
 };
 
 /**

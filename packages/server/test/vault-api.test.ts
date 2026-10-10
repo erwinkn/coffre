@@ -74,7 +74,7 @@ function buggyClientFor(on: FixtureDeps, id: string): CoffreClient {
     url: 'https://coffre.test',
     transport: async (request) => {
       const ctx = await contextFor(on, id);
-      ctx.caller = { ...ctx.caller, isRootAdmin: true, isOwner: true, instanceRole: 'root-admin' };
+      ctx.caller = { ...ctx.caller, isRootAdmin: true, role: 'owner' };
       return serveApi(request, ctx);
     },
   });
@@ -211,7 +211,7 @@ test('a removed member stays out despite a live session, until the vault admits 
 
   // What to rotate: what they read.
   const { report } = await root.members.remove(`user:${DEV}`);
-  assert.deepEqual(report.exposed.map(({ environment, key, how }) => [environment, key, how]), [['dev', 'API_KEY', 'read']]);
+  assert.deepEqual(report!.exposed.map(({ environment, key, how }) => [environment, key, how]), [['dev', 'API_KEY', 'read']]);
   assert.equal((await reveal()).status, 403);
   const removal = (await vaultEntries()).find((entry) => entry.action === 'member.remove');
   assert.equal(removal?.subject, `user:${DEV}`);

@@ -13,10 +13,9 @@ import type { GrantRow, ProjectSummary } from '../shared/models';
 import { ArchiveBlocked, archiveBlockers } from '../components/references';
 import { hasEnvironmentDetails, isActiveAccessibleEnvironment, type ProjectEnvironment } from '../lib/project-environments';
 import { environmentSlugProblem } from '../lib/validation';
-import { ConfirmDialog, EmptyState, MenuPopup, Modal, Timestamp } from '../components/ui';
+import { ConfirmDialog, EmptyState, MenuPopup, Modal, Notice, Timestamp } from '../components/ui';
 import { DeletePlaceDialog } from '../components/delete-place';
 import { PrincipalAvatar } from '../components/principal';
-import { ReachedBy, reaching, useEveryProject } from '../components/every-project';
 import { Archive, ChevronRight, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
 import { useProject } from '../lib/project-page';
@@ -181,7 +180,7 @@ function EnvironmentCard({
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const { instanceRole } = useShell();
+  const { capabilities } = useShell();
   const [slug, setSlug] = useState(environment.slug);
   const [name, setName] = useState(environment.name);
   const coffre = useCoffre();
@@ -193,7 +192,6 @@ function EnvironmentCard({
   const { data: lent } = useQuery({ ...queries.references(coffre, place), enabled: archiving });
   const blockers = archiving && lent?.ok === true ? archiveBlockers(place, lent.references) : [];
   const asking = archiving && lent === undefined;
-  const everyProject = useEveryProject();
   const { status, dismiss } = useChangeStatus(keys.projects);
   const state = status(environmentId(project, environment.slug));
   const pending = state.state === 'pending';
@@ -202,16 +200,13 @@ function EnvironmentCard({
   const secretCount = details?.secretCount ?? null;
   const opens = details !== null && !isArchived && environment.accessible && !pending;
   const manageable = isAdmin && details !== null;
-  // Deleting is for instance owners, and only once the environment is archived.
-  const deletable = manageable && isArchived && instanceRole !== 'user';
+  // Deleting is for those who run the instance, and only once the environment is archived.
+  const deletable = manageable && isArchived && capabilities.runsInstance;
   const slugError = slug === '' ? null : environmentSlugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
   const holders = holdersOf(grants, environment.slug);
-  // A new slug brings in whoever holds it in every project: said before the rename is saved.
-  const gainedBy =
-    slug === environment.slug || slugError !== null
-      ? []
-      : reaching(everyProject, slug).filter((grant) => grant.place !== '*');
+  // Scopes match environments by slug: a new one is said to move them before the rename is saved.
+  const reslugged = slug !== environment.slug && slug !== '' && slugError === null;
 
   return (
     <div
@@ -365,7 +360,12 @@ function EnvironmentCard({
                 />
               </label>
 
-              <ReachedBy grants={gainedBy} lead={`As ${project}/${slug}, it is reached by`} />
+              {reslugged && (
+                <Notice tone="info">
+                  Instance roles scoped to <span className="mono">{environment.slug}</span> stop reaching it; those scoped
+                  to <span className="mono">{slug}</span> start.
+                </Notice>
+              )}
 
               <div className="dialog-actions">
                 <button className="btn" type="button" onClick={() => setRenaming(false)}>
@@ -463,7 +463,6 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
     : [];
   const create = useChange(createEnvironment(coffre, project));
   const slugError = slug === '' ? null : environmentSlugProblem(slug);
-  const reachedBy = reaching(useEveryProject(), slugError === null && slug !== '' ? slug : null);
 
   function close() {
     setOpen(false);
@@ -560,8 +559,6 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
               )}
             </label>
           )}
-
-          <ReachedBy grants={reachedBy} lead="As soon as it exists, it is reached by" />
 
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>

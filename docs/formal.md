@@ -172,7 +172,7 @@ Traces are shortened here; the script prints every step.
 | Scenario | Who runs what | States |
 |---|---|---|
 | `Deletion` | One owner deletes a project or an environment, twice. Another grants, revokes, restores or renames, twice | 22 thousand |
-| `Reading` | A place is archived, then deleted. Meanwhile a root admin, a holder of a grant on every project and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 19 thousand |
+| `Reading` | A place is archived, then deleted. Meanwhile a root admin, a holder of an instance role and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 19 thousand |
 | `Members` | A member signs in, reads and writes, while an owner removes them or changes their grants, and the vault rotates its key | 249 thousand |
 | `Locks` | Two owners change each other's grants and remove a member, while the vault rotates its key, which locks every member's row | 15 thousand |
 | `Mixed` | Two owners run nearly every operation on places and grants, while a member reads, writes, signs in or rotates | 1 million |
@@ -194,8 +194,13 @@ reference to that secret in `References`, and none yet elsewhere.
   nothing, so it is left out.
 - **Roles.** A grant is a grant. Which role allows what is a pure function,
   which the property tests check ([property-tests.md](property-tests.md)).
-- **Grants on one environment slug in every project** (`*/prod`). They are
-  checked exactly as grants on every project are, and are modelled as those.
+- **Instance roles and their scopes.** A role reaches places by its scope,
+  the ones made later too, and is set under the same locks as a grant (the
+  member's row, then the head): the model's grant on every project, `"*"`,
+  stands for one, scoped or not. Which places a scope takes in is a pure
+  function, which the property tests check. The vault replacing the grants
+  on every project of 0.4 is one decision per member, under those same
+  locks, and is not modelled apart.
 - **The key service.** A remote KEK's intent transaction, budget and
   partial outages are left out. The key decision is modelled as with a
   local KEK, which holds the same locks in the same order.

@@ -34,6 +34,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'POST /reveals': 'reveal',
   'GET /members': 'read',
   'GET /members/:member': 'read',
+  'GET /members/:member/access': 'read',
   'PUT /members/:member': 'manage-access',
   'DELETE /members/:member': 'manage-access',
   'GET /members/:member/tokens': 'read',
@@ -44,6 +45,9 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'GET /workloads/lookup': 'read',
   'DELETE /members/:member/bindings/:id': 'manage-access',
   'PATCH /access/:member': 'manage-access',
+  'GET /settings': 'read',
+  // The instance's settings stay with people, in the pages and the CLI, as permanent deletion does.
+  'PUT /settings': null,
   // The person's own sign-in, connecting apps and deciding their changes: never an app's to touch.
   'GET /sessions': null,
   'DELETE /sessions/:id': null,

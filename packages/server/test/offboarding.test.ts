@@ -46,7 +46,7 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
-  await root.members.add(`user:${LEAD}`, { owner: true });
+  await root.members.add(`user:${LEAD}`, { role: 'admin' });
   await root.members.add(`user:${DEV}`);
   await root.members.add(`token:${SERVICE}`);
   await root.projects.create('market', { name: 'Market' });
@@ -251,7 +251,7 @@ test('removed people stay listed, with as many values to rotate as their report'
   assert.deepEqual((await root.members.list()).removed, []);
 
   const { report } = await root.members.remove(`user:${DEV}`);
-  assert.equal(report.exposed.length, 2);
+  assert.equal(report?.exposed.length, 2);
   await root.members.remove(`token:${SERVICE}`);
   const listed = async () =>
     (await root.members.list()).removed.map(
@@ -272,7 +272,7 @@ test('the report tells who removed someone, and that nothing still lets them in'
   await browserSession(DEV, 'gh-101');
   const before = await root.members.get(`user:${DEV}`);
   assert.equal(before.status, 'active');
-  assert.equal(before.instanceRole, 'user');
+  assert.equal(before.instanceRole, 'member');
   assert.deepEqual(before.live, { grants: 1, sessions: 1, tokens: 0, identities: 1, apps: 0 });
   assert.equal(before.removedAt, null);
 

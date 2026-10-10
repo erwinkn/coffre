@@ -1,12 +1,14 @@
 import {
   allows,
-  covers,
+  instanceRoleGrants,
   PERMISSIONS,
   roleGrants,
   type GrantPlace,
+  type InstanceRole,
   type Permission,
   type Place,
   type Role,
+  type Scope,
 } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 
@@ -16,10 +18,7 @@ export type { Place };
 
 export type PrincipalRef = { type: 'user' | 'service'; id: string };
 
-/**
- * A grant: `projectId` is the project it is in, also for a grant on one of
- * its environments, and null for one on every project (`GrantPlace`).
- */
+/** A grant: `projectId` is the project it is in, also for a grant on one of its environments (`GrantPlace`). */
 export type CallerGrant = GrantPlace & {
   role: Role;
   expiresAt: Date | null;
@@ -28,7 +27,8 @@ export type CallerGrant = GrantPlace & {
 /**
  * Who is asking, and everything they hold. Loaded from the vault once per
  * request; every permission check after that is a plain function of this
- * value. The vault checks again whatever touches a key or a grant.
+ * value, `Holdings` in @coffre/core/access. The vault checks again
+ * whatever touches a key or a grant.
  */
 export type Caller = {
   principal: PrincipalRef;
@@ -40,9 +40,9 @@ export type Caller = {
   generation: number;
   /** Named in the vault's COFFRE_ROOT_ADMINS: everything, everywhere. */
   isRootAdmin: boolean;
-  /** Root admins and active users with the instance `owner` role. */
-  isOwner: boolean;
-  instanceRole: 'user' | 'owner' | 'root-admin';
+  /** Their instance role and where it applies, projects by id; `member` everywhere for services and strangers. */
+  role: InstanceRole;
+  scope: Scope;
   /** Live grants only. */
   grants: CallerGrant[];
 };
@@ -59,12 +59,11 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
     tampered: access.status === 'tampered',
     generation: access.generation,
     isRootAdmin: access.isRootAdmin,
-    isOwner: access.isOwner,
-    instanceRole: access.isRootAdmin ? 'root-admin' : access.isOwner ? 'owner' : 'user',
+    role: access.role,
+    scope: access.scope,
     grants: access.grants.map((grant) => ({
       projectId: grant.projectId,
       environmentId: grant.environmentId,
-      environmentSlug: grant.environmentSlug,
       role: grant.role,
       expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt),
     })),
@@ -75,8 +74,8 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
  * Whether the caller may do `permission` at `place`: the rule the vault
  * applies too, from core.
  *
- *   on a project       its project grant, or one on every project; owners also manage every project
- *   on an environment  its environment grant, its project's grant, or one on every project or on its slug
+ *   on a project       its project grant, or their instance role, when its scope takes in all of the project
+ *   on an environment  its environment grant, its project's grant, or their instance role, when its scope takes it in
  */
 export function can(caller: Caller, permission: Permission, place: Place): boolean {
   return allows(caller, permission, place);
@@ -96,16 +95,20 @@ export function placeOf(project: { id: string }, environment: { id: string; slug
 
 /**
  * Whether the caller holds anything anywhere in a project, which is what
- * lets them see it: a grant on it, in it, on every project, or on the slug
- * of one of its environments.
+ * lets them see it: a grant on it or in it, or an instance role whose
+ * scope takes in it or one of its environments.
  */
 export function seesProject(caller: Caller, project: { id: string; environments: { id: string; slug: string }[] }): boolean {
-  if (caller.isOwner) return true;
   const places = [placeOf(project, null), ...project.environments.map((environment) => placeOf(project, environment))];
-  return caller.grants.some((grant) => places.some((place) => covers(grant, place)));
+  return places.some((place) => PERMISSIONS.some((permission) => can(caller, permission, place)));
 }
 
-/** Whether the caller holds `permission` anywhere at all. */
+/** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role. */
 export function canAnywhere(caller: Caller, permission: Permission): boolean {
-  return caller.isRootAdmin || caller.grants.some((grant) => roleGrants(grant.role, permission));
+  return caller.isRootAdmin || instanceRoleGrants(caller.role, permission) || caller.grants.some((grant) => roleGrants(grant.role, permission));
+}
+
+/** How the API names someone's instance role: theirs, or `root-admin` for a root admin. */
+export function instanceRoleOf(holder: { isRootAdmin: boolean; role: InstanceRole }): InstanceRole | 'root-admin' {
+  return holder.isRootAdmin ? 'root-admin' : holder.role;
 }

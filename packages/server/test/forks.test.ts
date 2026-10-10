@@ -35,7 +35,7 @@ beforeEach(async () => {
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/prod', { name: 'Prod' });
   await root.members.add(`user:${MAINTAINER}`);
-  await root.members.add(`user:${OWNER}`, { owner: true });
+  await root.members.add(`user:${OWNER}`, { role: 'admin' });
   await root.access.set(`user:${MAINTAINER}`, { market: 'maintainer' });
   await root.secrets.set('market/prod', { DATABASE_URL: 'postgres://prod', STRIPE_KEY: 'sk_live_1', OLD_KEY: 'gone' });
   await root.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_2' });

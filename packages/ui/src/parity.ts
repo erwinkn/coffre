@@ -110,6 +110,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: '⋯ › Remove…: what removing would revoke, before it does', in: 'components/directory.tsx', call: 'members.get' },
     ],
   },
+  'GET /members/:member/access': {
+    ui: [{ does: "a user's or service account's page › Access: their role and the grants you manage, in one read", in: 'components/principal-page.tsx', call: 'members.access' }],
+  },
   'PUT /members/:member': {
     ui: [
       { does: 'Users › Add user; Service accounts › Add service account', in: 'components/directory.tsx', call: 'members.add' },
@@ -134,7 +137,6 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: 'a project › Users, Service accounts › Add user, Add service account', in: 'pages/project-access.tsx', call: 'access.set' },
       { does: 'a grant › Revoke', in: 'components/grants.tsx', call: 'access.set' },
       { does: "a user's or service account's page › Edit access", in: 'components/principal-page.tsx', call: 'access.set' },
-      { does: "an owner, on a user's or service account's Access tab › Grant on every project, and its Revoke", in: 'components/every-project.tsx', call: 'access.set' },
     ],
   },
   'GET /sessions': { ui: [{ does: 'Account › Sessions', in: 'pages/account.tsx', call: 'sessions.list' }] },
@@ -156,5 +158,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'GET /audit/verification': { ui: [{ does: "Audit: the log's seal, verified on every visit", in: 'pages/audit.tsx', call: 'audit.verify' }] },
+  'GET /settings': { ui: [{ does: 'Settings › Service accounts: where people set them up', in: 'pages/settings.tsx', call: 'settings.get' }] },
+  'PUT /settings': { ui: [{ does: 'Settings › Service accounts › Edit', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
 };

@@ -30,8 +30,8 @@ removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account, 1 co
 ```
 
 The vault removes them in one transaction of its own: it revokes every
-grant they hold, on a project, an environment or every project, marks them
-removed, and moves their *generation* on.
+grant they hold, on a project or an environment, takes their instance role,
+marks them removed, and moves their *generation* on.
 Every session, CLI login, service account's bearer token, linked account,
 device approval and connected MCP app carries the generation it was issued under, so all of them stop working at
 that moment, whatever happens next. The vault logs one `member.remove`, and
@@ -99,7 +99,7 @@ DELETE /api/members/user:ada@acme.example   remove; answers with the report
 Services are `token:<name>`. From the client, `coffre.members.get(member)` and
 `coffre.members.remove(member)`.
 
-Both need the instance owner role (root admins have it).
+Both need an Admin or Owner whose scope narrows nothing, or a root admin.
 
 The generation is what makes removal stick. Even if the app's own clean-up
 failed after the vault committed, re-adding someone cannot revive a session,

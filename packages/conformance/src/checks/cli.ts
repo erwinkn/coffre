@@ -146,7 +146,7 @@ export async function verifyAsUser(cli: Cli, user: Person, admin: Person): Promi
   const run = await cli.run(['verify', 'instance']);
   expect(run.code === 1, `coffre verify instance as a user exited ${run.code}, not 1`, run.output);
   expect(marks(run.output).owner === '✗', 'the run went on past a user', run.output);
-  expect(/is neither an owner nor a root admin of \S+: nothing was made/.test(run.output), 'the run did not say plainly why it stopped', run.output);
+  expect(/is not an admin or owner of all of \S+, nor a root admin: nothing was made/.test(run.output), 'the run did not say plainly why it stopped', run.output);
   const service = await admin.api.members.get(PROBE.service).then(
     () => 'there',
     (error: unknown) => (error instanceof CoffreError && error.status === 404 ? 'absent' : Promise.reject(error)),
