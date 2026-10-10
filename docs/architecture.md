@@ -762,7 +762,7 @@ removal and the members page by what is live, not by history.
 ## Deleting for good
 
 Archiving hides a project or an environment and changes nothing stored.
-Deleting an archived one, which only an instance owner may do, frees the
+Deleting an archived one, which only those who run the instance may do, frees the
 space its values take and hides it for good. The place itself must be
 archived: an environment under an archived project is deleted alone only
 once it is archived too. `coffre projects delete market`

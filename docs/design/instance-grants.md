@@ -1,5 +1,9 @@
 # Grants on every project
 
+> **Superseded in 0.5** by [instance-roles.md](instance-roles.md): a person's
+> instance role and its scope do what these grants did, and the vault
+> replaces the ones 0.4 left. Kept as the record of how 0.4 worked.
+
 Written on 2026-10-05, from Erwin's decision that day: a member can hold a
 role on every project, including the ones created later, or on one
 environment name in every project. Revised as built, the same day.

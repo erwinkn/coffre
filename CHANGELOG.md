@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+**Instance roles with scopes replace grants on every project.** Each
+person has one instance role, Member, Auditor, Developer, Admin or Owner,
+which applies in every project its scope takes in, the ones made later
+too. A scope has two filters, Projects and Environments, each all, only
+some, or all except some; environments match by name, so "Developer,
+environments only dev" reads and writes every project's `dev`. Admin is
+0.4's instance owner: it manages people, projects and access, and reads no
+value; Owner adds every secret. A scoped Admin manages only inside its
+scope and sets no role, and nobody changes their own role or grants
+themselves one, which 0.4 let an owner or an access manager do. Grants are on a
+project or an environment, and only add to the role. Service accounts hold
+grants only. `*` and `*/<env>` are gone from the API, the CLI, the MCP
+tools and the pages: the vault replaces the ones there are when this
+version first runs, never giving more than they did, and logs each
+(`docs/design/instance-roles.md` has the rule). `coffre migrate` says what
+it will make of each before you deploy.
+
+- **API.** `PUT /api/members/<member>` takes `{ role, scope }` instead of
+  `{ owner }`; members list `instanceRole` (`member`, `auditor`,
+  `developer`, `admin`, `owner` or `root-admin`) and `scope`, and a
+  place's list says who reaches it by their role (`reachesByRole`).
+  `GET /api/me` adds `scope` and `runsInstance`. Making a project or an
+  environment no longer answers `inherited`, nor `GET /api/projects`
+  `everyProject`. Refusals of what only an Admin or Owner of the whole
+  instance may do log `requires_instance_admin`.
+- **CLI.** `coffre admit <email> --role <role>`, with `--projects`,
+  `--except-projects`, `--environments` and `--except-environments`,
+  replaces `--owner` and `--no-owner`. `coffre grant '*'` and
+  `coffre revoke '*'` are gone.
+- **MCP.** `admit_member` takes `role` and `scope`; `set_access` takes
+  projects and environments.
+- **Schema.** `0002_instance_roles` adds `role` and `scope` to
+  `vault_members`, and lets the vault's login update them. Rolling back to
+  0.4 leaves Members and Admins everywhere as they were; anyone else is
+  refused until removed.
+
 **One OIDC binding per workflow, on several events, pull requests
 included.** A GitHub binding now lists the events it trusts, so a workflow
 that runs on push, by hand and on a schedule is one entry, not three. It
@@ -21,8 +57,7 @@ Access and Activity. A deployment gains `users.$user.apps.tsx` through
 `coffre update`.
 
 **Shorter explainers.** "Sign in with OIDC" and "Bearer tokens" say what
-each is, when to use it, and give one example. Adding a user says what an
-owner can do only when Owner is chosen.
+each is, when to use it, and give one example.
 
 ## 0.4.6 (2026-10-07)
 

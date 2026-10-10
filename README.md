@@ -158,13 +158,12 @@ coffre environments rename market/dev --slug development
 coffre environments archive market/dev
 coffre environments unarchive market/dev
 coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history; --reference follows prod
-coffre roles                                # the built-in roles and each one's permissions: viewer, developer,
-                                            # maintainer, access-manager, auditor and owner (see Roles below)
+coffre roles                                # the instance roles and the project roles, and their permissions
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
 coffre grant market alice@acme.example --role developer --env dev
 coffre revoke market alice@acme.example --env dev
-coffre grant '*' bob@acme.example --role viewer --env dev   # dev in every project, the ones made later too; owners only
+coffre admit bob@acme.example --role developer --environments dev   # dev in every project, the ones made later too
 coffre offboard alice@acme.example          # previews; --apply removes (docs/offboarding.md)
 
 coffre admit api-deploy --service           # a service, for CI
@@ -176,7 +175,7 @@ coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
 coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --apply removes it
 
 coffre audit --denied
-coffre verify                               # asks which: instance, keys or log; owners only
+coffre verify                               # asks which: instance, keys or log; admins and owners
 coffre verify log                           # checks the whole log
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
 coffre verify instance                      # checks the instance from outside (docs/conformance.md)
@@ -248,23 +247,32 @@ the rules behind them are in
 
 ## Roles
 
-Permissions are a fixed list, and roles are named sets of them. A grant gives
-one member one role at one place, and may carry an end date. The places:
+Permissions are a fixed list, and roles are named sets of them. Each person
+has one **instance role**, which applies in every project its scope takes
+in, the ones made later too. A **grant** gives one member one project role
+on a project or one of its environments, may carry an end date, and only
+adds to the role. Service accounts are always members: they hold grants
+only.
 
-| Place | Covers |
+| Instance role | Holds, inside its scope | Reads secrets? |
+|---|---|---|
+| Member | nothing: only what grants give | no |
+| Auditor | `audit.read` | **no** |
+| Developer | `secret.read`, `secret.write` | yes |
+| Admin | `audit.read`, `environment.manage`, `grant.manage`, `project.manage`; people and service accounts | **no** |
+| Owner | all seven, and what an Admin does | yes |
+
+A role's **scope** has two filters, Projects and Environments, each all,
+only some, or all except some. Projects are named by id, so a rename keeps
+them; environments by name, so `dev` is the `dev` of every project:
+
+| Scope | Reaches |
 |---|---|
-| `market` | the project, and every environment in it |
-| `market/dev` | that environment |
-| `*` | every project and every environment, the ones created later too |
-| `*/dev` | the environment named `dev` in every project, never another, nor the project |
+| projects all, environments only `dev` | every project's `dev`, never a project around one |
+| projects all except `billing` | every project but billing, and every new one |
+| projects only `web`, `api` | web and api, and nothing made later |
 
-Grants add up, and none takes anything away: `viewer` on `*` and
-`developer` on `market` write in `market` and read everywhere else. A grant
-on `*/dev` matches the environment's slug when it is used: `billing/staging`
-renamed `billing/dev` comes in, and a project without a `dev` holds nothing
-for it until it has one.
-
-| Role | Permissions | Reads secrets? |
+| Project role | Permissions | Reads secrets? |
 |---|---|---|
 | `viewer` | `secret.read` | yes |
 | `developer` | `secret.read`, `secret.write` | yes |
@@ -273,24 +281,23 @@ for it until it has one.
 | `auditor` | `audit.read` | **no** |
 | `owner` | all seven | yes |
 
-`access-manager` and `auditor` are why roles exist at all. Under the old
-read, write, admin ladder, reading the audit log took admin, which also read
-every secret, so the person answering "who read which secret" could read them
-all. A role with a project-wide permission (`environment.manage`,
-`grant.manage`, `project.manage`) cannot be granted on one environment, nor
-on `*/dev`: the API answers 409 rather than grant less than asked.
+Grants and the role add up, and none takes anything away: a Developer scoped
+to `dev`, with `viewer` on `billing`, writes every `dev` and reads all of
+`billing`. `access-manager`, `auditor` and Admin are why roles exist at all.
+Under the old read, write, admin ladder, reading the audit log took admin,
+which also read every secret, so the person answering "who read which
+secret" could read them all. A project role with a project-wide permission
+(`environment.manage`, `grant.manage`, `project.manage`) cannot be granted
+on one environment: the API answers 409 rather than grant less than asked.
 
-Two roles sit above projects. **Root admins** are named in the vault's
-configuration, and no row anywhere makes someone one. They hold every
-permission everywhere, reading secrets included, so keep the list short.
-**Instance owners** are members a root admin or another owner marks as
-owners. They add and remove members, create projects, manage access and read
-the whole log, but read a secret only with a grant. Only they and root admins
-grant on `*` and `*/dev`: an `access-manager` manages one project's grants,
-and `owner` on `*` every project's, but neither grants on `*`. Creating a
-project grants no one anything, though grants on `*` reach it at once, and
-creating it says who they reach: so does creating an environment, or giving
-one a new slug ([docs/design/instance-grants.md](docs/design/instance-grants.md)).
+**Root admins** are named in the vault's configuration, and no row anywhere
+makes someone one. They hold every permission everywhere, reading secrets
+included, so keep the list short. An Admin or Owner whose scope narrows
+nothing, or a root admin, **runs the instance**: adds and removes people and
+service accounts, sets instance roles, issues tokens, and reads the
+instance's own log entries. A scoped Admin manages environments and grants
+inside its scope only, and sets no role. Nobody changes their own role or
+grants themselves one ([docs/design/instance-roles.md](docs/design/instance-roles.md)).
 
 ## Design decisions worth knowing
 
@@ -319,8 +326,8 @@ environments, secrets and their versions with `ON DELETE RESTRICT`, so
 nothing ever read or written leaves the database. Archiving hides a place
 or a secret: refused to readers, reversible, every row still there.
 Archiving a rotated-out secret also stops `coffre run` injecting it.
-Deleting an archived project or environment is for good, and for instance
-owners only: every version's ciphertext and wrapped data key is erased, the
+Deleting an archived project or environment is for good, and for those who
+run the instance only: every version's ciphertext and wrapped data key is erased, the
 vault revokes every grant there, and it leaves every list. A tombstone of
 names stays, renamed `market~deleted-2026-10-05`, so the log still reads and
 verifies, and `market` is free for a new project. Backups taken before still

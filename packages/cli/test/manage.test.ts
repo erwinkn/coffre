@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { byFolder, createClient, CoffreError } from '@coffre/client';
+import { EVERYWHERE } from '@coffre/core/access';
 
 import * as manage from '../src/manage.ts';
 
@@ -89,20 +90,31 @@ test('tokens revoke shows what it would end, and ends it only with --apply', asy
 });
 
 test('admit makes a member, and for a service names the next steps: grant, then trust or a token', async () => {
-  const { connect, calls, written, io } = fixture(() => ({ member: 'token:deploy-slides', instanceRole: 'user', created: true }));
+  const { connect, calls, written, io } = fixture(() => ({ member: 'token:deploy-slides', instanceRole: 'member', scope: EVERYWHERE, created: true }));
   await manage.admit(connect, ['deploy-slides', '--service'], io);
   assert.deepEqual(calls, [{ method: 'PUT', path: '/members/token:deploy-slides', body: {} }]);
   assert.match(written.out, /^admitted service:deploy-slides\n  next: coffre grant <project> deploy-slides --role viewer \[--env <env>\] --service,\n        then let its CI sign in by OIDC, coffre trust deploy-slides --github … --apply,\n        or, for CI without OIDC, give it a bearer token, coffre tokens issue deploy-slides\n$/);
 
-  const person = fixture(() => ({ member: 'user:ada@acme.example', instanceRole: 'owner', created: false }));
-  await manage.admit(person.connect, ['ada@acme.example', '--owner'], person.io);
-  assert.deepEqual(person.calls[0]!.body, { owner: true });
-  assert.equal(person.written.out, 'user:ada@acme.example is a member, an owner of the instance now\n');
-  await assert.rejects(manage.admit(person.connect, ['deploy', '--service', '--owner'], person.io), /a service account cannot own the instance/);
-  await assert.rejects(manage.admit(person.connect, ['ada@acme.example', '--owner', '--no-owner'], person.io), manage.UsageError);
+  const DEV_ONLY = { projects: { except: ['billing'] }, environments: { only: ['dev', 'staging'] } };
+  const person = fixture(() => ({ member: 'user:ada@acme.example', instanceRole: 'developer', scope: DEV_ONLY, created: false }));
+  await manage.admit(person.connect, ['ada@acme.example', '--role', 'developer', '--except-projects', 'billing', '--environments', 'dev, staging'], person.io);
+  assert.deepEqual(person.calls[0]!.body, { role: 'developer', scope: DEV_ONLY });
+  assert.equal(person.written.out, 'user:ada@acme.example is a member as Developer, All projects but billing · dev, staging only now\n');
+  const admin = fixture(() => ({ member: 'user:ada@acme.example', instanceRole: 'admin', scope: EVERYWHERE, created: true }));
+  await manage.admit(admin.connect, ['ada@acme.example', '--role', 'admin'], admin.io);
+  assert.deepEqual(admin.calls[0]!.body, { role: 'admin' });
+  assert.equal(admin.written.out, 'admitted user:ada@acme.example as Admin\n');
+  for (const [args, refusal] of [
+    [['deploy', '--service', '--role', 'developer'], /a service account holds project grants only/],
+    [['ada@acme.example', '--role', 'boss'], /no instance role "boss"/],
+    [['ada@acme.example', '--environments', 'dev'], /a scope goes with a role/],
+    [['ada@acme.example', '--role', 'developer', '--projects', 'a', '--except-projects', 'b'], /--projects or --except-projects, not both/],
+  ] as const) {
+    await assert.rejects(manage.admit(person.connect, [...args], person.io), refusal);
+  }
   // A name that says it is a service account's is one, with --service or not: service:deploy, or token:deploy as before.
   for (const name of ['service:deploy', 'token:deploy']) {
-    const service = fixture(() => ({ member: 'token:deploy', instanceRole: 'user', created: false }));
+    const service = fixture(() => ({ member: 'token:deploy', instanceRole: 'member', scope: EVERYWHERE, created: false }));
     await manage.admit(service.connect, [name], service.io);
     assert.deepEqual(service.calls, [{ method: 'PUT', path: '/members/token:deploy', body: {} }]);
     assert.equal(service.written.out, 'service:deploy is a member already\n');
@@ -119,43 +131,18 @@ test('revoke takes a grant away, and says when there was none', async () => {
   assert.equal(none.written.out, 'user:ada@acme.example held no grant on market: nothing changed\n');
 });
 
-test("revoke takes a grant on every project too, and asks for '*' quoted when the shell expanded it", async () => {
-  const { connect, calls, written, io } = fixture(() => ({ changes: { '*/dev': 'revoked' } }));
-  await manage.revoke(connect, ['*', 'ada@acme.example', '--env', 'dev'], io);
-  assert.deepEqual(calls, [{ method: 'PATCH', path: '/access/user:ada@acme.example', body: { '*/dev': null } }]);
-  assert.equal(written.out, "revoked user:ada@acme.example's grant on dev in every project\n");
-  await assert.rejects(manage.revoke(connect, ['README.md', 'package.json', 'ada@acme.example'], io), /too many arguments: ada@acme.example; to name every project, quote it: '\*'/);
+test("a grant is on a project or an environment: '*' says what reaches every project instead", async () => {
+  const { connect, calls, io } = fixture(() => ({ changes: {} }));
+  await assert.rejects(manage.revoke(connect, ['*', 'ada@acme.example', '--env', 'dev'], io), /a person reaches every project by their instance role, `coffre admit <email> --role <role>`/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(manage.revoke(connect, ['README.md', 'package.json', 'ada@acme.example'], io), /^Error: too many arguments: ada@acme.example$/);
   await assert.rejects(manage.revoke(connect, ['market'], io), /name <principal>/);
 });
 
-test('making a place, or giving an environment a new slug, says who reaches it through grants on every project', async () => {
-  const inherited = [
-    { member: 'user:ada@acme.example', place: '*', role: 'auditor', roleName: 'Auditor', expiresAt: null },
-    { member: 'token:ci', place: '*/dev', role: 'viewer', roleName: 'Viewer', expiresAt: '2027-01-31T23:59:59.999Z' },
-  ];
-  const { connect, written, io } = fixture(({ method, path }) =>
-    path.split('/').length === 4
-      ? method === 'PUT'
-        ? { environment: { slug: 'dev', name: 'dev', archivedAt: null }, created: true, inherited }
-        : { environment: { slug: 'dev', name: 'dev', archivedAt: null }, inherited }
-      : { project: { slug: 'slides', name: 'slides', archivedAt: null }, created: true, inherited: inherited.slice(0, 1) },
-  );
-  await manage.projectsCreate(connect, ['slides'], io);
-  await manage.environmentsCreate(connect, ['slides/dev'], io);
+test('giving an environment a new slug says who its instance roles reach now', async () => {
+  const { connect, written, io } = fixture(() => ({ environment: { slug: 'dev', name: 'dev', archivedAt: null } }));
   await manage.environmentsRename(connect, ['slides/staging', '--slug', 'dev'], io);
-  assert.equal(written.out, [
-    'created slides, "slides"',
-    'who reaches it already:',
-    '  user:ada@acme.example as auditor, through every project',
-    'created slides/dev, "dev"',
-    'who reaches it already:',
-    '  user:ada@acme.example as auditor, through every project',
-    '  service:ci as viewer, through dev in every project until 2027-01-31',
-    'slides/staging is now slides/dev, "dev"',
-    'who reaches it now by its new slug:',
-    '  service:ci as viewer, through dev in every project until 2027-01-31',
-    '',
-  ].join('\n'));
+  assert.equal(written.out, 'slides/staging is now slides/dev, "dev"\n  instance roles scoped to staging no longer reach it; those scoped to dev do\n');
 });
 
 test('projects and environments: create, rename and archive, each one request', async () => {
@@ -163,10 +150,10 @@ test('projects and environments: create, rename and archive, each one request', 
   const { connect, calls, written, io } = fixture(({ method, path }) =>
     path.split('/').length === 4
       ? method === 'PUT'
-        ? { environment: { slug: 'prod', name: 'prod', archivedAt: null }, created: true, inherited: [] }
-        : { environment: { slug: 'production', name: 'Production', archivedAt: null }, inherited: [] }
+        ? { environment: { slug: 'prod', name: 'prod', archivedAt: null }, created: true }
+        : { environment: { slug: 'production', name: 'Production', archivedAt: null } }
       : method === 'PUT'
-        ? { project, created: true, inherited: [] }
+        ? { project, created: true }
         : { project: { ...project, slug: 'deck' } },
   );
   await manage.projectsCreate(connect, ['slides', '--name', 'Slides'], io);
@@ -185,7 +172,7 @@ test('projects and environments: create, rename and archive, each one request', 
   ]);
   assert.equal(
     written.out,
-    'created slides, "Slides"\ncreated slides/prod, "prod"\nslides is now deck, "Slides"\ndeck/prod is now deck/production, "Production"\n' +
+    'created slides, "Slides"\ncreated slides/prod, "prod"\nslides is now deck, "Slides"\ndeck/prod is now deck/production, "Production"\n  instance roles scoped to prod no longer reach it; those scoped to production do\n' +
       'archived deck: `coffre projects unarchive deck` brings it back\nunarchived deck/production\n',
   );
   await assert.rejects(manage.projectsRename(connect, ['deck'], io), /give it a new --name, a new --slug, or both/);

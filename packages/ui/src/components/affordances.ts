@@ -36,7 +36,7 @@ export function administrationEntries<T>(
   ];
 }
 
-/** Project creation exists before a grantable resource, so it is owner-only. */
+/** Project creation exists before a grantable resource, so it follows the instance role and its scope (`makesProjects`). */
 export function RootAdminOnly({
   capabilities,
   children,

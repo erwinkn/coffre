@@ -26,7 +26,7 @@ export function UserAccessPage() {
 export function UserAppsPage() {
   const client = useCoffre();
   const member = memberRef('user', Route.useParams().user);
-  const { data: report } = useSuspenseQuery(queries.report(client, member, useShell().capabilities.canManageGrants));
+  const { data: report } = useSuspenseQuery(queries.report(client, member, useShell().capabilities.runsInstance));
   // Their layout says why there is no report.
   if (report?.ok !== true || report.report === null) return null;
   return (

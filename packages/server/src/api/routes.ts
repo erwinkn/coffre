@@ -1,6 +1,6 @@
 import { ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
-import { displayName, environmentSlug, folderName, secretKey, slug } from '@coffre/core/schemas';
+import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
@@ -12,7 +12,7 @@ import { breakReference, listReferences } from './references.ts';
 import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
-import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type InheritedGrant, type PlaceView } from './projects.ts';
+import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
   listSecrets,
@@ -155,7 +155,7 @@ export const routes = {
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
-    run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[]; forked: Forked | null }> => {
+    run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; forked: Forked | null }> => {
       // Not a slug a project's page has (`@coffre/core/pages`).
       environmentSlug.parse(params.environment);
       return input.from === undefined
@@ -280,7 +280,7 @@ export const routes = {
     run: (ctx, { params }) => memberReport(ctx, parseMember(params.member)),
   }),
   ...route('PUT /members/:member', {
-    input: z.object({ owner: z.boolean().optional() }).strict(),
+    input: z.object({ role: instanceRole.optional(), scope: scopeInput.optional() }).strict(),
     run: (ctx, { params, input }) => putMember(ctx, parseMember(params.member), input),
   }),
   ...route('DELETE /members/:member', {

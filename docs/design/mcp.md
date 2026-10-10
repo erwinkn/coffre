@@ -396,11 +396,12 @@ again.
 leaves out a tool no role the person holds now reaches anywhere, and keeps
 a tool their roles reach but their connection's scopes withhold: clients
 see what they could do, and step up when they need to. Each tool declares
-what it needs: any member (`whoami`, `list_projects`); an instance owner
-(`describe_member`, `create_project`, `admit_member`, `offboard_member`,
-the service-token and trust tools); or a permission held somewhere, as a
-grant's role gives it, instance owners holding the project-only ones and
-`audit.read` everywhere, as the API lets them. The list is computed on
+what it needs: any member (`whoami`, `list_projects`); someone who runs the
+instance, an Admin or Owner with no scope or a root admin (`describe_member`,
+`admit_member`, `offboard_member`, the service-token and trust tools); one
+whose scope takes in new projects (`create_project`); or a permission held
+somewhere, by a grant's role or the person's instance role, as the API lets
+them. The list is computed on
 each request from the `vault.access` answer the token check already read,
 so it costs no read of its own. It only hides: `tools/call` is unchanged,
 and a hidden tool called by name is refused by the same checks as before.
@@ -441,7 +442,7 @@ coffre's page (section 7).
 | `create_environment {environment, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
 | `reveal_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
 | `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
-| `admit_member {member, owner?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m` |
+| `admit_member {member, role?, scope?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m` |
 | `offboard_member {member}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m`; the page shows its report |
 | `issue_service_token {service, label?, expiresInDays}` | manage-access | ✗ ✗ ✗ | ✓, the token is shown on the page only | `POST /members/:m/tokens` |
 | `revoke_service_token {service, id}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m/tokens/:id` |
@@ -454,7 +455,7 @@ deploy reads the new one. coffre does not rely on the hints: the approval
 is what it enforces.
 
 No tool takes a secret value as input, so an agent can't supply one.
-Removing projects or environments, permanent deletion, and instance owners'
+Removing projects or environments, permanent deletion, and the instance's
 settings stay with people, in the UI and the CLI.
 
 Results are JSON in `structuredContent`, repeated as a text block, and each

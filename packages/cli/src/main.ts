@@ -53,7 +53,7 @@ import {
   unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
@@ -868,13 +868,13 @@ async function whoHasAccess(args: string[]): Promise<void> {
 
   for (const member of result.members) {
     const root = member.isRootAdmin ? '  [root admin]' : '';
+    const role = member.isRootAdmin || member.instanceRole === 'member' ? '' : `  ${manage.roleInWords(member)}`;
     const tampered = member.tampered ? '  [record failed its integrity check: remove to start over]' : '';
-    process.stdout.write(`${named(member.principalType, member.principalId)}${root}${tampered}\n`);
+    process.stdout.write(`${named(member.principalType, member.principalId)}${root}${role}${tampered}\n`);
     for (const g of member.grants) {
       const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
       const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;
-      const everywhere = g.project === '*' ? `  (${manage.placeName(place)})` : '';
-      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}${everywhere}\n`);
+      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}\n`);
     }
   }
   // Who reads a place's secrets through references held elsewhere: a grant there is not the only way in.
@@ -903,6 +903,7 @@ async function grantAccess(args: string[]): Promise<void> {
 
   const [project, principalId] = positionals as [string, string];
   if (!values.role) throw new UsageError('name the role: --role <role>');
+  manage.onAProject(project);
 
   const role = values.role;
   if (!isRole(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
@@ -916,7 +917,7 @@ async function grantAccess(args: string[]): Promise<void> {
     [scope]: values.expires ? { role, until: values.expires } : role,
   });
 
-  process.stdout.write(`granted ${values.role} on ${manage.placeName(scope)} to ${shownMember(who).replace(/^user:/, '')}\n`);
+  process.stdout.write(`granted ${values.role} on ${scope} to ${shownMember(who).replace(/^user:/, '')}\n`);
 }
 
 function plural(count: number, word: string): string {
@@ -1087,9 +1088,14 @@ async function offboard(args: string[]): Promise<void> {
 
 function roles(args: string[]): void {
   parse(args, {}, []);
+  process.stdout.write('Instance roles, a person\'s across every project in their scope (coffre admit --role):\n');
+  for (const [slug, role] of Object.entries(INSTANCE_ROLES)) {
+    process.stdout.write(`  ${slug.padEnd(16)} ${role.permissions.length === 0 ? 'nothing: only what grants give' : role.permissions.join(', ')}\n`);
+  }
+  process.stdout.write('\nProject roles, a grant on a project or an environment (coffre grant --role):\n');
   for (const [slug, role] of Object.entries(ROLES)) {
     const scope = assignableToEnvironment(slug as Role) ? 'project or env' : 'project only';
-    process.stdout.write(`${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
+    process.stdout.write(`  ${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
   }
 }
 

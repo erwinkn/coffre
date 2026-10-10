@@ -53,11 +53,12 @@ $$;
 INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
 VALUES ('user:ada@acme.example', 'active', 0, 'user:admin@acme.example', 0, 'user:admin@acme.example', 1,
         decode(repeat('00', 32), 'hex'));
-UPDATE vault_members SET status = 'removed', generation = generation + 1 WHERE principal = 'user:ada@acme.example';
+UPDATE vault_members SET role = 'developer', scope = '{"projects":"all","environments":{"only":["dev"]}}' WHERE principal = 'user:ada@acme.example';
+UPDATE vault_members SET status = 'removed', role = 'member', scope = NULL, generation = generation + 1 WHERE principal = 'user:ada@acme.example';
 INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
 VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'viewer', 0, 'user:admin@acme.example');
 DELETE FROM vault_grants WHERE principal = 'user:ada@acme.example';
-\echo 'PASS: coffre_vault can admit, remove, grant and revoke'
+\echo 'PASS: coffre_vault can admit, set a role and its scope, remove, grant and revoke'
 
 DO $$
 BEGIN

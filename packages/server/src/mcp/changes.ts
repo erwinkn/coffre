@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { EVERY_PROJECT, ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, ROLE_NAMES, runsInstance, scopeInWords, type Permission } from '@coffre/core/access';
 import {
   claimValues,
   defaultIssuer,
@@ -20,7 +20,7 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
-import { secretKey, slug } from '@coffre/core/schemas';
+import { instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
@@ -105,9 +105,14 @@ async function needs(api: CoffreClient, path: string, permission: Permission): P
   if (!here.permissions.includes(permission)) throw new CoffreError(403, 'forbidden', `you need ${permission} on ${path}`);
 }
 
-/** Refuse now, as the API would on Approve, when the person is not an instance owner. */
-async function ownersOnly({ connection }: ToolContext): Promise<void> {
-  if (!connection.caller.isOwner) throw new CoffreError(403, 'forbidden', 'only instance owners can do this');
+/** Refuse now, as the API would on Approve, when the person does not run the instance. */
+async function instanceOnly({ connection }: ToolContext): Promise<void> {
+  if (!runsInstance(connection.caller)) throw new CoffreError(403, 'forbidden', 'only an admin or owner of the whole instance can do this');
+}
+
+/** Refuse now, as the API would on Approve, when the person may not make a project. */
+async function projectMakers({ connection }: ToolContext): Promise<void> {
+  if (!makesProjects(connection.caller)) throw new CoffreError(403, 'forbidden', 'only an admin or owner whose scope takes in new projects can do this');
 }
 
 /** Refuse now, as the API would on Approve, when the person lacks a permission on each project. */
@@ -119,6 +124,9 @@ async function needsOn(api: CoffreClient, projects: string[], permission: Permis
     if (!here.permissions.includes(permission)) throw new CoffreError(403, 'forbidden', `you need ${permission} on ${project}`);
   }
 }
+
+/** A scope as the API takes it, with either filter left out as `all`. */
+const fullScope = (scope: z.infer<typeof scopeInput> | undefined) => ({ projects: scope?.projects ?? 'all', environments: scope?.environments ?? 'all' });
 
 /** What the page says of an app that holds Reveal values, beside a value it would otherwise never see. */
 const READABLE: Detail = { label: 'The app', value: 'holds Reveal values: it can read values you can read, this one included' };
@@ -295,7 +303,7 @@ const accessChange = z.union([role, z.object({ role, until: z.string().max(40).n
 type AccessChange = z.infer<typeof accessChange>;
 const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to === 'string' ? to : `${to.role}${to.until === null ? '' : ` until ${to.until}`}`);
 
-// A place as the API reads one, without spaces or slashes around it: market, market/prod, every project (*) or prod in each (*/prod).
+// A place as the API reads one, without spaces or slashes around it: market, or market/prod.
 const placeOf = (raw: string) => raw.trim().replace(/^\/+|\/+$/g, '');
 
 /** What `set_access` replaces: the role a member holds at each place, and until when, or nothing. */
@@ -462,9 +470,9 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'create_project',
-    needs: 'owner',
+    needs: 'new-project',
     title: 'Create a project',
-    description: `Create a project, with no environments yet. Instance owners only. ${approved}`,
+    description: `Create a project, with no environments yet. Admins and owners only. ${approved}`,
     scope: 'write',
     idempotent: true,
     destructive: false,
@@ -472,7 +480,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ project }) => [project],
     change: {
       summary: ({ project, name }) => `create the project ${project} (${name})`,
-      check: ownersOnly,
+      check: projectMakers,
       preview: async (_api, { project, name }) => [
         { label: 'Project', value: project, kind: 'mono' },
         { label: 'Name', value: name },
@@ -536,11 +544,15 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         const places = Object.keys(changes);
         return `change ${shownMember(apiMember(member))}'s access at ${places.length === 1 ? places[0] : `${places.length} places`}`;
       },
-      // Each place needs grant.manage on its project, and every project (`*`) an instance owner, as the API checks.
+      // Each place needs grant.manage there, as the API checks: on a project, all of it; on an environment, that one.
       check: async (ctx, { changes }) => {
-        const projects = Object.keys(changes).map((place) => placeOf(place).split('/')[0]!);
-        if (projects.includes(EVERY_PROJECT)) await ownersOnly(ctx);
-        await needsOn(ctx.api, projects.filter((project) => project !== EVERY_PROJECT), 'grant.manage');
+        const places = Object.keys(changes).map(placeOf);
+        if (places.some((place) => place.split('/')[0] === '*')) {
+          throw new CoffreError(400, 'bad_request', 'grants are on a project or an environment: a person reaches every project by their instance role (admit_member)');
+        }
+        const projects = places.filter((place) => !place.includes('/'));
+        await needsOn(ctx.api, projects, 'grant.manage');
+        for (const place of places.filter((candidate) => candidate.includes('/'))) await needs(ctx.api, place, 'grant.manage');
       },
       replaces: async (api, { member, changes }) => heldAt(api, member, changes),
       preview: async (_api, { member }, _viewing, replaced) => [{ label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' }, ...replaced],
@@ -553,33 +565,41 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'admit_member',
-    needs: 'owner',
-    title: 'Admit a member',
-    description: `Admit a person, or a service account, as a member, with no access until granted some. ${approved}`,
+    needs: 'instance',
+    title: 'Admit a member, or set their role',
+    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
     scope: 'manage-access',
     idempotent: true,
     destructive: false,
-    input: z.object({ member, owner: z.boolean().optional().describe('An instance owner: every project, every member') }).strict(),
+    input: z.object({
+      member,
+      role: instanceRole.optional().describe('A person\'s instance role; left out, a new member is a member and an existing one keeps theirs'),
+      scope: scopeInput.optional().describe('Where the role applies: projects and environments (by slug), each "all", { only: [...] } or { except: [...] }; left out, everywhere'),
+    }).strict(),
     names: ({ member }) => [apiMember(member)],
     change: {
-      summary: ({ member, owner }) => `admit ${shownMember(apiMember(member))}${owner === true ? ' as an instance owner' : ''}`,
-      check: ownersOnly,
-      preview: async (_api, { member, owner }) => [
+      summary: ({ member, role, scope }) => `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${INSTANCE_ROLES[role].name}, ${scopeInWords(fullScope(scope))}`}`,
+      check: instanceOnly,
+      preview: async (_api, { member, role, scope }) => [
         { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
-        { label: 'As', value: owner === true ? 'an instance owner: every project, every member' : 'a member, with no access until granted some' },
+        role === undefined
+          ? { label: 'As', value: 'a member, with no access until granted some, or as they are' }
+          : { label: 'As', value: `${INSTANCE_ROLES[role].name}: ${INSTANCE_ROLES[role].description}` },
+        ...(role === undefined || role === 'member' ? [] : [{ label: 'Where', value: scopeInWords(fullScope(scope)) }]),
       ],
-      apply: async (api, { member, owner }) => {
-        const made = await api.members.add(apiMember(member), owner === undefined ? {} : { owner });
+      apply: async (api, { member, role, scope }) => {
+        const made = await api.members.add(apiMember(member), role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) });
+        const as = `${INSTANCE_ROLES[made.instanceRole].name}, ${scopeInWords(made.scope)}`;
         return {
-          result: { member: shownMember(made.member), instanceRole: made.instanceRole, created: made.created },
-          text: made.created ? `${shownMember(made.member)} is a member.` : `${shownMember(made.member)} was a member already, as ${made.instanceRole}.`,
+          result: { member: shownMember(made.member), instanceRole: made.instanceRole, scope: made.scope, created: made.created },
+          text: `${shownMember(made.member)} is a member${made.created ? '' : ' already'}, as ${as}.`,
         };
       },
     },
   }),
   changeTool({
     name: 'offboard_member',
-    needs: 'owner',
+    needs: 'instance',
     title: 'Offboard a member',
     description: `Remove a member: their grants, sessions, tokens and linked accounts end, and the answer lists the secrets they read or wrote, to rotate. ${approved}`,
     scope: 'manage-access',
@@ -589,7 +609,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ member }) => [apiMember(member)],
     change: {
       summary: ({ member }) => `offboard ${shownMember(apiMember(member))}`,
-      check: ownersOnly,
+      check: instanceOnly,
       preview: async (api, { member }) => {
         const report = await api.members.get(apiMember(member));
         return [
@@ -610,7 +630,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'issue_service_token',
-    needs: 'owner',
+    needs: 'instance',
     title: 'Issue a service token',
     description: `Issue a bearer token for a service account. coffre shows the token to the person on its page, once; it never reaches you. ${approved}`,
     scope: 'manage-access',
@@ -620,7 +640,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
-      check: ownersOnly,
+      check: instanceOnly,
       preview: async (_api, { service, label, expiresInDays }) => [
         { label: 'Service account', value: shownService(service), kind: 'mono' },
         ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
@@ -639,7 +659,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'revoke_service_token',
-    needs: 'owner',
+    needs: 'instance',
     title: 'Revoke a service token',
     description: `Revoke one of a service account's tokens, by the ID describe_member lists. ${approved}`,
     scope: 'manage-access',
@@ -649,7 +669,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service }) => `revoke a token of ${shownService(service)}`,
-      check: ownersOnly,
+      check: instanceOnly,
       preview: async (api, { service, id }) => {
         const token = (await api.tokens.list(serviceMember(service))).tokens.find((entry) => entry.id === id);
         return [
@@ -666,7 +686,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'trust_workload',
-    needs: 'owner',
+    needs: 'instance',
     title: 'Trust a CI workload',
     description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. ${approved}`,
     scope: 'manage-access',
@@ -711,7 +731,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'untrust_workload',
-    needs: 'owner',
+    needs: 'instance',
     title: 'Stop trusting a CI workload',
     description: `Remove one of a service account's trust bindings, by the ID describe_member lists. ${approved}`,
     scope: 'manage-access',
@@ -721,7 +741,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service }) => `stop trusting a CI workload as ${shownService(service)}`,
-      check: ownersOnly,
+      check: instanceOnly,
       preview: async (api, { service, id }) => {
         const binding = (await api.bindings.list(serviceMember(service))).bindings.find((entry) => entry.id === id);
         return [

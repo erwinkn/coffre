@@ -74,7 +74,7 @@ function buggyClientFor(on: FixtureDeps, id: string): CoffreClient {
     url: 'https://coffre.test',
     transport: async (request) => {
       const ctx = await contextFor(on, id);
-      ctx.caller = { ...ctx.caller, isRootAdmin: true, isOwner: true, instanceRole: 'root-admin' };
+      ctx.caller = { ...ctx.caller, isRootAdmin: true, role: 'owner' };
       return serveApi(request, ctx);
     },
   });

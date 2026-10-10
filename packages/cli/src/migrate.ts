@@ -11,6 +11,10 @@
 // terminal, only with --yes.
 import { parseArgs } from 'node:util';
 
+import { INSTANCE_ROLES, scopeInWords, unscoped } from '@coffre/core/access';
+import { shownMember } from '@coffre/core/schemas';
+import { openDatabase } from '@coffre/db/connect';
+import { everyProjectPreview, type EveryProjectPreview } from '@coffre/db/grants';
 import { DatabaseAhead, migrateDatabase, migrationStatus } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
@@ -130,6 +134,7 @@ async function migrateDeployment(
   const { applied, pending } = status;
   if (pending.length === 0) {
     out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
+    out.write(describeEveryProject(await previewEveryProject(url)));
     return;
   }
   if (!options.yes && terminal === null) {
@@ -142,6 +147,43 @@ async function migrateDeployment(
   } finally {
     steps.end();
   }
+  out.write(describeEveryProject(await previewEveryProject(url)));
+}
+
+/** What the vault will make of the grants on every project of 0.4 still there, read with the owner's login. */
+async function previewEveryProject(url: URL): Promise<EveryProjectPreview[]> {
+  const { db, close } = await openDatabase(url.href);
+  try {
+    return await everyProjectPreview(db, Date.now());
+  } finally {
+    await close();
+  }
+}
+
+/**
+ * The grants on every project of 0.4, each with what the vault replaces it
+ * by when this version first runs, and what that reaches less: nothing when
+ * there are none.
+ *
+ *   user:ada@acme.example   developer on dev in every project → Developer, All projects · dev only
+ *   service:ci              viewer on every project → viewer on market, billing; not projects made later
+ */
+export function describeEveryProject(previews: readonly EveryProjectPreview[]): string {
+  if (previews.length === 0) return '';
+  const lines = ['', 'Grants on every project are gone in this version. When it first runs, the vault replaces them:'];
+  for (const { principal, before, conversion, paths } of previews) {
+    const was = before.map((grant) => `${grant.role} on ${grant.place === '*' ? 'every project' : `${grant.place.slice(2)} in every project`}`).join(', ');
+    const role = conversion.role === 'member' ? [] : [unscoped(conversion.scope) ? INSTANCE_ROLES[conversion.role].name : `${INSTANCE_ROLES[conversion.role].name}, ${scopeInWords(conversion.scope)}`];
+    const byRole = new Map<string, string[]>();
+    for (const grant of conversion.grants) byRole.set(grant.role, [...(byRole.get(grant.role) ?? []), paths[grant.environmentId ?? grant.projectId] ?? grant.projectId]);
+    const grants = [...byRole].map(([held, places]) => `${held} on ${places.join(', ')}`);
+    const later = conversion.narrowed.some((loss) => loss.kind === 'later-projects') ? ['not projects made later'] : [];
+    const kept = conversion.narrowed.flatMap((loss) => (loss.kind === 'kept' ? [`kept ${loss.kept} on ${paths[loss.environmentId ?? loss.projectId] ?? loss.projectId}`] : []));
+    const after = [[...role, ...grants].join(', and ') || 'nothing', ...later, ...kept].join('; ');
+    lines.push(`  ${shownMember(principal)}: ${was} → ${after}`);
+  }
+  lines.push('Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).', '');
+  return lines.join('\n');
 }
 
 /** Apply `pending` to the database, asking first unless told yes. */

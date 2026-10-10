@@ -14,7 +14,7 @@ export function SettingsPage() {
   const { auth, capabilities } = useShell();
   const client = useCoffre();
   const { data: directory } = useSuspenseQuery(queries.directory(client, capabilities.canManageGrants));
-  const { data: keys } = useSuspenseQuery(queries.auditKeys(client, capabilities.canManageGrants));
+  const { data: keys } = useSuspenseQuery(queries.auditKeys(client, capabilities.runsInstance));
   const providers = auth?.signin?.providers.map((provider) => provider.label) ?? [];
 
   const principals = directory?.ok === true ? directory.principals : null;

@@ -13,8 +13,21 @@ export type Api = {
       };
       registered: boolean;
       tampered: boolean;
-      instanceRole: "owner" | "root-admin" | "user";
+      instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+      scope: {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
       isRootAdmin: boolean;
+      runsInstance: boolean;
       canReadAudit: boolean;
       features: {
         mcp: string | null;
@@ -47,13 +60,6 @@ export type Api = {
         }[];
         secretCount: number | null;
       }[];
-      everyProject: {
-        member: string;
-        place: string;
-        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-        roleName: string;
-        expiresAt: string | null;
-      }[];
     };
   };
   "PUT /projects/:project": {
@@ -67,13 +73,6 @@ export type Api = {
         archivedAt: string | null;
       };
       created: boolean;
-      inherited: {
-        member: string;
-        place: string;
-        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-        roleName: string;
-        expiresAt: string | null;
-      }[];
     };
   };
   "PATCH /projects/:project": {
@@ -128,13 +127,6 @@ export type Api = {
         archivedAt: string | null;
       };
       created: boolean;
-      inherited: {
-        member: string;
-        place: string;
-        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-        roleName: string;
-        expiresAt: string | null;
-      }[];
       forked: null | {
         from: string;
         keys: number;
@@ -155,13 +147,6 @@ export type Api = {
         name: string;
         archivedAt: string | null;
       };
-      inherited: {
-        member: string;
-        place: string;
-        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-        roleName: string;
-        expiresAt: string | null;
-      }[];
     };
   };
   "DELETE /projects/:project/:environment": {
@@ -389,7 +374,20 @@ export type Api = {
         member: string;
         principalType: "service" | "user";
         principalId: string;
-        instanceRole: "owner" | "root-admin" | "user";
+        instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+        scope: {
+          projects: "all" | {
+            only: string[];
+          } | {
+            except: string[];
+          };
+          environments: "all" | {
+            only: string[];
+          } | {
+            except: string[];
+          };
+        };
+        reachesByRole: boolean;
         isRootAdmin: boolean;
         tampered: boolean;
         grants: {
@@ -415,7 +413,19 @@ export type Api = {
       principalType: "service" | "user";
       principalId: string;
       status: "active" | "removed" | "tampered";
-      instanceRole: "owner" | "root-admin" | "user";
+      instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+      scope: {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
       isRootAdmin: boolean;
       removedAt: string | null;
       removedBy: string | null;
@@ -469,11 +479,35 @@ export type Api = {
   };
   "PUT /members/:member": {
     input: {
-      owner?: boolean;
+      role?: "admin" | "auditor" | "developer" | "member" | "owner";
+      scope?: {
+        projects?: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments?: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
     };
     output: {
       member: string;
-      instanceRole: "owner" | "user";
+      instanceRole: "admin" | "auditor" | "developer" | "member" | "owner";
+      scope: {
+        projects: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+        environments: "all" | {
+          only: string[];
+        } | {
+          except: string[];
+        };
+      };
       created: boolean;
     };
   };
@@ -491,7 +525,19 @@ export type Api = {
         principalType: "service" | "user";
         principalId: string;
         status: "active" | "removed" | "tampered";
-        instanceRole: "owner" | "root-admin" | "user";
+        instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+        scope: {
+          projects: "all" | {
+            only: string[];
+          } | {
+            except: string[];
+          };
+          environments: "all" | {
+            only: string[];
+          } | {
+            except: string[];
+          };
+        };
         isRootAdmin: boolean;
         removedAt: string | null;
         removedBy: string | null;
@@ -1198,14 +1244,6 @@ export type IdentityRow = {
   lastSignInAt: string | null;
 };
 
-export type InheritedGrant = {
-  member: string;
-  place: string;
-  role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-  roleName: string;
-  expiresAt: string | null;
-};
-
 export type Me = {
   principal: {
     type: "service" | "user";
@@ -1213,8 +1251,21 @@ export type Me = {
   };
   registered: boolean;
   tampered: boolean;
-  instanceRole: "owner" | "root-admin" | "user";
+  instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+  scope: {
+    projects: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+    environments: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+  };
   isRootAdmin: boolean;
+  runsInstance: boolean;
   canReadAudit: boolean;
   features: {
     mcp: string | null;
@@ -1231,7 +1282,20 @@ export type Member = {
   member: string;
   principalType: "service" | "user";
   principalId: string;
-  instanceRole: "owner" | "root-admin" | "user";
+  instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+  scope: {
+    projects: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+    environments: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+  };
+  reachesByRole: boolean;
   isRootAdmin: boolean;
   tampered: boolean;
   grants: {
@@ -1255,7 +1319,19 @@ export type OffboardingReport = {
   principalType: "service" | "user";
   principalId: string;
   status: "active" | "removed" | "tampered";
-  instanceRole: "owner" | "root-admin" | "user";
+  instanceRole: "admin" | "auditor" | "developer" | "member" | "owner" | "root-admin";
+  scope: {
+    projects: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+    environments: "all" | {
+      only: string[];
+    } | {
+      except: string[];
+    };
+  };
   isRootAdmin: boolean;
   removedAt: string | null;
   removedBy: string | null;

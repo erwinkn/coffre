@@ -465,7 +465,7 @@ test("Connected apps lists a person's redeemed connections, and Disconnect ends 
   const ended = await entries('mcp.disconnect');
   assert.deepEqual(ended.map((entry) => [entry.decision, entry.actor, entry.metadata.reason ?? entry.code, entry.metadata.principalId ?? null]), [
     ['allow', `user:${DEV}`, 'person', null],
-    ['deny', `user:${OTHER}`, 'requires_instance_owner', null],
+    ['deny', `user:${OTHER}`, 'requires_instance_admin', null],
     ['allow', `user:${ROOT}`, 'owner', DEV],
     ['deny', `user:${DEV}`, 'unknown_connection', null],
   ]);

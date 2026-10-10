@@ -6,7 +6,7 @@ import { User } from '../components/icons';
 /**
  * Cloudflare Access has authenticated this person, but Coffre has not
  * registered them as a member. Keep this deliberately actionless: registration is
- * an owner decision, not a self-service privilege escalation path.
+ * an admin's decision, not a self-service privilege escalation path.
  */
 export function UnregisteredPage() {
   const { principal, accessTampered } = useShell();
@@ -24,7 +24,7 @@ export function UnregisteredPage() {
           )}{' '}
           was changed outside coffre, so the vault refuses it and you have no access.
         </p>
-        <p>To start over, ask a coffre owner to remove you under Users and add you again.</p>
+        <p>To start over, ask a coffre admin to remove you under Users and add you again.</p>
       </ClosedDoor>
     );
   }
@@ -46,7 +46,7 @@ export function UnregisteredPage() {
         , but coffre has not added you.
       </p>
       <p>
-        Ask a coffre owner or root admin to add your Access email under Users.
+        Ask a coffre admin or root admin to add your Access email under Users.
       </p>
     </ClosedDoor>
   );

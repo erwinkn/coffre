@@ -24,7 +24,7 @@ export function ServiceAccountSignInPage() {
   const client = useCoffre();
   const shell = useShell();
   const member = memberRef('service', account);
-  const { data: report } = useSuspenseQuery(queries.report(client, member, shell.capabilities.canManageGrants));
+  const { data: report } = useSuspenseQuery(queries.report(client, member, shell.capabilities.runsInstance));
   // Nothing to issue once it is removed, which its loader sent elsewhere; its layout then shows no such tab.
   const ways = signInWays(shell, report) ?? { tokens: false, workloads: false };
   const { data: credentials } = useSuspenseQuery(queries.credentials(client, member, ways.tokens));

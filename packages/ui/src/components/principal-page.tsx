@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, Outlet } from '@tanstack/react-router';
-import { ROLES } from '@coffre/core/access';
+import { INSTANCE_ROLES, ROLES, scopeInWords, unscoped } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
@@ -28,7 +28,6 @@ import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/mod
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
-import { EveryProjectGrants } from './every-project';
 import { ExpiryField } from './expiry-field';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
@@ -44,7 +43,7 @@ type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError:
 /** Who a user or service account is to the instance, as an owner reads it; null for anyone else. */
 function useReport(principalType: PrincipalType, principalId: string) {
   const { capabilities } = useShell();
-  return useSuspenseQuery(queries.report(useCoffre(), memberRef(principalType, principalId), capabilities.canManageGrants)).data;
+  return useSuspenseQuery(queries.report(useCoffre(), memberRef(principalType, principalId), capabilities.runsInstance)).data;
 }
 
 /**
@@ -61,13 +60,13 @@ function useProjectAccess(principalType: PrincipalType, principalId: string): Pr
     const result = grants[index]!.data;
     return {
       project,
-      // Grants on every project show once, below: not again in each project they reach.
+      // What their instance role reaches is said once, above: not again in each project it reaches.
       grants: result.ok
         ? result.grants.filter(
             (grant) =>
               grant.principalType === principalType &&
               grant.principalId === principalId &&
-              grant.scope !== 'every-project',
+              grant.scope !== 'instance-role',
           )
         : [],
       grantsError: result.ok ? null : result.error,
@@ -99,6 +98,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
           principalType,
           principalId,
           instanceRole: found.instanceRole,
+          scope: found.scope,
           isRootAdmin: found.isRootAdmin,
           tampered: found.status === 'tampered',
         }
@@ -253,6 +253,8 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
             </div>
           ))}
 
+          {people && <InstanceRoleNote principalId={principalId} />}
+
           <section className="card" aria-label="Project access">
             {rows.length === 0 ? (
               <EmptyState title="No project access yet">
@@ -308,12 +310,32 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
             </p>
           )}
 
-          <EveryProjectGrants principalType={principalType} principalId={principalId} />
         </>
       )}
 
       {found !== null && <PrincipalReportCards report={found} />}
     </>
+  );
+}
+
+/**
+ * What a person's instance role gives them, above the grants that add to
+ * it, as the directory lists them: nothing for a Member.
+ */
+function InstanceRoleNote({ principalId }: { principalId: string }) {
+  const { capabilities } = useShell();
+  const { data } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
+  const found = data.ok ? data.principals.find((entry) => entry.principalType === 'user' && entry.principalId === principalId) : undefined;
+  if (found === undefined || found.instanceRole === 'member' || found.instanceRole === 'root-admin') return null;
+  const { name } = INSTANCE_ROLES[found.instanceRole];
+  return (
+    <div className="report-notice">
+      <Notice tone="info">
+        <strong>{name}</strong>
+        {unscoped(found.scope) ? ' in every project' : `: ${scopeInWords(found.scope)}`}, from their instance role. The
+        grants below add to it.
+      </Notice>
+    </div>
   );
 }
 

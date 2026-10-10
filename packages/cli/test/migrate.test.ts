@@ -10,7 +10,7 @@ import pg from 'pg';
 
 import { migrationsFolder } from '@coffre/db/migrate';
 
-import { migrationFailure, pinProblem } from '../src/migrate.ts';
+import { describeEveryProject, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -21,6 +21,53 @@ const journal = JSON.parse(readFileSync(join(migrationsFolder('postgres'), 'meta
 const KNOWN = journal.entries.map((entry) => entry.tag);
 
 // --- without a database ------------------------------------------------------------
+
+test('migrate says what the vault will make of each grant on every project of 0.4, and nothing when there is none', () => {
+  assert.equal(describeEveryProject([]), '');
+  const paths = { m: 'market', b: 'billing', 'm-dev': 'market/dev' };
+  const said = describeEveryProject([
+    {
+      principal: 'user:ada@acme.example',
+      before: [{ place: '*/dev', role: 'developer', expiresAt: null }],
+      conversion: { role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } }, grants: [], narrowed: [] },
+      paths,
+    },
+    {
+      principal: 'user:bob@acme.example',
+      before: [{ place: '*', role: 'maintainer', expiresAt: null }],
+      conversion: {
+        role: 'developer',
+        scope: { projects: 'all', environments: 'all' },
+        grants: [{ projectId: 'b', environmentId: null, role: 'maintainer', expiresAt: null, replaces: null }],
+        narrowed: [
+          { kind: 'later-projects', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null } },
+          { kind: 'kept', grant: { environmentSlug: null, role: 'maintainer', expiresAt: null }, projectId: 'm', environmentId: null, kept: 'access-manager' },
+        ],
+      },
+      paths,
+    },
+    {
+      principal: 'token:ci',
+      before: [{ place: '*/dev', role: 'viewer', expiresAt: null }],
+      conversion: {
+        role: 'member',
+        scope: { projects: 'all', environments: 'all' },
+        grants: [{ projectId: 'm', environmentId: 'm-dev', role: 'viewer', expiresAt: null, replaces: null }],
+        narrowed: [{ kind: 'later-projects', grant: { environmentSlug: 'dev', role: 'viewer', expiresAt: null } }],
+      },
+      paths,
+    },
+  ]);
+  assert.equal(said, [
+    '',
+    'Grants on every project are gone in this version. When it first runs, the vault replaces them:',
+    '  user:ada@acme.example: developer on dev in every project → Developer, All projects · dev only',
+    '  user:bob@acme.example: maintainer on every project → Developer, and maintainer on billing; not projects made later; kept access-manager on market',
+    '  service:ci: viewer on dev in every project → viewer on market/dev; not projects made later',
+    'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
+    '',
+  ].join('\n'));
+});
 
 test("a migration's refusal is its own sentence, not the SQL around it", () => {
   const refusal = Object.assign(new Error('secrets_folder_check: a row holds a folder this version refuses'), { code: 'P0001' });

@@ -1,4 +1,5 @@
 import type { AuthInfo, CoffreClient, Member } from '@coffre/client';
+import { EVERYWHERE, INSTANCE_ROLES } from '@coffre/core/access';
 import { QueryClient, queryOptions, type QueryKey } from '@tanstack/react-query';
 
 import { deriveUiCapabilities } from './capabilities.ts';
@@ -60,31 +61,45 @@ export const keys = {
   auditKeys: ['audit', 'keys'],
 } satisfies Record<string, QueryKey | ((...args: never[]) => QueryKey)>;
 
-/** One member's grants, as rows. */
+/** Members' grants, as rows, and a row for each one whose instance role reaches the place listed. */
 function grantRows(members: Member[]): GrantRow[] {
-  return members.flatMap((member) =>
-    member.grants.map((grant) => ({
+  return members.flatMap((member): GrantRow[] => [
+    ...(member.reachesByRole && member.instanceRole !== 'root-admin'
+      ? [{
+          id: `${member.member}/instance-role`,
+          principalType: member.principalType,
+          principalId: member.principalId,
+          role: member.instanceRole,
+          roleName: INSTANCE_ROLES[member.instanceRole].name,
+          permissions: [...INSTANCE_ROLES[member.instanceRole].permissions],
+          scope: 'instance-role' as const,
+          environmentSlug: null,
+          expiresAt: null,
+        }]
+      : []),
+    ...member.grants.map((grant) => ({
       id: grant.id,
       principalType: member.principalType,
       principalId: member.principalId,
       role: grant.role,
       roleName: grant.roleName,
       permissions: grant.permissions,
-      scope: grant.project === '*' ? ('every-project' as const) : grant.environment === null ? ('project' as const) : ('environment' as const),
+      scope: grant.environment === null ? ('project' as const) : ('environment' as const),
       environmentSlug: grant.environment,
       expiresAt: grant.expiresAt,
     })),
-  );
+  ]);
 }
 
 function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
     const { members, removed } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, isRootAdmin, tampered, grants }) => ({
+      ({ principalType, principalId, instanceRole, scope, isRootAdmin, tampered, grants }) => ({
         principalType,
         principalId,
         instanceRole,
+        scope,
         isRootAdmin,
         tampered,
         grants: grants.map(({ project, environment }) => ({ project, environment })),
@@ -154,8 +169,8 @@ export const queries = {
 
   /**
    * Everyone in the directory, and who was removed. The API shows grant
-   * managers the members of their projects; the directory pages stay the
-   * owners' own, and asking for anyone else would only log a refusal, so
+   * managers the members of their projects; the directory pages are admins'
+   * and owners', and asking for anyone else would only log a refusal, so
    * nobody else is asked.
    */
   directory: (client: CoffreClient, owner: boolean) =>
@@ -166,7 +181,7 @@ export const queries = {
           ? listDirectory(client)
           : Promise.resolve({
               ok: false as const,
-              error: 'Only owners can manage users and service accounts.',
+              error: 'Only admins and owners can manage users and service accounts.',
               signedOut: false,
             }),
     }),
@@ -324,6 +339,8 @@ export function shellOf(
     auth,
     principal: me === null ? null : me.principal,
     instanceRole: member?.instanceRole ?? null,
+    /** Where their instance role applies, projects by slug. */
+    scope: member?.scope ?? EVERYWHERE,
     projects: listed,
     capabilities: deriveUiCapabilities(member, listed),
     registrationRequired: me !== null && !me.registered,
@@ -377,7 +394,7 @@ export async function loadSettings(queryClient: QueryClient, client: CoffreClien
   const shell = await loadShell(queryClient, client);
   await Promise.all([
     loadDirectory(queryClient, client),
-    queryClient.fetchQuery(queries.auditKeys(client, shell.capabilities.canManageGrants)),
+    queryClient.fetchQuery(queries.auditKeys(client, shell.capabilities.runsInstance)),
   ]);
 }
 
@@ -390,8 +407,8 @@ export async function loadSettings(queryClient: QueryClient, client: CoffreClien
 export async function loadServiceDirectory(queryClient: QueryClient, client: CoffreClient) {
   const shell = await loadShell(queryClient, client);
   const directory = await loadDirectory(queryClient, client);
-  const allowed = shell.capabilities.canManageGrants && shell.auth.signin !== null;
-  const trusts = shell.capabilities.canManageGrants && shell.features.workloads;
+  const allowed = shell.capabilities.runsInstance && shell.auth.signin !== null;
+  const trusts = shell.capabilities.runsInstance && shell.features.workloads;
   if (!directory.ok || !allowed) return directory;
   await Promise.all(
     directory.principals
@@ -407,10 +424,10 @@ export async function loadServiceDirectory(queryClient: QueryClient, client: Cof
   return directory;
 }
 
-/** Who a user or service account is to the instance, its pages' header: null to anyone but an owner. */
+/** Who a user or service account is to the instance, its pages' header: null to anyone who does not run it. */
 export async function loadMember(queryClient: QueryClient, client: CoffreClient, member: string) {
   const shell = await loadShell(queryClient, client);
-  return queryClient.fetchQuery(queries.report(client, member, shell.capabilities.canManageGrants));
+  return queryClient.fetchQuery(queries.report(client, member, shell.capabilities.runsInstance));
 }
 
 export type MemberReport = Awaited<ReturnType<typeof loadMember>>;
@@ -431,11 +448,11 @@ export async function loadAccess(queryClient: QueryClient, client: CoffreClient)
 /**
  * How a service account's page lets it sign in: bearer tokens under
  * coffre's own sign-in, trusted workloads where the deployment trusts them.
- * Null where it shows neither: to anyone but an owner, and for an account
- * that is not active, which can be issued nothing.
+ * Null where it shows neither: to anyone who does not run the instance,
+ * and for an account that is not active, which can be issued nothing.
  */
 export function signInWays(shell: Shell, report: MemberReport): { tokens: boolean; workloads: boolean } | null {
-  const owner = shell.capabilities.canManageGrants;
+  const owner = shell.capabilities.runsInstance;
   const ways = { tokens: owner && shell.auth.signin !== null, workloads: owner && shell.features.workloads };
   const active = report?.ok === true && report.report?.status === 'active';
   return active && (ways.tokens || ways.workloads) ? ways : null;
@@ -449,7 +466,7 @@ export function signInWays(shell: Shell, report: MemberReport): { tokens: boolea
  */
 export function hasAppsTab(shell: Shell, report: MemberReport): boolean {
   const found = report?.ok === true ? report.report : null;
-  return Boolean(shell.features.mcp) && shell.capabilities.canManageGrants && found !== null && found.status !== 'removed';
+  return Boolean(shell.features.mcp) && shell.capabilities.runsInstance && found !== null && found.status !== 'removed';
 }
 
 export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {

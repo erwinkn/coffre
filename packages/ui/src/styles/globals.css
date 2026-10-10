@@ -1249,6 +1249,79 @@ a.crumb-link:hover {
   background-repeat: no-repeat;
 }
 
+/* An instance role's scope: two filters, each All, Only or All except, and the names it lists. */
+.scope-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  gap: 0.5rem;
+}
+
+.scope-field > legend {
+  margin-bottom: 0.375rem;
+  padding: 0;
+}
+
+.scope-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem 0.5rem;
+}
+
+.scope-label {
+  width: 6.25rem;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.scope-row > .select {
+  width: auto;
+}
+
+.scope-names {
+  display: flex;
+  flex: 1 1 9rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.scope-chip {
+  padding-right: 0.15rem;
+  color: var(--ink-2);
+}
+
+.scope-chip button {
+  display: inline-flex;
+  padding: 0.125rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.scope-chip button:hover {
+  color: var(--ink);
+}
+
+.input.scope-input {
+  flex: 1 1 4rem;
+  width: auto;
+  min-width: 4rem;
+  height: 1.875rem;
+  font-size: 0.8125rem;
+}
+
+/* Where a person's instance role applies, beside it in a list. */
+.role-scope {
+  margin-left: 0.4rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
 .input-group {
   position: relative;
   display: flex;
@@ -1872,13 +1945,6 @@ a.crumb-link:hover {
 
 .grants .col-actions {
   width: 4.75rem;
-}
-
-/* Where a revoke would be, for a grant on every project: lined up with one. */
-.grants .every-project-note {
-  padding: 0 0.5rem;
-  font-size: 0.8125rem;
-  white-space: nowrap;
 }
 
 .grants td {
@@ -2793,26 +2859,6 @@ span.env-link {
 
 .section-foot {
   margin-top: 0.75rem;
-}
-
-/* A member's grants on every project, above their access project by project. */
-.every-project-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.every-project-list li {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.every-project .hint {
-  margin-top: 0.5rem;
 }
 
 /* Environments as cards in a grid: each one a door into its secrets. */

@@ -171,22 +171,29 @@ export const SECTIONS = [
       {
         command: 'access',
         usage: ['access [<project>[/<environment>]] [--json]'],
-        about: ["the members, or those who reach a place; '*' lists the grants", 'on every project'],
+        about: ['the members, their instance roles and grants; or who', 'reaches a place'],
       },
       {
         command: 'admit',
-        usage: ['admit <principal> [--service] [--owner | --no-owner]'],
-        about: ['a member: a person by their email, or a service account,', 'service:<name> or --service; --owner makes a person an owner'],
+        usage: [
+          'admit <principal> [--service] [--role <role>]',
+          '      [--projects <a,b> | --except-projects <a,b>]',
+          '      [--environments <a,b> | --except-environments <a,b>]',
+        ],
+        about: [
+          'a member: a person by their email, or a service account,',
+          'service:<name> or --service. --role sets a person\'s',
+          'instance role, member, auditor, developer, admin or owner,',
+          'in every project and environment unless a scope flag',
+          'narrows it; never your own',
+        ],
       },
       {
         command: 'grant',
         usage: ['grant <project> <principal> --role <role> [--env <env>] [--service]', '      [--expires YYYY-MM-DD]'],
-        about: [
-          "a member, admitted first. '*' for every project, the ones made later",
-          'too, and with --env, the environment of that name in each: owners only',
-        ],
+        about: ['a member, admitted first: on a project, or one of its', 'environments with --env'],
       },
-      { command: 'revoke', usage: ['revoke <project> <principal> [--env <env>] [--service]'], about: ["their grant there, '*' too"] },
+      { command: 'revoke', usage: ['revoke <project> <principal> [--env <env>] [--service]'], about: ['their grant there'] },
       {
         command: 'offboard',
         usage: ['offboard <principal> [--service] [--apply]'],
@@ -220,13 +227,13 @@ export const SECTIONS = [
     title: 'Verify',
     entries: [
       { command: 'verify', usage: ['verify'], about: ['asks which of these, on a terminal'] },
-      { command: 'verify instance', usage: ['verify instance [<url>]'], about: ['the instance from outside: as no one, then as you, an owner'] },
+      { command: 'verify instance', usage: ['verify instance [<url>]'], about: ['the instance from outside: as no one, then as you, an', 'admin or owner'] },
       {
         command: 'verify keys',
         usage: ['verify keys [--vault-id <id>]'],
         about: ['the vault key and app key you keep, checked on this machine'],
       },
-      { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an owner'] },
+      { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an admin or owner'] },
     ],
   },
 ] as const satisfies readonly Section[];

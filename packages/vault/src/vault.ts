@@ -3,15 +3,22 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   allows,
   assignableToEnvironment,
-  everyProjectPath,
+  convertEveryProjectGrants,
+  EVERYWHERE,
   grantKind,
+  isInstanceRole,
   isRole,
+  isScope,
   mayManageAccess,
-  type GrantPlace,
+  normalScope,
+  NOTHING,
+  runsInstance,
   type Holdings,
+  type InstanceRole,
   type Permission,
   type Place,
   type Role,
+  type Scope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, type SecretContext } from '@coffre/core/envelope';
@@ -69,7 +76,7 @@ import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, forward, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, withCause, type Anchor } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
-import { memberMac, rowKey, sameGrants, sealed } from './rows.ts';
+import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import * as store from './store.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 
@@ -120,6 +127,8 @@ export type PreparedVault = {
   kekChecked: boolean;
   /** Why not, once decided that they do not. */
   wrongKek: string | null;
+  /** Whether this process has replaced the grants on every project of 0.4 there were when it started (`#convert`). */
+  converted: boolean;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -134,6 +143,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     superseded: null,
     kekChecked: false,
     wrongKek: null,
+    converted: false,
   };
 }
 
@@ -345,6 +355,11 @@ class VaultService implements Vault {
   async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
     const superseded = await this.#settled();
     if (superseded !== null) return { ok: false, refusal: refusal('wrong_kek', superseded) };
+    return this.#decideNow(principals, decide);
+  }
+
+  /** `#decide`, once the vault is settled. */
+  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
     const reports: NewEntry[] = [];
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -516,7 +531,101 @@ class VaultService implements Vault {
     // database; calls that race settle it alike, and a rotation they race
     // to write goes in once (`#rotate`).
     if (prepared.since === null && prepared.superseded === null) await this.#settle();
+    if (prepared.superseded === null && !prepared.converted) await this.#convert();
     return prepared.superseded;
+  }
+
+  /**
+   * Replace every grant on every project of 0.4 with what 0.5 has instead
+   * (`convertEveryProjectGrants` in @coffre/core/access): a person's
+   * instance role and its scope, and project grants on the projects there
+   * are now. Once per process, before its first call does anything else:
+   * one decision per member who holds any, as `system:vault`, each grant it
+   * replaces an `access.revoke` that says what became of it. Another
+   * process that converts the same member at once finds nothing left under
+   * their lock. A member whose row fails its check is left as they are:
+   * removing them clears it.
+   */
+  async #convert(): Promise<void> {
+    for (const principal of await store.everyProjectHolders(this.#db)) {
+      if (this.#isRootAdmin(principal)) continue;
+      await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
+    }
+    this.#prepared.converted = true;
+  }
+
+  async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
+    const row = d.members.get(principal);
+    const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
+    if (row === undefined || subject.status !== 'active') return;
+    const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
+    if (everyProject.length === 0) return;
+    // The projects there are now, read under the log's head, which a deletion holds.
+    await lockLogHead(d.tx);
+    const before = roleOf(principal, row);
+    const conversion = convertEveryProjectGrants({
+      person: principal.startsWith('user:'),
+      role: before.role,
+      everyProject: everyProject.filter((grant) => live(grant, d.at)).map((grant) => ({ environmentSlug: grant.environmentSlug, role: grant.role as Role, expiresAt: grant.expiresAt })),
+      grants: subject.stored
+        .filter((grant) => grantKind(grant) !== null && live(grant, d.at))
+        .map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role as Role, expiresAt: grant.expiresAt })),
+      projects: await store.liveProjects(d.tx),
+    });
+    const after = { role: conversion.role, scope: conversion.scope };
+    const replacedBy = { role: after.role, scope: after.scope, grants: conversion.grants.length };
+    d.grants.set(principal, [...subject.stored]);
+    d.touched.add(principal);
+    const correlation = { operationId: randomUUID() };
+    const drop = (grant: GrantRow) =>
+      d.writes.push(async () => {
+        await store.deleteGrant(d.tx, principal, grant);
+        d.grants.set(principal, d.grants.get(principal)!.filter((held) => held !== grant));
+      });
+
+    for (const grant of everyProject) {
+      drop(grant);
+      // A lapsed one goes with no entry: it changes nothing anyone holds.
+      if (!live(grant, d.at)) continue;
+      const narrowed = conversion.narrowed.filter((loss) => loss.grant.environmentSlug === grant.environmentSlug);
+      d.log.push(accessEntry(VAULT_ACTOR, 'access.revoke', principal, 'allow', correlation, {
+        role: null,
+        expiresAt: null,
+        previousRole: grant.role,
+        ...located(grant).detail,
+        replacedBy,
+        ...(narrowed.length === 0 ? {} : { narrowed: narrowed.map(({ grant: _, ...loss }) => loss) }),
+      }));
+    }
+    if (JSON.stringify(standing(after)) !== JSON.stringify(standing(before))) {
+      d.log.push(accessEntry(VAULT_ACTOR, 'member.role', principal, 'allow', correlation, {
+        ...after,
+        previousRole: before.role,
+        previousScope: before.scope,
+        reason: 'every-project',
+      }));
+      d.writes.push(() => store.updateMember(d.tx, principal, after));
+    }
+    for (const given of conversion.grants) {
+      const place = { projectId: given.projectId, environmentId: given.environmentId, environmentSlug: null };
+      // Whatever they held there, lapsed or not, makes way: the conversion never gives less there than it was.
+      const there = subject.stored.find((grant) => grantKind(grant) !== null && placeKey(grant) === placeKey(place));
+      if (there !== undefined) drop(there);
+      d.writes.push(async (at) => {
+        const grant = { principal, ...place, role: given.role, expiresAt: given.expiresAt, grantedAt: at, grantedBy: VAULT_ACTOR };
+        await store.insertGrant(d.tx, grant);
+        d.grants.get(principal)!.push(grant);
+      });
+      d.log.push({
+        ...accessEntry(VAULT_ACTOR, 'access.grant', principal, 'allow', correlation, {
+          role: given.role,
+          expiresAt: given.expiresAt === null ? null : iso(given.expiresAt),
+          previousRole: given.replaces,
+          reason: 'every-project',
+        }),
+        ...located(place).ids,
+      });
+    }
   }
 
   /**
@@ -1181,14 +1290,15 @@ class VaultService implements Vault {
           action: 'member.add',
           decision: 'allow',
           subjectPrincipal: principal,
-          metadata: JSON.stringify({ owner: false, rootAdmin: true }),
+          metadata: JSON.stringify({ role: 'member', rootAdmin: true }),
         },
       ]);
       const { occurredAt: at, seqStart } = appended;
       const row = {
         principal,
         status: 'active' as const,
-        owner: false,
+        role: 'member' as const,
+        scope: EVERYWHERE,
         generation: 0,
         createdAt: at,
         createdBy: VAULT_ACTOR,
@@ -1207,9 +1317,9 @@ class VaultService implements Vault {
    * configuration, which no row can change.
    */
   async #standing(db: Queryable, principal: string, row: Member | undefined, at: number, reports: NewEntry[]): Promise<Standing> {
-    const none = { isRootAdmin: false, isOwner: false, grants: [] };
+    const none = NOTHING;
     if (this.#isRootAdmin(principal)) {
-      const root = { isRootAdmin: true, isOwner: true, grants: [] };
+      const root: Holdings = { isRootAdmin: true, role: 'owner', scope: EVERYWHERE, grants: [] };
       return { principal, status: 'active', live: root, all: root, fault: null, stored: [] };
     }
     const grants = row === undefined ? [] : await store.grants(db, principal);
@@ -1218,12 +1328,12 @@ class VaultService implements Vault {
     if (!PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants };
     if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
     const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
-    const isOwner = row.owner && principal.startsWith('user:');
+    const { role, scope } = roleOf(principal, row);
     return {
       principal,
       status: 'active',
-      live: { isRootAdmin: false, isOwner, grants: held.filter((grant) => live(grant, at)) },
-      all: { isRootAdmin: false, isOwner, grants: held },
+      live: { isRootAdmin: false, role, scope, grants: held.filter((grant) => live(grant, at)) },
+      all: { isRootAdmin: false, role, scope, grants: held },
       fault,
       stored: grants,
     };
@@ -1231,7 +1341,7 @@ class VaultService implements Vault {
 
   #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean): Access {
     if (this.#isRootAdmin(principal)) {
-      return { principal, status: 'active', generation: row?.generation ?? 0, isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
+      return { principal, status: 'active', generation: row?.generation ?? 0, isRootAdmin: true, role: 'owner', scope: EVERYWHERE, grants: [], since: null, by: null };
     }
     const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
     return {
@@ -1239,8 +1349,8 @@ class VaultService implements Vault {
       status: tampered ? 'tampered' : !PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
       generation: row?.generation ?? 0,
       isRootAdmin: false,
-      isOwner: active && row.owner && principal.startsWith('user:'),
-      grants: active ? held.filter((grant) => live(grant, at)).map(view) : [],
+      ...(active ? roleOf(principal, row) : { role: 'member', scope: EVERYWHERE }),
+      grants: active ? held.filter((grant) => live(grant, at) && grantKind(grant) !== null).map(view) : [],
       since: row ? iso(row.statusChangedAt) : null,
       by: row?.statusChangedBy ?? null,
     };
@@ -1302,7 +1412,7 @@ class VaultService implements Vault {
 
   setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>> {
     const { actor, principal } = input;
-    const changes = input.changes.map((change) => ({ ...change, environmentSlug: change.environmentSlug ?? null }));
+    const changes = input.changes.map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, environmentSlug: null, role, expiresAt }));
     const action = changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
     // One place refused is shown where it is, to whoever reads that place's log; an invalid one may be no place at all.
     const [only] = changes.length === 1 ? changes : [];
@@ -1313,48 +1423,57 @@ class VaultService implements Vault {
         ...where.ids,
       }]);
     };
-    const onProjects = changes.flatMap(({ projectId, environmentId, role }) => (projectId === null ? [] : [{ projectId, environmentId, role }]));
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const places = new Set<string>();
       for (const change of changes) {
-        const shape = placeShape(change);
-        if (shape !== null) throw refused('invalid', shape);
+        if (grantKind(change) === null) {
+          throw refused('invalid', change.projectId === null && change.environmentId === null
+            ? 'grants are on a project or an environment: a person reaches every project by their instance role'
+            : 'an environment is named in its project');
+        }
         const key = placeKey(change);
         if (places.has(key)) throw refused('invalid', 'each place may be changed once per call');
         places.add(key);
         if (change.role !== null && !isRole(change.role)) throw refused('invalid', `no such role: ${change.role}`);
-        if (change.role !== null && (change.environmentId !== null || change.environmentSlug !== null) && !assignableToEnvironment(change.role)) {
-          throw refused('invalid', `${change.role} can only be granted on a project, or on every project`);
+        if (change.role !== null && change.environmentId !== null && !assignableToEnvironment(change.role)) {
+          throw refused('invalid', `${change.role} can only be granted on a project`);
         }
         const expiresAt = change.expiresAt === null ? null : Date.parse(change.expiresAt);
         if (Number.isNaN(expiresAt) || (expiresAt !== null && expiresAt <= d.at)) {
           throw refused('invalid', 'an end date must be in the future');
         }
       }
-      // Every project is always there; a project or an environment must be,
-      // and to be granted, not deleted. Read under the log's head, which a
-      // deletion holds while it renames the place, so the place is as it commits.
-      if (onProjects.length > 0) await lockLogHead(d.tx);
+      // A project or an environment must be there, and to be granted, not
+      // deleted. Read under the log's head, which a deletion holds while it
+      // renames the place, so the place is as it commits.
+      await lockLogHead(d.tx);
       const known = await store.places(
         d.tx,
-        onProjects.map((change) => change.projectId),
-        onProjects.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
+        changes.map((change) => change.projectId!),
+        changes.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
       );
-      for (const { projectId, environmentId, role } of onProjects) {
-        if (!known.projects.has(projectId) || (environmentId !== null && known.environments.get(environmentId) !== projectId)) {
+      const where: Place[] = changes.map(({ projectId, environmentId, role }) => {
+        const environment = environmentId === null ? undefined : known.environments.get(environmentId);
+        if (!known.projects.has(projectId!) || (environmentId !== null && environment?.projectId !== projectId)) {
           throw refused('invalid', `no such place: ${environmentId === null ? projectId : `${projectId}/${environmentId}`}`);
         }
         // A grant there is refused; a revocation, as a deletion makes, is not.
-        if (role !== null && (known.deleted.has(projectId) || (environmentId !== null && known.deleted.has(environmentId)))) {
+        if (role !== null && (known.deleted.has(projectId!) || (environmentId !== null && known.deleted.has(environmentId)))) {
           throw refused('deleted');
         }
-      }
+        // An environment by its slug as the store has it, which scopes match.
+        return environmentId === null ? { projectId: projectId! } : { projectId: projectId!, environmentId, environmentSlug: environment!.slug };
+      });
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!changes.every((change) => mayManageAccess(acting.live, change))) throw refused('not_allowed');
+      if (!where.every((place) => mayManageAccess(acting.live, place))) throw refused('not_allowed');
+      // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
+      if (actor === principal && !acting.live.isRootAdmin && changes.some((change) => change.role !== null)) {
+        throw refused('not_allowed', 'nobody grants themselves a role: ask another admin');
+      }
 
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
@@ -1376,7 +1495,7 @@ class VaultService implements Vault {
     actor: string,
     principal: string,
     held: readonly GrantRow[],
-    change: GrantChange & GrantPlace,
+    change: GrantChange & store.Place,
     correlation: Correlation,
   ): AccessChange {
     const existing = held.find((grant) => placeKey(grant) === placeKey(change));
@@ -1421,40 +1540,45 @@ class VaultService implements Vault {
     return current === undefined ? 'created' : 'updated';
   }
 
-  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; owner: boolean; generation: number }>> {
+  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; role: InstanceRole; scope: Scope; generation: number }>> {
     const { actor, principal } = input;
+    const asked = input.role === undefined ? {} : { role: input.role, scope: input.scope ?? EVERYWHERE };
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
       new Refused(refusal(code, message), [
-        accessEntry(actor, 'member.add', principal, 'deny', input, { owner: input.owner ?? null }, code),
+        accessEntry(actor, 'member.add', principal, 'deny', input, asked, code),
       ]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!acting.live.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
+      if (!runsInstance(acting.live)) throw refused('not_allowed', 'only admins and owners of the whole instance may add members or set their roles');
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
-      if (input.owner === true && !principal.startsWith('user:')) {
-        throw refused('invalid', 'service accounts cannot be owners');
+      if (input.role !== undefined && !isInstanceRole(input.role)) throw refused('invalid', `no such instance role: ${input.role}`);
+      if (input.scope !== undefined && (input.role === undefined || !isScope(input.scope))) throw refused('invalid', 'a scope is a role\'s: { projects, environments }, each all, only or except');
+      const wanted = input.role === undefined ? undefined : { role: input.role, scope: input.role === 'member' ? EVERYWHERE : normalScope(input.scope ?? EVERYWHERE) };
+      if (wanted !== undefined && wanted.role !== 'member' && !principal.startsWith('user:')) {
+        throw refused('invalid', 'service accounts hold project grants only, never an instance role');
       }
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
       if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       d.touched.add(principal);
       d.grants.set(principal, [...subject.stored]);
-      const entry = (action: string, owner: boolean) =>
-        d.log.push(accessEntry(actor, action, principal, 'allow', input, { owner }));
+      const entry = (action: string, detail: Record<string, unknown>) =>
+        d.log.push(accessEntry(actor, action, principal, 'allow', input, detail));
 
       if (row === undefined || row.status === 'removed') {
-        // Coming back is a fresh start: no owner role unless given again.
-        const owner = input.owner ?? false;
-        entry(row === undefined ? 'member.add' : 'member.restore', owner);
+        // Coming back is a fresh start: a member, unless given a role again.
+        const { role, scope } = wanted ?? { role: 'member' as const, scope: EVERYWHERE };
+        entry(row === undefined ? 'member.add' : 'member.restore', { role, scope });
         d.writes.push(async (at) => {
           if (row === undefined) {
             await store.insertMember(d.tx, {
               principal,
               status: 'active',
-              owner,
+              role,
+              scope,
               generation: 0,
               createdAt: at,
               createdBy: actor,
@@ -1463,18 +1587,21 @@ class VaultService implements Vault {
               ...UNSEALED,
             });
           } else {
-            await store.updateMember(d.tx, principal, { status: 'active', owner, statusChangedAt: at, statusChangedBy: actor });
+            await store.updateMember(d.tx, principal, { status: 'active', role, scope, statusChangedAt: at, statusChangedBy: actor });
           }
         });
         // A removal moved the generation on already; coming back keeps it.
-        return { created: true, owner, generation: row?.generation ?? 0 };
+        return { created: true, role, scope, generation: row?.generation ?? 0 };
       }
-      const owner = input.owner ?? row.owner;
-      if (owner !== row.owner) {
-        entry('member.owner', owner);
-        d.writes.push(() => store.updateMember(d.tx, principal, { owner }));
+      const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
+      // Nobody sets their own role: running the instance never lets anyone widen what they hold themselves.
+      if (changed && actor === principal) throw refused('not_allowed', 'nobody changes their own instance role: ask another admin');
+      if (changed) {
+        entry('member.role', { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope });
+        d.writes.push(() => store.updateMember(d.tx, principal, { role: wanted.role, scope: wanted.scope }));
+        return { created: false, ...wanted, generation: row.generation };
       }
-      return { created: false, owner, generation: row.generation };
+      return { created: false, role: row.role, scope: row.scope, generation: row.generation };
     });
   }
 
@@ -1493,10 +1620,10 @@ class VaultService implements Vault {
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
       const held = subject.stored;
       if (subject.status === 'tampered') {
-        if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove a member whose record failed its check');
+        if (!runsInstance(holder)) throw refused('not_allowed', 'only admins and owners of the whole instance may remove a member whose record failed its check');
         return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
       }
-      if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove members');
+      if (!runsInstance(holder)) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members');
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
 
       const revoked = held.filter((grant) => live(grant, d.at));
@@ -1520,7 +1647,8 @@ class VaultService implements Vault {
         d.grants.set(principal, []);
         await store.updateMember(d.tx, principal, {
           status: 'removed',
-          owner: false,
+          role: 'member',
+          scope: EVERYWHERE,
           generation,
           statusChangedAt: at,
           statusChangedBy: actor,
@@ -1556,7 +1684,8 @@ class VaultService implements Vault {
       d.grants.set(principal, []);
       const fresh = {
         status: 'removed' as const,
-        owner: false,
+        role: 'member' as const,
+        scope: EVERYWHERE,
         generation,
         createdAt: logged.createdAt,
         createdBy: logged.createdBy,
@@ -2185,39 +2314,30 @@ function live(grant: GrantRow, at: number): boolean {
 
 /**
  * Where an entry about a grant says it is: its project and environment; or,
- * on every project, neither, and the place as a path in its payload. Only a
- * grant that names no place at all is on every project (`grantKind`).
+ * for a grant on every project of 0.4, neither, and the place as a path in
+ * its payload, `*`, or `*` and the slug, as 0.4 wrote it.
  */
-function located(place: GrantPlace): { ids: Pick<NewEntry, 'projectId' | 'environmentId'>; detail: { place?: string } } {
-  return grantKind(place) === 'every-project'
-    ? { ids: {}, detail: { place: everyProjectPath(place.environmentSlug) } }
+function located(place: store.Place): { ids: Pick<NewEntry, 'projectId' | 'environmentId'>; detail: { place?: string } } {
+  return place.projectId === null && place.environmentId === null
+    ? { ids: {}, detail: { place: place.environmentSlug === null ? '*' : `*/${place.environmentSlug}` } }
     : { ids: { projectId: place.projectId, environmentId: place.environmentId }, detail: {} };
 }
 
-/** One key per place a member can hold a grant at, by what the grant names first: its environment, its project, or neither. */
-function placeKey(place: GrantPlace): string {
+/** One key per place a member can hold a grant at, by what the grant names first: its environment, its project, or neither, on every project of 0.4. */
+function placeKey(place: store.Place): string {
   if (place.environmentId !== null) return `environment:${place.environmentId}`;
-  return place.projectId !== null ? `project:${place.projectId}` : everyProjectPath(place.environmentSlug);
+  return place.projectId !== null ? `project:${place.projectId}` : `every-project:${place.environmentSlug ?? ''}`;
 }
 
-/** Why a change's place is not one a grant can be at, or null when it is. */
-function placeShape(place: GrantPlace): string | null {
-  const kind = grantKind(place);
-  if (kind === null) return place.projectId === null ? 'an environment is named in its project' : 'a slug names environments on every project, not in one';
-  if (kind === 'every-project' && place.environmentSlug !== null && !SLUG.test(place.environmentSlug)) {
-    return `not an environment slug: ${place.environmentSlug}`;
-  }
-  return null;
+/** A member's instance role, as their row has it: service accounts are members, whatever a row says. */
+function roleOf(principal: string, row: Member): { role: InstanceRole; scope: Scope } {
+  return principal.startsWith('user:') ? { role: row.role, scope: row.scope } : { role: 'member', scope: EVERYWHERE };
 }
-
-/** An environment's slug, as the schema has it. */
-const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 function view(grant: GrantRow): Grant {
   return {
     projectId: grant.projectId,
     environmentId: grant.environmentId,
-    environmentSlug: grant.environmentSlug,
     role: grant.role as Role,
     expiresAt: grant.expiresAt === null ? null : iso(grant.expiresAt),
     grantedAt: iso(grant.grantedAt),

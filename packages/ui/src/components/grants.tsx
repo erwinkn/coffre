@@ -3,7 +3,6 @@ import { grantId, revokeGrant, type GrantVars } from '../lib/changes';
 import type { FailedAdd } from '../lib/optimistic';
 import { useCoffre } from '../lib/coffre';
 import { projectAccessLabel } from '../lib/project-access';
-import { everyProjectPlace } from './every-project';
 import { keys } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { GrantRow } from '../shared/models';
@@ -65,9 +64,9 @@ export function GrantRowView({
   const revoke = useChange(revokeGrant(useCoffre(), project));
   const { status, dismiss } = useChangeStatus(keys.grants(project));
   const state = status(grantId(grant));
-  // A grant on every project is shown where it reaches, and changed only by owners, with the CLI.
-  const everywhere = grant.scope === 'every-project';
-  const label = everywhere ? `${everyProjectPlace(grant.environmentSlug)} · ${grant.roleName}` : projectAccessLabel(grant);
+  // Someone's instance role reaching the project is shown here, and changed on their page in Users.
+  const byRole = grant.scope === 'instance-role';
+  const label = byRole ? grant.roleName : projectAccessLabel(grant);
   const expired = grant.expiresAt !== null && new Date(grant.expiresAt).getTime() < Date.now();
 
   return (
@@ -79,6 +78,11 @@ export function GrantRowView({
         </td>
         <td className="col-access" data-label="Permissions">
           <span className={`tag${grant.role === 'owner' ? ' tag-violet' : ''}`}>{label}</span>
+          {byRole && (
+            <span className="role-scope" title="Their instance role reaches this project. Change it on their page in Users.">
+              instance role
+            </span>
+          )}
         </td>
         <td
           className={`col-expires cell-mono cell-muted${grant.expiresAt === null ? ' is-never' : ''}`}
@@ -102,11 +106,7 @@ export function GrantRowView({
         <td className="col-actions">
           {state.state === 'pending' ? (
             <RowPending status={state} />
-          ) : everywhere ? (
-            <span className="cell-muted every-project-note" title="Owners change grants on every project with coffre grant '*' and coffre revoke '*'">
-              every project
-            </span>
-          ) : (
+          ) : byRole ? null : (
             <ConfirmButton
               trigger={<button className="act act-danger">Revoke</button>}
               title={

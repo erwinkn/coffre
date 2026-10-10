@@ -1,4 +1,4 @@
-import type { Permission } from '@coffre/core/access';
+import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import type { Refusal as VaultRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
@@ -234,12 +234,24 @@ export function vaultRefusal(
   return new Refusal(vaultRefused(refusal), denied(ctx, action, `vault_${refusal.code}`, fields));
 }
 
-/** Refuse, and log the refusal, unless the caller is an instance owner or a root admin. */
-export function requireOwner(ctx: ApiContext, action: string, fields: EntryFields = {}): void {
-  if (ctx.caller.isOwner) return;
+/**
+ * Refuse, and log the refusal, unless the caller runs the instance: a root
+ * admin, or an Admin or Owner whose scope narrows nothing (`runsInstance`).
+ */
+export function requireInstance(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>, action: string, fields: EntryFields = {}, what = 'do that'): void {
+  if (runsInstance(ctx.caller)) return;
   throw new Refusal(
-    forbidden('only instance owners may do that'),
-    denied(ctx, action, 'requires_instance_owner', fields),
+    forbidden(`only admins and owners of the whole instance may ${what}`),
+    denied(ctx, action, 'requires_instance_admin', fields),
+  );
+}
+
+/** Refuse, and log the refusal, unless the caller may make a project their scope takes in (`makesProjects`). */
+export function requireProjectMaker(ctx: ApiContext, action: string, fields: EntryFields = {}): void {
+  if (makesProjects(ctx.caller)) return;
+  throw new Refusal(
+    forbidden('only admins and owners whose scope takes in new projects may make one'),
+    denied(ctx, action, 'requires_instance_admin', fields),
   );
 }
 

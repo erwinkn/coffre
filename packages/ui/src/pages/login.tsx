@@ -80,7 +80,7 @@ function ProviderLoginPage({
           {title}
         </h1>
         <p className="signin-lede">
-          {note ?? 'Sign in with your organization’s account. Only people an owner has invited can get in.'}
+          {note ?? 'Sign in with your organization’s account. Only people an admin has invited can get in.'}
         </p>
       </div>
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
+import { EVERYWHERE } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
 import { answer } from './start-fixture.ts';
@@ -30,7 +31,7 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
   return {
     access: async (principal: string): Promise<Access> => {
       onAsk(principal);
-      return { principal, status: 'unknown', generation: 0, isRootAdmin: false, isOwner: false, grants: [], since: null, by: null, ...known[principal] };
+      return { principal, status: 'unknown', generation: 0, isRootAdmin: false, role: 'member', scope: EVERYWHERE, grants: [], since: null, by: null, ...known[principal] };
     },
   };
 }
@@ -201,7 +202,7 @@ test('a root admin is whoever the vault says, in one call', async () => {
       auth: cloudflare,
       verifier: { verify: async () => root },
       vault: vaultKnowing(
-        { 'user:admin@acme.example': { status: 'active', isRootAdmin: true, isOwner: true } },
+        { 'user:admin@acme.example': { status: 'active', isRootAdmin: true, role: 'owner' } },
         (principal) => asked.push(principal),
       ),
     } as never,
@@ -249,8 +250,8 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
       tampered: false,
       generation: 0,
       isRootAdmin: false,
-      isOwner: false,
-      instanceRole: 'user',
+      role: 'member',
+      scope: EVERYWHERE,
       grants: [],
     },
     requestId: 'unregistered-request',
@@ -311,8 +312,8 @@ test('an active registered identity receives an auditable request context', asyn
         tampered: false,
         generation: 0,
         isRootAdmin: false,
-        isOwner: false,
-        instanceRole: 'user',
+        role: 'member',
+        scope: EVERYWHERE,
         grants: [],
       },
       requestId: 'registered-request',

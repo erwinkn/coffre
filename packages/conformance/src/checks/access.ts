@@ -125,55 +125,56 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
 }
 
 /**
- * Grants on every project: one on `*` reaches a project made after it; one
- * on `*` and a slug reaches that environment in every project and never
- * another; nobody but an owner gives one; and removing a member takes
- * them. Its services are removed, and its project archived, as it ends.
+ * Instance roles: a Developer scoped to dev reads and writes the dev of a
+ * project made after it, and no prod; an Admin scoped to one environment
+ * grants there and nowhere else, and sets no role, its own or anyone's;
+ * and no grant is on every project. The reader is a member again as it
+ * ends, its service removed, its project archived.
  */
-export async function everyProject(deployment: Deployment, { admin, reader }: People, canaries: Canaries): Promise<string> {
-  const services = { everything: 'token:conformance-everywhere', dev: 'token:conformance-every-dev', manager: 'token:conformance-manager' };
-  const client = async (member: string) => bearer(deployment.origin, (await admin.api.tokens.issue(member, { expiresInDays: 1 })).token);
-  for (const member of Object.values(services)) await admin.api.members.add(member);
+export async function instanceRoles(deployment: Deployment, { admin, reader }: People, canaries: Canaries): Promise<string> {
+  const scoped = 'token:conformance-scoped';
+  await admin.api.members.add(scoped);
+  await refused('a grant on every project was given', admin.api.access.set(scoped, { '*': 'viewer' }));
+  await refused('a grant on dev in every project was given', admin.api.access.set(scoped, { '*/dev': 'viewer' }));
+  await refused('a service account was given an instance role', admin.api.members.add(scoped, { role: 'developer' }));
+  await refused('a viewer gave themselves an instance role', reader.api.members.add(reader.member, { role: 'owner' }));
 
-  // A project's access manager, and a viewer, are not owners.
-  await admin.api.access.set(services.manager, { [PROJECT]: 'access-manager' });
-  const manager = await client(services.manager);
-  await refused("a project's access manager granted on every project", manager.access.set(services.everything, { '*': 'viewer' }));
-  await refused('a viewer granted themselves every project', reader.api.access.set(reader.member, { '*/prod': 'viewer' }));
-  await admin.api.access.set(services.everything, { '*': 'viewer' });
-  await admin.api.access.set(services.dev, { '*/dev': 'viewer' });
-  const [everything, dev] = [await client(services.everything), await client(services.dev)];
-
-  // Made after the grants: a project with a dev and a prod.
-  const later = `${PROJECT}-later`;
-  const made = await admin.api.projects.create(later, { name: 'Made later' });
-  expect(made.inherited.some((grant) => grant.member === services.everything && grant.place === '*'), 'making a project did not say who reaches it', made.inherited);
+  // Made after the role: a project with a dev and a prod.
+  await admin.api.members.add(reader.member, { role: 'developer', scope: { environments: { only: ['dev'] } } });
+  const later = `${PROJECT}-roles`;
+  await admin.api.projects.create(later, { name: 'Made later' });
   for (const environment of ['dev', 'prod']) {
     const path = `${later}/${environment}`;
-    const { inherited } = await admin.api.environments.create(path, { name: environment });
-    const reaches = inherited.filter((grant) => grant.member === services.dev).length;
-    expect(reaches === (environment === 'dev' ? 1 : 0), `making ${path} misnamed who reaches it through dev in every project`, inherited);
+    await admin.api.environments.create(path, { name: environment });
     canaries[`${path}/API_KEY`] = canary();
     await admin.api.secrets.set(path, valuesIn(canaries, path));
   }
-  for (const path of [`${later}/prod`, `${later}/dev`, PROD]) {
-    const read = await everything.secrets.reveal(path);
-    expect(read.values.API_KEY === canaries[`${path}/API_KEY`], `viewer on every project could not read ${path}`, read.values);
-  }
-  await refused('viewer on every project wrote a value', everything.secrets.set(`${later}/prod`, { API_KEY: 'from everywhere' }));
-  const devRead = await dev.secrets.reveal(`${later}/dev`);
-  expect(devRead.values.API_KEY === canaries[`${later}/dev/API_KEY`], 'viewer on dev in every project could not read a dev made later', devRead.values);
-  await refused('viewer on dev in every project read a prod made later', dev.secrets.reveal(`${later}/prod`));
-  await refused('viewer on dev in every project read prod', dev.secrets.reveal(PROD));
+  const read = await reader.api.secrets.reveal(`${later}/dev`);
+  expect(read.values.API_KEY === canaries[`${later}/dev/API_KEY`], 'a Developer scoped to dev could not read a dev made later', read.values);
+  await reader.api.secrets.set(`${later}/dev`, { API_KEY: canaries[`${later}/dev/API_KEY`]! });
+  await refused('a Developer scoped to dev read a prod made later', reader.api.secrets.reveal(`${later}/prod`));
+  await refused('a Developer scoped to dev read prod', reader.api.secrets.reveal(PROD));
 
-  // Removed, they hold nothing, and the list of grants on every project is as it was.
-  for (const member of Object.values(services)) await admin.api.members.remove(member);
-  await refused('a removed member read through a grant on every project', everything.secrets.reveal(`${later}/prod`));
-  await refused('a removed member read through a grant on dev in every project', dev.secrets.reveal(`${later}/dev`));
-  const left = (await admin.api.members.list('*')).members.filter((member) => Object.values(services).includes(member.member));
-  expect(left.length === 0, 'grants on every project outlived their members', left);
+  // An admin scoped to one environment manages it alone.
+  await admin.api.members.add(reader.member, { role: 'admin', scope: { projects: { only: [PROJECT] }, environments: { only: ['dev'] } } });
+  await reader.api.access.set(scoped, { [DEV]: 'viewer' });
+  await refused('a scoped admin granted outside its scope', reader.api.access.set(scoped, { [PROD]: 'viewer' }));
+  await refused('a scoped admin granted on the project around its scope', reader.api.access.set(scoped, { [PROJECT]: 'viewer' }));
+  await refused('a scoped admin widened its own role', reader.api.members.add(reader.member, { role: 'admin' }));
+  await refused('a scoped admin promoted someone', reader.api.members.add(scoped, { role: 'member' }));
+  await refused('a scoped admin made a project', reader.api.projects.create(`${PROJECT}-scoped`, { name: 'Scoped' }));
+  await refused('a scoped admin read a value no grant of its gives', reader.api.secrets.reveal(PROD));
+  // Nor does an admin of the whole instance set its own.
+  await admin.api.members.add(reader.member, { role: 'admin' });
+  await refused('an admin made itself an owner', reader.api.members.add(reader.member, { role: 'owner' }));
+
+  // As it was: a member, with its viewer on dev; the service and the project gone.
+  await admin.api.members.add(reader.member, { role: 'member' });
+  await admin.api.members.remove(scoped);
   await admin.api.projects.update(later, { archived: true });
-  return 'a grant on every project reaches a project made after it; one on dev, every dev and nothing else; refused to non-owners; gone with its member';
+  const me = await reader.api.me();
+  expect(me.instanceRole === 'member' && me.environments.length === 1, 'the reader is not back as it was', me);
+  return 'a Developer scoped to dev reaches a dev made later and no prod; a scoped admin grants only inside its scope and sets no role; no grant is on every project';
 }
 
 /** Reading more values at once than the vault allows in its window is refused. */

@@ -7,7 +7,7 @@ import { Browser } from '../browser.ts';
 import { Chrome, findChrome } from '../chrome.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
-import { type Person, PROJECT, signIn } from './people.ts';
+import { DEV, type Person, PROJECT, signIn } from './people.ts';
 
 /** Each page, the heading it shows, and the tab it is, for a page with tabs. */
 const PAGES: [path: string, heading: string, tab: string | null][] = [
@@ -138,18 +138,17 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     const walked = await chrome.load(project, admin.browser.cookies(), undefined, WALK_TABS);
     expect(walked.errors.length === 0, `${project}'s tabs reported errors in the browser`, walked.errors.join('\n'));
     expect(walked.href === `${project}/users` && walked.tab === 'Users', `Users, Settings, back, back and forward from ${project} ended on ${walked.href}, the tab ${JSON.stringify(walked.tab)}`);
-    // Its access on every project, which an owner grants and revokes on its Access tab.
+    // Its access, project by project: a grant on one of its environments, and none on every project to give.
     const access = `${account}/access`;
-    await admin.api.access.set(SERVICE, { '*/dev': 'viewer' });
+    await admin.api.access.set(SERVICE, { [DEV]: 'viewer' });
     try {
       const loaded = await chrome.load(new URL(access, deployment.origin).href, admin.browser.cookies());
       expect(loaded.errors.length === 0, `${access} reported errors in the browser`, loaded.errors.join('\n'));
       expect(loaded.tab === 'Access', `${access} shows the tab ${JSON.stringify(loaded.tab)}, not "Access"`);
-      for (const shown of ['dev in every project', 'Grant on every project']) {
-        expect(loaded.text.includes(shown), `${access}, to an owner, does not show "${shown}"`, loaded.text);
-      }
+      expect(loaded.text.includes('Viewer') && loaded.text.includes('Edit access'), `${access}, to an admin, does not show its grant and Edit access`, loaded.text);
+      expect(!loaded.text.includes('every project'), `${access} still offers a grant on every project`, loaded.text);
     } finally {
-      await admin.api.access.set(SERVICE, { '*/dev': null });
+      await admin.api.access.set(SERVICE, { [DEV]: null });
     }
     // The page an MCP client sends a person to: who asks, where the answer goes, and what it may do.
     const consent = await consentUrl(deployment);
@@ -162,7 +161,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
   } finally {
     await chrome.close();
   }
-  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, on its tab, no error from their scripts; a project's tabs by their links, back and forward; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button; the account's Connected apps tab, with this instance's MCP URL and Claude Code's command; the MCP consent page, a registered client shown as unverified`;
+  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, on its tab, no error from their scripts; a project's tabs by their links, back and forward; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev, project by project; the account's Connected apps tab, with this instance's MCP URL and Claude Code's command; the MCP consent page, a registered client shown as unverified`;
 }
 
 /**

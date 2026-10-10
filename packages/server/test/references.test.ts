@@ -83,12 +83,14 @@ test("a reader of the holder reads the source through it, live, without a grant 
   assert.equal((await ada.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL')!.reference?.canOpenSource, true);
 });
 
-test("a grant on prod in every project reads through a reference held in prod, as the holder's slug decides", async () => {
+test("an instance role scoped to prod reads through a reference held in prod, as the holder's slug decides", async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
-  // Bo's grant moves from billing/prod to prod in every project: still no grant in market.
-  await root.access.set(`user:${BO}`, { 'billing/prod': null, '*/prod': 'viewer' });
+  // Bo's grant moves from billing/prod to his instance role, on billing's prod: still nothing in market.
+  await root.access.set(`user:${BO}`, { 'billing/prod': null });
+  await root.members.add(`user:${BO}`, { role: 'developer', scope: { projects: { only: ['billing'] }, environments: { only: ['prod'] } } });
+  await assert.rejects(bo.secrets.reveal('market/prod/DATABASE_URL'), { status: 403 });
   assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v1' });
-  // Renamed, billing/prod is no longer prod: the grant on prod no longer reaches through it.
+  // Renamed, billing/prod is no longer prod: the role on prod no longer reaches through it.
   await root.environments.update('billing/prod', { slug: 'live' });
   await assert.rejects(bo.secrets.reveal('billing/live/DATABASE_URL'), { status: 403 });
 });

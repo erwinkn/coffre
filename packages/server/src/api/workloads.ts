@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { runsInstance } from '@coffre/core/access';
 import {
   BindingInvalid,
   canonicalClaims,
@@ -42,7 +43,7 @@ import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Asker, SigninService } from './signin.ts';
-import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound } from './errors.ts';
 
 export type WorkloadServiceDeps = {
@@ -183,7 +184,7 @@ export class WorkloadService {
   async listBindings(ctx: Asker, serviceId: string): Promise<BindingView[]> {
     const { principal } = ctx.caller;
     const self = principal.type === 'service' && principal.id === serviceId;
-    if (!self && !ctx.caller.isOwner) throw forbidden('only owners may see trust bindings');
+    if (!self && !runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see trust bindings');
     const member = `token:${serviceId}`;
     const standing = await memberStanding(this.#deps.db, member);
     if (standing === null) throw notFound('unknown service');
@@ -202,9 +203,7 @@ export class WorkloadService {
       throw error;
     }
     return withRefusals(this.#deps, async () => {
-      if (!ctx.caller.isOwner) {
-        throw new Refusal(forbidden('only owners may trust workloads'), denied(ctx, 'token.bind', 'requires_instance_owner', { metadata: details }));
-      }
+      requireInstance(ctx, 'token.bind', { metadata: details }, 'trust workloads');
       const standing = await this.#deps.vault.access(member);
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
@@ -277,10 +276,8 @@ export class WorkloadService {
     const member = `token:${serviceId}`;
     const metadata = { bindingId, principalType: 'service', principalId: serviceId };
     return withRefusals(this.#deps, async () => {
-      if (!ctx.caller.isOwner) {
-        // Logged as a denial, which no tombstone check counts.
-        throw new Refusal(forbidden('only owners may remove trust bindings'), denied(ctx, 'token.unbind', 'requires_instance_owner', { metadata }));
-      }
+      // Logged as a denial, which no tombstone check counts.
+      requireInstance(ctx, 'token.unbind', { metadata }, 'remove trust bindings');
       return audited(this.#deps, async (tx, log) => {
         const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
         const live = row !== null && row.revokedAt === null
@@ -301,7 +298,7 @@ export class WorkloadService {
    * A private one is not found, and its IDs are typed in.
    */
   async lookup(ctx: Asker, input: { github?: string; gitlab?: string; gitlabUrl?: string }): Promise<WorkloadIds> {
-    if (!ctx.caller.isOwner) throw forbidden('only owners may trust workloads');
+    if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may trust workloads');
     const ask = async (url: URL): Promise<Record<string, unknown>> => {
       try {
         const answer = await this.#deps.transport.json(url);

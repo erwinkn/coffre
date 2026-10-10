@@ -1,4 +1,4 @@
-import { grantKind, roleGrants } from '@coffre/core/access';
+import { runsInstance } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
 import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
@@ -15,6 +15,7 @@ import {
   resolvePath,
   type AuditFilter,
 } from '../db/queries.ts';
+import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
 import { forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
@@ -149,9 +150,11 @@ export type AuditQuery = {
 };
 
 /**
- * Newest first, both authors. Owners read everything; anyone else reads the
- * projects and environments where they hold `audit.read`, and nothing else:
- * an entry about no place, such as a member's removal, is owners' alone.
+ * Newest first, both authors. Those who run the instance read everything;
+ * anyone else reads the projects and environments where they hold
+ * `audit.read`, by a grant or their instance role, and nothing else: an
+ * entry about no place, such as a sign-in or a member's removal, is the
+ * instance's, and theirs alone.
  *
  * Without `detail`, the page says what it left out: the detail entries the
  * same filters match in the page's stretch of the log, by action. A page's
@@ -169,18 +172,14 @@ export async function listAudit(
     limit: query.limit,
   };
   const { caller } = ctx;
-  if (!caller.isOwner) {
-    const readable = caller.grants.filter((grant) => roleGrants(grant.role, 'audit.read'));
-    const projectIds = readable.flatMap((grant) => (grantKind(grant) === 'project' ? [grant.projectId!] : []));
-    const environmentIds = readable.flatMap((grant) => (grantKind(grant) === 'environment' ? [grant.environmentId!] : []));
-    // A grant on every project reads each project's log, or each environment's of its slug, as they are now.
-    const everywhere = readable.filter((grant) => grantKind(grant) === 'every-project');
-    if (everywhere.length > 0) {
+  if (!runsInstance(caller)) {
+    const projectIds: string[] = [];
+    const environmentIds: string[] = [];
+    // A project's whole log where they read all of it, else each environment's they read, as places are now.
+    if (canAnywhere(caller, 'audit.read')) {
       for (const project of await places(ctx.db)) {
-        if (everywhere.some((grant) => grant.environmentSlug === null)) projectIds.push(project.id);
-        for (const environment of project.environments) {
-          if (everywhere.some((grant) => grant.environmentSlug === environment.slug)) environmentIds.push(environment.id);
-        }
+        if (can(caller, 'audit.read', placeOf(project, null))) projectIds.push(project.id);
+        else environmentIds.push(...project.environments.filter((environment) => can(caller, 'audit.read', placeOf(project, environment))).map((environment) => environment.id));
       }
     }
     if (projectIds.length === 0 && environmentIds.length === 0) {
@@ -270,8 +269,8 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
 
 /** What the keys are checked against (`AuditKeys`): owners and root admins only, as verification is. */
 export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
-  if (!ctx.caller.isOwner) {
-    throw forbidden('only a root admin or instance owner may read what the keys are checked against');
+  if (!runsInstance(ctx.caller)) {
+    throw forbidden('only a root admin, or an admin or owner of the whole instance, may read what the keys are checked against');
   }
   const { current, checks } = await ctx.vault.keyChecks();
   return {
@@ -294,8 +293,8 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
  * the other. Owners only: a partial view of the chain cannot be verified.
  */
 export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
-  if (!ctx.caller.isOwner) {
-    throw forbidden('only a root admin or instance owner may verify the complete audit chain');
+  if (!runsInstance(ctx.caller)) {
+    throw forbidden('only a root admin, or an admin or owner of the whole instance, may verify the complete audit chain');
   }
   const failed = (author: 'app' | 'vault', failedAtSeq: number | bigint | null, reason: string, through: bigint | null) => ({
     ok: false as const,

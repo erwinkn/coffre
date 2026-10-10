@@ -134,7 +134,6 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: 'a project › Users, Service accounts › Add user, Add service account', in: 'pages/project-access.tsx', call: 'access.set' },
       { does: 'a grant › Revoke', in: 'components/grants.tsx', call: 'access.set' },
       { does: "a user's or service account's page › Edit access", in: 'components/principal-page.tsx', call: 'access.set' },
-      { does: "an owner, on a user's or service account's Access tab › Grant on every project, and its Revoke", in: 'components/every-project.tsx', call: 'access.set' },
     ],
   },
   'GET /sessions': { ui: [{ does: 'Account › Sessions', in: 'pages/account.tsx', call: 'sessions.list' }] },

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { runsInstance } from '@coffre/core/access';
 import {
   deriveKey,
   generateToken,
@@ -35,7 +36,7 @@ import {
   updateAuth,
 } from '../db/queries.ts';
 import type { PrincipalRef } from './caller.ts';
-import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember } from './paths.ts';
 
@@ -593,12 +594,7 @@ export class SigninService {
       if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principal === principalOf(principal);
-      if (!own && !ctx.caller.isOwner) {
-        throw new Refusal(
-          forbidden("only owners may revoke other people's credentials"),
-          denied(ctx, 'token.revoke', 'requires_instance_owner', { metadata: { targetCredentialId: credentialId } }),
-        );
-      }
+      if (!own) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
       const revoked = await updateAuth(
         tx,
         this.#deps.chainKey,
@@ -686,7 +682,7 @@ export class SigninService {
   async listServiceTokens(ctx: Asker, serviceId: string): Promise<ServiceTokenRow[]> {
     const { principal } = ctx.caller;
     const self = principal.type === 'service' && principal.id === serviceId;
-    if (!self && !ctx.caller.isOwner) throw forbidden('only owners may see service tokens');
+    if (!self && !runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see service tokens');
     const [service] = await members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date());
     return (service?.credentials ?? [])
       // Those its trust bindings issued are a CI run's for five minutes, not tokens anyone keeps.
@@ -718,12 +714,7 @@ export class SigninService {
     }
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
-      if (!ctx.caller.isOwner) {
-        throw new Refusal(
-          forbidden('only owners may issue service tokens'),
-          denied(ctx, 'token.create', 'requires_instance_owner', { metadata: details }),
-        );
-      }
+      requireInstance(ctx, 'token.create', { metadata: details }, 'issue service tokens');
       const service = { type: 'service' as const, id: serviceId };
       const standing = await this.#standing(service);
       const refusal = () => new Refusal(

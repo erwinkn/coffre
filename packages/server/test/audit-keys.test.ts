@@ -34,7 +34,7 @@ test("a root admin reads the app key's id, the vault key now, and its check, whi
 });
 
 test('an instance owner reads them too; a user, a project owner or a service is refused', async () => {
-  await root.members.add('user:owner@acme.example', { owner: true });
+  await root.members.add('user:owner@acme.example', { role: 'admin' });
   await root.members.add('user:lead@acme.example');
   await root.members.add('token:ci');
   await root.projects.create('market', { name: 'Market' });

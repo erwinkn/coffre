@@ -5,7 +5,7 @@
 // it to its connection's. Read, here: what is there, never a value. The
 // tools that change something are in changes.ts, each through an approval.
 import { apiMember, type CoffreClient } from '@coffre/client';
-import { PROJECT_ONLY_PERMISSIONS, type Permission } from '@coffre/core/access';
+import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
@@ -116,7 +116,7 @@ const READ_TOOLS: readonly Tool[] = [
     name: 'list_access',
     needs: 'grant.manage',
     title: 'List access',
-    description: "Who is a member, and their access. Given a place, a project or project/environment, only those who reach it, and through which grant.",
+    description: "Who is a member, their instance role and its scope, and their grants. Given a place, a project or project/environment, only those who reach it: by a grant there, or by their instance role.",
     scope: 'read',
     readOnly: true,
     idempotent: true,
@@ -128,7 +128,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'describe_member',
-    needs: 'owner',
+    needs: 'instance',
     title: 'Describe a member',
     description: "What a member holds: their grants, and what they have read. For a service account, also its tokens and the CI workloads it trusts.",
     scope: 'read',
@@ -200,14 +200,12 @@ export const TOOLS: readonly Tool[] = [...READ_TOOLS, SHOW_VALUE, REVEAL_VALUES,
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
 /**
- * Who could ever use a tool, by their roles: every member (`anyone`),
- * instance owners alone (`owner`), or whoever holds a permission somewhere.
- * Instance owners hold the project-only ones on every project, and read the
- * whole audit log, as the API lets them.
+ * Who could ever use a tool, by their roles: every member (`anyone`), those
+ * who run the instance (`instance`: an admin or owner with no scope, or a
+ * root admin), those who may make a project (`new-project`), or whoever
+ * holds a permission somewhere, by a grant or their instance role.
  */
-export type Need = 'anyone' | 'owner' | Permission;
-
-const OWNERS_HOLD: readonly Permission[] = [...PROJECT_ONLY_PERMISSIONS, 'audit.read'];
+export type Need = 'anyone' | 'instance' | 'new-project' | Permission;
 
 /**
  * Whether the person's roles, as they are now, let them use `tool`
@@ -218,8 +216,9 @@ const OWNERS_HOLD: readonly Permission[] = [...PROJECT_ONLY_PERMISSIONS, 'audit.
 export function usable(caller: Caller, tool: Tool): boolean {
   const { needs } = tool;
   if (needs === 'anyone') return true;
-  if (needs === 'owner') return caller.isOwner;
-  return canAnywhere(caller, needs) || (caller.isOwner && OWNERS_HOLD.includes(needs));
+  if (needs === 'instance') return runsInstance(caller);
+  if (needs === 'new-project') return makesProjects(caller);
+  return canAnywhere(caller, needs);
 }
 
 /** A tool as `tools/list` describes it, in either era. */

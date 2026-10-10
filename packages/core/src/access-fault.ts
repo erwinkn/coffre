@@ -1,4 +1,4 @@
-import { everyProjectPath, grantKind, type GrantPlace } from './access.ts';
+import type { GrantPlace } from './access.ts';
 
 /**
  * Why the vault's members and grants do not follow from its log, as facts
@@ -25,12 +25,13 @@ export type AccessFault =
    */
   | { kind: 'tampered-member'; principal: string; why: 'mac' | 'stale' };
 
-export type FaultGrant = GrantPlace & { principal: string; role: string };
+/** A grant a fault names; `environmentSlug` only on a grant on every project of 0.4, which names no project. */
+export type FaultGrant = GrantPlace & { environmentSlug?: string | null; principal: string; role: string };
 
 /** How to name a principal (`user:ada@…`) and a place; ids by default. */
 export type FaultNames = {
   principal?: (principal: string) => string;
-  /** Asked only of a project's or an environment's place: a grant on every project is named by its path. */
+  /** Asked only of a project's or an environment's place: a grant on every project of 0.4 is named by its path. */
   place?: (projectId: string, environmentId: string | null) => string;
 };
 
@@ -43,7 +44,8 @@ export function describeAccessFault(fault: AccessFault, names: FaultNames = {}):
       environmentId === null ? projectId : `${projectId}/${environmentId}`);
   const grant = (held: FaultGrant) => {
     const { principal, projectId, environmentId, environmentSlug, role } = held;
-    const place = grantKind(held) === 'every-project' ? everyProjectPath(environmentSlug) : where(projectId ?? 'no project', environmentId);
+    const everyProject = projectId === null && environmentId === null;
+    const place = everyProject ? (environmentSlug == null ? '*' : `*/${environmentSlug}`) : where(projectId ?? 'no project', environmentId);
     return `${who(principal)} as ${role} on ${place}`;
   };
   switch (fault.kind) {

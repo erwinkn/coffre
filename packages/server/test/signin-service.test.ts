@@ -73,7 +73,7 @@ beforeEach(async () => {
   deps.signin = signin;
   // Who is in is the vault's to say, and its member rows are the directory.
   for (const id of [LEAD, DEV, GONE, SERVICE, RETIRED]) {
-    assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: member(id), owner: id === LEAD })).ok, true);
+    assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: member(id), ...(id === LEAD ? { role: 'admin' as const } : {}) })).ok, true);
   }
   await deactivate(GONE);
   await deactivate(RETIRED);
@@ -594,8 +594,8 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
   assert.deepEqual(
     rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason ?? null]),
     [
-      ['token.revoke', 'deny', DEV, 'requires_instance_owner'],
-      ['token.revoke', 'deny', DEV, 'requires_instance_owner'],
+      ['token.revoke', 'deny', DEV, 'requires_instance_admin'],
+      ['token.revoke', 'deny', DEV, 'requires_instance_admin'],
       ['token.revoke', 'allow', DEV, null],
       ['token.revoke', 'deny', DEV, 'unknown_credential'],
       ['token.revoke', 'deny', DEV, 'unknown_credential'],
@@ -845,8 +845,8 @@ test('only owners issue service tokens, for active services, for 1 to 366 whole 
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
-    ['token.create', 'deny', DEV, 'requires_instance_owner'],
-    ['token.create', 'deny', SERVICE, 'requires_instance_owner'],
+    ['token.create', 'deny', DEV, 'requires_instance_admin'],
+    ['token.create', 'deny', SERVICE, 'requires_instance_admin'],
     ['token.create', 'deny', LEAD, 'unknown_principal'],
     ['token.create', 'deny', LEAD, 'unknown_principal'],
     ['token.create', 'deny', LEAD, 'unknown_principal'],

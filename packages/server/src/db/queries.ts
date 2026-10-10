@@ -1,10 +1,10 @@
-import type { GrantPlace } from '@coffre/core/access';
+import type { GrantPlace, InstanceRole, Scope } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { readGrants } from '@coffre/db/grants';
+import { readGrants, storedRole } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -352,7 +352,7 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
   keys: number;
   versions: number;
   grants: DoomedGrant[];
-  /** Members, not owners, whose every live grant is among `grants`. */
+  /** Members with no instance role, whose every live grant is among `grants`. */
   stranded: string[];
 }> {
   const { secrets, secretVersions, vaultGrants, vaultMembers, environments } = tablesOf(db);
@@ -373,6 +373,8 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
       role: vaultGrants.role,
       expiresAt: vaultGrants.expiresAt,
       owner: vaultMembers.owner,
+      instanceRole: vaultMembers.role,
+      scope: vaultMembers.scope,
     })
       .from(vaultGrants)
       .innerJoin(vaultMembers, eq(vaultMembers.principal, vaultGrants.principal))
@@ -381,11 +383,13 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
   ]);
   const doomed = (grant: (typeof held)[number]) =>
     place.environmentId === null ? grant.projectId === place.projectId : grant.environmentId === place.environmentId;
-  const grants = held.filter(doomed).map(({ owner: _, ...grant }) => grant);
+  const grants = held.filter(doomed).map(({ owner: _, instanceRole: _role, scope: _scope, ...grant }) => grant);
   const now = Date.now();
+  // An instance role that reaches anything keeps them in, wherever its scope does.
+  const roleless = (grant: (typeof held)[number]) => storedRole({ owner: grant.owner, role: grant.instanceRole, scope: grant.scope }).role === 'member';
   const stranded = [...new Set(grants.map((grant) => grant.principal))].filter((principal) =>
     held.every((grant) => grant.principal !== principal
-      || (!grant.owner && (doomed(grant) || (grant.expiresAt !== null && grant.expiresAt <= now)))));
+      || (roleless(grant) && (doomed(grant) || (grant.expiresAt !== null && grant.expiresAt <= now)))));
   return { environments: going, keys: Number(keys.n), versions: Number(versions.n), grants, stranded };
 }
 
@@ -468,38 +472,11 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
 }
 
 /**
- * A grant as `vault_grants` holds it: on a project, one of its environments
- * (with its project), every project (`projectId` null), or one environment
- * slug in every project.
+ * A grant as `vault_grants` holds it: on a project, or one of its
+ * environments (with its project). A grant on every project of 0.4, which
+ * names neither until the vault replaces it, reaches nothing (`grantKind`).
  */
 export type StoredGrant = GrantPlace & { role: string; expiresAt: number | null };
-
-/** A live grant on every project, of an active member: `environmentSlug` is the one slug it covers, or null for all. */
-export type EveryProjectGrant = { principal: string; environmentSlug: string | null; role: string; expiresAt: number | null };
-
-/**
- * The live grants on every project that active members hold, as stored,
- * but those of members the vault has found changed around it, as lists
- * leave them out: who reaches a project or an environment the moment it is
- * made. A display, as lists are; the vault decides.
- */
-export async function everyProjectGrants(db: Queryable, now: Date): Promise<EveryProjectGrant[]> {
-  const { vaultMembers } = tablesOf(db);
-  const grants = await readGrants(db, { everyProject: true, liveAt: now.getTime() });
-  if (grants.length === 0) return [];
-  const [rows, tampered] = await Promise.all([
-    db
-      .select({ principal: vaultMembers.principal })
-      .from(vaultMembers)
-      .where(and(inArray(vaultMembers.principal, [...new Set(grants.map((grant) => grant.principal))]), eq(vaultMembers.status, 'active'))),
-    tamperedMembers(db),
-  ]);
-  const active = new Set(rows.map((row) => row.principal));
-  return grants
-    .filter((grant) => active.has(grant.principal) && !tampered.has(grant.principal))
-    .map(({ principal, environmentSlug, role, expiresAt }) => ({ principal, environmentSlug, role, expiresAt }))
-    .sort((a, b) => compareText(a.principal, b.principal) || compareText(a.environmentSlug ?? '', b.environmentSlug ?? ''));
-}
 
 const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -509,7 +486,9 @@ export type MemberRow = {
   createdAt: Date;
   /** As the vault last wrote their row. */
   status: 'active' | 'removed';
-  owner: boolean;
+  /** Their instance role and its scope, projects by id (`storedRole`). */
+  role: InstanceRole;
+  scope: Scope;
   generation: number;
   statusChangedAt: Date;
   statusChangedBy: string;
@@ -629,6 +608,8 @@ export async function members(
         createdAt: vaultMembers.createdAt,
         status: vaultMembers.status,
         owner: vaultMembers.owner,
+        role: vaultMembers.role,
+        scope: vaultMembers.scope,
         generation: vaultMembers.generation,
         statusChangedAt: vaultMembers.statusChangedAt,
         statusChangedBy: vaultMembers.statusChangedBy,
@@ -651,13 +632,13 @@ export async function members(
     ...memberOf(row.principal),
     createdAt: new Date(row.createdAt),
     status: row.status as MemberRow['status'],
-    owner: row.owner,
+    ...storedRole(row),
     generation: row.generation,
     statusChangedAt: new Date(row.statusChangedAt),
     statusChangedBy: row.statusChangedBy,
     grants: granted
       .filter((grant) => grant.principal === row.principal)
-      .map(({ projectId, environmentId, environmentSlug, role, expiresAt }) => ({ projectId, environmentId, environmentSlug, role, expiresAt })),
+      .map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
     tampered: tampered.has(row.principal),
     credentials: validCredentials.filter((credential) => credential.principal === row.principal
       && credential.revokedAt === null && credential.expiresAt > now)

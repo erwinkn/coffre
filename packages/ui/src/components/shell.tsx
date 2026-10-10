@@ -8,8 +8,9 @@ import {
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog } from '@base-ui/react/dialog';
 import { Menu } from '@base-ui/react/menu';
+import { INSTANCE_ROLES } from '@coffre/core/access';
 import { PROJECT_PAGES } from '@coffre/core/pages';
-import type { ProjectSummary } from '../shared/models';
+import type { Me, ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { useMounted } from '../lib/mounted';
@@ -37,7 +38,7 @@ import {
 } from './icons';
 
 type Principal = { type: 'user' | 'service'; id: string } | null;
-type InstanceRole = 'user' | 'owner' | 'root-admin' | null;
+type InstanceRole = Me['instanceRole'] | null;
 
 type ShellProps = {
   projects: ProjectSummary[];
@@ -65,8 +66,7 @@ const CURRENT = { 'aria-current': 'page' } as const;
 function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
   if (principal?.type === 'service') return 'Token';
   if (instanceRole === 'root-admin') return 'Root admin';
-  if (instanceRole === 'owner') return 'Owner';
-  return 'Member';
+  return INSTANCE_ROLES[instanceRole ?? 'member'].name;
 }
 
 /** The product's mark and name, for the pages you see before signing in. */

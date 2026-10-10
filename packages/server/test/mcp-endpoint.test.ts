@@ -203,7 +203,7 @@ test("each person's tools/list is what their roles reach somewhere, whatever the
   const root = clientFor(deps, ROOT);
   await root.members.add('user:access@acme.example');
   await root.access.set('user:access@acme.example', { market: 'access-manager' });
-  await root.members.add('user:owner@acme.example', { owner: true });
+  await root.members.add('user:owner@acme.example', { role: 'admin' });
   await root.members.add('user:lead@acme.example');
   await root.access.set('user:lead@acme.example', { billing: 'owner' });
 
@@ -250,7 +250,7 @@ test("a role granted shows in the person's next list, and one taken is gone from
   const { status, body } = await callRaw(token, 'describe_member', { member: `user:${ROOT}` });
   assert.equal(status, 200);
   assert.equal(body.result!.isError, true);
-  assert.match(body.result!.content[0]!.text!, /only owners may see what someone has access to/);
+  assert.match(body.result!.content[0]!.text!, /only admins and owners of the whole instance may see what someone has access to/);
   const listed = await callRaw(token, 'list_secrets', { environment: 'market/prod' });
   assert.equal(listed.body.result!.isError, true, 'nor does a role taken leave anything behind');
 });

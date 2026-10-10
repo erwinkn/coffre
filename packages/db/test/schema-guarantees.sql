@@ -246,6 +246,16 @@ $$;
 
 DO $$
 BEGIN
+    UPDATE vault_members SET role = 'owner', scope = NULL;
+    RAISE EXCEPTION 'FAIL: coffre_app was able to change an instance role';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: coffre_app cannot change an instance role';
+END
+$$;
+
+DO $$
+BEGIN
     INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by)
     VALUES ('user:x@acme.example', '11111111-1111-1111-1111-111111111111', 'owner', 0, 'user:x@acme.example');
     RAISE EXCEPTION 'FAIL: coffre_app was able to grant';

@@ -145,7 +145,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
   const [deleting, setDeleting] = useState(false);
   const coffre = useCoffre();
   const router = useRouter();
-  const { instanceRole } = useShell();
+  const { capabilities } = useShell();
   const { pending, error, run } = useAction();
   const isArchived = project.archivedAt !== null;
   // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
@@ -153,8 +153,8 @@ function DangerZone({ project }: { project: ProjectSummary }) {
   const { data: lent } = useQuery({ ...queries.references(coffre, project.slug), enabled: archiving });
   const blockers = archiving && lent?.ok === true ? archiveBlockers(project.slug, lent.references) : [];
   const asking = archiving && lent === undefined;
-  // Deleting is for instance owners, and only once the project is archived.
-  const canDelete = isArchived && instanceRole !== 'user';
+  // Deleting is for those who run the instance, and only once the project is archived.
+  const canDelete = isArchived && capabilities.runsInstance;
 
   return (
     <Card labelledBy="danger-zone" title="Danger zone" tone="danger">

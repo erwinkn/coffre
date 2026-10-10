@@ -30,7 +30,6 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
-  InheritedGrant,
   ListedReference,
   Me,
   Member,
