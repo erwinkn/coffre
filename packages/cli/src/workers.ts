@@ -436,7 +436,7 @@ export class Cloudflare {
    * a new password, and stops the run when it does not, Hyperdrive needing
    * a password setup can't read.
    */
-  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<Outcome> {
+  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[] }> {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
     const details: string[] = [];

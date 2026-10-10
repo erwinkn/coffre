@@ -12,7 +12,9 @@ send one request per project or account at once, and some of them failed
 as "coffre is unavailable". `coffre setup` now reads the database's
 `max_connections`, less what it reserves, and caps each config at half of
 what is left after 3 for the administrator (at most 20), so that a burst
-waits in Hyperdrive instead. A run on an existing deployment lowers a
+waits in Hyperdrive instead. It says how it chose, as in "max_connections
+25, 3 reserved, 3 kept for the administrator and migrations: 9 each", and
+refuses a database too small for Hyperdrive's 5 per config. A run on an existing deployment lowers a
 higher limit. To fix one now, without setup:
 `wrangler hyperdrive update <id> --origin-connection-limit=<n>` for each
 config.

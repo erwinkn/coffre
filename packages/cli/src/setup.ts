@@ -82,39 +82,56 @@ const HELD_BACK = 3;
 /** The fewest connections Hyperdrive takes per config, and the most Free allows, which is plenty for coffre. */
 const HYPERDRIVE_CONNECTIONS = { fewest: 5, most: 20 } as const;
 
-/**
- * The most connections each of the two Hyperdrive configs may open, out of
- * the `budget` the database lets its logins open (`connectionBudget`):
- * an even share, less what is held back. Hyperdrive opens connections up to
- * its limit before it queues a query, and left at Cloudflare's default, 60
- * on Paid, the two configs outgrow a small database, such as PlanetScale's
- * smallest: it refuses the connection a burst of requests needs ("remaining
- * connection slots are reserved", 53300), and they fail. Under the limit, a
- * query waits its turn instead, which a query holding a connection only
- * while it runs keeps short. Null when the budget is short of the fewest.
- */
-export function hyperdriveLimit(budget: number): number | null {
-  const share = Math.floor((budget - HELD_BACK) / 2);
-  return share < HYPERDRIVE_CONNECTIONS.fewest ? null : Math.min(share, HYPERDRIVE_CONNECTIONS.most);
+/** What the database lets in: `max_connections`, and the slots it reserves for superusers and `pg_use_reserved_connections`. */
+export type Connections = { max: number; reserved: number };
+
+/** Each config's even share of what the database lets coffre's logins open, less what is held back. */
+function share({ max, reserved }: Connections): number {
+  return Math.floor((max - reserved - HELD_BACK) / 2);
 }
 
-/** Why a database with `budget` connections can have no Hyperdrive config for each login. */
-export function tooFewConnections(budget: number): string {
-  const needed = 2 * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK;
+/**
+ * The most connections each of the two Hyperdrive configs may open: an even
+ * share of what the database lets its logins open, less what is held back.
+ * Hyperdrive opens connections up to its limit before it queues a query,
+ * and left at Cloudflare's default, 60 on Paid, the two configs outgrow a
+ * small database, such as PlanetScale's smallest: it refuses the
+ * connection a burst of requests needs ("remaining connection slots are
+ * reserved", 53300), and they fail. Under the limit, a query waits its turn
+ * instead, which a query holding a connection only while it runs keeps
+ * short. Null when the share is short of what Hyperdrive takes.
+ */
+export function hyperdriveLimit(connections: Connections): number | null {
+  const each = share(connections);
+  return each < HYPERDRIVE_CONNECTIONS.fewest ? null : Math.min(each, HYPERDRIVE_CONNECTIONS.most);
+}
+
+/** How the limit was chosen: `max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each`. */
+export function limitReason(connections: Connections, limit: number): string {
+  const each = share(connections);
   return (
-    `the database lets its logins open ${budget} connections, and Hyperdrive takes at least ${HYPERDRIVE_CONNECTIONS.fewest} for each of coffre's two configs, ` +
-    `with ${HELD_BACK} left for the administrator: raise its max_connections by ${needed - budget}, or move to a larger plan`
+    `max_connections ${connections.max}, ${connections.reserved} reserved, ${HELD_BACK} kept for the administrator and migrations: ` +
+    `${each} each${each > limit ? `, capped at ${limit}` : ''}`
   );
 }
 
-/** How many connections Postgres lets anyone but a superuser open: max_connections, less the slots it reserves. */
-async function connectionBudget(client: pg.Client): Promise<number> {
-  const [row] = (await client.query<{ budget: number }>(
-    `SELECT current_setting('max_connections')::int
-       - current_setting('superuser_reserved_connections')::int
-       - coalesce(current_setting('reserved_connections', true), '0')::int AS budget`,
+/** Why a database letting in `connections` can have no Hyperdrive config for each login. */
+export function tooFewConnections(connections: Connections): string {
+  const needed = 2 * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK + connections.reserved;
+  return (
+    `the database's max_connections is ${connections.max}, ${connections.reserved} of them reserved; Hyperdrive takes at least ${HYPERDRIVE_CONNECTIONS.fewest} ` +
+    `for each of coffre's two configs, and setup keeps ${HELD_BACK} for the administrator and migrations: raise max_connections to ${needed} or more, or move to a larger plan`
+  );
+}
+
+/** What the database lets in, as the administrator reads it; `reserved_connections` is Postgres 16's, and none before. */
+async function connectionsOf(client: pg.Client): Promise<Connections> {
+  const [row] = (await client.query<Connections>(
+    `SELECT current_setting('max_connections')::int AS max,
+            current_setting('superuser_reserved_connections')::int
+              + coalesce(current_setting('reserved_connections', true), '0')::int AS reserved`,
   )).rows;
-  return row!.budget;
+  return row!;
 }
 
 /**
@@ -321,11 +338,11 @@ async function run(
   const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
-  let budget = 0;
+  let connections: Connections = { max: 0, reserved: 0 };
   try {
     await step(0, async () => {
       await client.connect();
-      budget = await connectionBudget(client);
+      connections = await connectionsOf(client);
       // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
       cloudflare?.checkKeys(await holdsData(client));
       return `Connected to ${where} as ${user}`;
@@ -391,17 +408,18 @@ async function run(
     });
     if (cloudflare !== null) {
       await step(5, async () => {
-        const limit = hyperdriveLimit(budget);
-        if (limit === null) throw new SetupError(tooFewConnections(budget));
-        return cloudflare.hyperdrive(logins, limit);
+        const limit = hyperdriveLimit(connections);
+        if (limit === null) throw new SetupError(tooFewConnections(connections));
+        const { text, details } = await cloudflare.hyperdrive(logins, limit);
+        return { text, details: [...details, limitReason(connections, limit)] };
       });
       await step(6, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
       await step(7, async () => cloudflare.write());
-      return { keys: null, ...logins, version, hyperdriveLimit: hyperdriveLimit(budget) };
+      return { keys: null, ...logins, version, hyperdriveLimit: hyperdriveLimit(connections) };
     }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
     const fresh = !used && (logins.app.url !== null || logins.vault.url !== null);
-    return { keys: fresh ? generateKeys() : null, ...logins, version, hyperdriveLimit: hyperdriveLimit(budget) };
+    return { keys: fresh ? generateKeys() : null, ...logins, version, hyperdriveLimit: hyperdriveLimit(connections) };
   } finally {
     steps.end();
     await client.end().catch(() => {});
@@ -581,6 +599,9 @@ export function setupScreen(result: SetupResult): Screen {
       : [
           `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
           ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
+          ...(result.hyperdriveLimit === null
+            ? []
+            : [`Each opens at most ${result.hyperdriveLimit} connections to the database, so that both fit under its max_connections, with some left for migrations.`]),
           'Or make them in the Cloudflare dashboard, under Hyperdrive.',
           ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
         ]),

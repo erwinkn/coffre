@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
-import { asJson, hyperdriveCommand, hyperdriveLimit, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, tooFewConnections, type SetupResult } from '../src/setup.ts';
+import { asJson, hyperdriveCommand, hyperdriveLimit, limitReason, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, tooFewConnections, type SetupResult } from '../src/setup.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster } from './cluster.ts';
 import { fakeOpener, fakeWrangler } from './fakes.ts';
@@ -158,13 +158,19 @@ test("each Hyperdrive config opens at most an even share of the database's conne
   // PlanetScale's smallest cluster: max_connections 25, 3 kept for superusers.
   // Left at Cloudflare's default, 60 each, both configs opened more than its
   // 22, and a page's parallel reads failed with 53300 (T78).
-  assert.equal(hyperdriveLimit(22), 9);
-  // Postgres's default, 100 less 3: no more than Free allows, which a query that holds a connection only while it runs never needs.
-  assert.equal(hyperdriveLimit(97), 20);
-  // The fewest Hyperdrive takes is 5 per config.
-  assert.equal(hyperdriveLimit(13), 5);
-  assert.equal(hyperdriveLimit(12), null);
-  assert.match(tooFewConnections(12), /lets its logins open 12 connections.*at least 5 for each of coffre's two configs.*raise its max_connections by 1,/);
+  const small = { max: 25, reserved: 3 };
+  assert.equal(hyperdriveLimit(small), 9);
+  assert.equal(limitReason(small, 9), 'max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each');
+  // Postgres's default: no more than Free allows, which a query that holds a connection only while it runs never needs.
+  const standard = { max: 100, reserved: 3 };
+  assert.equal(hyperdriveLimit(standard), 20);
+  assert.equal(limitReason(standard, 20), 'max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20');
+  // The fewest Hyperdrive takes is 5 per config: below it, setup refuses rather than write a smaller limit.
+  assert.equal(hyperdriveLimit({ max: 16, reserved: 3 }), 5);
+  assert.equal(hyperdriveLimit({ max: 15, reserved: 3 }), null);
+  assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's two configs.*raise max_connections to 16 or more/);
+  // The guide on setup's screen says what the commands' limit is for.
+  assert.ok(setupScreen(made).guide[0]!.lines.includes('Each opens at most 9 connections to the database, so that both fit under its max_connections, with some left for migrations.'));
 });
 
 test('a Hyperdrive command reads the URL without echo, and hands wrangler it without its parameters', { skip: spawnSync('bash', ['-c', 'true']).status !== 0 && 'needs bash' }, () => {
