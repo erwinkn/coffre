@@ -29,7 +29,7 @@ import { type Screen, showSecrets, type Value } from './secrets.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
-import { Cloudflare, deployedSummary, Later } from './workers.ts';
+import { Cloudflare, type Database, deployedSummary, Later } from './workers.ts';
 
 /** The two runtime roles, as the migration names them, and the Hyperdrive config each gets on Workers. */
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime' } as const;
@@ -138,8 +138,8 @@ export async function setup(args: string[]): Promise<void> {
       command: 'coffre setup',
     });
     secrets.push(...typed);
-    // A Workers deployment whose database can't hold both Hyperdrive configs stops here, before setup asks about Cloudflare.
-    const connections = kind === 'workers' ? await roomForHyperdrive(administrator, out, clean) : null;
+    // What the database refuses, it refuses here, before setup asks about Cloudflare.
+    const database = await inspect(administrator, kind === 'workers', out, clean);
     let cloudflare: Cloudflare | null = null;
     if (offers && kind === 'workers') {
       const choice = await select(terminal.keys, out, s, 'Set Cloudflare up too?', [
@@ -149,10 +149,12 @@ export async function setup(args: string[]): Promise<void> {
       if (choice === 0) {
         // Cloudflare goes through the deployment's own wrangler, which a fresh clone has yet to install.
         await installFirst(dir, out, clean);
-        cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
+        cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, asRead(administrator, database.used, database.existing), {
+          resetPasswords: options.resetPasswords,
+        });
       }
     }
-    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, connections }, secrets, clean);
+    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, connections: database.connections }, secrets, clean);
     if (cloudflare !== null) {
       if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
       await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
@@ -241,30 +243,54 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
   return kind;
 }
 
+/** The database as setup finds it: what it lets in, whether it holds data, and which runtime logins exist. */
+type Inspected = { connections: Connections; used: boolean; existing: ReadonlySet<string> };
+
 /**
- * What the database lets in, read before anything that changes it or
- * Cloudflare: a Workers deployment needs room for both Hyperdrive configs.
- * Without it, setup stops here, before Cloudflare's questions, its domain
- * added or a custom hostname made, and before any login gets a new password
- * its config would never have.
+ * The database, read before anything changes it or Cloudflare: the
+ * administrator connects, and may create roles; a Workers deployment's
+ * has room for both Hyperdrive configs. Each refusal comes before
+ * Cloudflare's questions, its domain added or a custom hostname made, and
+ * before any login gets a new password its config would never have.
  */
-async function roomForHyperdrive(administrator: URL, out: Output, clean: (error: unknown) => string): Promise<Connections> {
-  const steps = new Steps(out, [`Check ${whereOf(administrator)} has room for Hyperdrive`], () => null, clean);
+async function inspect(administrator: URL, workers: boolean, out: Output, clean: (error: unknown) => string): Promise<Inspected> {
+  const user = decodeURIComponent(administrator.username);
+  const where = whereOf(administrator);
+  const steps = new Steps(
+    out,
+    [`Connect to ${where}`, `Check ${user} can create roles`, ...(workers ? [`Check ${where} has room for Hyperdrive`] : [])],
+    () => null,
+    clean,
+  );
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
-  let connections!: Connections;
+  let inspected!: Inspected;
   try {
     await steps.run(0, async () => {
       await client.connect();
-      connections = await connectionsOf(client);
-      const limit = hyperdriveLimit(connections);
-      if (limit === null) throw new SetupError(tooFewConnections(connections));
-      return `${whereOf(administrator)} has room for both Hyperdrive configs, with a connection limit of ${limit} each`;
+      inspected = { connections: await connectionsOf(client), used: await holdsData(client), existing: await existingLogins(client) };
+      return `Connected to ${where} as ${user}`;
     });
+    await steps.run(1, async () => {
+      const [self] = (await client.query<{ rolsuper: boolean; rolcreaterole: boolean }>(
+        'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user',
+      )).rows;
+      if (!self?.rolsuper && !self?.rolcreaterole) {
+        throw new SetupError(`${user} cannot create roles: connect as the database's administrator, which has CREATEROLE`);
+      }
+      return `${user} can create roles`;
+    });
+    if (workers) {
+      await steps.run(2, async () => {
+        const limit = hyperdriveLimit(inspected.connections);
+        if (limit === null) throw new SetupError(tooFewConnections(inspected.connections));
+        return `${where} has room for both Hyperdrive configs, with a connection limit of ${limit} each`;
+      });
+    }
   } finally {
     steps.end();
     await client.end().catch(() => {});
   }
-  return connections;
+  return inspected;
 }
 
 /** The database setup was given, as its steps name it: `db.example.com/coffre`. */
@@ -290,19 +316,16 @@ async function run(
   administrator: URL,
   out: Output,
   questions: () => Keyboard | null,
-  options: { resetPasswords: boolean; cloudflare: Cloudflare | null; connections: Connections | null },
+  options: { resetPasswords: boolean; cloudflare: Cloudflare | null; connections: Connections },
   secrets: string[],
   clean: (error: unknown) => string,
 ): Promise<SetupResult> {
-  const { cloudflare } = options;
+  const { cloudflare, connections } = options;
   const user = decodeURIComponent(administrator.username);
-  const where = whereOf(administrator);
   const version = cliVersion();
   const steps = new Steps(
     out,
     [
-      `Connect to ${where}`,
-      `Check ${user} can create roles`,
       'Make the two logins',
       'Migrate the database',
       "Check each login's rights",
@@ -314,28 +337,11 @@ async function run(
   const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
-  let connections!: Connections;
   try {
-    await step(0, async () => {
-      await client.connect();
-      // A Workers deployment's were read before Cloudflare was asked (`roomForHyperdrive`).
-      connections = options.connections ?? (await connectionsOf(client));
-      // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
-      cloudflare?.checkKeys(await holdsData(client));
-      return `Connected to ${where} as ${user}`;
-    });
-    await step(1, async () => {
-      const [self] = (await client.query<{ rolsuper: boolean; rolcreaterole: boolean }>(
-        'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user',
-      )).rows;
-      if (!self?.rolsuper && !self?.rolcreaterole) {
-        throw new SetupError(`${user} cannot create roles: connect as the database's administrator, which has CREATEROLE`);
-      }
-      return `${user} can create roles`;
-    });
     let logins!: Record<Component, Login>;
-    await step(2, async (progress) => {
-      // On Cloudflare, a login gets a new password when its Hyperdrive config needs one: the database keeps only its verifier.
+    await step(0, async (progress) => {
+      await client.connect();
+      // On Cloudflare, a login gets a new password when its Hyperdrive config needs one, as decided before Cloudflare changed (`newPasswords`).
       const reset =
         cloudflare === null
           ? async (existing: ReadonlySet<string>) => {
@@ -346,19 +352,14 @@ async function run(
               return () => all;
             }
           : async (existing: ReadonlySet<string>) => {
-              const resets = {} as Record<Component, boolean>;
-              for (const component of ['app', 'vault'] as const) {
-                const login = loginFor(ROLES[component], user);
-                resets[component] = options.resetPasswords || cloudflare.needsPassword(component, administrator, login);
-                // Both checked before either changes: another deployment's login is never given a new password.
-                if (resets[component] && existing.has(ROLES[component])) cloudflare.refuseShared(component, administrator, login);
-              }
-              return (component: Component) => resets[component];
+              // Cloudflare's refusals again, against the database as it is now: it may have changed while setup asked its questions.
+              cloudflare.recheck(asRead(administrator, await holdsData(client), existing));
+              return (component: Component) => cloudflare.newPasswords[component];
             };
       logins = await provision(client, administrator, user, reset, secrets);
       return described(logins);
     });
-    await step(3, async (progress) => {
+    await step(1, async (progress) => {
       let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
       await migrateDatabase(administrator.href, (planned) => {
         plan = planned;
@@ -371,7 +372,7 @@ async function run(
         : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`;
     });
     let used = false;
-    await step(4, async () => {
+    await step(2, async () => {
       const details: string[] = [];
       for (const component of ['app', 'vault'] as const) {
         const login = logins[component];
@@ -384,14 +385,14 @@ async function run(
       return { text: 'Each login holds only its rights', details };
     });
     if (cloudflare !== null) {
-      await step(5, async () => {
-        // Checked before Cloudflare was asked, and before any of this run's changes.
+      await step(3, async () => {
+        // Checked before Cloudflare was asked, and before any of this run's changes (`inspect`).
         const limit = hyperdriveLimit(connections)!;
         const { text, details } = await cloudflare.hyperdrive(logins, limit);
         return { text, details: [...details, limitReason(connections, limit)] };
       });
-      await step(6, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
-      await step(7, async () => cloudflare.write());
+      await step(4, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
+      await step(5, async () => cloudflare.write());
       return { keys: null, ...logins, version, connections };
     }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
@@ -410,6 +411,19 @@ async function holdsData(client: pg.Client): Promise<boolean> {
   return (await client.query<{ used: boolean }>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used')).rows[0]!.used;
 }
 
+/** The database as Cloudflare's checks take it (`Database`). */
+function asRead(administrator: URL, used: boolean, existing: ReadonlySet<string>): Database {
+  const user = decodeURIComponent(administrator.username);
+  const login = (component: Component) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
+  return { administrator, used, logins: { app: login('app'), vault: login('vault') } };
+}
+
+/** The runtime logins that exist, by role. */
+async function existingLogins(client: pg.Client): Promise<Set<string>> {
+  const { rows } = await client.query<{ rolname: string }>('SELECT rolname FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)]);
+  return new Set(rows.map(({ rolname }) => rolname));
+}
+
 /**
  * Each runtime login, created with a fresh password, or, if it exists, its
  * password set again when `reset`, given the logins that exist, says so;
@@ -422,11 +436,7 @@ async function provision(
   reset: (existing: ReadonlySet<string>) => Promise<(component: Component) => boolean>,
   secrets: string[],
 ): Promise<Record<Component, Login>> {
-  const existing = new Set(
-    (await client.query<{ rolname: string }>('SELECT rolname FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)])).rows.map(
-      (row) => row.rolname,
-    ),
-  );
+  const existing = await existingLogins(client);
   const resets = await reset(existing);
   const logins = {} as Record<Component, Login>;
   for (const component of ['app', 'vault'] as const) {
