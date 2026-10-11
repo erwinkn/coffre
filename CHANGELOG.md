@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+**`coffre update` moves a deployment with the new release's pages.** The
+deployment's own CLI, `pnpm exec coffre update`, belongs to the release
+it moves from, and it used that release's list of pages. So 0.4's CLI,
+moving a deployment to 0.5.0, left out the new `users.$user.apps.tsx`,
+and running it again added nothing, since the deployment was at 0.5.0 by
+then. Now a CLI of an earlier release first asks the new release's own
+CLI, `npx @coffre/cli@<release> update --plan <dir>`, which pages it adds
+and retires and which versions its Start app and pnpm take, and changes
+nothing if that fails. CLIs before 0.5.1 don't ask, so to move a
+deployment from 0.5.0 or earlier, run the new release's CLI: `npx
+@coffre/cli@latest update`. A deployment that 0.4's CLI moved to 0.5.0
+still lacks the page: copy `app/src/routes/_coffre/users.$user.apps.tsx`
+from `node_modules/@coffre/cli/dist/templates/<workers or node>/`, then
+build, which writes the route tree.
+
+**`coffre migrate` names the role that owns the tables.** A login that
+neither owns coffre's tables nor is a member of the role that does used
+to get as far as Postgres's "permission denied for schema drizzle". Now
+it stops before asking, with the owner and the fix: "coffre's tables are
+owned by X, and this login, Y, is neither it nor a member of it: migrate
+with X's connection string, or, as a role that administers it, run GRANT
+X TO Y". With nothing to apply, it only warns, so the login can be fixed
+before the next migration needs it. `coffre setup` and `coffre-server
+migrate` refuse the same way.
+
+**CI runs `pnpm test:compat` again**, for both kinds: the newest release,
+now 0.5.0, must stay conformant on each change's schema.
+
 ## 0.5.0 (2026-10-11)
 
 **Upgrading from 0.4.** This release changes what people and service

@@ -918,8 +918,8 @@ release to the schema of the change under review: it installs that release
 from npm as `coffre init` writes a deployment, and lets its own conformance
 boot it, with the database migrated by the change's migrations instead of
 the release's. A synthetic destructive migration on top must then fail it,
-so that the check is known to be able to. It is off for 0.4.0, which has no
-earlier release on its schema, and holds 0.4.0 to the next release's.
+so that the check is known to be able to. CI runs it on every change; it
+was off for 0.4.0, which had no earlier release on its schema.
 
 ## Limits
 

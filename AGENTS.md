@@ -117,9 +117,8 @@ check or type, a unique or foreign key the old code may break) ships one
 release after the code stops using it. 0.4.0 is a clean break: one baseline
 per engine, for new databases only, and no code for earlier releases'
 deployments or data. `pnpm test:compat` holds the newest release to this
-checkout's schema, through that release's own conformance; it is off for
-0.4.0, which has no earlier release on its schema, and returns for 0.5.0,
-against 0.4.0.
+checkout's schema, through that release's own conformance, in CI on every
+change; it was off for 0.4.0, which had no earlier release on its schema.
 
 **Transactions and the vault.** No app database transaction may stay open across
 any vault call. Prepare outside SQL; commit app writes and their audit together,
@@ -196,7 +195,7 @@ unsupported diff select full validation.
   migrate with this checkout's migrations, and requires it conformant; then
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
-  network and Postgres. Off in CI for 0.4.0 (see Migrations); back for 0.5.0.
+  network and Postgres. CI runs it for both kinds.
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

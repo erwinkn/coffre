@@ -130,6 +130,14 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    route tree, `app/src/routeTree.gen.ts`, as the build does, so the diff
    to commit is whole.
 
+   The pages and the versions are the release's own, as its CLI knows
+   them. The deployment's own CLI, `pnpm exec coffre update`, is of the
+   release before, so it asks the new release's CLI what to change, `npx
+   @coffre/cli@<release> update --plan <dir>`, before it changes anything.
+   CLIs before 0.5.1 do not ask: they move a deployment with their own
+   pages, so 0.4's CLI left out 0.5.0's `users.$user.apps.tsx`. From such a
+   CLI, update with the new release's own: `npx @coffre/cli@latest update`.
+
    It also pins the deployment's pnpm, `packageManager` in its package.json,
    to the one coffre installs with, as `coffre init` writes it: then your
    machine, CI and Workers Builds install with the same pnpm, and each holds
@@ -174,6 +182,12 @@ runs the previous version, by design. It stops unless:
 - **the CLI is the version the deployment pins.** A global `coffre` of
   another version says to run `pnpm exec coffre migrate`, after `pnpm
   install`.
+- **the login can change coffre's tables.** Migrations change the
+  `drizzle` schema, the tables and the functions, so the login must own
+  them, or be a member of the role that does. Otherwise it names that role
+  and stops before it asks: migrate with that role's URL, or, as a role
+  that administers it, `GRANT <owner> TO <login>`. With nothing to apply,
+  it only warns that the next migration needs another login.
 - **the database is not ahead of that version.** A database a newer coffre
   migrated, as after rolling a deployment back, is refused, each migration
   it does not know named by when it was made and its hash, and nothing is

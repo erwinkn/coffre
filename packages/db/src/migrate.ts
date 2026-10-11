@@ -56,8 +56,59 @@ interface Migrator {
   migrate(migrationsFolder: string): Promise<void>;
   /** Reassert privileges a one-database backup does not carry. */
   restrict(): Promise<void>;
+  /** Why this login cannot change the objects migrations change, or null when it can. */
+  notOwner(): Promise<NotOwner | null>;
   close(): Promise<void>;
 }
+
+/**
+ * The login cannot change coffre's objects, the ledger's schema, the tables
+ * and the functions: their owners are roles whose privileges it does not
+ * have, as neither one of them nor a member of one. Postgres would refuse
+ * the first migration that touches one, "permission denied for schema
+ * drizzle"; this says whose login migrates, or what makes this one able to.
+ */
+export class NotOwner extends Error {
+  readonly login: string;
+  readonly owners: string[];
+
+  constructor(login: string, owners: string[]) {
+    const named = owners.join(' and ');
+    const grants = owners.map((owner) => `GRANT ${identifier(owner)} TO ${identifier(login)}`).join('; ');
+    super(
+      `coffre's tables are owned by ${named}, and this login, ${login}, is neither ${owners.length === 1 ? 'it nor a member of it' : 'one nor a member of one'}: ` +
+        `migrate with ${owners.length === 1 ? `${owners[0]}'s` : 'their'} connection string, or, as a role that administers ${owners.length === 1 ? 'it' : 'them'}, run ${grants}`,
+    );
+    this.name = 'NotOwner';
+    this.login = login;
+    this.owners = owners;
+  }
+}
+
+/** A role's name as SQL takes it: quoted when it must be. */
+function identifier(name: string): string {
+  return /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
+}
+
+/**
+ * The owners of what migrations change, the drizzle schema and everything
+ * in it and in public but an extension's, whose privileges the login lacks.
+ * A superuser has every role's.
+ */
+const FOREIGN_OWNERS = `
+  WITH owned AS (
+    SELECT oid, 'pg_namespace'::regclass AS catalog, nspowner AS owner FROM pg_namespace WHERE nspname = 'drizzle'
+    UNION ALL
+    SELECT c.oid, 'pg_class'::regclass, c.relowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname IN ('public', 'drizzle') AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+    UNION ALL
+    SELECT p.oid, 'pg_proc'::regclass, p.proowner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname IN ('public', 'drizzle')
+  )
+  SELECT DISTINCT r.rolname AS owner, current_user AS login FROM owned JOIN pg_roles r ON r.oid = owned.owner
+  WHERE NOT pg_has_role(owned.owner, 'USAGE')
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = owned.catalog AND d.objid = owned.oid AND d.deptype = 'e')
+  ORDER BY r.rolname`;
 
 /**
  * Beside this module: src/migrations in the workspace, and dist/migrations
@@ -177,6 +228,10 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     },
     migrate: (migrationsFolder) => migrate(drizzle(client), { migrationsFolder }),
     restrict: () => restrictDatabase(client),
+    async notOwner() {
+      const { rows } = await client.query<{ owner: string; login: string }>(FOREIGN_OWNERS);
+      return rows.length === 0 ? null : new NotOwner(rows[0]!.login, rows.map((row) => row.owner));
+    },
     async close() {
       client.release();
       await pool.end();
@@ -206,6 +261,8 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
     async unlock() {},
     migrate: (migrationsFolder) => migrate(sqlite, { migrationsFolder }),
     async restrict() {},
+    // One file, which whoever opens it may change.
+    notOwner: async () => null,
     close,
   };
 }
@@ -218,11 +275,12 @@ export type MigrationPlan = { applied: number; total: number; pending: string[] 
 
 /**
  * Which of this version's migrations a database has applied, and which it
- * has not, without changing it or waiting on a migration under way. A
- * history that is not a prefix of this version's is refused, as
- * `migrateDatabase` refuses it.
+ * has not, without changing it or waiting on a migration under way; and
+ * whether this login could apply them (`notOwner`), as `migrateDatabase`
+ * requires. A history that is not a prefix of this version's is refused,
+ * as `migrateDatabase` refuses it.
  */
-export async function migrationStatus(url: string): Promise<{ applied: string[]; pending: string[] }> {
+export async function migrationStatus(url: string): Promise<{ applied: string[]; pending: string[]; notOwner: NotOwner | null }> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
@@ -233,6 +291,7 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
     return {
       applied: expected.slice(0, applied).map((entry) => entry.tag),
       pending: expected.slice(applied).map((entry) => entry.tag),
+      notOwner: await migrator.notOwner(),
     };
   } finally {
     await migrator.close();
@@ -241,7 +300,8 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
 
 /**
  * Apply missing migrations, check their history and reassert database
- * privileges. `onPlan` hears what there is to apply before it is, under
+ * privileges, as a login that can change coffre's objects: another is
+ * refused, NotOwner, before anything changes. `onPlan` hears what there is to apply before it is, under
  * the migration lock, and may stop the run by throwing: all of it then goes
  * in one call, with no word of each.
  */
@@ -260,6 +320,8 @@ export async function migrateDatabase(
 
     const applied = await migrator.applied();
     verifyHistory(expected, applied, false);
+    const notOwner = await migrator.notOwner();
+    if (notOwner !== null) throw notOwner;
     const done = applied?.length ?? 0;
     await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
     await migrator.migrate(migrationsFolder(engine));

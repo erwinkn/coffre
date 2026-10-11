@@ -15,7 +15,7 @@ import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { DatabaseAhead, migrateDatabase, migrationStatus } from '@coffre/db/migrate';
+import { DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
@@ -57,6 +57,7 @@ export function pinProblem(cli: string, pinned: string): string | null {
  * not the SQL around it.
  */
 export function migrationFailure(error: unknown): string {
+  if (error instanceof NotOwner) return `${error.message}. Nothing was changed`;
   for (let cause: unknown = error; cause instanceof Error; cause = cause.cause) {
     const code = (cause as { code?: unknown }).code;
     if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) {
@@ -121,7 +122,7 @@ async function migrateDeployment(
   });
   secrets.push(...typed);
   const where = `${url.hostname}${decodeURIComponent(url.pathname)}`;
-  let status: { applied: string[]; pending: string[] };
+  let status: Awaited<ReturnType<typeof migrationStatus>>;
   try {
     status = await migrationStatus(url.href);
   } catch (error) {
@@ -131,12 +132,16 @@ async function migrateDeployment(
         'Deploy that version, or, to go back, restore the database from before it (docs/restore.md). Nothing was changed',
     );
   }
-  const { applied, pending } = status;
+  const { applied, pending, notOwner } = status;
   if (pending.length === 0) {
     out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
-    out.write(describeFirstRun(await previewFirstRun(url)));
+    // Nothing to apply now, but the next release's migrations would be refused: said while there is time.
+    // The preview reads with the owner's login, which this is not.
+    if (notOwner !== null) out.write(`  ${s.dim(`The next migration needs another login: ${notOwner.message}`)}\n`);
+    else out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
+  if (notOwner !== null) throw new MigrateError(`${notOwner.message}. Nothing was changed`);
   if (!options.yes && terminal === null) {
     throw new MigrateError('Not a terminal, so nothing to confirm on: pass --yes to migrate without asking.');
   }

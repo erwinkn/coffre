@@ -25,10 +25,11 @@ import {
   startPinMoves,
 } from '../src/deployment.ts';
 import { templateDir, templateFiles } from '../src/init.ts';
-import { applyChanges, CLEAN_BREAK, pageMove } from '../src/layout.ts';
+import { applyChanges, CLEAN_BREAK, pageMove, ROUTE_FILES } from '../src/layout.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
-import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
+import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated, type Plan } from '../src/update.ts';
+import { cliVersion } from '../src/version.ts';
 
 const examples = fileURLToPath(new URL('../../../examples/', import.meta.url));
 
@@ -266,11 +267,11 @@ test('update without a terminal, and without --yes, says plainly to pass --yes, 
 });
 
 /**
- * A Workers deployment at the clean break's release, a registry whose latest coffre is 9.9.9,
- * and a pnpm that holds pg-protocol back until the deployment lets it
- * through by name.
+ * A Workers deployment at the clean break's release, a registry whose latest coffre is `latest`,
+ * a pnpm that holds pg-protocol back until the deployment lets it
+ * through by name, and an npx whose coffre `latest` is this CLI.
  */
-async function heldDeployment() {
+async function heldDeployment(latest = '9.9.9') {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-held-'));
   // The template's every file, as coffre init writes them.
   for (const file of templateFiles(join(examples, 'workers'))) {
@@ -294,9 +295,19 @@ exit 1
 `,
   );
   chmodSync(join(bin, 'pnpm'), 0o755);
+  writeFileSync(
+    join(bin, 'npx'),
+    `#!/bin/sh
+echo "$@" >> '${dir}/npx-asked'
+[ "$1" = --yes ] && [ "$2" = '@coffre/cli@${latest}' ] || { echo "npx $*: not the latest coffre" >&2; exit 1; }
+shift 2
+exec '${process.execPath}' --conditions=coffre:source '${main}' "$@"
+`,
+  );
+  chmodSync(join(bin, 'npx'), 0o755);
   const registry = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ version: '9.9.9' }));
+    response.end(JSON.stringify({ version: latest }));
   });
   await new Promise<void>((resolve) => registry.listen(0, '127.0.0.1', resolve));
   const env = {
@@ -386,6 +397,102 @@ test('any failed install puts package.json, pnpm-workspace.yaml and pnpm-lock.ya
     assert.equal(await new Promise((resolve) => child.on('close', resolve)), 1);
     assert.match(stderr, /ERR_PNPM_FETCH_404.*package\.json, pnpm-workspace\.yaml and pnpm-lock\.yaml are as they were; node_modules may be incomplete/s);
     assert.deepEqual(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map((name) => readFileSync(join(dir, name), 'utf8')), before);
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** `coffre update --yes` in `dir`, as a deployment's own CLI runs it. */
+async function updateIn(dir: string, env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> {
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+  return { code: await new Promise((resolve) => child.on('close', resolve)), stderr };
+}
+
+test("an earlier release's CLI moves a deployment with the pages and pins the release's own CLI names, not its own", async () => {
+  // What 0.4.6's CLI did to 0.5.0: it added the pages it knew, and not users.$user.apps.tsx.
+  const { dir, env, close } = await heldDeployment();
+  try {
+    const later = 'app/src/routes/_coffre/later.tsx';
+    assert.equal(ROUTE_FILES[later], undefined, 'a page this CLI does not know');
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    // 9.9.9's own CLI, which knows a page and a React this one does not.
+    const plan = {
+      pages: { changes: [{ path: later, was: null, becomes: '// a page coffre 9.9.9 adds\n' }] },
+      start: [{ name: 'react', from: '19.2.7', to: '19.9.0' }],
+      packageManager: 'pnpm@11.8.0',
+    };
+    writeFileSync(join(dir, '.bin', 'npx'), `#!/bin/sh\necho "$@" > '${dir}/npx-asked'\necho 'npm warn exec it installs @coffre/cli@9.9.9' >&2\nprintf '%s\\n' '${JSON.stringify(plan)}'\n`);
+    const run = await updateIn(dir, env);
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(readFileSync(join(dir, 'npx-asked'), 'utf8'), `--yes @coffre/cli@9.9.9 update --plan ${dir}\n`);
+    assert.equal(existsSync(join(dir, later)) && readFileSync(join(dir, later), 'utf8'), '// a page coffre 9.9.9 adds\n', run.stderr);
+    assert.match(run.stderr, /Changed coffre's page files: app\/src\/routes\/_coffre\/later\.tsx/);
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+    assert.equal(manifest.dependencies.react, '19.9.0');
+    assert.ok(Object.values(coffrePins(dir)).every((version) => version === '9.9.9'));
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a release's CLI names the pages a deployment gains since its pins, its Start app's pins and its pnpm, as one line of JSON", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-plan-'));
+  try {
+    for (const file of templateFiles(join(examples, 'node'))) {
+      mkdirSync(join(dir, file, '..'), { recursive: true });
+      cpSync(join(examples, 'node', file), join(dir, file));
+    }
+    const apps = 'app/src/routes/_coffre/users.$user.apps.tsx';
+    rmSync(join(dir, apps));
+    const ask = () => {
+      const ran = spawnSync(process.execPath, ['--conditions=coffre:source', main, 'update', '--plan', dir], { cwd: tmpdir(), encoding: 'utf8' });
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.equal(ran.stdout.trim().split('\n').length, 1);
+      return JSON.parse(ran.stdout) as Plan;
+    };
+    bumpPins(dir, '0.4.6');
+    movePins(dir, [{ name: 'react', from: '', to: '19.0.0' }]);
+    const plan = ask();
+    assert.deepEqual(plan.pages, { changes: [{ path: apps, was: null, becomes: readFileSync(join(templateDir('node'), apps), 'utf8') }] });
+    assert.deepEqual(plan.start.map(({ name, from }) => [name, from]), [['react', '19.0.0']]);
+    assert.equal(plan.packageManager, JSON.parse(readFileSync(join(templateDir('node'), 'package.json'), 'utf8')).packageManager);
+    // At 0.5.0, which first wrote it, the page is one the deployment left out.
+    bumpPins(dir, '0.5.0');
+    assert.deepEqual(ask().pages, { changes: [] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("when the release's own CLI can't say what it changes, the deployment stays as it was, and update says what to run", async () => {
+  const { dir, env, close } = await heldDeployment();
+  try {
+    writeFileSync(join(dir, '.bin', 'npx'), '#!/bin/sh\necho "npm error 404 Not Found - GET @coffre/cli@9.9.9" >&2\nexit 1\n');
+    const before = ['package.json', 'pnpm-workspace.yaml'].map((name) => readFileSync(join(dir, name), 'utf8'));
+    const run = await updateIn(dir, env);
+    assert.equal(run.code, 0, run.stderr);
+    assert.match(run.stderr, /This deployment stays as it is, at 0\.4\.0: coffre 9\.9\.9's own CLI, through npx, could not say what it changes \(npm error 404 Not Found - GET @coffre\/cli@9\.9\.9\)\. Nothing was changed/);
+    assert.match(run.stderr, /Run coffre 9\.9\.9's own: npx @coffre\/cli@9\.9\.9 update/);
+    assert.deepEqual(['package.json', 'pnpm-workspace.yaml'].map((name) => readFileSync(join(dir, name), 'utf8')), before);
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the release itself moves a deployment by its own template, asking no npx', async () => {
+  const { dir, env, close } = await heldDeployment(cliVersion());
+  try {
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    const run = await updateIn(dir, env);
+    assert.equal(run.code, 0, run.stderr);
+    assert.ok(!existsSync(join(dir, 'npx-asked')), 'npx was not asked');
+    assert.ok(Object.values(coffrePins(dir)).every((version) => version === cliVersion()));
   } finally {
     close();
     rmSync(dir, { recursive: true, force: true });

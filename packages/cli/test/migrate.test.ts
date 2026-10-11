@@ -8,11 +8,11 @@ import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
 
-import { migrationsFolder } from '@coffre/db/migrate';
+import { migrateDatabase, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
 import { describeEveryProject, describeFirstRun, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
-import { database, emptyCluster, needsCluster } from './cluster.ts';
+import { asSuperuser, database, emptyCluster, needsCluster } from './cluster.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const journal = JSON.parse(readFileSync(join(migrationsFolder('postgres'), 'meta', '_journal.json'), 'utf8')) as {
@@ -219,6 +219,19 @@ function migrateIn(dir: string, url: string | null, args: string[] = ['--yes'], 
   );
 }
 
+test("a login that cannot change coffre's tables is told whose they are, and the GRANT that would let it, quoted as SQL takes it", () => {
+  const one = new NotOwner('pscale_api_qj93', ['pscale_api_2rmo']);
+  assert.equal(
+    migrationFailure(one),
+    "coffre's tables are owned by pscale_api_2rmo, and this login, pscale_api_qj93, is neither it nor a member of it: " +
+      "migrate with pscale_api_2rmo's connection string, or, as a role that administers it, run GRANT pscale_api_2rmo TO pscale_api_qj93. Nothing was changed",
+  );
+  assert.match(
+    new NotOwner('ci-deploy', ['owner', 'Old"Owner']).message,
+    /owned by owner and Old"Owner, and this login, ci-deploy, is neither one nor a member of one: migrate with their connection string, or, as a role that administers them, run GRANT owner TO "ci-deploy"; GRANT "Old""Owner" TO "ci-deploy"$/,
+  );
+});
+
 test("in a deployment's folder, a CLI that is not the version it pins refuses, before asking for anything", async () => {
   assert.equal(pinProblem('0.1.17', '0.1.17'), null);
   const dirs = [deploymentFolder(pinnedAt('0.0.1')), deploymentFolder({ ...pinnedAt(cliVersion()), '@coffre/vault': '0.0.1' })];
@@ -335,4 +348,53 @@ test('a database a coffre before 0.4.0 made is refused, with what to do instead,
   assert.equal(run.code, 1);
   assert.match(run.output, /the database was made by a coffre before 0\.4\.0, which is a clean break: deploy afresh, on a new database \(docs\/deploy\.md\)/);
   assert.equal(await applied(url), 1);
+});
+
+test("a login that neither owns coffre's tables nor is a member of their owner is refused, the owner named, before anything changes", needsCluster, async () => {
+  await emptyCluster();
+  // Migrated by one login, as a managed host's first: CREATEROLE, not superuser.
+  const owned = await database('setup_migrate_owners', 'owner');
+  const owner = new pg.Client({ connectionString: owned });
+  await owner.connect();
+  try {
+    await owner.query('CREATE ROLE coffre_runtime LOGIN');
+    await owner.query('CREATE ROLE coffre_vault_runtime LOGIN');
+  } finally {
+    await owner.end();
+  }
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  assert.equal((await migrateIn(dir, owned)).code, 0);
+  // Then deployed with another, as PlanetScale gives a second: CREATEROLE too, a member of no role.
+  await asSuperuser('postgres', (client) => client.query("CREATE ROLE setup_deployer LOGIN CREATEROLE PASSWORD 'deployer-only-p4ss'"));
+  const deployer = new URL(owned);
+  deployer.username = 'setup_deployer';
+  deployer.password = 'deployer-only-p4ss';
+  const refusal = /coffre's tables are owned by setup_owner, and this login, setup_deployer, is neither it nor a member of it: migrate with setup_owner's connection string, or, as a role that administers it, run GRANT setup_owner TO setup_deployer/;
+
+  // Up to date, it applies nothing, and says the next migration needs another login.
+  const current = await migrateIn(dir, deployer.href);
+  assert.equal(current.code, 0, current.output);
+  assert.match(current.output, /is up to date/);
+  assert.match(current.output, new RegExp(`The next migration needs another login: ${refusal.source}`));
+
+  // With a migration to apply, refused before it asks, not "permission denied for schema drizzle".
+  const last = await asSuperuser('setup_migrate_owners', async (client) =>
+    (await client.query('DELETE FROM drizzle.__drizzle_migrations WHERE id = (SELECT max(id) FROM drizzle.__drizzle_migrations) RETURNING hash, created_at')).rows[0] as { hash: string; created_at: string },
+  );
+  const pending = await migrateIn(dir, deployer.href);
+  assert.equal(pending.code, 1);
+  assert.match(pending.output, new RegExp(`${refusal.source}\\. Nothing was changed`));
+  assert.doesNotMatch(pending.output, /permission denied|to apply to/);
+  assert.equal(await applied(owned), KNOWN.length - 1);
+  await record(owned, last.hash, Number(last.created_at));
+
+  // The migrator itself refuses, under its lock, whatever calls it.
+  await assert.rejects(migrateDatabase(deployer.href), (error) => error instanceof NotOwner && error.owners.join() === 'setup_owner' && error.login === 'setup_deployer');
+
+  // A member of the owner migrates, and is told nothing more.
+  await asSuperuser('postgres', (client) => client.query('GRANT setup_owner TO setup_deployer'));
+  await migrateDatabase(deployer.href);
+  const member = await migrateIn(dir, deployer.href);
+  assert.equal(member.code, 0, member.output);
+  assert.doesNotMatch(member.output, /another login/);
 });
