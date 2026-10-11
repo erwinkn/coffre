@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.1 (2026-10-11)
+
 **`coffre update` moves a deployment with the new release's pages.** The
 deployment's own CLI, `pnpm exec coffre update`, belongs to the release
 it moves from, and it used that release's list of pages. So 0.4's CLI,
