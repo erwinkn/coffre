@@ -10,7 +10,7 @@ import pg from 'pg';
 
 import { migrationsFolder } from '@coffre/db/migrate';
 
-import { describeEveryProject, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
+import { describeEveryProject, describeFirstRun, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -140,6 +140,29 @@ test("migrate lists 0.4's tokens and bindings by account, which keep what their 
       '',
     ].join('\n'),
   );
+});
+
+test('migrate says which accounts hold nothing, whose tokens and bindings would reach nothing for good', () => {
+  const unsealed = [
+    { kind: 'token' as const, id: 't1', principal: 'token:ci-web' },
+    { kind: 'token' as const, id: 't2', principal: 'token:idle' },
+    { kind: 'binding' as const, id: 'b1', principal: 'token:idle' },
+    { kind: 'token' as const, id: 't3', principal: 'token:old' },
+  ];
+  const conversion = (grants: number) => ({ role: 'member', scope: { projects: 'all', environments: 'all' }, grants: Array.from({ length: grants }, () => ({ projectId: 'p', environmentId: null, role: 'viewer' })), narrowed: [] });
+  const said = describeFirstRun({
+    everyProject: [
+      // On every project, which the vault converts: it holds what that becomes.
+      { principal: 'token:ci-web', before: [{ place: '*', role: 'viewer', expiresAt: null }], conversion: conversion(1), paths: { p: 'market' }, reported: false },
+      // Reported tampered with: left as it is, which no scope reaches.
+      { principal: 'token:old', before: [{ place: '*', role: 'viewer', expiresAt: null }], conversion: conversion(1), paths: { p: 'market' }, reported: true },
+    ] as never,
+    unsealed,
+    holding: new Set(['user:ada@acme.example']),
+  }).split('\n');
+  assert.ok(said.includes('  service:ci-web: 1 token'));
+  assert.ok(said.includes('  service:idle: 1 token and 1 trust binding, which will reach nothing: grant the account before you deploy, or reissue them after'));
+  assert.ok(said.includes('  service:old: 1 token, which will reach nothing: grant the account before you deploy, or reissue it after'));
 });
 
 test("a migration's refusal is its own sentence, not the SQL around it", () => {

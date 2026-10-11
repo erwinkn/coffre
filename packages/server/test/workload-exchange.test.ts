@@ -204,8 +204,9 @@ test("a run's credential reaches what both its binding's scope and the account h
     await root.secrets.set(`market/${environment}`, { API_KEY: `${environment}-key` });
   }
   await root.access.set(MEMBER, { 'market/dev': 'developer' });
-  // A binding made now takes what the account holds now, or less when told.
-  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: null, replaces: [bound] }, { dryRun: false });
+  // A binding made now takes what the account holds now, or less when told; one that replaces another, what that one reached.
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: null, replaces: [] }, { dryRun: false });
   assert.ok('binding' in made);
   await root.access.set(MEMBER, { 'market/prod': 'viewer' });
 
@@ -732,7 +733,8 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   await root.secrets.set('market/prod', { API_KEY: 'sk_live' });
   await root.access.set(MEMBER, { 'market/prod': 'viewer' });
   // A binding reaches what its account held when it was made: one made now reaches prod.
-  await bind(DEPLOY, [bound]);
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  await bind(DEPLOY);
 
   const { body } = await trade(token(rsa));
   const [exchange] = await appEntries('token.exchange');

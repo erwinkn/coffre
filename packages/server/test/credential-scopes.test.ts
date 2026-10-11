@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { defineSignin, generateToken, github, hashToken, tokenHint } from '@coffre/core/identity';
+import { defineSignin, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { unsealedCredentials } from '@coffre/db/grants';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
@@ -17,7 +17,8 @@ import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { sealScopes } from '../src/api/services.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import type { CoffreRuntime } from '../src/runtime.ts';
+import { resolveConfig } from '../src/config.ts';
+import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
@@ -27,6 +28,8 @@ const ADA = 'user:ada@acme.example';
 const CI = 'token:ci-web';
 
 const GITHUB = 'https://token.actions.githubusercontent.com';
+/** Where the issuer says its keys are: a test moves them. */
+let jwks = `${GITHUB}/.well-known/jwks`;
 const SIGNIN = defineSignin({ publicUrl: ORIGIN, providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits() } });
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
@@ -46,6 +49,7 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
+  jwks = `${GITHUB}/.well-known/jwks`;
   deps = testDeps(db.runtime, [ROOT]);
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
@@ -54,7 +58,7 @@ beforeEach(async () => {
     chainKey: deps.chainKey,
     vault: deps.vault,
     config: SIGNIN.workloads!,
-    transport: { json: async () => ({ issuer: GITHUB, jwks_uri: `${GITHUB}/.well-known/jwks` }) },
+    transport: { json: async () => ({ issuer: GITHUB, jwks_uri: jwks }) },
     signin,
     publicUrl: ORIGIN,
   });
@@ -209,6 +213,31 @@ test('nobody makes a token or a binding past the account or past what they could
   assert.deepEqual((await db.owner.select().from(credentials)).length, 0, 'no token was made');
 });
 
+test('a binding that replaces others reaches what they reached of what the account still holds, unless told: trusting a workload again never widens it', async () => {
+  const DEPLOY = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
+  const narrow = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'market/dev': 'viewer' } });
+  await root.access.set(CI, { 'market/prod': 'viewer' });
+  // Asked to replace it, by someone who could give it all the account holds now: what it reached, not prod.
+  const again = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [narrow.binding.id] });
+  assert.deepEqual(again.binding.scope, { 'market/dev': 'viewer' });
+  // Its issuer moved its keys: the binding made on the new ones takes the old one's place, and its scope, as the preview says.
+  jwks = `${GITHUB}/.well-known/jwks-2`;
+  const plan = await root.bindings.preview(CI, { profile: 'github', claims: DEPLOY });
+  assert.deepEqual([plan.scope, plan.replaces], [{ 'market/dev': 'viewer' }, [{ id: again.binding.id, why: 'keys_moved' }]]);
+  const moved = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY });
+  assert.deepEqual(moved.binding.scope, { 'market/dev': 'viewer' });
+  // Named, the scope is what it says, within the account.
+  const told = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'market/dev': 'developer', 'market/prod': 'viewer' }, replaces: [moved.binding.id] });
+  assert.deepEqual(told.binding.scope, { 'market/dev': 'developer', 'market/prod': 'viewer' });
+  // What the account lost drops out: prod taken back, the next one reaches dev alone; nothing left of it, it is refused.
+  await root.access.set(CI, { 'market/prod': null });
+  const after = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [told.binding.id] });
+  assert.deepEqual(after.binding.scope, { 'market/dev': 'developer' });
+  await root.access.set(CI, { 'market/dev': null, 'market/prod': 'viewer' });
+  await assert.rejects(root.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [after.binding.id] }), { status: 400 });
+  assert.deepEqual((await root.bindings.list(CI)).bindings.map((each) => each.id), [after.binding.id], 'refused, it replaced nothing');
+});
+
 test('the scope is listed wherever tokens are, and logged by id when made', async () => {
   const issued = await ada.tokens.issue(CI, { label: 'deploy', expiresInDays: 30, scope: { 'market/dev': 'viewer' } });
   const [listed] = (await ada.tokens.list(CI)).tokens;
@@ -289,6 +318,44 @@ test('a vault that cannot answer seals nothing: the credential is uncheckable, n
   assert.notEqual(await unsealed(), null);
 });
 
+test('on Workers, where each request builds its runtime, the isolate seals once: a later request reads no unsealed rows, and asks the vault of no other account', async () => {
+  const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
+  await ada.members.add('token:ci-old');
+  await ada.access.set('token:ci-old', { 'market/dev': 'viewer' });
+  const first = await legacyToken('token:ci-old');
+  // What `createCoffre` keeps for the isolate, and `runtimeFor` builds each runtime from, request by request.
+  const config = resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
+  const transport = { json: async () => ({}) };
+  const asked: string[] = [];
+  const access = deps.vault.access.bind(deps.vault);
+  deps.vault.access = async (principal) => {
+    asked.push(principal);
+    return access(principal);
+  };
+  const scope = async (id: string) => (await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope;
+  /** A request of the isolate, with its own runtime: what it read of `credentials`' unsealed rows, and whom it asked the vault about. */
+  const request = async (isolate: typeof config) => {
+    asked.length = 0;
+    const answered = await fetchApi(
+      new Request(`${ORIGIN}/api/me`, { headers: { authorization: `Bearer ${issued.token}` } }),
+      createRuntime(isolate, deps.db, deps.vault, transport),
+      { sourceIp: null },
+    );
+    assert.equal(answered.status, 200);
+    return [...asked];
+  };
+  assert.deepEqual(await request(config), ['token:ci-old', CI], 'the first request seals, then checks its own token');
+  assert.notEqual(await scope(first.id), null);
+  // A token 0.4 makes while both run: no request of this isolate reads it, nor asks the vault about its account.
+  const second = await legacyToken('token:ci-old');
+  for (let i = 0; i < 3; i++) assert.deepEqual(await request(config), [CI]);
+  assert.equal(await scope(second.id), null);
+  // Another isolate, or process, seals it on its first request.
+  const another = resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
+  assert.deepEqual(await request(another), ['token:ci-old', CI]);
+  assert.notEqual(await scope(second.id), null);
+});
+
 test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", async () => {
   // A token 0.4 issued: no scope, its MAC over 0.4's tuple.
   const token = generateToken('service');
@@ -339,6 +406,12 @@ test("0.4's tokens and bindings keep exactly what they reached: sealed with the 
   assert.equal((await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, removed.id)))[0]!.scope, null, 'a removed binding is left as it is');
   assert.deepEqual(await unsealedCredentials(db.owner, new Date()), []);
   assert.equal(await sealScopes(deps.db, deps.chainKey, deps.vault), 0, 'once');
+  // Logged, by the app, naming each row it sealed and what they reach.
+  const seals = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'token.seal'));
+  assert.deepEqual(seals.map((entry) => [entry.actor, JSON.parse(entry.metadata) as unknown]), [[
+    'system:app',
+    { principalType: 'service', principalId: 'ci-web', tokens: [row.id], bindings: [bound.id], scope: JSON.parse(sealed[0]!.scope!) as unknown },
+  ]]);
 
   // Widened after, it reaches no more than it did.
   await root.projects.create('billing', { name: 'Billing' });

@@ -1,11 +1,15 @@
 import {
+  allows,
   assignableToEnvironment,
   isCredentialScope,
   issuesCredential,
   managesService,
+  NOTHING,
+  ROLES,
   runsInstance,
   setsUpServices,
   type CredentialScope,
+  type Holdings,
   type Place,
   type Role,
   type ServiceAccount,
@@ -16,10 +20,10 @@ import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
-import { places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import { memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { placeOf } from './caller.ts';
-import { denied, Refusal, type ApiContext } from './context.ts';
+import { audited, denied, Refusal, type ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
 
@@ -145,11 +149,13 @@ export function scopeByPath(scope: CredentialScope | null, known: readonly Place
 
 /**
  * The scope a token or a trust binding of an account is made with, as the
- * caller asked for it, by path, or everything the account holds when they
- * did not: checked, each grant one the account holds and the caller could
- * give it (`issuesCredential`). A scope that reaches nothing is refused:
- * the account needs a grant first, since nothing it is given later reaches
- * a credential made before.
+ * caller asked for it, by path; when they did not, everything the account
+ * holds, or for a binding that takes the place of others, what those
+ * reached of what the account still holds (`inherited`), so that trusting
+ * a workload again never widens it. Checked, each grant one the account
+ * holds and the caller could give it (`issuesCredential`). A scope that
+ * reaches nothing is refused: the account needs a grant first, since
+ * nothing it is given later reaches a credential made before.
  */
 export async function issuedScope(
   db: Queryable,
@@ -158,12 +164,13 @@ export async function issuedScope(
   standing: Access,
   wanted: ScopeByPath | undefined,
   refused: { action: 'token.create' | 'token.bind'; metadata: Record<string, unknown> },
+  inherited?: CredentialScope,
 ): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
   const known = await places(db);
   const account = accountOf(standing.grants, standing.by, known);
-  const scope = wanted === undefined
-    ? account.grants
-    : Object.entries(wanted).map(([raw, role]) => {
+  let scope: ServiceAccount['grants'];
+  if (wanted !== undefined) {
+    scope = Object.entries(wanted).map(([raw, role]) => {
       const path = parsePath(raw, [1, 2]);
       const project = known.find((candidate) => candidate.slug === path.project);
       if (project === undefined) throw notFound(`no project "${path.project}"`);
@@ -173,6 +180,15 @@ export async function issuedScope(
       if (!assignableToEnvironment(role)) throw badRequest(`${role} includes permissions that only make sense on a whole project; name "${path.project}"`);
       return { role, place: placeOf(project, environment) };
     });
+  } else if (inherited !== undefined) {
+    // What the replaced bindings reached and the account still holds: a place deleted, or a role it lost, drops out.
+    const held: Holdings = { ...NOTHING, grants: account.grants.map(asGrant) };
+    scope = accountOf(inherited, null, known).grants
+      .filter(({ role, place }) => ROLES[role].permissions.every((permission) => allows(held, permission, place)));
+    if (scope.length === 0) throw badRequest('the bindings it replaces reach nothing the account still holds: say what it reaches');
+  } else {
+    scope = account.grants;
+  }
   if (new Set(scope.map(({ place }) => `${place.projectId}/${place.environmentId ?? ''}`)).size !== scope.length) throw badRequest('name each place once');
   if (scope.length === 0) {
     throw badRequest('a credential reaches only what its account holds when it is made: give the account a grant first');
@@ -190,18 +206,44 @@ export async function issuedScope(
   return { scope: issued, byPath: scopeByPath(issued, known)! };
 }
 
+/**
+ * What the bindings a new one replaces reached, together, by id: what it
+ * reaches unless told (`issuedScope`). Undefined when it replaces none, or
+ * one 0.4 made and the app has not sealed, which reached all the account
+ * held. Two that reach a place with different roles are for the caller to
+ * choose between.
+ */
+export function inheritedScope(replaced: readonly { scope: string | null }[]): CredentialScope | undefined {
+  if (replaced.length === 0) return undefined;
+  const scopes = replaced.map((row) => readScope(row.scope));
+  if (scopes.some((scope) => scope === null)) return undefined;
+  const byPlace = new Map<string, CredentialScope[number]>();
+  for (const grant of scopes.flat() as CredentialScope[number][]) {
+    const place = `${grant.projectId}/${grant.environmentId ?? ''}`;
+    const before = byPlace.get(place);
+    if (before !== undefined && before.role !== grant.role) {
+      throw badRequest('the bindings it replaces reach one place with different roles: say what it reaches');
+    }
+    byPlace.set(place, grant);
+  }
+  return [...byPlace.values()];
+}
+
 function asGrant({ role, place }: ServiceAccount['grants'][number]): CredentialScope[number] {
   return { projectId: place.projectId, environmentId: place.environmentId ?? null, role };
 }
 
 /**
  * Seal the tokens and trust bindings 0.4 made, which carry no scope, with
- * what their account holds now: once a process, before it checks its first
- * credential (`SigninService.verify`), so each keeps what it reached and
- * nothing granted after reaches it. A row 0.4 still makes while both run
- * reaches all its account holds, as then, until the next process seals it.
- * Each update matches the row's MAC as read, so two processes at once seal
- * a row once. Returns how many rows it sealed.
+ * what their account holds now: once a configuration, the isolate's or the
+ * process's, before it checks its first credential (`SigninService.verify`),
+ * so each keeps what it reached and nothing granted after reaches it. A row
+ * 0.4 still makes while both run reaches all its account holds, as then,
+ * until the next isolate or process seals it. Each update matches the row's
+ * MAC as read, so two at once seal a row once; each account's rows are
+ * sealed in one transaction with a `token.seal` entry naming them, so a row
+ * put back unsealed later, and sealed again, shows in the log. Returns how
+ * many rows it sealed.
  */
 export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): Promise<number> {
   const unsealed = await unsealedCredentials(db, new Date());
@@ -209,12 +251,28 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
   for (const principal of new Set(unsealed.map((row) => row.principal))) {
     const access = await vault.access(principal);
     if (access.status !== 'active') continue;
-    const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role })));
-    for (const row of unsealed.filter((candidate) => candidate.principal === principal)) {
-      sealed += row.kind === 'token'
-        ? await updateAuth(db, chainKey, credentials, { id: row.id, scope: null }, { scope })
-        : await updateAuth(db, chainKey, serviceBindings, { id: row.id, scope: null }, { scope });
-    }
+    const grants = access.grants.map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role }));
+    const scope = storedScope(grants);
+    sealed += await audited({ db, chainKey }, async (tx, log) => {
+      const done = { tokens: [] as string[], bindings: [] as string[] };
+      for (const row of unsealed.filter((candidate) => candidate.principal === principal)) {
+        const changed = row.kind === 'token'
+          ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: null }, { scope })
+          : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: null }, { scope });
+        if (changed > 0) done[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
+      }
+      const count = done.tokens.length + done.bindings.length;
+      if (count > 0) {
+        log.push({
+          actorType: 'system',
+          actorId: 'app',
+          action: 'token.seal',
+          decision: 'allow',
+          metadata: { principalType: 'service', principalId: memberOf(principal).id, ...done, scope: JSON.parse(scope) as unknown },
+        });
+      }
+      return count;
+    });
   }
   return sealed;
 }

@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, ROLE_NAMES, runsInstance, scopeInWords, type Permission } from '@coffre/core/access';
+import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, ROLE_NAMES, runsInstance, scopeInWords, type Permission } from '@coffre/core/access';
 import {
   claimValues,
   defaultIssuer,
@@ -312,19 +312,23 @@ function archiving(archived: boolean): Tool {
 }
 
 const role = z.enum(ROLE_NAMES);
-/** What a token or a binding will reach, as the page says it: what the API answers, or why it cannot. */
-async function reaches(read: () => Promise<Record<string, string>>): Promise<Detail> {
-  try {
-    return { label: 'Reaches', value: credentialScopeInWords(await read()), note: 'Never more than the account holds, and nothing it is given later.' };
-  } catch (error) {
-    if (!(error instanceof CoffreError)) throw error;
-    return { label: 'Reaches', value: `coffre cannot say: ${error.message}`, warn: true };
-  }
+/**
+ * What a token or a binding will reach, as the page says it, and its basis:
+ * left out of the call, the server decides it when the change is made, so
+ * Approve reads it again and is refused if it differs from what the person
+ * read, as when the account was given another grant since.
+ */
+function reaching(scope: Record<string, string>, state: Record<string, unknown> = {}): Replaced {
+  return {
+    state: { ...state, scope },
+    details: [{ label: 'Reaches', value: credentialScopeInWords(scope), note: 'Never more than the account holds, and nothing it is given later.' }],
+  };
 }
 
 /** A token's or a binding's scope (`POST /api/members/<member>/tokens`). */
 const credentialScope = z
   .record(z.string().max(200), role)
+  .refine((scope) => Object.keys(scope).length <= MAX_SCOPE_PLACES, `a scope names at most ${MAX_SCOPE_PLACES} places`)
   .optional()
   .describe('What it reaches, each project or environment by path and its role, as {"market/dev": "developer"}; at most what the account holds. Left out: all it holds now. Nothing the account is given later reaches it.');
 
@@ -682,17 +686,16 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
       check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
-      preview: async (api, { service, label, expiresInDays, scope }) => {
-        const held = async () => scope ?? Object.fromEntries((await api.members.access(serviceMember(service))).grants
-          .map((grant) => [grant.environment === null ? grant.project : `${grant.project}/${grant.environment}`, grant.role]));
-        return [
-          { label: 'Service account', value: shownService(service), kind: 'mono' },
-          ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
-          await reaches(held),
-          { label: 'Good for', value: `${expiresInDays} days` },
-          { label: 'The token', value: 'shown here once, after you approve; never to the app' },
-        ];
-      },
+      replaces: async (api, { service, scope }) =>
+        reaching(scope ?? Object.fromEntries((await api.members.access(serviceMember(service))).grants
+          .map((grant) => [grant.environment === null ? grant.project : `${grant.project}/${grant.environment}`, grant.role]))),
+      preview: async (_api, { service, label, expiresInDays }, _viewing, replaced) => [
+        { label: 'Service account', value: shownService(service), kind: 'mono' },
+        ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
+        ...replaced,
+        { label: 'Good for', value: `${expiresInDays} days` },
+        { label: 'The token', value: 'shown here once, after you approve; never to the app' },
+      ],
       apply: async (api, { service, label, expiresInDays, scope }) => {
         const issued = await api.tokens.issue(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) });
         return {
@@ -756,11 +759,17 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       // The binding is checked, and its issuer asked where its keys are, before anyone is asked to approve it.
       check: async ({ api }, { service, profile, issuer, claims, scope, label }) =>
         void (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null })),
+      // What its runs will reach, and the bindings it takes the place of, as the server plans them: Approve refuses either changed.
+      replaces: async (api, { service, profile, issuer, claims, scope, label }) => {
+        const plan = await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null });
+        const replaced = reaching(plan.scope, { replaces: plan.replaces.map(({ id }) => id) });
+        if (plan.replaces.length === 0) return replaced;
+        const moved = plan.replaces.some(({ why }) => why === 'keys_moved') ? ', since the issuer moved its keys' : '';
+        return { ...replaced, details: [...replaced.details, { label: 'Replaces', value: `${plan.replaces.length === 1 ? 'a binding' : `${plan.replaces.length} bindings`} of the account${moved}`, note: plan.replaces.map(({ id }) => id).join(', ') }] };
+      },
       // The model picks the IDs: each is named back from GitHub or GitLab, where it can be, so the person reads what they trust.
-      preview: async (api, { service, profile, issuer, claims, scope, label }, { transport }) => {
+      preview: async (_api, { service, profile, issuer, claims, label }, { transport }, replaced) => {
         const names = await namesOf(transport, profile, issuer ?? null, claims);
-        const reach = await reaches(async () =>
-          (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null })).scope);
         // An issuer the app named that is not GitHub's or GitLab's own: whoever runs it signs the tokens.
         const unfamiliar = issuer !== undefined && issuer !== GITHUB_ISSUER && issuer !== GITLAB_ISSUER;
         return [
@@ -769,7 +778,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
             ? { label: 'Runs from', value: issuer, kind: 'mono', note: "Not GitHub's or GitLab's own: whoever runs this host can sign in as the account. Approve only if it is yours.", warn: true }
             : { label: 'Runs from', value: issuer ?? `${profile}'s own issuer` },
           ...claimLines(claims, names),
-          reach,
+          ...replaced,
           ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
         ];
       },

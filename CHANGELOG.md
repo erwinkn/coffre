@@ -107,22 +107,31 @@ make another and revoke the first. Someone who made one and then lost
 access shrinks nothing, so CI keeps working; offboarding them lists the
 tokens they issued, each with what it reaches. An account needs a grant
 before it gets a token or binding, since nothing it is given later
-reaches one made before. The tokens and bindings of 0.4 keep exactly what
+reaches one made before. A binding that replaces others, by `--replace`
+or because its issuer moved its keys, reaches what they reached unless
+told otherwise. The tokens and bindings of 0.4 keep exactly what
 they reached: the first time this version checks a credential, it gives
 each one its account's grants then, after the conversion of grants on
-every project, and `coffre migrate` lists them before you deploy. Rolling
-back to 0.4 refuses them.
+every project, and logs it (`token.seal`); `coffre migrate` lists them
+before you deploy, and says which would reach nothing because their
+account holds nothing. Rolling back to 0.4 refuses them, and so does any
+0.4 instance still serving while 0.5 rolls out: it answers 401 to every
+service token and CI run 0.5 has sealed until it is replaced, so deploy
+in one step, or expect those to fail for the length of the rollout.
 
 - **API.** `POST /api/members/<member>/tokens` and `/bindings` take
   `scope`, paths to roles as `PATCH /api/access` takes them; the tokens,
   bindings and offboarding's `issuedTokens` lists say each one's `scope`,
   and `token.create` and `token.bind` log it. A scope past the account or
-  past you is refused, logged as `beyond_account`.
+  past you is refused, logged as `beyond_account`; one names at most 1000
+  places.
 - **CLI.** `coffre tokens issue` and `coffre trust` take
   `--scope market/dev=viewer,…`; `coffre tokens`, `coffre trust
   <service>` and `coffre offboard` say what each reaches.
 - **MCP.** `issue_service_token` and `trust_workload` take `scope`, and
-  the approval page says what the token or binding will reach.
+  the approval page says what the token or binding will reach; if that
+  changes before Approve, as when the account is given another grant,
+  Approve is refused and the page shows it again.
 - **Schema.** `0003_credential_scopes` adds `scope` to `credentials` and
   `service_bindings`, and lets the app's login update it.
 

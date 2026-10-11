@@ -126,7 +126,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
         )}
       </Card>
       <div className="table-actions">
-        <TrustWorkload serviceId={serviceId} grants={grants} />
+        <TrustWorkload serviceId={serviceId} grants={grants} bindings={bindings} />
       </div>
     </>
   );
@@ -195,7 +195,17 @@ function Exposure({ events }: { events: string[] }) {
   );
 }
 
-function TrustWorkload({ serviceId, grants }: { serviceId: string; grants: HeldGrant[] }) {
+/** What the bindings a plan replaces reached, when it is not what the new one reaches: a scope chosen again is said. */
+function Reached({ plan, bindings }: { plan: BindingPlan; bindings: BindingView[] }) {
+  const reached = [...new Set(plan.replaces.flatMap((replaced) => {
+    const scope = bindings.find((binding) => binding.id === replaced.id)?.scope;
+    return scope === undefined ? [] : [scope === null ? 'all its account holds' : credentialScopeInWords(scope)];
+  }))];
+  if (reached.every((words) => words === credentialScopeInWords(plan.scope))) return null;
+  return <> {plan.replaces.length === 1 ? 'It' : 'They'} reached {reached.join('; ')}: this one reaches what it says above.</>;
+}
+
+function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; grants: HeldGrant[]; bindings: BindingView[] }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
   const [scope, setScope] = useState(() => wholeScope(grants));
@@ -431,6 +441,7 @@ function TrustWorkload({ serviceId, grants }: { serviceId: string; grants: HeldG
               <Notice tone="info">
                 This replaces {plan.replaces.length === 1 ? 'a binding' : `${plan.replaces.length} bindings`}
                 {plan.replaces.some((replaced) => replaced.why === 'keys_moved') ? ', since the issuer moved its keys' : ''}.
+                <Reached plan={plan} bindings={bindings} />
               </Notice>
             )}
             <ErrorLine error={error} />

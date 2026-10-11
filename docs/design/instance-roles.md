@@ -229,14 +229,21 @@ narrows them all at once. A scope is the shape of the account's grants
 rather than a role's filters (`all`, `only`, `except`): a filter that
 takes in projects or environments made later would let a grant the
 account is given later through, which is the widening the scope is there
-to stop.
+to stop. A grant on a project in a scope does reach the environments made
+in it later, as the account's own grant on it does (`covers`): that is no
+wider than the account, which holds them through the same grant, and
+taking it back from the account takes it from the credential.
 
 **Making one.** Whoever manages the account (`managesService`) makes a
 credential whose every grant is one the account holds, every permission
 of its role there, and one they could give it (`givesService`):
 `issuesCredential`, which the API checks for the pages, the CLI and MCP
 alike, and logs `beyond_account` when it refuses. Left out, the scope is
-everything the account holds. One that reaches nothing is refused: the
+everything the account holds, or, for a binding that replaces others
+(`--replace`, or its issuer's keys moved), what those reached of what
+the account still holds, so trusting a workload again never widens it.
+Through MCP, Approve reads the scope again and is refused if it changed
+since the page showed it. One that reaches nothing is refused: the
 account needs a grant first. The scope never changes after; to change
 it, make another and revoke the first. Its issuer losing access later
 shrinks nothing, so CI keeps working when they leave: offboarding them
@@ -263,15 +270,22 @@ or cleared around the app fails it, and the credential is refused, as a
 token row changed around it is. The app's login gains `UPDATE (scope)` for
 the conversion below.
 
-**Tokens and bindings of 0.4.** They have no scope. Once a process,
-before it checks its first credential, the app seals each live one with
-what its account holds then, after the vault's conversion of the grants
-on every project (`sealScopes`), so each keeps exactly what it reached.
-One that 0.4 makes while both run reaches what its account holds, as in
-0.4, until the next process seals it. `coffre migrate` lists them by
-account (`unsealedCredentials`, which `sealScopes` reads too). Rolling
-back to 0.4 fails closed: a sealed row fails 0.4's MAC, and its token or
-binding is refused.
+**Tokens and bindings of 0.4.** They have no scope. Once per Node
+process or Worker isolate (a Worker builds its runtime each request, so
+the isolate keeps the flag beside its configuration), before it checks
+its first credential, the app seals each live one with what its account holds then, after the vault's conversion
+of the grants on every project (`sealScopes`), so each keeps exactly what
+it reached. Each account's are sealed in one transaction with a
+`token.seal` entry naming them, so a row put back unsealed and sealed
+again shows in the log. A vault that cannot answer seals nothing, and the
+credential is uncheckable (503) until it can. One that 0.4 makes while
+both run reaches what its account holds, as in 0.4, until the next
+process or isolate seals it. `coffre migrate` lists them by account
+(`unsealedCredentials`, which `sealScopes` reads too), and says which
+account holds nothing, whose credentials would reach nothing for good.
+Rolling back to 0.4 fails closed: a sealed row fails 0.4's MAC, and its
+token or binding is refused; so does a 0.4 instance still serving while
+0.5 rolls out, for every row 0.5 has sealed.
 
 ## Where it lives
 

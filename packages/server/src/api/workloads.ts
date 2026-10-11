@@ -45,6 +45,7 @@ import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts'
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
+  inheritedScope,
   issuedScope,
   managedAccount,
   notManager,
@@ -160,7 +161,7 @@ export type BindingInput = {
   profile: string;
   issuer: string | null;
   claims: BindingClaims;
-  /** What the credentials it issues reach, by path (`issuedScope`): all the account holds when left out. */
+  /** What the credentials it issues reach, by path (`issuedScope`): when left out, what the bindings it replaces reached, or all the account holds. */
   scope?: ScopeByPath;
   label: string | null;
   /** Bindings this one takes the place of, as a change to them: they are removed in the same step. */
@@ -227,7 +228,6 @@ export class WorkloadService {
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
-      const { scope, byPath } = await issuedScope(this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.bind', metadata: details });
       let jwksUri: string;
       try {
         jwksUri = await discoverKeys(this.#deps.transport, policy.issuer, { allowLoopback: this.#deps.config.allowLoopback });
@@ -235,22 +235,34 @@ export class WorkloadService {
         if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${policy.issuer}: ${error.message}`);
         throw error;
       }
-      const plan = (live: BindingRow[]): BindingPlan => {
+      /** The bindings it takes the place of, among those live. */
+      type Replacing = BindingRow & { why: BindingPlan['replaces'][number]['why'] };
+      const replacing = (live: BindingRow[]): Replacing[] => {
         const asked = new Set(input.replaces);
         const unknownReplaced = input.replaces.filter((id) => !live.some((row) => row.id === id));
         if (unknownReplaced.length > 0) throw conflict(`no live binding of ${shownMember(member)}'s is ${unknownReplaced.join(', ')}`);
-        const replaces = live.flatMap((row): BindingPlan['replaces'] => {
-          if (asked.has(row.id)) return [{ id: row.id, why: 'asked' }];
-          return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ id: row.id, why: 'keys_moved' }] : [];
+        const replaces = live.flatMap((row): Replacing[] => {
+          if (asked.has(row.id)) return [{ ...row, why: 'asked' }];
+          return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ ...row, why: 'keys_moved' }] : [];
         });
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
-        return { ...policy, jwksUri, scope: byPath, replaces };
+        return replaces;
       };
-      if (options.dryRun) return plan(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      const replaced = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      // Left out, its scope is what those it replaces reached, so that trusting a workload again never widens it.
+      const inherits = input.scope === undefined && replaced.length > 0;
+      const { scope, byPath } = await issuedScope(
+        this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.bind', metadata: details }, inherits ? inheritedScope(replaced) : undefined,
+      );
+      const plan = (replaces: typeof replaced): BindingPlan => ({ ...policy, jwksUri, scope: byPath, replaces: replaces.map(({ id, why }) => ({ id, why })) });
+      if (options.dryRun) return plan(replaced);
 
       return audited(this.#deps, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
-        const planned = plan(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
+        const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
+        if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
+          throw conflict('the bindings it replaces changed while it was made: try again');
+        }
         const id = randomUUID();
         const now = new Date();
         const row = {

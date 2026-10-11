@@ -275,6 +275,9 @@ export function grantKind(grant: GrantPlace): 'project' | 'environment' | null {
  */
 export type CredentialScope = readonly (GrantPlace & { role: Role })[];
 
+/** The most places a scope asked for names: far more than any credential needs, and a bound on what a request makes the app check. */
+export const MAX_SCOPE_PLACES = 1000;
+
 /**
  * A credential's scope, by path as the API names it, in words, each role
  * with its places: `developer on market/dev, api/dev; viewer on market/prod`.

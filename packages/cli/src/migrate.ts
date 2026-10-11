@@ -14,7 +14,7 @@ import { parseArgs } from 'node:util';
 import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
-import { everyProjectPreview, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
+import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
 import { DatabaseAhead, migrateDatabase, migrationStatus } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
@@ -151,7 +151,12 @@ async function migrateDeployment(
 }
 
 /** What this version does to 0.4's rows when it first runs, which the database says: what `coffre migrate` shows. */
-export type FirstRun = { everyProject: EveryProjectPreview[]; unsealed: Unsealed[] };
+export type FirstRun = {
+  everyProject: EveryProjectPreview[];
+  unsealed: Unsealed[];
+  /** The members who hold a live grant on a project or an environment now. */
+  holding: ReadonlySet<string>;
+};
 
 /**
  * What the vault will make of the grants on every project of 0.4 still
@@ -161,26 +166,32 @@ export type FirstRun = { everyProject: EveryProjectPreview[]; unsealed: Unsealed
 async function previewFirstRun(url: URL): Promise<FirstRun> {
   const { db, close } = await openDatabase(url.href);
   try {
-    const [everyProject, unsealed] = await Promise.all([everyProjectPreview(db, Date.now()), unsealedCredentials(db, new Date())]);
-    return { everyProject, unsealed };
+    const at = new Date();
+    const [everyProject, unsealed, grants] = await Promise.all([everyProjectPreview(db, at.getTime()), unsealedCredentials(db, at), readGrants(db, { liveAt: at.getTime() })]);
+    return { everyProject, unsealed, holding: new Set(grants.filter((grant) => grant.projectId !== null).map((grant) => grant.principal)) };
   } finally {
     await close();
   }
 }
 
-export function describeFirstRun({ everyProject, unsealed }: FirstRun): string {
-  return describeEveryProject(everyProject) + describeUnsealed(unsealed);
+export function describeFirstRun({ everyProject, unsealed, holding }: FirstRun): string {
+  // What a member holds once the vault has converted: their grants on a place, and what it makes of those on every project, unless it leaves them.
+  const converted = everyProject.filter((preview) => !preview.reported && preview.conversion.grants.length > 0).map((preview) => preview.principal);
+  const holds = new Set([...holding, ...converted]);
+  return describeEveryProject(everyProject) + describeUnsealed(unsealed, new Set(unsealed.map((row) => row.principal).filter((principal) => !holds.has(principal))));
 }
 
 /**
  * The tokens and trust bindings of 0.4, which carry no scope of their own,
  * by account: when this version first checks a credential, each keeps what
  * its account holds then (`sealScopes` in @coffre/server), and nothing the
- * account is given after reaches it. Nothing when there are none.
+ * account is given after reaches it. An account that holds nothing then
+ * (`empty`) seals them reaching nothing, for good. Nothing when there are none.
  *
  *   service:ci-web   2 tokens and 1 trust binding
+ *   service:idle     1 token, which will reach nothing: grant the account before you deploy, or reissue it after
  */
-export function describeUnsealed(unsealed: readonly Unsealed[]): string {
+export function describeUnsealed(unsealed: readonly Unsealed[], empty: ReadonlySet<string> = new Set()): string {
   if (unsealed.length === 0) return '';
   const lines = [
     '',
@@ -192,7 +203,10 @@ export function describeUnsealed(unsealed: readonly Unsealed[]): string {
     const tokens = theirs.filter((row) => row.kind === 'token').length;
     const bindings = theirs.length - tokens;
     const what = [tokens === 0 ? null : count(tokens, 'token'), bindings === 0 ? null : count(bindings, 'trust binding')].filter((part) => part !== null);
-    lines.push(`  ${shownMember(principal)}: ${what.join(' and ')}`);
+    const nothing = empty.has(principal)
+      ? `, which will reach nothing: grant the account before you deploy, or reissue ${theirs.length === 1 ? 'it' : 'them'} after`
+      : '';
+    lines.push(`  ${shownMember(principal)}: ${what.join(' and ')}${nothing}`);
   }
   lines.push('Grant or revoke before you deploy to choose what they keep; to change one after, issue another and revoke it.', '');
   return lines.join('\n');

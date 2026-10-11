@@ -48,6 +48,12 @@ export type SigninServiceDeps = {
   /** Who is a member, and who is a root admin, is the vault's to say. */
   vault: Vault;
   signin: SigninConfig;
+  /**
+   * Whether 0.4's tokens and bindings are sealed (`sealScopes`), for as long
+   * as the configuration lives: the isolate's, which builds a service for
+   * each request, or the process's. The service's own when left out.
+   */
+  scopes?: { sealed: boolean };
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
@@ -252,14 +258,14 @@ export function normalizeUserCode(input: string): string | null {
 export class SigninService {
   readonly #deps: SigninServiceDeps;
   readonly #stateKey: Buffer;
-  /** Whether this process sealed the scopes of 0.4's tokens and bindings (`sealScopes`). */
-  #sealed = false;
+  readonly #scopes: { sealed: boolean };
 
   constructor(deps: SigninServiceDeps) {
     this.#deps = deps;
     // Derived rather than configured: one fewer secret to provision, and
     // HKDF keeps it independent of the audit chain key it comes from.
     this.#stateKey = deriveKey(deps.chainKey, 'signin-state/v1');
+    this.#scopes = deps.scopes ?? { sealed: false };
   }
 
   get config(): SigninConfig {
@@ -531,9 +537,9 @@ export class SigninService {
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
     try {
-      if (!this.#sealed) {
+      if (!this.#scopes.sealed) {
         await sealScopes(db, this.#deps.chainKey, this.#deps.vault);
-        this.#sealed = true;
+        this.#scopes.sealed = true;
       }
       row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
       if (row !== null) access = await this.#deps.vault.access(row.principal);
