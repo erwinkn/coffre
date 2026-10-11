@@ -132,8 +132,17 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
 
    The pages and the versions are the release's own, as its CLI knows
    them. The deployment's own CLI, `pnpm exec coffre update`, is of the
-   release before, so it asks the new release's CLI what to change, `npx
-   @coffre/cli@<release> update --plan <dir>`, before it changes anything.
+   release before, so it asks the new release's CLI what to change, `coffre
+   update --plan <dir>`. That runs the new release's code, so it asks you
+   first, once (`--yes` answers for CI; without a terminal and without it,
+   nothing runs), then makes the move as that CLI says, without asking
+   again. It fetches that CLI as the deployment's install will: npm installs
+   it in an empty directory of its own, with the deployment's `.npmrc`, so
+   from its registry, never a copy a project or the global prefix has. It
+   takes the plan only as a list of page files in `app/src/routes/`, each as
+   the deployment has it now, the Start app's packages at exact versions,
+   and an exact pnpm, and checks it all before it changes anything. When
+   that CLI cannot say, nothing changes and the update fails.
    CLIs before 0.5.1 do not ask: they move a deployment with their own
    pages, so 0.4's CLI left out 0.5.0's `users.$user.apps.tsx`. From such a
    CLI, update with the new release's own: `npx @coffre/cli@latest update`.
@@ -183,12 +192,17 @@ runs the previous version, by design. It stops unless:
   another version says to run `pnpm exec coffre migrate`, after `pnpm
   install`.
 - **the login can change coffre's tables.** Migrations change the
-  `drizzle` schema, the tables and the functions, so the login must own
-  them, or be a member of the role that does. Otherwise it names that role
-  and stops before it asks: migrate with that role's URL, or, as a role
-  that administers it, `GRANT <owner> TO <login>`. With nothing to apply,
-  a login that can still read the tables gets only a warning: the next
-  migration needs another login.
+  `drizzle` schema, and the tables and the functions coffre's migrations
+  make, so the login must own them, or be a member of the role that does,
+  one that inherits its privileges. Other tables in `public` are the
+  database's own, whoever owns them. Otherwise it names that role, and
+  whether the login is a member that does not inherit, and stops before
+  it asks: migrate with that role's URL, or, as a role that administers
+  it, `GRANT "<owner>" TO "<login>" WITH INHERIT TRUE` (before Postgres
+  16, `GRANT "<owner>" TO "<login>"`, and `ALTER ROLE "<login>" INHERIT`
+  for a NOINHERIT login). With nothing to apply, a login that can still
+  read the tables gets only a warning: the next migration needs another
+  login.
 - **the database is not ahead of that version.** A database a newer coffre
   migrated, as after rolling a deployment back, is refused, each migration
   it does not know named by when it was made and its hash, and nothing is

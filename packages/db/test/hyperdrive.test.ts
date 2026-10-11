@@ -15,7 +15,7 @@ import { createDatabase, QueryOutsideTransaction } from '../src/database.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 
 const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: Hyperdrive' : false;
-const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
+const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
 /** Postgres behind a proxy that counts the connections made to it, and can cut them. */
 async function counted() {

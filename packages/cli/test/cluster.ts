@@ -41,7 +41,7 @@ export async function emptyCluster(cluster = CLUSTER): Promise<void> {
     for (const { datname } of (await client.query<{ datname: string }>("SELECT datname FROM pg_database WHERE datname LIKE 'setup\\_%'")).rows) {
       await client.query(`DROP DATABASE ${client.escapeIdentifier(datname)} WITH (FORCE)`);
     }
-    await client.query('DROP ROLE IF EXISTS coffre_runtime, coffre_vault_runtime, coffre_app, coffre_vault, setup_owner, setup_deployer');
+    await client.query('DROP ROLE IF EXISTS coffre_runtime, coffre_vault_runtime, coffre_app, coffre_vault, setup_owner, setup_deployer, setup_reporting');
   }, cluster);
 }
 

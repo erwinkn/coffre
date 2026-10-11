@@ -27,7 +27,7 @@ source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
 restored_db="${source_db}_restored"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
 export COFFRE_DEV_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
-owner_url() { echo "postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$1"; }
+owner_url() { echo "postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"; }
 psql_as_owner() { docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -qU coffre_owner "$@"; }
 log() { printf '\n==> %s\n' "$1"; }
 
@@ -58,8 +58,8 @@ start_coffre() {
         export PUBLIC_URL="$COFFRE_DEV_URL" ROOT_ADMINS="$COFFRE_ROOT_ADMINS" WRANGLER_SEND_METRICS=false
         export GITHUB_CLIENT_ID=coffre-local GITHUB_CLIENT_SECRET=coffre-local-secret
         export APP_KEY="$COFFRE_APP_KEY" VAULT_KEY_ID="$COFFRE_VAULT_KEY_ID" VAULT_KEY="$2"
-        export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$1"
-        export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432/$1"
+        export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"
+        export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"
         exec ./node_modules/.bin/wrangler dev -c "$app_config" -c vault/wrangler.jsonc \
             --ip 127.0.0.1 --port "$port" --inspector-port "$((port + 2))" --persist-to "$state" \
             --show-interactive-dev-session=false \
@@ -99,7 +99,7 @@ node scripts/ensure-database.mjs "$restored_db"
 docker compose exec -T postgres pg_restore -U coffre_owner --dbname="$restored_db" --exit-on-error <"$scratch/backup.dump"
 # Migrate reasserts database privileges, which a dump of one database leaves out.
 DATABASE_URL="$(owner_url "$restored_db")" pnpm --dir packages/db run db:migrate >/dev/null
-COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$restored_db" \
+COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$restored_db" \
     pnpm --dir packages/db run db:verify:runtime >/dev/null
 
 log 'checking the restored instance, with the same keys'

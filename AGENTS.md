@@ -65,7 +65,11 @@ this does not relax the workspace's or deployments' Node 24 requirement.
 `coffre_owner`, restricted runtime logins `coffre_runtime` for the app and
 `coffre_vault_runtime` for the vault). The running app and all the
 DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you invoke
-`docker compose` directly.
+`docker compose` directly. A Postgres of your own, beside the shared one, is a
+project and a port of its own: `COMPOSE_PROJECT_NAME=coffre_mine
+COFFRE_POSTGRES_PORT=56432 pnpm test` starts it, and every script, test and
+fixture connects to that port; `ensure-postgres.sh` refuses a project already
+up on another.
 
 `scripts/ensure-postgres.sh` reuses a healthy or initializing container and
 serializes cold starts across worktrees with the host's advisory lock
@@ -100,7 +104,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`). Don't add another to a package or the
+`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in

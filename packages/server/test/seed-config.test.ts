@@ -24,10 +24,10 @@ test('seed accepts the checked-in local development targets', () => {
   });
 });
 
-test('seed accepts a second local stack, on its own database and ports', () => {
+test('seed accepts a second local stack, on its own database and ports, its Postgres too', () => {
   const second = loadLocalSeedConfig({
     ...local,
-    DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_step6',
+    DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:56484/coffre_step6',
     COFFRE_DEV_URL: 'http://127.0.0.1:3080',
     COFFRE_DEV_IDP_URL: 'http://127.0.0.1:3081',
   });

@@ -37,5 +37,5 @@ END
 $$;
 SQL
 
-DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database" \
+DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database" \
     pnpm --filter @coffre/db run db:migrate >/dev/null

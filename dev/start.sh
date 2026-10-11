@@ -24,7 +24,7 @@ port="${COFFRE_DEV_PORT:-3000}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8081}"
 database="${COFFRE_DEV_DATABASE:-coffre}"
 state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
-owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database"
+owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 
 # What deployment/app/src/server.ts, the dev IdP and the seed read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login, and
@@ -34,8 +34,8 @@ export COFFRE_DEV_URL="$COFFRE_PUBLIC_URL"
 export COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port"
 export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"
-export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$database"
-export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432/$database"
+export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
+export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 
 log() { printf '\n==> %s\n' "$1"; }
 
