@@ -12,7 +12,7 @@ import { unsealedCredentials } from '@coffre/db/grants';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { authMac } from '../src/auth-rows.ts';
-import { SigninService } from '../src/api/signin.ts';
+import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { sealScopes } from '../src/api/services.ts';
@@ -152,6 +152,20 @@ test('narrowing the account narrows every token at once, and a token narrower th
   await bearer(writer.token).secrets.set('market/dev', { API_KEY: 'again' });
 });
 
+test('a scope names places by id: a place deleted takes its grants with it, and one made again under its name is another place', async () => {
+  const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
+  await root.environments.update('market/dev', { archived: true });
+  await root.environments.delete('market/dev');
+  assert.deepEqual((await root.tokens.list(CI)).tokens[0]!.scope, {}, 'what it reached is gone');
+  // market/dev again: a new environment, which the account is given, and the token is not.
+  await root.environments.create('market/dev', { name: 'dev' });
+  await root.secrets.set('market/dev', { API_KEY: 'new-dev-key' });
+  await root.access.set(CI, { 'market/dev': 'developer' });
+  assert.equal(await reads(issued.token, 'dev'), 403);
+  const again = await ada.tokens.issue(CI, { expiresInDays: 30 });
+  assert.equal(await reads(again.token, 'dev'), 'new-dev-key', 'a token made now reaches the new one');
+});
+
 test('nobody makes a token or a binding past the account or past what they could give it, through the API, and the refusal is logged', async () => {
   await root.access.set(CI, { 'market/prod': 'viewer' });
   // The account now holds prod, which Ada does not reach: she manages it no more, whatever scope she asks.
@@ -224,6 +238,55 @@ test("a scope changed or cleared around the app fails the row's MAC, and the tok
   }
   await db.owner.update(credentials).set({ scope: row!.scope }).where(eq(credentials.id, row!.id));
   assert.equal(await reads(issued.token, 'dev'), 'dev-key', 'its own scope put back checks again');
+});
+
+/** A token of 0.4, issued for `principal`: no scope, its MAC over 0.4's tuple. Its value. */
+async function legacyToken(principal: string): Promise<{ token: string; id: string }> {
+  const token = generateToken('service');
+  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const row = {
+    id: randomUUID(),
+    kind: 'service',
+    tokenHash: hashToken(token),
+    generation: member!.generation,
+    tokenHint: tokenHint(token),
+    principal,
+    identityId: null,
+    label: '0.4',
+    createdBy: 'ada@acme.example',
+    expiresAt: new Date(Date.now() + 86_400_000),
+    revokedAt: null,
+  };
+  await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
+  return { token, id: row.id };
+}
+
+test("two processes sealing 0.4's tokens at once seal each once, and each token reaches what its account held", async () => {
+  const tokens = await Promise.all(Array.from({ length: 6 }, () => legacyToken(CI)));
+  // Each its own process, as two isolates or two Node servers starting together.
+  const counts = await Promise.all([sealScopes(deps.db, deps.chainKey, deps.vault), sealScopes(deps.db, deps.chainKey, deps.vault)]);
+  assert.equal(counts[0] + counts[1], tokens.length, `sealed once each, not ${counts.join(' and ')}`);
+  assert.deepEqual(await unsealedCredentials(db.owner, new Date()), []);
+  for (const { token } of tokens) assert.equal(await reads(token, 'dev'), 'dev-key', 'its MAC checks, its scope the account\'s');
+  await root.access.set(CI, { 'market/prod': 'viewer' });
+  for (const { token } of tokens) assert.equal(await reads(token, 'prod'), 403);
+});
+
+test('a vault that cannot answer seals nothing: the credential is uncheckable, never sealed empty or in part, and the next check seals it', async () => {
+  const { token, id } = await legacyToken(CI);
+  const access = deps.vault.access.bind(deps.vault);
+  let down = true;
+  deps.vault.access = async (principal) => {
+    if (down) throw new Error('the vault is down');
+    return access(principal);
+  };
+  await assert.rejects(runtime.signin!.verify(token), CredentialUncheckable);
+  const unsealed = async () => (await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope;
+  assert.equal(await unsealed(), null);
+  assert.equal(await reads(token, 'dev'), 503, 'unavailable, not let through');
+  down = false;
+  assert.equal(await reads(token, 'dev'), 'dev-key');
+  assert.notEqual(await unsealed(), null);
 });
 
 test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", async () => {
