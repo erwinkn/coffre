@@ -109,10 +109,12 @@ tokens they issued, each with what it reaches. An account needs a grant
 before it gets a token or binding, since nothing it is given later
 reaches one made before. A binding that replaces others, by `--replace`
 or because its issuer moved its keys, reaches what they reached unless
-told otherwise. The tokens and bindings of 0.4 keep exactly what
+told otherwise; on the page, Trust a workload's picker then starts from
+it. The tokens and bindings of 0.4 keep exactly what
 they reached: the first time this version checks a credential, it gives
 each one its account's grants then, after the conversion of grants on
-every project, and logs it (`token.seal`); `coffre migrate` lists them
+every project, and logs it (`token.seal`); one a 0.4 instance makes while
+both run gets its account's grants on its first use. `coffre migrate` lists them
 before you deploy, and says which would reach nothing because their
 account holds nothing. Rolling back to 0.4 refuses them, and so does any
 0.4 instance still serving while 0.5 rolls out: it answers 401 to every
@@ -124,14 +126,18 @@ in one step, or expect those to fail for the length of the rollout.
   bindings and offboarding's `issuedTokens` lists say each one's `scope`,
   and `token.create` and `token.bind` log it. A scope past the account or
   past you is refused, logged as `beyond_account`; one names at most 1000
-  places.
+  places. `POST …/tokens?dryRun=1` answers what the token would reach, and
+  issues nothing, as `…/bindings?dryRun=1` does.
 - **CLI.** `coffre tokens issue` and `coffre trust` take
   `--scope market/dev=viewer,…`; `coffre tokens`, `coffre trust
   <service>` and `coffre offboard` say what each reaches.
 - **MCP.** `issue_service_token` and `trust_workload` take `scope`, and
-  the approval page says what the token or binding will reach; if that
-  changes before Approve, as when the account is given another grant,
-  Approve is refused and the page shows it again.
+  the approval page says what the token or binding will reach, as the
+  server would make it: a scope past the account is refused before anyone
+  is asked. If that changes before Approve, as when the account is given
+  another grant, Approve is refused and the page shows it again; Approve
+  makes the token or binding with the scope the page showed, so a grant
+  landing just after reaches neither.
 - **Schema.** `0003_credential_scopes` adds `scope` to `credentials` and
   `service_bindings`, and lets the app's login update it.
 

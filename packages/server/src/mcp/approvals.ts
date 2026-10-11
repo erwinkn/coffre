@@ -285,19 +285,20 @@ export class McpApprovals {
     }
     // What it replaces, read again: another version set, or another role granted, since the page showed it refuses it.
     // Unread on either side, nothing is approved: a page that could not read it, or a read that fails now.
-    // The API takes no expected version, so a write in the moment between this read and the change still lands first.
+    // The API takes no expected version, so a write in the moment between this read and the change still lands first;
+    // what a token or a binding reaches, found as shown, is what it is made with (`apply`), whatever the account holds by then.
+    let replaced: Replaced | undefined;
     if (input.approve && tool.change!.replaces !== undefined) {
       if (input.basis === undefined || input.basis === null) {
         throw refuse(conflict('coffre could not read what this replaces when the page opened: reload it and try again'), 'unconfirmed');
       }
-      let basis: string;
       try {
-        basis = basisOf(await tool.change!.replaces(this.#client(ctx), args as never));
+        replaced = await tool.change!.replaces(this.#client(ctx), args as never);
       } catch (error) {
         if (!(error instanceof CoffreError)) throw error;
         throw refuse(new ApiError('unavailable', 'coffre could not read what this replaces just now: try again'), 'unconfirmed');
       }
-      if (basis !== input.basis) throw refuse(conflict('this changed since you opened it: open the approval again'), 'replaced');
+      if (basisOf(replaced) !== input.basis) throw refuse(conflict('this changed since you opened it: open the approval again'), 'replaced');
     }
 
     await audited(ctx, async (tx, log) => {
@@ -324,7 +325,7 @@ export class McpApprovals {
     const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id };
     let applied: Applied;
     try {
-      applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value });
+      applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value, replaced });
     } catch (error) {
       const known = error instanceof CoffreError;
       if (!known) console.error('an approved MCP change failed', logged(error));

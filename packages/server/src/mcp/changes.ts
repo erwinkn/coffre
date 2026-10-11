@@ -65,8 +65,12 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
    * need not hold, since the value reaches the person only.
    */
   reveal?: true;
-  /** The change, as the person with the connection attached, when they approve it. */
-  apply: (api: CoffreClient, args: z.infer<I>, given: { value?: string }) => Promise<Applied>;
+  /**
+   * The change, as the person with the connection attached, when they
+   * approve it: with the value they typed, and what it replaces as Approve
+   * read it again and found it as the page showed it.
+   */
+  apply: (api: CoffreClient, args: z.infer<I>, given: { value?: string; replaced?: Replaced }) => Promise<Applied>;
 };
 
 const secret = z.string().min(1).max(300).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
@@ -313,19 +317,31 @@ function archiving(archived: boolean): Tool {
 
 const role = z.enum(ROLE_NAMES);
 /**
- * What a token or a binding will reach, as the page says it, and its basis:
- * left out of the call, the server decides it when the change is made, so
- * Approve reads it again and is refused if it differs from what the person
- * read, as when the account was given another grant since.
+ * What a token or a binding will reach, as the server would make it now,
+ * as the page says it, and its basis: Approve reads it again and is refused
+ * if it differs from what the person read, as when the account was given
+ * another grant since, and makes the change with it (`pinned`).
  */
-function reaching(scope: Record<string, string>, state: Record<string, unknown> = {}): Replaced {
+function reaching(scope: CredentialScope, state: Record<string, unknown> = {}): Replaced {
   return {
     state: { ...state, scope },
     details: [{ label: 'Reaches', value: credentialScopeInWords(scope), note: 'Never more than the account holds, and nothing it is given later.' }],
   };
 }
 
+/**
+ * The scope the page showed and Approve found again (`reaching`), which the
+ * token or binding is made with, rather than left for the server to decide
+ * a moment after Approve compared it.
+ */
+function pinned(replaced: Replaced | undefined): CredentialScope {
+  const scope = (replaced?.state as { scope?: CredentialScope } | undefined)?.scope;
+  if (scope === undefined) throw new Error('approved without what it reaches');
+  return scope;
+}
+
 /** A token's or a binding's scope (`POST /api/members/<member>/tokens`). */
+type CredentialScope = RouteInput<'POST /members/:member/tokens'>['scope'] & {};
 const credentialScope = z
   .record(z.string().max(200), role)
   .refine((scope) => Object.keys(scope).length <= MAX_SCOPE_PLACES, `a scope names at most ${MAX_SCOPE_PLACES} places`)
@@ -685,10 +701,14 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
-      check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
-      replaces: async (api, { service, scope }) =>
-        reaching(scope ?? Object.fromEntries((await api.members.access(serviceMember(service))).grants
-          .map((grant) => [grant.environment === null ? grant.project : `${grant.project}/${grant.environment}`, grant.role]))),
+      // A scope it names is checked as issuing it would be, before anyone is asked to approve it.
+      check: async (ctx, { service, label, expiresInDays, scope }) => {
+        await manages(ctx.api, serviceMember(service));
+        await ctx.api.tokens.preview(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) });
+      },
+      // What it will reach, as the server would issue it: what it names, or all the account holds. Approve refuses it changed.
+      replaces: async (api, { service, label, expiresInDays, scope }) =>
+        reaching((await api.tokens.preview(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) })).scope),
       preview: async (_api, { service, label, expiresInDays }, _viewing, replaced) => [
         { label: 'Service account', value: shownService(service), kind: 'mono' },
         ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
@@ -696,8 +716,8 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         { label: 'Good for', value: `${expiresInDays} days` },
         { label: 'The token', value: 'shown here once, after you approve; never to the app' },
       ],
-      apply: async (api, { service, label, expiresInDays, scope }) => {
-        const issued = await api.tokens.issue(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) });
+      apply: async (api, { service, label, expiresInDays }, { replaced }) => {
+        const issued = await api.tokens.issue(serviceMember(service), { label: label ?? null, expiresInDays, scope: pinned(replaced) });
         return {
           result: { service: shownService(service), id: issued.id, expiresAt: issued.expiresAt, scope: issued.scope },
           text: `A token for ${shownService(service)} is issued, good until ${issued.expiresAt}, reaching ${credentialScopeInWords(issued.scope)}. coffre showed it to the person, once; it is not here.`,
@@ -782,8 +802,8 @@ export const CHANGE_TOOLS: readonly Tool[] = [
           ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
         ];
       },
-      apply: async (api, { service, profile, issuer, claims, scope, label }) => {
-        const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null });
+      apply: async (api, { service, profile, issuer, claims, label }, { replaced }) => {
+        const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, scope: pinned(replaced), label: label ?? null });
         return { result: { service: shownService(service), binding: made.binding.id }, text: `CI runs that match are trusted as ${shownService(service)}.` };
       },
     },

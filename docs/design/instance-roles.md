@@ -279,8 +279,12 @@ it reached. Each account's are sealed in one transaction with a
 `token.seal` entry naming them, so a row put back unsealed and sealed
 again shows in the log. A vault that cannot answer seals nothing, and the
 credential is uncheckable (503) until it can. One that 0.4 makes while
-both run reaches what its account holds, as in 0.4, until the next
-process or isolate seals it. `coffre migrate` lists them by account
+both run, after the process or isolate sealed, is sealed on its first use
+instead (`sealCredentials`): a token or a run's credential when `verify`
+checks it, a binding when it exchanges, each with the account's grants
+the check already asked the vault for, and its own `token.seal` entry.
+No 0.5 process uses one unsealed, so nothing granted after its first use
+reaches it. `coffre migrate` lists them by account
 (`unsealedCredentials`, which `sealScopes` reads too), and says which
 account holds nothing, whose credentials would reach nothing for good.
 Rolling back to 0.4 fails closed: a sealed row fails 0.4's MAC, and its

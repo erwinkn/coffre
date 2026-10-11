@@ -356,6 +356,39 @@ test('on Workers, where each request builds its runtime, the isolate seals once:
   assert.notEqual(await scope(second.id), null);
 });
 
+test('a token 0.4 makes after this process sealed is sealed on its first use, with the answer its check already asked of the vault, and widened by nothing after', async () => {
+  const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
+  assert.equal(await reads(issued.token, 'dev'), 'dev-key', 'the first check seals what there is');
+  const straggler = await legacyToken(CI);
+  const asked: string[] = [];
+  const access = deps.vault.access.bind(deps.vault);
+  deps.vault.access = async (principal) => {
+    asked.push(principal);
+    return access(principal);
+  };
+  assert.equal(await reads(straggler.token, 'dev'), 'dev-key');
+  assert.deepEqual(asked.slice(0, 1), [CI], 'its own check, once, before the request reads anything');
+  const scope = async (id: string) => (await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope;
+  assert.equal(await scope(straggler.id), await scope(issued.id), "the account's grants, as a token issued now reaches them");
+  const seals = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'token.seal'));
+  assert.deepEqual(seals.map((entry) => [entry.actor, JSON.parse(entry.metadata) as unknown]), [[
+    'system:app',
+    { principalType: 'service', principalId: 'ci-web', tokens: [straggler.id], bindings: [], scope: JSON.parse((await scope(issued.id))!) as unknown },
+  ]]);
+  // Widened after, it reaches no more than it did; as one sealed with the rest would.
+  await root.access.set(CI, { 'market/prod': 'viewer' });
+  assert.equal(await reads(straggler.token, 'prod'), 403);
+  assert.equal(await reads(straggler.token, 'dev'), 'dev-key');
+});
+
+test("a token's dry run says what it would reach, checked as issuing it is, and issues and logs nothing", async () => {
+  assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30 }), { scope: { 'market/dev': 'developer' } });
+  assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/dev': 'viewer' } }), { scope: { 'market/dev': 'viewer' } });
+  await assert.rejects(ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/prod': 'viewer' } }), { status: 403 });
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+  assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.create')).then((rows) => rows.filter((row) => row.decision === 'allow')), []);
+});
+
 test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", async () => {
   // A token 0.4 issued: no scope, its MAC over 0.4's tuple.
   const token = generateToken('service');

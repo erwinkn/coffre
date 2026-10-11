@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { checkBinding } from '@coffre/core/workloads';
 
-import { bindingOf, EMPTY_FORM, summary, type Form } from '../src/lib/bindings.ts';
+import { askedScope, bindingOf, EMPTY_FORM, planned, summary, type Form, type ScopeChoice } from '../src/lib/bindings.ts';
 
 const SHA = 'c'.repeat(40);
 const form = (changes: Partial<Form>): Form => ({ ...EMPTY_FORM, ...changes });
@@ -74,4 +74,17 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
     { title: 'GitLab project 345', detail: 'push at tag v1' },
   );
   assert.deepEqual(summary({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104' } }), { title: 'accounts.google.com', detail: 'sub 104' });
+});
+
+test("the Trust dialog leaves a binding's scope to the server until the person chooses: one that replaces others reaches what they did, and the picker says so", () => {
+  const whole: ScopeChoice = { scope: { market: 'developer', 'billing/dev': 'viewer' }, chosen: false };
+  assert.deepEqual(askedScope(whole), {}, 'the server decides: what the bindings it replaces reached, or all the account holds');
+  // The plan replaces a binding that reached market/dev: the picker shows that, still the server's.
+  const inherited = planned(whole, { scope: { 'market/dev': 'viewer' } });
+  assert.deepEqual(inherited, { scope: { 'market/dev': 'viewer' }, chosen: false });
+  assert.deepEqual(askedScope(inherited), {});
+  // Chosen in the picker, it is asked for, and no plan changes it.
+  const chosen: ScopeChoice = { scope: { market: 'viewer' }, chosen: true };
+  assert.deepEqual(askedScope(chosen), { scope: { market: 'viewer' } });
+  assert.equal(planned(chosen, { scope: { 'market/dev': 'viewer' } }), chosen);
 });

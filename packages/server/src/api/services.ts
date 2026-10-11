@@ -17,7 +17,7 @@ import {
 } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Queryable } from '@coffre/db';
-import { unsealedCredentials } from '@coffre/db/grants';
+import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
 import { memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
@@ -148,6 +148,21 @@ export function scopeByPath(scope: CredentialScope | null, known: readonly Place
 }
 
 /**
+ * A scope as asked, by path, checked as far as it can be without the
+ * database: each path a project or an environment, and each role one its
+ * place takes.
+ */
+export function parseScope(wanted: ScopeByPath): { path: ReturnType<typeof parsePath>; role: Role }[] {
+  return Object.entries(wanted).map(([raw, role]) => {
+    const path = parsePath(raw, [1, 2]);
+    if (path.environment !== undefined && !assignableToEnvironment(role)) {
+      throw badRequest(`${role} includes permissions that only make sense on a whole project; name "${path.project}"`);
+    }
+    return { path, role };
+  });
+}
+
+/**
  * The scope a token or a trust binding of an account is made with, as the
  * caller asked for it, by path; when they did not, everything the account
  * holds, or for a binding that takes the place of others, what those
@@ -170,14 +185,12 @@ export async function issuedScope(
   const account = accountOf(standing.grants, standing.by, known);
   let scope: ServiceAccount['grants'];
   if (wanted !== undefined) {
-    scope = Object.entries(wanted).map(([raw, role]) => {
-      const path = parsePath(raw, [1, 2]);
+    scope = parseScope(wanted).map(({ path, role }) => {
       const project = known.find((candidate) => candidate.slug === path.project);
       if (project === undefined) throw notFound(`no project "${path.project}"`);
       if (path.environment === undefined) return { role, place: placeOf(project, null) };
       const environment = project.environments.find((candidate) => candidate.slug === path.environment);
       if (environment === undefined) throw notFound(`no environment "${formatPath(path)}"`);
-      if (!assignableToEnvironment(role)) throw badRequest(`${role} includes permissions that only make sense on a whole project; name "${path.project}"`);
       return { role, place: placeOf(project, environment) };
     });
   } else if (inherited !== undefined) {
@@ -238,12 +251,9 @@ function asGrant({ role, place }: ServiceAccount['grants'][number]): CredentialS
  * what their account holds now: once a configuration, the isolate's or the
  * process's, before it checks its first credential (`SigninService.verify`),
  * so each keeps what it reached and nothing granted after reaches it. A row
- * 0.4 still makes while both run reaches all its account holds, as then,
- * until the next isolate or process seals it. Each update matches the row's
- * MAC as read, so two at once seal a row once; each account's rows are
- * sealed in one transaction with a `token.seal` entry naming them, so a row
- * put back unsealed later, and sealed again, shows in the log. Returns how
- * many rows it sealed.
+ * 0.4 still makes while both run is sealed on its first use instead
+ * (`sealCredentials`, from `verify` or an exchange). Returns how many rows
+ * it sealed.
  */
 export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): Promise<number> {
   const unsealed = await unsealedCredentials(db, new Date());
@@ -251,28 +261,38 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
   for (const principal of new Set(unsealed.map((row) => row.principal))) {
     const access = await vault.access(principal);
     if (access.status !== 'active') continue;
-    const grants = access.grants.map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role }));
-    const scope = storedScope(grants);
-    sealed += await audited({ db, chainKey }, async (tx, log) => {
-      const done = { tokens: [] as string[], bindings: [] as string[] };
-      for (const row of unsealed.filter((candidate) => candidate.principal === principal)) {
-        const changed = row.kind === 'token'
-          ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: null }, { scope })
-          : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: null }, { scope });
-        if (changed > 0) done[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
-      }
-      const count = done.tokens.length + done.bindings.length;
-      if (count > 0) {
-        log.push({
-          actorType: 'system',
-          actorId: 'app',
-          action: 'token.seal',
-          decision: 'allow',
-          metadata: { principalType: 'service', principalId: memberOf(principal).id, ...done, scope: JSON.parse(scope) as unknown },
-        });
-      }
-      return count;
-    });
+    sealed += await sealCredentials(db, chainKey, access, unsealed.filter((candidate) => candidate.principal === principal));
   }
   return sealed;
+}
+
+/**
+ * Seal these unsealed rows of one account with what it holds now, as
+ * `access` answered, asked of the vault before: in one transaction, with a
+ * `token.seal` entry naming those it sealed, so a row put back unsealed
+ * later, and sealed again, shows in the log. Each update matches the row's
+ * MAC as read, so two at once seal a row once. Returns how many it sealed.
+ */
+export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, rows: readonly Unsealed[]): Promise<number> {
+  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role })));
+  return audited({ db, chainKey }, async (tx, log) => {
+    const done = { tokens: [] as string[], bindings: [] as string[] };
+    for (const row of rows) {
+      const changed = row.kind === 'token'
+        ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: null }, { scope })
+        : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: null }, { scope });
+      if (changed > 0) done[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
+    }
+    const count = done.tokens.length + done.bindings.length;
+    if (count > 0) {
+      log.push({
+        actorType: 'system',
+        actorId: 'app',
+        action: 'token.seal',
+        decision: 'allow',
+        metadata: { principalType: 'service', principalId: memberOf(access.principal).id, ...done, scope: JSON.parse(scope) as unknown },
+      });
+    }
+    return count;
+  });
 }

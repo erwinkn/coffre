@@ -10,6 +10,7 @@ import { notFound } from './errors.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { managedAccount } from './services.ts';
+import type { IssuedServiceToken, TokenPlan } from './signin.ts';
 import { getSettings, putSettings } from './settings.ts';
 import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
@@ -307,7 +308,12 @@ export const routes = {
       expiresInDays: z.number().int().min(1).max(366),
       scope: credentialScope,
     }),
-    run: (ctx, { params, input }) => signin(ctx).issueServiceToken(ctx, serviceId(params.member), input),
+    // `?dryRun=1` answers what the token would reach, and issues nothing.
+    query: dryRunFlag,
+    run: (ctx, { params, input, query }): Promise<TokenPlan | IssuedServiceToken> =>
+      query.dryRun !== undefined
+        ? signin(ctx).planServiceToken(ctx, serviceId(params.member), input)
+        : signin(ctx).issueServiceToken(ctx, serviceId(params.member), input),
   }),
   ...route('DELETE /members/:member/tokens/:id', {
     run: async (ctx, { params }) => {

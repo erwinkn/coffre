@@ -266,6 +266,72 @@ test('a token or a binding reaches what the page said: an account given more sin
   assert.notDeepEqual(await basis({ market: 'viewer' }), await basis({ market: 'viewer' }, ['b1']));
 });
 
+test('Approve makes the token or the binding with the reach it found as the page showed it: a grant landing just after its compare reaches neither', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
+  await root.members.add(`user:${DEV}`, { role: 'admin' });
+  const token = await connect(DEV, 'read manage-access');
+  const id = idOf(await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 }));
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads');
+  // Another Admin gives the account prod in the moment between Approve's compare and the change.
+  const change = TOOL_BY_NAME.get('issue_service_token')!.change!;
+  const replaces = change.replaces!;
+  change.replaces = async (...given) => {
+    const replaced = await replaces(...given);
+    await root.access.set('token:ci-deploy', { 'market/prod': 'viewer' });
+    return replaced;
+  };
+  let decided: Awaited<ReturnType<typeof decide>>;
+  try {
+    decided = await decide(id, true, { shown });
+  } finally {
+    change.replaces = replaces;
+  }
+  assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
+  assert.match(decided.body.outcome.text, /reaching viewer on ci-deploy-reads\./);
+  const tokens = await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
+  assert.deepEqual(tokens.map((row) => (JSON.parse(row.scope!) as unknown[]).length), [1], 'the token reaches what the page said, not prod');
+
+  // A binding the same: made with the scope of the plan Approve found, never left for the server to decide again.
+  const trust = TOOL_BY_NAME.get('trust_workload')!.change!;
+  const made: unknown[] = [];
+  const api = { bindings: { create: async (_member: string, input: unknown) => (made.push(input), { binding: { id: 'b1' }, replaced: [] }) } };
+  const args = { service: 'ci-deploy', profile: 'github', claims: { event_name: 'push' } };
+  await trust.apply(api as never, args as never, { replaced: { details: [], state: { scope: { 'market/dev': 'viewer' }, replaces: [] } } });
+  assert.deepEqual((made[0] as { scope: unknown }).scope, { 'market/dev': 'viewer' });
+});
+
+test("issue_service_token checks a scope it names as issuing would, before anyone is asked: the page shows only what would be issued", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
+  await root.members.add(`user:${DEV}`, { role: 'admin' });
+  const token = await connect(DEV, 'read manage-access');
+  // Past the account: refused at the call, and no page asks the person about it.
+  const beyond = (await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30, scope: { 'market/prod': 'viewer' } })).body.result!;
+  assert.equal(beyond.isError, true);
+  assert.match(beyond.content[0]!.text!, /at most what its account holds and what you could give it: not market\/prod/);
+  const unknown = (await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30, scope: { 'shop/prod': 'viewer' } })).body.result!;
+  assert.match(unknown.content[0]!.text!, /no project "shop"/);
+  assert.equal((await approvalRows()).length, 0);
+
+  // Within it: the page says what the server would issue, and its dry run issues nothing.
+  await root.access.set('token:ci-deploy', { 'market/prod': 'developer' });
+  const id = idOf(await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30, scope: { 'market/prod': 'viewer' } }));
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.details.find((line) => line.label === 'Reaches')?.value, 'viewer on market/prod');
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, 'token:ci-deploy')), []);
+  // The account loses it before Approve: the page cannot say what would be issued, and nothing is.
+  await root.access.set('token:ci-deploy', { 'market/prod': null });
+  const stale = (await view(id)).body.approval;
+  assert.equal(stale.ready, false);
+  assert.match(stale.details.find((line) => line.label === 'Note')!.value, /could not read what this replaces: .*not market\/prod/);
+  assert.equal((await decide(id, true, { shown })).status, 503);
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, 'token:ci-deploy')), []);
+});
+
 test('a change the person could not make is refused before anyone is asked; without Write, the step-up starts', async () => {
   const viewer = await connect(OTHER, 'read write');
   const refused = await callRaw(viewer, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
