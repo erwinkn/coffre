@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0 (2026-10-11)
+
 **Upgrading from 0.4.** This release changes what people and service
 accounts hold, so read what `coffre migrate` says before you deploy. The
 steps are the usual ones ([Upgrading](docs/deploy.md#upgrading)):
