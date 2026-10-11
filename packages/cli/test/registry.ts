@@ -8,18 +8,19 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export type Published = { version: string; daysAgo: number; dependencies?: Record<string, string> };
+/** `files`, the package's own, its package.json among them, in place of one with only its name, version and dependencies. */
+export type Published = { version: string; daysAgo: number; dependencies?: Record<string, string>; files?: Record<string, string> };
 
 export async function registry(packages: Record<string, Published[]>): Promise<{ origin: string; close(): void }> {
   const work = mkdtempSync(join(tmpdir(), 'coffre-registry-'));
   const tarballs = new Map<string, Buffer>();
   const packuments = new Map<string, (origin: string) => unknown>();
   for (const [name, versions] of Object.entries(packages)) {
-    const built = versions.map(({ version, daysAgo, dependencies = {} }) => {
+    const built = versions.map(({ version, daysAgo, dependencies = {}, files = { 'package.json': JSON.stringify({ name, version, dependencies }) } }) => {
       const root = join(work, `${name}-${version}`);
       mkdirSync(join(root, 'package'), { recursive: true });
-      const manifest = { name, version, dependencies };
-      writeFileSync(join(root, 'package', 'package.json'), JSON.stringify(manifest));
+      for (const [file, text] of Object.entries(files)) writeFileSync(join(root, 'package', file), text);
+      const manifest = JSON.parse(files['package.json']!) as { version: string };
       execFileSync('tar', ['czf', `${root}.tgz`, '-C', root, 'package']);
       const body = readFileSync(`${root}.tgz`);
       const path = `/${name}/-/${name}-${version}.tgz`;

@@ -20,7 +20,7 @@ async function fixture(t, mode, callers = 1) {
     const port = portProbe.address().port;
     await new Promise((resolve) => portProbe.close(resolve));
     const localScript = join(dir, 'scripts/ensure-postgres.sh');
-    writeFileSync(localScript, readFileSync(script, 'utf8').replaceAll('55432', String(port)));
+    writeFileSync(localScript, readFileSync(script, 'utf8'));
     writeFileSync(join(dir, 'scripts/postgres-port-available.mjs'), readFileSync(resolve(import.meta.dirname, 'postgres-port-available.mjs')));
     const state = JSON.stringify(dir);
     writeFileSync(join(dir, 'docker'), `#!${process.execPath}
@@ -90,9 +90,9 @@ if (args.includes('up')) {
 }
 throw new Error('unexpected docker command: ' + args.join(' '));
 `, { mode: 0o755 });
-    const run = () => new Promise((resolve, reject) => {
+    const run = (asked = port) => new Promise((resolve, reject) => {
         const child = spawn('/bin/bash', [localScript], {
-            env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, COMPOSE_PROJECT_NAME: project },
+            env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, COMPOSE_PROJECT_NAME: project, COFFRE_POSTGRES_PORT: String(asked) },
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
         });
@@ -109,7 +109,7 @@ throw new Error('unexpected docker command: ' + args.join(' '));
         child.once('error', (error) => { clearTimeout(deadline); reject(error); });
         child.once('close', (code) => { clearTimeout(deadline); resolve({ code, output }); });
     });
-    return { dir, run, calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse) };
+    return { dir, port, run, calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse) };
 }
 
 test('a healthy Postgres is reused without an up', async (t) => {
@@ -117,6 +117,14 @@ test('a healthy Postgres is reused without an up', async (t) => {
     const ran = await f.run();
     assert.equal(ran.code, 0, ran.output);
     assert.ok(f.calls().every((args) => !args.includes('up')));
+});
+
+test("a project's Postgres on another port than the one asked for is refused, not used", async (t) => {
+    const f = await fixture(t, 'healthy');
+    const ran = await f.run(f.port + 1);
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, new RegExp(`publishes Postgres on :${f.port}, not :${f.port + 1}\\. Run that port as a project of its own`));
+    assert.ok(f.calls().every((args) => !args.includes('up') && !args.includes('exec')));
 });
 
 test('a running but unready Postgres is awaited without recreation', async (t) => {

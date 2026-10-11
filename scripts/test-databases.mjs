@@ -4,7 +4,7 @@ import pg from 'pg';
 import { restrictDatabase } from '@coffre/db/migrate';
 
 export async function withOwner(work, database = 'postgres') {
-    const owner = new pg.Client(`postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/${encodeURIComponent(database)}`);
+    const owner = new pg.Client(`postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${encodeURIComponent(database)}`);
     await owner.connect();
     try {
         return await work(owner);

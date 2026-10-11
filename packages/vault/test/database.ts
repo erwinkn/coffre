@@ -18,7 +18,7 @@ import pg from 'pg';
 export const ENGINE = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'sqlite' : 'postgres';
 
 const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
-const url = (login: string) => `postgresql://${login}@127.0.0.1:55432/${name}`;
+const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 export const OWNER_URL = url('coffre_owner:local-dev-only');
 export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
 

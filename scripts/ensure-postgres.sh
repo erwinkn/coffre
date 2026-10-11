@@ -12,6 +12,8 @@ set -euo pipefail
 script="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$script")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
+# Another port is another container: give it its own COMPOSE_PROJECT_NAME.
+port="${COFFRE_POSTGRES_PORT:-55432}"
 
 # Over TCP, not the socket: on a fresh volume the image first runs a
 # temporary server on the socket alone, to create the database, then stops
@@ -21,6 +23,12 @@ ready() {
     local published
     published="$(docker compose port postgres 5432 2>/dev/null)" || return 1
     [[ -n "$published" ]] || return 1
+    # The project's container, on another port: never the one this caller asked for.
+    if [[ "${published##*:}" != "$port" ]]; then
+        printf 'Compose project %s publishes Postgres on :%s, not :%s. Run that port as a project of its own: COMPOSE_PROJECT_NAME=<another> COFFRE_POSTGRES_PORT=%s.\n' \
+            "$COMPOSE_PROJECT_NAME" "${published##*:}" "$port" "$port" >&2
+        exit 1
+    fi
     docker compose exec -T postgres pg_isready -h 127.0.0.1 -U coffre_owner -d postgres >/dev/null 2>&1
 }
 
@@ -47,20 +55,20 @@ running() {
     [[ -n "$container" && "$(docker inspect --format '{{.State.Running}}' "$container")" == true ]]
 }
 
-# A socket allocated before CI reserves 55432 may remain in TIME_WAIT for
+# A socket allocated before CI reserves the port may remain in TIME_WAIT for
 # 60 seconds. Allow that plus the image's 60-second initialization budget.
 deadline=$((SECONDS + 120))
 last_error=''
 while ((SECONDS < deadline)); do
     if ready; then exit 0; fi
     if ! running; then
-        if node "$(dirname "$script")/postgres-port-available.mjs" 55432; then
+        if node "$(dirname "$script")/postgres-port-available.mjs" "$port"; then
             :
         else
             status=$?
             if ((status != 1)); then exit "$status"; fi
             if [[ -z "$last_error" ]]; then
-                last_error='Postgres port 55432 is occupied; waiting for the socket to close.'
+                last_error="Postgres port $port is occupied; waiting for the socket to close."
                 printf '%s\n' "$last_error" >&2
             fi
             sleep 1
@@ -94,5 +102,5 @@ echo 'Postgres did not become ready within 120 seconds.' >&2
 docker compose ps -a >&2 || true
 # A non-listening outgoing socket can block Docker's bind too. Include all
 # TCP states so the next failure names the socket rather than only the port.
-if command -v ss >/dev/null; then ss -tan '( sport = :55432 )' >&2 || true; fi
+if command -v ss >/dev/null; then ss -tan "( sport = :$port )" >&2 || true; fi
 exit 1

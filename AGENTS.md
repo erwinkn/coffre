@@ -65,7 +65,11 @@ this does not relax the workspace's or deployments' Node 24 requirement.
 `coffre_owner`, restricted runtime logins `coffre_runtime` for the app and
 `coffre_vault_runtime` for the vault). The running app and all the
 DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you invoke
-`docker compose` directly.
+`docker compose` directly. A Postgres of your own, beside the shared one, is a
+project and a port of its own: `COMPOSE_PROJECT_NAME=coffre_mine
+COFFRE_POSTGRES_PORT=56432 pnpm test` starts it, and every script, test and
+fixture connects to that port; `ensure-postgres.sh` refuses a project already
+up on another.
 
 `scripts/ensure-postgres.sh` reuses a healthy or initializing container and
 serializes cold starts across worktrees with the host's advisory lock
@@ -100,7 +104,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`). Don't add another to a package or the
+`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
@@ -117,9 +121,8 @@ check or type, a unique or foreign key the old code may break) ships one
 release after the code stops using it. 0.4.0 is a clean break: one baseline
 per engine, for new databases only, and no code for earlier releases'
 deployments or data. `pnpm test:compat` holds the newest release to this
-checkout's schema, through that release's own conformance; it is off for
-0.4.0, which has no earlier release on its schema, and returns for 0.5.0,
-against 0.4.0.
+checkout's schema, through that release's own conformance, in CI on every
+change; it was off for 0.4.0, which had no earlier release on its schema.
 
 **Transactions and the vault.** No app database transaction may stay open across
 any vault call. Prepare outside SQL; commit app writes and their audit together,
@@ -196,7 +199,7 @@ unsupported diff select full validation.
   migrate with this checkout's migrations, and requires it conformant; then
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
-  network and Postgres. Off in CI for 0.4.0 (see Migrations); back for 0.5.0.
+  network and Postgres. CI runs it for both kinds.
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

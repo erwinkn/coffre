@@ -77,9 +77,9 @@ trap finish EXIT
 
 "$root/scripts/ensure-postgres.sh"
 node "$root/scripts/ensure-database.mjs" coffre
-postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432
-runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432
-vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432
+postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
+runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
+vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 store="$(pnpm --dir "$root" store path)"
 
 # What applies the schema: this checkout's migrations, from its sources, or

@@ -14,7 +14,7 @@ if (!/^coffre[a-z0-9_]*$/.test(name ?? '')) {
     process.exit(2);
 }
 
-const client = new pg.Client('postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/postgres');
+const client = new pg.Client(`postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/postgres`);
 await client.connect();
 try {
     // Roles belong to the cluster, not this run's database. Match the lock

@@ -3,9 +3,9 @@
 // the release changes for the database: the migrations it adds, which
 // `coffre migrate` applies before the new version is deployed.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -28,13 +28,15 @@ import {
   resolveAgain,
   ROUTE_TREE,
   movePins,
+  START_PACKAGES,
   startPinMoves,
   type Held,
   type Moved,
+  type PinMove,
 } from './deployment.ts';
 import { WORKFLOW } from './deploy-on-push.ts';
 import { templateDir, type Kind } from './init.ts';
-import { after as later, applyChanges, CLEAN_BREAK, pageMove, shownChange } from './layout.ts';
+import { after as later, applyChanges, CLEAN_BREAK, type Move, pageMove, shownChange } from './layout.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
@@ -224,14 +226,143 @@ function command(name: string, args: string[], cwd: string): Promise<void> {
   });
 }
 
+/**
+ * What moving a deployment to a release changes of it, by that release's
+ * template: the page files it adds and retires since the version the
+ * deployment pins (none when its pins are not one version), its Start app's
+ * pins, and its pnpm.
+ */
+export type Plan = { pages: Move; start: PinMove[]; packageManager: string | null };
+
+/** A version as a deployment pins it: exact, never a range. */
+const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+/** A packageManager pnpm, as corepack takes it: an exact version, perhaps with its hash. */
+const PNPM = /^pnpm@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+sha(?:1|224|256|384|512)\.[0-9a-f]+)?$/;
+const ROUTES = 'app/src/routes/';
+
+/**
+ * A plan another release's CLI wrote, as this one may make it, or why not:
+ * its page files under the routes directory, each as the deployment in
+ * `dir` has it now; its pins among the Start app's packages, at exact
+ * versions; its pnpm, an exact one. A field this release does not know is
+ * left out, for a later release may say more; one it knows, of another
+ * shape, refuses the whole plan, before anything is changed.
+ */
+export function parsePlan(said: unknown, dir: string): Plan {
+  const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+  const nullable = (value: unknown) => value === null || typeof value === 'string';
+  if (!object(said)) throw new Error('not a plan');
+  const { pages, start, packageManager } = said;
+  if (packageManager !== null && !(typeof packageManager === 'string' && PNPM.test(packageManager))) {
+    throw new Error(`packageManager ${JSON.stringify(packageManager)} is not an exact pnpm`);
+  }
+  if (!Array.isArray(start)) throw new Error('start is not a list');
+  const pins = start.map((pin): PinMove => {
+    if (!object(pin) || typeof pin.name !== 'string' || typeof pin.from !== 'string' || typeof pin.to !== 'string') throw new Error('a start pin is not a name, from and to');
+    if (!(START_PACKAGES as readonly string[]).includes(pin.name)) throw new Error(`${pin.name} is not one of the Start app's packages`);
+    if (!EXACT.test(pin.to)) throw new Error(`${pin.name} ${JSON.stringify(pin.to)} is not an exact version`);
+    return { name: pin.name, from: pin.from, to: pin.to };
+  });
+  if (!object(pages)) throw new Error('pages is not a move');
+  let move: Move;
+  if (Array.isArray(pages.problems)) {
+    if (!pages.problems.every((problem) => typeof problem === 'string')) throw new Error('a page problem is not a line');
+    move = { problems: pages.problems as string[] };
+  } else if (Array.isArray(pages.changes)) {
+    move = {
+      changes: pages.changes.map((change) => {
+        if (!object(change) || typeof change.path !== 'string' || !nullable(change.was) || !nullable(change.becomes)) throw new Error('a page change is not a path, was and becomes');
+        const { path } = change;
+        // Relative, in the routes directory, and said once: no `..`, `.`, empty or Windows segment.
+        if (!path.startsWith(ROUTES) || path.includes('\\') || path.slice(ROUTES.length).split('/').some((part) => part === '' || part === '.' || part === '..')) {
+          throw new Error(`${JSON.stringify(path)} is not a file in ${ROUTES}`);
+        }
+        // The file as the plan saw it, or the plan is another deployment's: what it changes, it must know.
+        const now = existsSync(join(dir, path)) ? readFileSync(join(dir, path), 'utf8') : null;
+        if (now !== change.was) throw new Error(`${path} is not as it says it was`);
+        return { path, was: change.was as string | null, becomes: change.becomes as string | null };
+      }),
+    };
+  } else throw new Error('pages has neither changes nor problems');
+  return { pages: move, start: pins, packageManager: packageManager as string | null };
+}
+
+/** The plan for moving the deployment in `dir`, of `kind`, to this CLI's release. */
+export function planHere(dir: string, kind: Kind): Plan {
+  const template = templateDir(kind);
+  const pinned = [...new Set(Object.values(coffrePins(dir)))];
+  return {
+    pages: pinned.length === 1 ? pageMove(dir, template, pinned[0]!) : { changes: [] },
+    start: startPinMoves(dir, template),
+    packageManager: templatePackageManager(kind),
+  };
+}
+
+/**
+ * The plan for moving the deployment in `dir` to `version`, as that
+ * release's own CLI says: a CLI of an earlier release knows neither the
+ * pages it adds nor the pins it is built with. Its `coffre update --plan
+ * <dir>` writes the plan as one line of JSON, an answer kept as it is from
+ * release to release, as earlier CLIs ask it, and held to it (parsePlan).
+ * That CLI is the package the deployment's install fetches: npm installs it
+ * in an empty project of its own, with the deployment's .npmrc, so from its
+ * registry, and never runs a copy of the same version another project or
+ * the global prefix has, as npx would. Running it runs that release's
+ * code: asked only once the move is agreed to.
+ */
+export async function planOf(version: string, dir: string, env: NodeJS.ProcessEnv = process.env): Promise<Plan> {
+  const scratch = mkdtempSync(join(tmpdir(), 'coffre-plan-'));
+  try {
+    // Its package.json stops npm's search for a project above it.
+    writeFileSync(join(scratch, 'package.json'), '{ "private": true }\n');
+    if (existsSync(join(dir, '.npmrc'))) copyFileSync(join(dir, '.npmrc'), join(scratch, '.npmrc'));
+    await output('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', `${PACKAGE}@${version}`], scratch, env);
+    const root = join(scratch, 'node_modules', PACKAGE);
+    const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version?: unknown; bin?: Record<string, unknown> };
+    if (manifest.version !== version) throw new Error(`npm installed ${String(manifest.version)}`);
+    const bin = manifest.bin?.coffre;
+    if (typeof bin !== 'string') throw new Error('it has no coffre command');
+    const said = (await output(process.execPath, [join(root, bin), 'update', '--plan', dir], scratch, env)).trim().split('\n').at(-1) ?? '';
+    return parsePlan(JSON.parse(said), dir);
+  } catch (error) {
+    throw new Error(`coffre ${version}'s own CLI could not say what it changes (${error instanceof Error ? error.message : String(error)})`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** What a command writes, or the last line of what it says, when it fails. */
+function output(name: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(name, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' } });
+    let [stdout, stderr] = ['', ''];
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+    child.on('error', () => reject(new Error(`${name} is not installed`)));
+    child.on('close', (code) => (code === 0 ? resolve(stdout) : reject(new Error(stderr.trim().split('\n').at(-1) || `${name} exited with ${code}`))));
+  });
+}
+
+/** `coffre update --plan <dir>`: the plan, for an earlier release's CLI that asks it. */
+function writePlan(dir: string): void {
+  const kind = deploymentKind(dir);
+  if (kind !== 'workers' && kind !== 'node') {
+    process.stderr.write(`${dir} holds no deployment coffre init wrote\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`${JSON.stringify(planHere(dir, kind))}\n`);
+}
+
 export async function update(args: string[]): Promise<void> {
   let yes: boolean;
+  let plan: string | undefined;
   try {
-    ({ yes } = parseArgs({ args, options: { yes: { type: 'boolean', default: false } }, strict: true }).values);
+    ({ yes, plan } = parseArgs({ args, options: { yes: { type: 'boolean', default: false }, plan: { type: 'string' } }, strict: true }).values);
   } catch {
     process.stderr.write('usage: coffre update [--yes]\n');
     process.exit(2);
   }
+  if (plan !== undefined) return writePlan(plan);
   const terminal = openTerminal();
   const out = terminal?.out ?? process.stderr;
   const s = style(out);
@@ -300,15 +431,36 @@ export async function update(args: string[]): Promise<void> {
             details: [`Deploy coffre ${latest} afresh, with coffre init (docs/deploy.md, "From a release before ${CLEAN_BREAK}")`],
           };
         }
+        const atLatest = pinned.length === 1 && pinned[0] === latest;
+        // What the release changes, as it says: this CLI's own template is its release's, perhaps an earlier one.
+        // Its own CLI says it by running, so the move is agreed to before, once, and then made as it says.
+        let plan: Plan;
+        const agreed = current !== latest;
+        if (!agreed) plan = planHere(deployment, kind as Kind);
+        else {
+          const question = atLatest
+            ? `Bring this deployment's pages and pins to coffre ${latest}'s, as its own CLI says, and install it?`
+            : `Move this deployment from ${was} to ${latest}, with the pages and pins its own CLI says, and install it?`;
+          step.under([`To say what changes, coffre ${latest}'s own CLI runs, fetched with npm; then that changes, unasked`]);
+          const accepted = await ask(question, step);
+          step.under([]);
+          if (!accepted) return { text: `This deployment stays as it is, at ${was}`, details: [] };
+          step.note(`Asking coffre ${latest}'s own CLI what it changes`);
+          try {
+            plan = await planOf(latest, deployment);
+          } catch (error) {
+            // Not done, so not a success, which a pipeline would take it for.
+            throw new Error(`${error instanceof Error ? error.message : String(error)}. Nothing was changed: run coffre ${latest}'s own, npx ${PACKAGE}@${latest} update`);
+          }
+        }
         const details: string[] = [];
         // Exclusions an earlier run wrote, whose packages have cleared since: gone first.
         const cleared = removeCleared(deployment, new Date());
         if (cleared.length > 0) details.push(`No longer excluded from minimumReleaseAge, now old enough: ${listed(cleared, 'and')}`);
-        const template = templateDir(kind as Kind);
-        const pnpm = templatePackageManager(kind as Kind);
+        const pnpm = plan.packageManager;
         const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
         // The deployment gains the pages coffre has added since its release, and loses those it retired.
-        const pages = pinned.length !== 1 ? { changes: [] } : pageMove(deployment, template, pinned[0]!);
+        const pages = plan.pages;
         if ('problems' in pages) {
           return {
             text: `This deployment stays as it is, at ${was}: coffre ${latest}'s pages are not all where this one's are. Nothing was changed`,
@@ -317,23 +469,25 @@ export async function update(args: string[]): Promise<void> {
         }
         const move = pages.changes;
         // What its Start app builds with, as the release's pages are built with.
-        const shared = startPinMoves(deployment, template);
-        const current = pinned.length === 1 && pinned[0] === latest;
-        if (current && !repin && move.length === 0 && shared.length === 0) {
+        const shared = plan.start;
+        if (atLatest && !repin && move.length === 0 && shared.length === 0) {
           return { text: `This deployment's coffre packages are at ${latest} already`, details };
         }
-        const on = pnpm?.replace('@', ' ');
-        const question = current
-          ? move.length > 0
-            ? "Change coffre's page files, as above, and install it?"
-            : repin
-              ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
-              : `Move its Start app's packages to the versions coffre ${latest} is built with, and install it?`
-          : `Move this deployment from ${was} to ${latest}${move.length > 0 ? ", with coffre's pages as above," : ''}${repin ? ` on ${on},` : ''} and install it?`;
-        step.under([...move.flatMap((change) => shownChange(change)), ...(move.length > 0 ? [`~ ${ROUTE_TREE}, regenerated`] : []), ...shared.map(({ name, from, to }) => `~ ${name} ${from} → ${to}`)]);
-        const accepted = await ask(question, step);
-        step.under([]);
-        if (!accepted) return { text: `This deployment stays as it is, at ${was}`, details };
+        // Asked here when no other release's code had to run to say what changes; shown first.
+        if (!agreed) {
+          const on = pnpm?.replace('@', ' ');
+          const question = atLatest
+            ? move.length > 0
+              ? "Change coffre's page files, as above, and install it?"
+              : repin
+                ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
+                : `Move its Start app's packages to the versions coffre ${latest} is built with, and install it?`
+            : `Move this deployment from ${was} to ${latest}${move.length > 0 ? ", with coffre's pages as above," : ''}${repin ? ` on ${on},` : ''} and install it?`;
+          step.under([...move.flatMap((change) => shownChange(change)), ...(move.length > 0 ? [`~ ${ROUTE_TREE}, regenerated`] : []), ...shared.map(({ name, from, to }) => `~ ${name} ${from} → ${to}`)]);
+          const accepted = await ask(question, step);
+          step.under([]);
+          if (!accepted) return { text: `This deployment stays as it is, at ${was}`, details };
+        }
 
         // Put back byte for byte however this ends short of installed: the
         // deployment's pins, pnpm and lockfile stay as they were.
@@ -448,7 +602,7 @@ export async function update(args: string[]): Promise<void> {
           }
         }
         return {
-          text: current ? `Pinned ${pnpm}, and installed it` : `Moved this deployment from ${was} to ${latest}, and installed it`,
+          text: atLatest ? `Pinned ${pnpm}, and installed it` : `Moved this deployment from ${was} to ${latest}, and installed it`,
           details,
         };
       });

@@ -45,10 +45,11 @@ export const LOCAL_SEED_GRANTS = Object.freeze([
 /**
  * What each target may be: this machine's Postgres as the local owner, any
  * database on it named `coffre…`, and loopback for the API and the IdP, on
- * any port, so a second dev stack can run beside the first.
+ * any port, so a second dev stack can run beside the first, and a second
+ * Postgres too (COFFRE_POSTGRES_PORT).
  */
 const LOCAL_TARGETS = Object.freeze({
-    databaseUrl: /^postgresql:\/\/coffre_owner:local-dev-only@127\.0\.0\.1:55432\/coffre[a-z0-9_]*$/,
+    databaseUrl: /^postgresql:\/\/coffre_owner:local-dev-only@127\.0\.0\.1:\d{2,5}\/coffre[a-z0-9_]*$/,
     apiUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
     idpUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
     rootAdmin: /^admin@acme\.example$/,

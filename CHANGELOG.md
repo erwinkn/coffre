@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+**`coffre update` moves a deployment with the new release's pages.** The
+deployment's own CLI, `pnpm exec coffre update`, belongs to the release
+it moves from, and it used that release's list of pages. So 0.4's CLI,
+moving a deployment to 0.5.0, left out the new `users.$user.apps.tsx`,
+and running it again added nothing, since the deployment was at 0.5.0 by
+then. Now a CLI of an earlier release asks the new release's own CLI,
+`coffre update --plan <dir>`, which pages it adds and retires and which
+versions its Start app and pnpm take. That runs the new release's code, so
+it asks first: "Move this deployment from 0.5.1 to 0.5.2, with the pages
+and pins its own CLI says, and install it?", then moves it as that CLI
+says, without asking again. `--yes` answers for CI; without a terminal
+and without `--yes`, nothing runs. npm installs that CLI in an empty
+directory of its own, with the deployment's `.npmrc`, so it is the
+registry's package the deployment's install fetches, never a copy of the
+same version that a project or the global prefix has, as `npx` would run.
+Its answer is checked whole before anything changes: page files only in
+`app/src/routes/`, each as the deployment has it now; only the Start app's
+packages, at exact versions; an exact pnpm. Fields this release doesn't
+know are left out. When that CLI can't say, nothing changes and the update
+exits 1. CLIs before 0.5.1 don't ask, so to move a deployment from 0.5.0 or
+earlier, run the new release's CLI: `npx @coffre/cli@latest update`. A
+deployment that 0.4's CLI moved to 0.5.0 still lacks the page: copy
+`app/src/routes/_coffre/users.$user.apps.tsx` from
+`node_modules/@coffre/cli/dist/templates/<workers or node>/`, then build,
+which writes the route tree.
+
+**`coffre migrate` names the role that owns the tables.** A login that
+neither owns coffre's tables nor is a member of the role that does used
+to get as far as Postgres's "permission denied for schema drizzle". Now
+it stops before asking, with the owner and the fix: "coffre's tables are
+owned by X, and this login, Y, is neither it nor a member of it: migrate
+with X's connection string, or, as a role that administers it, run GRANT
+"X" TO "Y" WITH INHERIT TRUE". A member of X that doesn't inherit its
+privileges (NOINHERIT) is told so, since a plain GRANT would leave it
+unable to migrate. Only the `drizzle` schema and the objects coffre's
+migrations make count: another table in `public`, whoever owns it, is the
+database's own. With nothing to apply, a login that can still read the
+tables gets only a warning, so it can be fixed before the next migration
+needs it. `coffre setup` and `coffre-server migrate` refuse the same way.
+
+**CI runs `pnpm test:compat` again**, for both kinds: the newest release,
+now 0.5.0, must stay conformant on each change's schema.
+
 ## 0.5.0 (2026-10-11)
 
 **Upgrading from 0.4.** This release changes what people and service

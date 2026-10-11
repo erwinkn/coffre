@@ -13,7 +13,7 @@ import type { Deployment } from '../src/harness.ts';
 test('the canary scan detects plaintext in a Postgres bytea column', {
   skip: (process.env.COFFRE_TEST_ENGINE ?? 'postgres') !== 'postgres' && 'Postgres bytea reader',
 }, async (t) => {
-  const url = `postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
+  const url = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
   // Only storage is under test; every HTTP surface answers without a value.
   const clean = async () => new Response('{}');
   t.mock.method(globalThis, 'fetch', clean);
