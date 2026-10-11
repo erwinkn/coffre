@@ -207,7 +207,6 @@ test("a run's credential reaches what both its binding's scope and the account h
   // A binding made now takes what the account holds now, or less when told.
   const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: null, replaces: [bound] }, { dryRun: false });
   assert.ok('binding' in made);
-  assert.deepEqual(made.binding.scope, { 'api-deploy-reads': 'viewer', 'market/dev': 'developer' });
   await root.access.set(MEMBER, { 'market/prod': 'viewer' });
 
   const reveal = async (credential: string, path: string) =>
@@ -218,6 +217,7 @@ test("a run's credential reaches what both its binding's scope and the account h
   // Narrowing the account narrows the run's credential at once.
   await root.access.set(MEMBER, { 'market/dev': null });
   assert.equal(await reveal(credential, 'market/dev'), 403);
+  assert.deepEqual(made.binding.scope, { 'api-deploy-reads': 'viewer', 'market/dev': 'developer' });
   // A binding is made at most as wide as the account, whoever makes it.
   await assert.rejects(
     runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, scope: { 'market/dev': 'viewer' }, label: null, replaces: [] }, { dryRun: true }),
