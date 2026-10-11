@@ -14,6 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
+import type { CredentialScope } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -29,6 +30,7 @@ import {
   members,
   memberOf,
   memberStanding,
+  places,
   principalOf,
   revokePriorMembership,
   update,
@@ -38,7 +40,7 @@ import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember } from './paths.ts';
-import { managedAccount, notManager } from './services.ts';
+import { issuedScope, managedAccount, notManager, readScope, scopeByPath, sealScopes, storedScope, type ScopeByPath } from './services.ts';
 
 export type SigninServiceDeps = {
   db: Database;
@@ -129,6 +131,8 @@ export type CredentialPrincipal = Principal & {
   credentialId: string;
   credentialGeneration: number;
   access: Access;
+  /** Its scope, a service token's or its binding's, past which nothing it asks reaches; null for a session's. */
+  credentialScope: CredentialScope | null;
   /** Whether a trust binding issued it, for a CI run: the request's entries then name it. */
   exchanged: boolean;
 };
@@ -170,6 +174,8 @@ export type ServiceTokenRow = {
   expiresAt: string;
   lastUsedAt: string | null;
   lastUsedIp: string | null;
+  /** What it reaches, of what its account holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
+  scope: ScopeByPath | null;
 };
 
 export type DeviceStart = {
@@ -246,6 +252,8 @@ export function normalizeUserCode(input: string): string | null {
 export class SigninService {
   readonly #deps: SigninServiceDeps;
   readonly #stateKey: Buffer;
+  /** Whether this process sealed the scopes of 0.4's tokens and bindings (`sealScopes`). */
+  #sealed = false;
 
   constructor(deps: SigninServiceDeps) {
     this.#deps = deps;
@@ -484,7 +492,7 @@ export class SigninService {
     tx: Transaction,
     kind: CredentialKind,
     principal: PrincipalRef,
-    options: { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date },
+    options: { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope },
   ): Promise<IssuedCredential> {
     const token = generateToken(kind);
     const id = randomUUID();
@@ -499,6 +507,7 @@ export class SigninService {
       label: options.label?.slice(0, 120) ?? null,
       createdBy: options.createdBy,
       expiresAt: options.expiresAt,
+      scope: options.scope === undefined ? null : storedScope(options.scope),
       revokedAt: null,
     };
     await insert(tx, credentials, { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) });
@@ -522,6 +531,10 @@ export class SigninService {
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
     try {
+      if (!this.#sealed) {
+        await sealScopes(db, this.#deps.chainKey, this.#deps.vault);
+        this.#sealed = true;
+      }
       row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
       if (row !== null) access = await this.#deps.vault.access(row.principal);
     } catch (error) {
@@ -539,7 +552,16 @@ export class SigninService {
 
     const member = memberOf(row.principal);
     return member.type === 'service'
-      ? { type: 'service', id: member.id, commonName: member.id, credentialId: row.id, credentialGeneration: row.generation, access, exchanged: row.bindingStands !== null }
+      ? {
+          type: 'service',
+          id: member.id,
+          commonName: member.id,
+          credentialId: row.id,
+          credentialGeneration: row.generation,
+          access,
+          credentialScope: readScope(row.scope),
+          exchanged: row.bindingStands !== null,
+        }
       : {
           type: 'user',
           id: member.id,
@@ -549,6 +571,7 @@ export class SigninService {
           credentialGeneration: row.generation,
           exchanged: false,
           access,
+          credentialScope: null,
         };
   }
 
@@ -690,7 +713,10 @@ export class SigninService {
     if (!self && !(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) {
       throw forbidden('only those who manage this service account may see its tokens');
     }
-    const [service] = await members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date());
+    const [[service], known] = await Promise.all([
+      members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date()),
+      places(this.#deps.db),
+    ]);
     return (service?.credentials ?? [])
       // Those its trust bindings issued are a CI run's for five minutes, not tokens anyone keeps.
       .filter((row) => issuingBinding(row.createdBy) === null)
@@ -704,18 +730,22 @@ export class SigninService {
         expiresAt: row.expiresAt.toISOString(),
         lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
         lastUsedIp: row.lastUsedIp,
+        scope: scopeByPath(readScope(row.scope), known),
       }));
   }
 
   /**
    * Mint a token for a service principal. The value is returned once and
-   * exists nowhere afterwards; losing it means minting another.
+   * exists nowhere afterwards; losing it means minting another. Its scope
+   * is what the caller asks, by path, or all the account holds; never more
+   * than the account holds, nor than the caller could give it
+   * (`issuedScope`), and never changed after.
    */
   async issueServiceToken(
     ctx: Asker,
     serviceId: string,
-    input: { label: string | null; expiresInDays: number },
-  ): Promise<IssuedCredential> {
+    input: { label: string | null; expiresInDays: number; scope?: ScopeByPath },
+  ): Promise<IssuedCredential & { scope: ScopeByPath }> {
     if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > MAX_SERVICE_TOKEN_DAYS) {
       throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
     }
@@ -723,13 +753,14 @@ export class SigninService {
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
-      const { standing, managed } = await managedAccount(this.#deps, ctx.caller, serviceId);
+      const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.create', details, 'issue its tokens');
       const refusal = () => new Refusal(
         notFound('unknown service'),
         denied(ctx, 'token.create', 'unknown_principal', { metadata: details }),
       );
       if (standing.status !== 'active') throw refusal();
+      const { scope, byPath } = await issuedScope(this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.create', metadata: details });
       return audited(this.#deps, async (tx, log) => {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
@@ -738,13 +769,14 @@ export class SigninService {
           label: input.label,
           createdBy: ctx.caller.principal.id,
           expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
+          scope,
         });
         log.push(
           allowed(ctx, 'token.create', {
-            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt },
+            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
           }),
         );
-        return credential;
+        return { ...credential, scope: byPath };
       });
     });
   }

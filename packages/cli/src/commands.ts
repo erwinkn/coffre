@@ -225,8 +225,13 @@ export const SECTIONS = [
       { command: 'tokens', usage: ['tokens <service> [--json]'], about: ['its bearer tokens, for CI without OIDC'] },
       {
         command: 'tokens issue',
-        usage: ['tokens issue <service> [--expires-in <days>] [--label <label>]', '             [--output-file <path>]'],
-        about: ['a bearer token, on stdout or in a new 0600 file, shown once', 'and kept nowhere; 90 days unless told'],
+        usage: ['tokens issue <service> [--expires-in <days>] [--label <label>]', '             [--scope <path>=<role>,…] [--output-file <path>]'],
+        about: [
+          'a bearer token, on stdout or in a new 0600 file, shown once',
+          'and kept nowhere; 90 days unless told. It reaches what --scope',
+          'says, at most what the account holds, all of it unless told,',
+          'and nothing the account is given later',
+        ],
       },
       { command: 'tokens revoke', usage: ['tokens revoke <service> <id> [--apply]'] },
     ],

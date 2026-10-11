@@ -143,6 +143,7 @@ export async function setAccess(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
+      credentialScope: ctx.caller.credentialScope,
       changes: located.map((want) => ({
         projectId: want.projectId,
         environmentId: want.environmentId,

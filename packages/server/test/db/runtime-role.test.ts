@@ -19,6 +19,8 @@ const EXPECTED_UPDATE_COLUMNS = [
   'credentials.last_used_ip',
   'credentials.revoked_at',
   'credentials.revoked_by',
+  // Once, to seal a token of 0.4 with its account's grants; its MAC covers it.
+  'credentials.scope',
   'device_authorizations.auth_mac',
   'device_authorizations.consumed_at',
   'device_authorizations.decided_at',
@@ -65,12 +67,13 @@ const EXPECTED_UPDATE_COLUMNS = [
   'secrets.folder',
   'secrets.key',
   'secrets.updated_at',
-  // A binding changes in place only in its label, last use and revocation, with the MAC that covers them.
+  // A binding changes in place only in its label, last use and revocation, and once its scope (as a token's), with the MAC that covers them.
   'service_bindings.auth_mac',
   'service_bindings.label',
   'service_bindings.last_used_at',
   'service_bindings.revoked_at',
   'service_bindings.revoked_by',
+  'service_bindings.scope',
 ];
 
 test(

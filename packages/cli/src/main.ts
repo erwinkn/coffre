@@ -16,7 +16,7 @@ import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
-import { bindingFrom, describeBindings, describeEvents, describePlan, serviceMember, TRUST_USAGE } from './trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describePlan, reaches, scopeFrom, serviceMember, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
@@ -982,6 +982,7 @@ async function trust(args: string[]): Promise<void> {
       'owner-id': { type: 'string' },
       'project-id': { type: 'string' },
       'namespace-id': { type: 'string' },
+      scope: { type: 'string', multiple: true },
       label: { type: 'string' },
       replace: { type: 'string', multiple: true },
       apply: { type: 'boolean', default: false },
@@ -998,7 +999,7 @@ async function trust(args: string[]): Promise<void> {
   if (positionals.length > 1) throw new UsageError(`too many arguments: ${positionals.slice(1).join(' ')}`);
   const member = serviceMember(service);
   const coffre = client();
-  const { label, replace, apply, ...flags } = values;
+  const { scope: scopeFlags, label, replace, apply, ...flags } = values;
   if (Object.keys(flags).length === 0) {
     process.stdout.write(describeBindings(member, (await coffre.bindings.list(member)).bindings));
     return;
@@ -1008,7 +1009,14 @@ async function trust(args: string[]): Promise<void> {
   const binding = await bindingFrom(flags, (input) => lookup.bindings.lookup(input)).catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
-  const input = { ...binding, label: label ?? null, replaces: replace ?? [] };
+  const scope = (() => {
+    try {
+      return scopeFrom(scopeFlags);
+    } catch (error) {
+      throw new UsageError((error as Error).message);
+    }
+  })();
+  const input = { ...binding, ...(scope === undefined ? {} : { scope }), label: label ?? null, replaces: replace ?? [] };
   const plan = await coffre.bindings.preview(member, input);
   const events = describeEvents(plan);
   if (!apply) {
@@ -1102,7 +1110,7 @@ async function offboard(args: string[]): Promise<void> {
     for (const token of report.issuedTokens) {
       const label = token.label === null ? '' : ` "${token.label}"`;
       process.stdout.write(
-        `  service:${serviceName(token.service)}${label} ${token.hint}, expires ${token.expiresAt.slice(0, 10)}\n`,
+        `  service:${serviceName(token.service)}${label} ${token.hint}, reaching ${reaches(token.scope)}, expires ${token.expiresAt.slice(0, 10)}\n`,
       );
     }
   }

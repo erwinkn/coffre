@@ -7,6 +7,7 @@ import {
   EVERYWHERE,
   givesService,
   grantKind,
+  isCredentialScope,
   isInstanceRole,
   isRole,
   isScope,
@@ -66,6 +67,7 @@ import {
   type SetAccessInput,
   type SetSettingsInput,
   type Settings,
+  type Through,
   type UnwrapInput,
   type Vault,
   type Via,
@@ -315,6 +317,17 @@ type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
 
 /** What ties an entry to the app's request, and to the one action it is part of. */
 type Correlation = { requestId?: string | null; operationId?: string | null; credentialId?: string | null };
+
+/**
+ * What the one asking holds through the credential their request came in
+ * on: no more than its scope (`allows`). A scope that is not one is a bug
+ * of the app's, which fails the call.
+ */
+function through(standing: Standing, { credentialScope }: Through): Standing {
+  if (credentialScope == null) return standing;
+  if (!isCredentialScope(credentialScope)) throw new Error('credentialScope must be a list of grants, one a place');
+  return { ...standing, live: { ...standing.live, credentialScope }, all: { ...standing.all, credentialScope } };
+}
 
 /** The credential a CI run's request came in on, as its entries record it: copied, never decided on. */
 function traced(correlation: Correlation): { credentialId?: string } {
@@ -968,7 +981,7 @@ class VaultService implements Vault {
       vet?: (db: Queryable) => Promise<(RefusalCode | null)[]>;
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
-      input: Correlation & { purpose?: string };
+      input: Correlation & Through & { purpose?: string };
     },
     /** One per secret; null for a bad claim, an error for an outage or an unexpected fault. */
     operations: () => ((operation: KeyOperation) => Promise<T | null>)[],
@@ -984,7 +997,7 @@ class VaultService implements Vault {
     }
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
-      const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
+      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
       // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
       // matches the slug there, and a place deleted on either side opens for none.
@@ -1164,7 +1177,7 @@ class VaultService implements Vault {
     };
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     return this.#decide([principal], async (d) => {
-      const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
+      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
       // Both sides as the store has them: a grant on a slug matches there, and neither side may be deleted.
       const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
         const source = sources.get(item.source.secretId);
@@ -1249,7 +1262,7 @@ class VaultService implements Vault {
       return seals.map((seal) => (done.has(seal.seq) ? ('ended' as const) : null));
     };
     return this.#decide([principal], async (d) => {
-      const actor = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
+      const actor = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
       // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
       const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
       const codes: (RefusalCode | null)[] = seals.map((seal) => {
@@ -1502,7 +1515,7 @@ class VaultService implements Vault {
         // An environment by its slug as the store has it, which scopes match.
         return environmentId === null ? { projectId: projectId! } : { projectId: projectId!, environmentId, environmentSlug: environment!.slug };
       });
-      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
       // Where they manage access, anything; otherwise only a person to a service account (`givesService`).
       const manages = where.every((place) => mayManageAccess(acting.live, place));
@@ -1597,7 +1610,7 @@ class VaultService implements Vault {
       ]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
-      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
       if (!runsInstance(acting.live)) {
         // A service account, with no grant yet, any person who could give it one sets up (`setsUpServices`).
@@ -1674,7 +1687,7 @@ class VaultService implements Vault {
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
-      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
       const holder = acting.live;
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
@@ -1783,7 +1796,7 @@ class VaultService implements Vault {
       new Refused(refusal(code, message), [entry('deny', { serviceAccounts: input.settings?.serviceAccounts ?? null }, code)]);
     return this.#decide([actor], async (d) => {
       validateCorrelation(input);
-      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
       if (!runsInstance(acting.live)) throw refused('not_allowed', "only admins and owners of the whole instance change its settings");
       if (!isScope(input.settings?.serviceAccounts)) throw refused('invalid', 'who sets up service accounts is a scope: { projects, environments }, each all, only or except');

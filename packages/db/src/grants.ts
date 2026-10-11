@@ -17,7 +17,7 @@ import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { and, desc, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { tablesOf, type Queryable } from './database.ts';
-import { entryColumns, KEYLESS, LOOK_BACK, newestAuthentic, type Authenticity, type Newest } from './log.ts';
+import { entryColumns, LOOK_BACK, newestAuthentic, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `vault_grants` holds it: on a project (`environmentId`
@@ -103,7 +103,7 @@ export type EveryProjectPreview = {
   paths: Record<string, string>;
   /**
    * Whether the vault has reported their row changed around it since the
-   * last change to what they hold (`reportStands`), by the entries in its
+   * last change to what they hold (`tamperedMembers`), by the entries in its
    * name: then it leaves them as they are, unless the report is forged.
    */
   reported: boolean;
@@ -117,7 +117,7 @@ export type EveryProjectPreview = {
  * reads again, under its locks, when it converts, and checks what this
  * cannot, holding no key: each row's MAC, and each entry's in its name. So
  * a member it has reported changed around it is listed, and marked
- * `reported`, by the vault's own rule (`reportStands`) over the entries as
+ * `reported`, by the vault's own rule (`tamperedMembers`) over the entries as
  * they read: whether that report is the vault's own, or forged so as to
  * hide what it will do, only the vault can tell. Any member the vault
  * converts is listed. A root admin's it leaves while they are one, until
@@ -129,15 +129,14 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
   const held = (await readGrants(db, { liveAt: at })).filter((grant) => grant.projectId === null && grant.environmentId === null);
   if (held.length === 0) return [];
   const holders = [...new Set(held.map((grant) => grant.principal))].sort();
-  const [members, grants, places, inside, standing] = await Promise.all([
+  const [members, grants, places, inside, tampered] = await Promise.all([
     db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope }).from(vaultMembers),
     readGrants(db, { liveAt: at }),
     db.select({ id: projects.id, slug: projects.slug }).from(projects),
     db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug }).from(environments),
-    // The vault's own rule, over every entry in its name: holders are few, and this runs once a deploy.
-    Promise.all(holders.map((principal) => reportStands(db, principal, KEYLESS))),
+    // The vault's own rule (`reportStands`), over every entry in its name, for everyone in two queries.
+    tamperedMembers(db),
   ]);
-  const reported = new Set(holders.filter((_, i) => standing[i]));
   // A deleted place keeps its row under a tombstone's slug, its own or its project's: no grant reaches it.
   const live = places.filter((project) => !isTombstone(project.slug)).map((project) => ({
     id: project.id,
@@ -164,19 +163,56 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
         projects: live,
       }),
       paths,
-      reported: reported.has(principal),
+      reported: tampered.has(principal),
     }];
   });
 }
 
+/** A service token or trust binding of 0.4, which carries no scope of its own yet. */
+export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: string };
+
+/**
+ * The live service tokens and trust bindings of active service accounts
+ * that carry no scope yet, as 0.4 made them: what the app seals with each
+ * account's grants once a process (`sealScopes`), and what `coffre migrate`
+ * says it will. A credential a binding issued carries its binding's.
+ */
+export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
+  const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
+  const [tokens, bindings] = await Promise.all([
+    db
+      .select({ id: credentials.id, principal: credentials.principal })
+      .from(credentials)
+      .innerJoin(vaultMembers, and(eq(vaultMembers.principal, credentials.principal), eq(vaultMembers.generation, credentials.generation)))
+      .where(and(
+        eq(credentials.kind, 'service'),
+        isNull(credentials.scope),
+        sql`${credentials.createdBy} NOT LIKE 'binding:%'`,
+        isNull(credentials.revokedAt),
+        gt(credentials.expiresAt, at),
+        eq(vaultMembers.status, 'active'),
+      )),
+    db
+      .select({ id: serviceBindings.id, principal: serviceBindings.principal })
+      .from(serviceBindings)
+      .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
+      .where(and(isNull(serviceBindings.scope), isNull(serviceBindings.revokedAt), eq(vaultMembers.status, 'active'))),
+  ]);
+  return [
+    ...tokens.map((row) => ({ kind: 'token' as const, ...row })),
+    ...bindings.map((row) => ({ kind: 'binding' as const, ...row })),
+  ].sort((a, b) => a.principal.localeCompare(b.principal) || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+}
+
 /**
  * The members the vault has found changed around it, and not started over
- * since, as a reader without its key can tell (`reportStands` with
- * `KEYLESS`), for everyone at once, where the app lists members: its
- * newest `vault.tampered` about them, for their row (`mac`) or an older
- * one put back (`stale`), is newer than its newest entry changing what
- * they hold. Both reads go by the log's (author, action, seq) and (author,
- * subject, seq) indexes, and findings are few.
+ * since, as a reader without its key can tell: `reportStands`' rule, taking
+ * every entry in the vault's name as its own, for everyone at once, where
+ * the app lists members and `coffre migrate` marks them. Their newest
+ * `vault.tampered`, for their row (`mac`) or an older one put back
+ * (`stale`), is newer than the newest entry changing what they hold. Both
+ * reads go by the log's (author, action, seq) and (author, subject, seq)
+ * indexes, and findings are few.
  */
 export async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
   const { auditLog } = tablesOf(db);
@@ -210,11 +246,12 @@ const TAMPER_CODES = ['mac', 'stale'] as const;
  * stands: one of its own is newer than its newest entry changing what they
  * hold, and only starting them over, or another change, settles it. While
  * one stands the vault leaves their grants on every project of 0.4 as they
- * are. Both entries as `check` tells them apart: the vault by their MACs,
- * passing over those forged in its name; a reader without its key
- * (`KEYLESS`) by what they say. Only reports after that entry are read, so
- * older ones, forged or not, never hide one. Past LOOK_BACK forged entries,
- * of either kind, one may stand, so it is taken to.
+ * are. Both entries as `check`, the vault's MACs, tells them apart,
+ * passing over those forged in its name; a reader without its key takes
+ * them all as the vault's (`tamperedMembers`). Only reports after that
+ * entry are read, so older ones, forged or not, never hide one. From
+ * LOOK_BACK forged entries on, of either kind, one may stand, so it is
+ * taken to.
  */
 export async function reportStands(db: Queryable, principal: string, check: Authenticity): Promise<boolean> {
   const access = await newestAccess(db, principal, check);

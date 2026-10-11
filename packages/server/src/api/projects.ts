@@ -540,6 +540,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         requestId: ctx.requestId,
         operationId,
         credentialId: ctx.provenance,
+        credentialScope: ctx.caller.credentialScope,
         changes: grants.map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: null, expiresAt: null })),
       });
       if (!result.ok) throw vaultRefused(result.refusal);

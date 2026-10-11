@@ -10,6 +10,7 @@
  * issuer and the keys it names. `--apply` saves it.
  */
 import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView, type WorkloadIds } from '@coffre/client';
+import { credentialScopeInWords, isRole, type Role } from '@coffre/core/access';
 import {
   claimValues,
   EVENT_EXPOSURE,
@@ -60,7 +61,9 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
        coffre trust <service> --issuer <url> --claim sub=<subject> [--claim <name>=<value> …]
          IDs, when the lookup cannot see a private repository or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
-         [--label <text>] [--replace <binding-id>] [--apply]
+         [--scope <path>=<role>,…] [--label <text>] [--replace <binding-id>] [--apply]
+         --scope is what its runs reach, as market/dev=developer: at most what the account holds,
+         all of it unless told, and nothing it is given later
          --event and --source take one or more, push alone unless told; a pull request matches
          by the branch it merges into
        coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it
@@ -71,6 +74,27 @@ binding, with no stored secret; or, for CI without OIDC, with a bearer token: co
 export function serviceMember(value: string): string {
   const member = apiMember(value);
   return member.startsWith('token:') ? member : `token:${member}`;
+}
+
+/**
+ * A token's or a binding's scope, from `--scope market/dev=developer,market/prod=viewer`,
+ * repeated or a comma list; undefined, all its account holds, when not given.
+ */
+export function scopeFrom(values: string[] | undefined): Record<string, Role> | undefined {
+  const pairs = listOf(values);
+  if (pairs === undefined) return undefined;
+  return Object.fromEntries(pairs.map((pair) => {
+    const [path, role, ...rest] = pair.split('=');
+    if (!path || role === undefined || rest.length > 0 || !isRole(role)) {
+      throw new Error(`--scope takes <project>[/<environment>]=<role>, a role one of viewer, developer, maintainer, access-manager, auditor, owner; not "${pair}"`);
+    }
+    return [path, role];
+  }));
+}
+
+/** A token's or a binding's scope in words; null for one 0.4 made, not sealed yet, which reaches all its account holds. */
+export function reaches(scope: Record<string, string> | null): string {
+  return scope === null ? 'all its account holds' : credentialScopeInWords(scope);
 }
 
 /** `push,workflow_dispatch` and `--event schedule`, as one list, each once. */
@@ -211,10 +235,10 @@ function custom(flags: TrustFlags): BindingRequest {
 }
 
 /** A binding, or a plan for one, as lines: what it trusts, every claim in full. */
-export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'claims'>): string[] {
+export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'claims'> & { scope: BindingPlan['scope'] | null }): string[] {
   const width = Math.max(0, ...Object.keys(binding.claims).map((name) => name.length));
   const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? 'claims ' : '       '}  ${name.padEnd(width)}  ${claimValues(value).join(', ')}`);
-  return [`  profile  ${binding.profile}`, `  issuer   ${binding.issuer}`, `  keys     ${binding.jwksUri}`, ...claims];
+  return [`  profile  ${binding.profile}`, `  issuer   ${binding.issuer}`, `  keys     ${binding.jwksUri}`, ...claims, `  reaches  ${reaches(binding.scope)}`];
 }
 
 export function describePlan(member: string, plan: BindingPlan, applied: BindingView | null): string {

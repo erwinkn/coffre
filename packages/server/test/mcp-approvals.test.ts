@@ -12,7 +12,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { decideApproval } from '../src/db/queries.ts';
 import { callDigest } from '../src/mcp/approvals.ts';
 import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
-import { clientFor } from './api-fixture.ts';
+import { clientFor, holdSomething } from './api-fixture.ts';
 import { auditLog, mcpApprovals, mcpConnections } from './db/tables.ts';
 import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
@@ -218,10 +218,13 @@ test('a value comes from the page only: the person types it, coffre writes it, a
 
 test('a token issued through an approval is shown on the page, once, and never to the client', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   const token = await connect(DEV, 'read manage-access');
   const id = ((await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 })).body.result!.structuredContent!.approval as { id: string }).id;
-  assert.ok((await view(id)).body.approval.details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
+  const details = (await view(id)).body.approval.details;
+  assert.ok(details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
+  assert.equal(details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads', 'what the token will reach: all the account holds');
   const decided = await decide(id, true);
   assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
   const issued = decided.body.shown.find((line) => line.label === 'Token')!.value;
@@ -549,6 +552,7 @@ test('the basis Approve compares is the state the page showed, read once: a vers
 
 test('a change made whose outcome is not stored reads as being made, then unknown, never failed, and is never reported (L2)', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   const token = await connect(DEV, 'read manage-access');
   const call = () => callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 });

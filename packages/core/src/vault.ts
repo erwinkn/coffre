@@ -1,5 +1,5 @@
 import type { AccessFault } from './access-fault.ts';
-import type { GrantPlace, InstanceRole, Role, Scope, ServiceSetting } from './access.ts';
+import type { CredentialScope, GrantPlace, InstanceRole, Role, Scope, ServiceSetting } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -215,7 +215,15 @@ type Correlation = {
   credentialId?: string | null;
 };
 
-export type UnwrapInput = Correlation & {
+/**
+ * The scope of the credential the request came in on, a service token's or
+ * a trust binding's: unlike the correlation, the vault decides on it, and
+ * its principal holds nothing past it (`allows`). Null, or left out, for a
+ * session's, which carries all its member holds.
+ */
+export type Through = { credentialScope?: CredentialScope | null };
+
+export type UnwrapInput = Correlation & Through & {
   principal: string;
   purpose: Purpose;
   /**
@@ -232,26 +240,26 @@ export type Via = { reference: string; seq: number };
 /** Where a reference is held: the holder's ids, and its path for the log. A new holder's row may not exist yet. */
 export type HolderRef = { projectId: string; environmentId: string; secretId: string; path: string };
 
-export type ReferenceInput = Correlation & {
+export type ReferenceInput = Correlation & Through & {
   principal: string;
   /** `id` is the reference's, a fresh UUID; the vault reads the source by its id. */
   items: { id: string; holder: HolderRef; source: { secretId: string } }[];
 };
 
-export type EndReferencesInput = Correlation & {
+export type EndReferencesInput = Correlation & Through & {
   principal: string;
   /** `abandoned`: sealed for a write that stored nothing, so that no row written later revives it. */
   reason: 'replaced' | 'broken' | 'abandoned';
   items: Via[];
 };
 
-export type WrapInput = Correlation & {
+export type WrapInput = Correlation & Through & {
   principal: string;
   /** `key` is a fresh 32-byte data key, base64. */
   items: { secret: SecretRef; key: string }[];
 };
 
-export type RewrapInput = Correlation & {
+export type RewrapInput = Correlation & Through & {
   principal: string;
   /** `secret` is the proposed new version; `secretVersionId` is the stored source. */
   items: { secret: SecretRef; secretVersionId: string }[];
@@ -305,13 +313,13 @@ export type GrantChange = GrantPlace & {
 
 export type AccessChange = 'created' | 'updated' | 'revoked' | 'unchanged';
 
-export type SetAccessInput = Correlation & {
+export type SetAccessInput = Correlation & Through & {
   actor: string;
   principal: string;
   changes: GrantChange[];
 };
 
-export type AdmitInput = Correlation & {
+export type AdmitInput = Correlation & Through & {
   actor: string;
   principal: string;
   /**
@@ -323,7 +331,7 @@ export type AdmitInput = Correlation & {
   scope?: Scope;
 };
 
-export type RemoveInput = Correlation & {
+export type RemoveInput = Correlation & Through & {
   actor: string;
   principal: string;
 
@@ -335,7 +343,7 @@ export type Settings = {
   serviceAccounts: ServiceSetting;
 };
 
-export type SetSettingsInput = Correlation & {
+export type SetSettingsInput = Correlation & Through & {
   actor: string;
   settings: Settings;
 };

@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, ROLE_NAMES, runsInstance, scopeInWords, type Permission } from '@coffre/core/access';
+import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, ROLE_NAMES, runsInstance, scopeInWords, type Permission } from '@coffre/core/access';
 import {
   claimValues,
   defaultIssuer,
@@ -312,6 +312,22 @@ function archiving(archived: boolean): Tool {
 }
 
 const role = z.enum(ROLE_NAMES);
+/** What a token or a binding will reach, as the page says it: what the API answers, or why it cannot. */
+async function reaches(read: () => Promise<Record<string, string>>): Promise<Detail> {
+  try {
+    return { label: 'Reaches', value: credentialScopeInWords(await read()), note: 'Never more than the account holds, and nothing it is given later.' };
+  } catch (error) {
+    if (!(error instanceof CoffreError)) throw error;
+    return { label: 'Reaches', value: `coffre cannot say: ${error.message}`, warn: true };
+  }
+}
+
+/** A token's or a binding's scope (`POST /api/members/<member>/tokens`). */
+const credentialScope = z
+  .record(z.string().max(200), role)
+  .optional()
+  .describe('What it reaches, each project or environment by path and its role, as {"market/dev": "developer"}; at most what the account holds. Left out: all it holds now. Nothing the account is given later reaches it.');
+
 const accessChange = z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]);
 type AccessChange = z.infer<typeof accessChange>;
 const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to === 'string' ? to : `${to.role}${to.until === null ? '' : ` until ${to.until}`}`);
@@ -661,22 +677,27 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     scope: 'manage-access',
     idempotent: false,
     destructive: false,
-    input: z.object({ service, label: z.string().trim().min(1).max(120).optional(), expiresInDays: z.number().int().min(1).max(366) }).strict(),
+    input: z.object({ service, label: z.string().trim().min(1).max(120).optional(), expiresInDays: z.number().int().min(1).max(366), scope: credentialScope }).strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
       check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
-      preview: async (_api, { service, label, expiresInDays }) => [
-        { label: 'Service account', value: shownService(service), kind: 'mono' },
-        ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
-        { label: 'Good for', value: `${expiresInDays} days` },
-        { label: 'The token', value: 'shown here once, after you approve; never to the app' },
-      ],
-      apply: async (api, { service, label, expiresInDays }) => {
-        const issued = await api.tokens.issue(serviceMember(service), { label: label ?? null, expiresInDays });
+      preview: async (api, { service, label, expiresInDays, scope }) => {
+        const held = async () => scope ?? Object.fromEntries((await api.members.access(serviceMember(service))).grants
+          .map((grant) => [grant.environment === null ? grant.project : `${grant.project}/${grant.environment}`, grant.role]));
+        return [
+          { label: 'Service account', value: shownService(service), kind: 'mono' },
+          ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
+          await reaches(held),
+          { label: 'Good for', value: `${expiresInDays} days` },
+          { label: 'The token', value: 'shown here once, after you approve; never to the app' },
+        ];
+      },
+      apply: async (api, { service, label, expiresInDays, scope }) => {
+        const issued = await api.tokens.issue(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) });
         return {
-          result: { service: shownService(service), id: issued.id, expiresAt: issued.expiresAt },
-          text: `A token for ${shownService(service)} is issued, good until ${issued.expiresAt}. coffre showed it to the person, once; it is not here.`,
+          result: { service: shownService(service), id: issued.id, expiresAt: issued.expiresAt, scope: issued.scope },
+          text: `A token for ${shownService(service)} is issued, good until ${issued.expiresAt}, reaching ${credentialScopeInWords(issued.scope)}. coffre showed it to the person, once; it is not here.`,
           shown: [{ label: 'Token', value: issued.token, kind: 'mono' }],
         };
       },
@@ -725,6 +746,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         claims: z
           .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
           .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]'),
+        scope: credentialScope,
         label: z.string().trim().min(1).max(120).optional(),
       })
       .strict(),
@@ -732,11 +754,13 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     change: {
       summary: ({ service, profile }) => `let ${profile} CI runs sign in as ${shownService(service)}`,
       // The binding is checked, and its issuer asked where its keys are, before anyone is asked to approve it.
-      check: async ({ api }, { service, profile, issuer, claims, label }) =>
-        void (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, label: label ?? null })),
+      check: async ({ api }, { service, profile, issuer, claims, scope, label }) =>
+        void (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null })),
       // The model picks the IDs: each is named back from GitHub or GitLab, where it can be, so the person reads what they trust.
-      preview: async (_api, { service, profile, issuer, claims, label }, { transport }) => {
+      preview: async (api, { service, profile, issuer, claims, scope, label }, { transport }) => {
         const names = await namesOf(transport, profile, issuer ?? null, claims);
+        const reach = await reaches(async () =>
+          (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null })).scope);
         // An issuer the app named that is not GitHub's or GitLab's own: whoever runs it signs the tokens.
         const unfamiliar = issuer !== undefined && issuer !== GITHUB_ISSUER && issuer !== GITLAB_ISSUER;
         return [
@@ -745,11 +769,12 @@ export const CHANGE_TOOLS: readonly Tool[] = [
             ? { label: 'Runs from', value: issuer, kind: 'mono', note: "Not GitHub's or GitLab's own: whoever runs this host can sign in as the account. Approve only if it is yours.", warn: true }
             : { label: 'Runs from', value: issuer ?? `${profile}'s own issuer` },
           ...claimLines(claims, names),
+          reach,
           ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
         ];
       },
-      apply: async (api, { service, profile, issuer, claims, label }) => {
-        const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, label: label ?? null });
+      apply: async (api, { service, profile, issuer, claims, scope, label }) => {
+        const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null });
         return { result: { service: shownService(service), binding: made.binding.id }, text: `CI runs that match are trusted as ${shownService(service)}.` };
       },
     },

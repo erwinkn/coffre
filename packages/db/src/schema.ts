@@ -525,6 +525,8 @@ export const serviceBindings = pgTable(
     jwksUri: text('jwks_uri').notNull(),
     // JSON, sorted by claim name.
     claims: text().notNull(),
+    // What the credentials it issues reach (`CredentialScope`), JSON; null on a binding of 0.4 the app has not sealed yet.
+    scope: text(),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
@@ -708,6 +710,8 @@ export const credentials = pgTable(
     // The member it acts as, `user:<email>` or `token:<id>`, under the generation it was issued in.
     principal: text().notNull(),
     identityId: uuid('identity_id'),
+    // What a service token reaches (`CredentialScope`), JSON: null for a session, one a binding issued (its binding's), or one of 0.4 the app has not sealed yet.
+    scope: text(),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),

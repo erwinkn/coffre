@@ -24,7 +24,6 @@ import { serviceBindings } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
 import {
-  bindingStands,
   consumeToken,
   exchangeCandidates,
   exchangesSince,
@@ -34,6 +33,7 @@ import {
   memberStanding,
   places,
   revokeLiveCredentials,
+  standingBinding,
   tokenConsumed,
   update,
   updateAuth,
@@ -44,7 +44,17 @@ import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
-import { managedAccount, notManager, serviceSettingFor, setsUp } from './services.ts';
+import {
+  issuedScope,
+  managedAccount,
+  notManager,
+  readScope,
+  scopeByPath,
+  serviceSettingFor,
+  setsUp,
+  storedScope,
+  type ScopeByPath,
+} from './services.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound } from './errors.ts';
 
 export type WorkloadServiceDeps = {
@@ -127,6 +137,8 @@ export type BindingView = {
   issuer: string;
   jwksUri: string;
   claims: BindingClaims;
+  /** What the credentials it issues reach, of what its account holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
+  scope: ScopeByPath | null;
   label: string | null;
   createdAt: string;
   createdBy: string;
@@ -139,6 +151,7 @@ export type BindingPlan = {
   issuer: string;
   jwksUri: string;
   claims: BindingClaims;
+  scope: ScopeByPath;
   /** `asked`: named in `replaces`. `keys_moved`: the service's bindings on the issuer, under its old keys' URL. */
   replaces: { id: string; why: 'asked' | 'keys_moved' }[];
 };
@@ -147,6 +160,8 @@ export type BindingInput = {
   profile: string;
   issuer: string | null;
   claims: BindingClaims;
+  /** What the credentials it issues reach, by path (`issuedScope`): all the account holds when left out. */
+  scope?: ScopeByPath;
   label: string | null;
   /** Bindings this one takes the place of, as a change to them: they are removed in the same step. */
   replaces: string[];
@@ -191,7 +206,8 @@ export class WorkloadService {
     const member = `token:${serviceId}`;
     const standing = await memberStanding(this.#deps.db, member);
     if (standing === null) throw notFound('unknown service');
-    return (await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation)).map(view);
+    const [live, known] = await Promise.all([liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation), places(this.#deps.db)]);
+    return live.map((row) => view(row, scopeByPath(readScope(row.scope), known)));
   }
 
   /** Check a binding and ask its issuer where its keys are; with `dryRun`, write nothing and log nothing. */
@@ -207,10 +223,11 @@ export class WorkloadService {
     }
     return withRefusals(this.#deps, async () => {
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
-      const { standing, managed } = await managedAccount(this.#deps, ctx.caller, serviceId);
+      const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
+      const { scope, byPath } = await issuedScope(this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.bind', metadata: details });
       let jwksUri: string;
       try {
         jwksUri = await discoverKeys(this.#deps.transport, policy.issuer, { allowLoopback: this.#deps.config.allowLoopback });
@@ -227,7 +244,7 @@ export class WorkloadService {
           return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ id: row.id, why: 'keys_moved' }] : [];
         });
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
-        return { ...policy, jwksUri, replaces };
+        return { ...policy, jwksUri, scope: byPath, replaces };
       };
       if (options.dryRun) return plan(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
 
@@ -244,6 +261,7 @@ export class WorkloadService {
           issuer: planned.issuer,
           jwksUri: planned.jwksUri,
           claims: canonicalClaims(planned.claims),
+          scope: storedScope(scope),
           label: input.label?.slice(0, 120) ?? null,
           createdAt: now,
           createdBy: ctx.caller.principal.id,
@@ -264,11 +282,12 @@ export class WorkloadService {
             issuer: planned.issuer,
             jwksUri: planned.jwksUri,
             claims: planned.claims,
+            scope,
             replaces: planned.replaces.map((replaced) => replaced.id),
           },
         }));
         return {
-          binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }),
+          binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath),
           replaced: planned.replaces.map((replaced) => replaced.id),
         };
       });
@@ -416,7 +435,7 @@ export class WorkloadService {
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      if (!(await stillMember(tx, member, standing)) || !(await bindingStands(tx, chainKey, binding.id, member, binding.generation))) {
+      if (!(await stillMember(tx, member, standing)) || (await standingBinding(tx, chainKey, binding.id, member, binding.generation)) === null) {
         throw unbound();
       }
       // The times again, should the request have waited.
@@ -495,13 +514,14 @@ async function stillMember(tx: Transaction, member: string, standing: Access): P
   return row !== null && row.generation === standing.generation && row.status === 'active';
 }
 
-function view(row: BindingRow): BindingView {
+function view(row: BindingRow, scope: ScopeByPath | null): BindingView {
   return {
     id: row.id,
     profile: row.profile as WorkloadProfile,
     issuer: row.issuer,
     jwksUri: row.jwksUri,
     claims: JSON.parse(row.claims) as BindingClaims,
+    scope,
     label: row.label,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,

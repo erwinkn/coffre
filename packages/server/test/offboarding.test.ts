@@ -52,6 +52,8 @@ beforeEach(async () => {
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/prod', { name: 'Production' });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
+  // A token reaches what its account holds when it is issued.
+  await root.access.set(`token:${SERVICE}`, { 'market/prod': 'viewer' });
 });
 
 function meta() {
@@ -139,7 +141,7 @@ test('removing someone revokes every way in, so re-adding them starts from nothi
 test('a removed service loses its tokens for good', async () => {
   const token = await lead.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 });
   const { revoked } = await root.members.remove(`token:${SERVICE}`);
-  assert.deepEqual(revoked, { grants: 0, sessions: 0, tokens: 1, identities: 0, apps: 0 });
+  assert.deepEqual(revoked, { grants: 1, sessions: 0, tokens: 1, identities: 0, apps: 0 });
   await root.members.add(`token:${SERVICE}`);
   await assert.rejects(signin.verify(token.token), /unknown, expired or revoked/);
 });

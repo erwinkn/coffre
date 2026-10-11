@@ -262,6 +262,46 @@ export function grantKind(grant: GrantPlace): 'project' | 'environment' | null {
 }
 
 /**
+ * What a service account's token or trust binding carries, its scope:
+ * grants as the account's are, a role on a project or an environment, each
+ * one the account held and its issuer could give when it was issued.
+ * Nothing changes it after. A request made with it holds what both it and
+ * the account hold now (`allows`), so narrowing the account narrows it, and
+ * a grant the account gets later reaches no credential issued before:
+ *
+ *   account   developer on market/dev, then viewer on market/prod too
+ *   token     developer on market/dev, issued before market/prod
+ *   request   reads and writes market/dev, never market/prod
+ */
+export type CredentialScope = readonly (GrantPlace & { role: Role })[];
+
+/**
+ * A credential's scope, by path as the API names it, in words, each role
+ * with its places: `developer on market/dev, api/dev; viewer on market/prod`.
+ */
+export function credentialScopeInWords(scope: Readonly<Record<string, string>>): string {
+  const byRole = new Map<string, string[]>();
+  for (const [path, role] of Object.entries(scope)) byRole.set(role, [...(byRole.get(role) ?? []), path]);
+  return [...byRole].map(([role, paths]) => `${role} on ${paths.join(', ')}`).join('; ') || 'nothing';
+}
+
+/** Whether `value` is a credential's scope as the app stores it and the vault reads it: one grant a place, each role one that place takes. */
+export function isCredentialScope(value: unknown): value is CredentialScope {
+  if (!Array.isArray(value)) return false;
+  const places = new Set<string>();
+  return value.every((grant: unknown) => {
+    if (typeof grant !== 'object' || grant === null || Array.isArray(grant)) return false;
+    const { projectId, environmentId, role, ...rest } = grant as Record<string, unknown>;
+    if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string' || !isRole(role)) return false;
+    if (environmentId !== null && (typeof environmentId !== 'string' || !assignableToEnvironment(role))) return false;
+    const place = `${projectId}/${environmentId ?? ''}`;
+    if (places.has(place)) return false;
+    places.add(place);
+    return true;
+  });
+}
+
+/**
  * What someone holds: everything a permission check reads. The app builds
  * it from what the vault says once per request; the vault builds it from
  * its own store. Both then ask the same functions below, so the rules
@@ -275,6 +315,8 @@ export type Holdings = {
   scope: Scope;
   /** Live grants only. */
   grants: readonly (GrantPlace & { role: Role })[];
+  /** The scope of the credential a request came in on, past which nothing reaches; absent or null for a session's. */
+  credentialScope?: CredentialScope | null;
 };
 
 /** Someone who holds nothing: a stranger, a removed member, a tampered row. */
@@ -307,9 +349,15 @@ export function covers(grant: GrantPlace, place: Place): boolean {
  * `billing`.
  */
 export function allows(holder: Holdings, permission: Permission, place: Place): boolean {
+  if (holder.credentialScope != null && !holdsAt(holder.credentialScope, permission, place)) return false;
   if (holder.isRootAdmin) return true;
   if (instanceRoleGrants(holder.role, permission) && inScope(holder.scope, place)) return true;
-  return holder.grants.some((grant) => covers(grant, place) && roleGrants(grant.role, permission));
+  return holdsAt(holder.grants, permission, place);
+}
+
+/** Whether a grant among `grants` covers `place` with a role that holds `permission`. */
+function holdsAt(grants: readonly (GrantPlace & { role: Role })[], permission: Permission, place: Place): boolean {
+  return grants.some((grant) => covers(grant, place) && roleGrants(grant.role, permission));
 }
 
 /**
@@ -384,6 +432,28 @@ export function managesService(holder: Holdings, setting: ServiceSetting | null,
   if (runsInstance(holder)) return true;
   if (account.grants.length === 0) return setting !== null && account.admittedBy === actor;
   return account.grants.every((grant) => givesService(holder, setting, grant.role, grant.place));
+}
+
+/**
+ * Whether `holder`, the member `actor`, may issue a token or a trust
+ * binding of `account` whose scope is `scope`: they manage the account
+ * (`managesService`), and each grant of the scope is one they could give it
+ * (`givesService`) and one it holds, every permission of its role there.
+ * For an account that holds `developer` on `market/dev`, a Developer of
+ * `dev` issues `developer` or `viewer` there; nobody issues `market/prod`
+ * for it, or `maintainer` on `market/dev`, until the account holds them.
+ */
+export function issuesCredential(
+  holder: Holdings,
+  setting: ServiceSetting | null,
+  actor: string,
+  account: ServiceAccount,
+  scope: ServiceAccount['grants'],
+): boolean {
+  if (!managesService(holder, setting, actor, account)) return false;
+  const held: Holdings = { ...NOTHING, grants: account.grants.map(({ role, place }) => ({ projectId: place.projectId, environmentId: place.environmentId ?? null, role })) };
+  return scope.every(({ role, place }) =>
+    givesService(holder, setting, role, place) && ROLES[role].permissions.every((permission) => allows(held, permission, place)));
 }
 
 /**

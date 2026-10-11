@@ -10,7 +10,7 @@ import pg from 'pg';
 
 import { migrationsFolder } from '@coffre/db/migrate';
 
-import { describeEveryProject, migrationFailure, pinProblem } from '../src/migrate.ts';
+import { describeEveryProject, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -114,11 +114,32 @@ test('migrate says what the vault will make of each grant on every project of 0.
     '  user:cy@acme.example: viewer on every project → viewer on billing, market/dev; not projects made later; viewer on market only through its environments, not those made later',
     '  service:deploy: maintainer on every project → maintainer on market; not projects made later; loses access-manager on market (keeps maintainer)',
     '  service:ci: viewer on dev in every project → viewer on market/dev; not projects made later',
-    '  service:old: viewer on every project → left as it is: the vault reported their row tampered with (if that report is forged: viewer on billing; not projects made later)',
+    '  service:old: viewer on every project → left as it is: the vault reported their row tampered with (if the vault finds that report forged, it makes: viewer on billing; not projects made later)',
     "A root admin's stay as they are while they are one, and so do those of a member whose row the vault finds tampered with: migrate holds no key to check a row, nor whether a report is the vault's own.",
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   ].join('\n'));
+});
+
+test("migrate lists 0.4's tokens and bindings by account, which keep what their account holds when this version first runs", () => {
+  assert.equal(describeUnsealed([]), '');
+  assert.equal(
+    describeUnsealed([
+      { kind: 'token', id: 't1', principal: 'token:ci-web' },
+      { kind: 'token', id: 't2', principal: 'token:ci-web' },
+      { kind: 'binding', id: 'b1', principal: 'token:ci-web' },
+      { kind: 'binding', id: 'b2', principal: 'token:deploy' },
+    ]),
+    [
+      '',
+      'Service tokens and trust bindings now carry their own scope, and what an account is given later reaches none made before.',
+      'When this version first checks a credential, each of these keeps what its account holds then, after any conversion above:',
+      '  service:ci-web: 2 tokens and 1 trust binding',
+      '  service:deploy: 1 trust binding',
+      'Grant or revoke before you deploy to choose what they keep; to change one after, issue another and revoke it.',
+      '',
+    ].join('\n'),
+  );
 });
 
 test("a migration's refusal is its own sentence, not the SQL around it", () => {

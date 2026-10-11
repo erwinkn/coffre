@@ -18,7 +18,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
@@ -87,6 +87,8 @@ let limits: { perSource: RateLimiter; total: RateLimiter };
 let vaultCalls: number;
 /** Waited for before the vault is asked about the member: the last step before the commit. */
 let beforeAccess: (() => Promise<void>) | undefined;
+/** The binding every test starts with, of `deploy.yml` on main. */
+let bound: string;
 
 const transport: WorkloadTransport = {
   json: async (url) => {
@@ -134,7 +136,8 @@ beforeEach(async () => {
   for (const [principal, owner] of [[`user:${DEV}`, false], [MEMBER, false]] as const) {
     assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal, ...(owner ? { role: 'admin' as const } : {}) })).ok, true);
   }
-  await bind(DEPLOY);
+  await holdSomething(db.owner, deps.vault, MEMBER, `user:${ROOT}`);
+  bound = await bind(DEPLOY);
 });
 
 async function bind(claims: BindingClaims, replaces: string[] = [], profile: WorkloadProfile = 'github'): Promise<string> {
@@ -191,6 +194,35 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.notEqual(binding!.lastUsedAt, null);
   // An ES256 issuer is the same.
   assert.equal((await trade(token(ec))).status, 200);
+});
+
+test("a run's credential reaches what both its binding's scope and the account hold: a grant the account gets later reaches no binding made before", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  for (const environment of ['dev', 'prod']) {
+    await root.environments.create(`market/${environment}`, { name: environment });
+    await root.secrets.set(`market/${environment}`, { API_KEY: `${environment}-key` });
+  }
+  await root.access.set(MEMBER, { 'market/dev': 'developer' });
+  // A binding made now takes what the account holds now, or less when told.
+  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: null, replaces: [bound] }, { dryRun: false });
+  assert.ok('binding' in made);
+  assert.deepEqual(made.binding.scope, { 'api-deploy-reads': 'viewer', 'market/dev': 'developer' });
+  await root.access.set(MEMBER, { 'market/prod': 'viewer' });
+
+  const reveal = async (credential: string, path: string) =>
+    (await answer(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }), runtime, ui, IP)).status;
+  const credential = (await trade(token(rsa))).body.token!;
+  assert.equal(await reveal(credential, 'market/dev'), 200);
+  assert.equal(await reveal(credential, 'market/prod'), 403, "the account's later grant does not reach the run");
+  // Narrowing the account narrows the run's credential at once.
+  await root.access.set(MEMBER, { 'market/dev': null });
+  assert.equal(await reveal(credential, 'market/dev'), 403);
+  // A binding is made at most as wide as the account, whoever makes it.
+  await assert.rejects(
+    runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, scope: { 'market/dev': 'viewer' }, label: null, replaces: [] }, { dryRun: true }),
+    { status: 403 },
+  );
 });
 
 test('a token is spent once used, in any spelling: the ES256 twin of a signature is refused as replayed', async () => {
@@ -699,6 +731,8 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   await root.environments.create('market/prod', { name: 'Production' });
   await root.secrets.set('market/prod', { API_KEY: 'sk_live' });
   await root.access.set(MEMBER, { 'market/prod': 'viewer' });
+  // A binding reaches what its account held when it was made: one made now reaches prod.
+  await bind(DEPLOY, [bound]);
 
   const { body } = await trade(token(rsa));
   const [exchange] = await appEntries('token.exchange');

@@ -40,6 +40,7 @@ export async function putSettings(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
+      credentialScope: ctx.caller.credentialScope,
     });
     if (!result.ok) throw vaultRefused(result.refusal);
     return { serviceAccounts: scopeView(result.settings.serviceAccounts, known) };

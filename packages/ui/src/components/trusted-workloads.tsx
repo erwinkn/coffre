@@ -1,4 +1,5 @@
 import type { BindingPlan, BindingView } from '@coffre/client';
+import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { Fragment, useState } from 'react';
 import { bindingOf, EMPTY_FORM, summary, type Form, type RefKind } from '../lib/bindings';
@@ -9,6 +10,7 @@ import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { Card } from './page';
+import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { GitHub, Link, Plus, X } from './icons';
 
@@ -18,7 +20,7 @@ import { GitHub, Link, Plus, X } from './icons';
  * every claim of a binding matches, so the claims are what the page shows,
  * in full, before anything is saved.
  */
-export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; bindings: BindingView[] }) {
+export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: string; bindings: BindingView[]; grants: HeldGrant[] }) {
   const change = removeBinding(useCoffre(), serviceId);
   const remove = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
@@ -43,6 +45,7 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
               <thead>
                 <tr>
                   <th>Workload</th>
+                  <th>Reaches</th>
                   <th className="col-shrink">Added (UTC)</th>
                   <th className="col-shrink">Last used</th>
                   <th className="col-actions">
@@ -70,6 +73,7 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
                             </span>
                           </span>
                         </td>
+                        <td>{binding.scope === null ? 'All its account holds' : credentialScopeInWords(binding.scope)}</td>
                         <td className="nowrap">
                           <span className="cell-stack">
                             <Timestamp iso={binding.createdAt} />
@@ -112,7 +116,7 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
                           )}
                         </td>
                       </tr>
-                      <RowFailure status={state} columns={4} onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)} />
+                      <RowFailure status={state} columns={5} onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)} />
                     </Fragment>
                   );
                 })}
@@ -122,7 +126,7 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
         )}
       </Card>
       <div className="table-actions">
-        <TrustWorkload serviceId={serviceId} />
+        <TrustWorkload serviceId={serviceId} grants={grants} />
       </div>
     </>
   );
@@ -191,9 +195,10 @@ function Exposure({ events }: { events: string[] }) {
   );
 }
 
-function TrustWorkload({ serviceId }: { serviceId: string }) {
+function TrustWorkload({ serviceId, grants }: { serviceId: string; grants: HeldGrant[] }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
+  const [scope, setScope] = useState(() => wholeScope(grants));
   const [plan, setPlan] = useState<BindingPlan | null>(null);
   const coffre = useCoffre();
   const member = memberRef('service', serviceId);
@@ -203,11 +208,12 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
     setForm((current) => ({ ...current, ...changes }));
     setPlan(null);
   };
-  const input = () => ({ ...bindingOf(form), label: form.label.trim() === '' ? null : form.label.trim(), replaces: [] });
+  const input = () => ({ ...bindingOf(form), scope, label: form.label.trim() === '' ? null : form.label.trim(), replaces: [] });
 
   function close() {
     setOpen(false);
     setForm(EMPTY_FORM);
+    setScope(wholeScope(grants));
     setPlan(null);
     setError(null);
     lookup.setError(null);
@@ -393,13 +399,21 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
               </>
             )}
 
+            <ScopePicker
+              grants={grants}
+              value={scope}
+              onChange={(next) => {
+                setScope(next);
+                setPlan(null);
+              }}
+            />
             {field('Label (optional)', 'label', { placeholder: 'Deploys to production' })}
             <ErrorLine error={error} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={close}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="submit" disabled={pending}>
+              <button className="btn btn-primary" type="submit" disabled={pending || Object.keys(scope).length === 0}>
                 {pending && <Spinner />}
                 Review
               </button>
@@ -408,8 +422,8 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
         ) : (
           <div className="form">
             <p>
-              Runs whose ID token matches these claims sign in as <span className="mono">service:{serviceId}</span> and read what it can
-              read.
+              Runs whose ID token matches these claims sign in as <span className="mono">service:{serviceId}</span> and reach{' '}
+              {credentialScopeInWords(plan.scope)}, as long as the account holds it.
             </p>
             <Claims binding={plan} />
             <Exposure events={claimValues(plan.claims.event_name)} />

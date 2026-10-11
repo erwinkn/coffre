@@ -326,6 +326,7 @@ const TEMPLATES: Record<string, Template> = {
     did: 'trusted CI runs to sign in as',
     tried: 'trust CI runs to sign in as',
     what: (facts) => subject(facts.entry),
+    then: ({ entry }) => reaching(entry),
   },
   'token.unbind': {
     did: 'stopped trusting CI runs to sign in as',
@@ -365,7 +366,7 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => (text(entry.metadata.provider) === null ? [] : [`with ${text(entry.metadata.provider)}`]),
   },
   sign_out: { did: 'signed out', tried: 'sign out', what: () => [] },
-  'token.create': { did: 'issued a bearer token to', tried: 'issue a bearer token to', what: (facts) => subject(facts.entry) },
+  'token.create': { did: 'issued a bearer token to', tried: 'issue a bearer token to', what: (facts) => subject(facts.entry), then: ({ entry }) => reaching(entry) },
   'token.revoke': { did: 'revoked a bearer token of', tried: 'revoke a bearer token of', what: (facts) => subject(facts.entry) },
   'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [] },
   'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [] },
@@ -425,6 +426,21 @@ function article(name: string): string {
 function scoped(entry: AuditEntry): Part[] {
   const scope = entry.metadata.scope as { projects?: unknown; environments?: unknown } | undefined;
   return scope === undefined || (scope.projects === 'all' && scope.environments === 'all') ? [] : [', with a scope'];
+}
+
+/**
+ * What a token or binding reaches, its scope, each role with the places it
+ * holds, counted, as the log names them by id: `, reaching developer on 2 places`.
+ */
+function reaching(entry: AuditEntry): Part[] {
+  const scope = entry.metadata.scope;
+  if (!Array.isArray(scope) || scope.length === 0) return [];
+  const byRole = new Map<string, number>();
+  for (const grant of scope as { role?: unknown }[]) {
+    const role = text(grant.role);
+    if (role !== null) byRole.set(role, (byRole.get(role) ?? 0) + 1);
+  }
+  return [`, reaching ${[...byRole].map(([role, count]) => `${role} on ${plural(count, 'place')}`).join(', ')}`];
 }
 
 /**

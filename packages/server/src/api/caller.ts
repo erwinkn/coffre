@@ -7,6 +7,7 @@ import {
   type InstanceRole,
   type Permission,
   type Place,
+  type CredentialScope,
   type Role,
   type Scope,
 } from '@coffre/core/access';
@@ -45,6 +46,8 @@ export type Caller = {
   scope: Scope;
   /** Live grants only. */
   grants: CallerGrant[];
+  /** The scope of the service token or binding the request came in on, past which nothing reaches; null for a session. */
+  credentialScope: CredentialScope | null;
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -52,7 +55,7 @@ export async function loadCaller(vault: Vault, principal: PrincipalRef): Promise
   return callerFrom({ type: principal.type, id: principal.id }, await vault.access(formatMember(principal)));
 }
 
-export function callerFrom(principal: PrincipalRef, access: Access): Caller {
+export function callerFrom(principal: PrincipalRef, access: Access, credentialScope: CredentialScope | null = null): Caller {
   return {
     principal,
     registered: access.status === 'active',
@@ -67,6 +70,7 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
       role: grant.role,
       expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt),
     })),
+    credentialScope,
   };
 }
 
@@ -103,8 +107,9 @@ export function seesProject(caller: Caller, project: { id: string; environments:
   return places.some((place) => PERMISSIONS.some((permission) => can(caller, permission, place)));
 }
 
-/** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role. */
+/** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role; within their credential's scope. */
 export function canAnywhere(caller: Caller, permission: Permission): boolean {
+  if (caller.credentialScope !== null && !caller.credentialScope.some((grant) => roleGrants(grant.role, permission))) return false;
   return caller.isRootAdmin || instanceRoleGrants(caller.role, permission) || caller.grants.some((grant) => roleGrants(grant.role, permission));
 }
 

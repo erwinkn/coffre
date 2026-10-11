@@ -93,6 +93,39 @@ them, the setting is closed, never everywhere.
   and checked against the account; the setting is changed in the pages and
   the CLI only.
 
+**Each service token and OIDC binding has its own scope.** A scope is
+grants, as the account's are: `developer` on `market/dev`, `viewer` on
+`market/prod`. It is set when the token or binding is made, at most what
+the account holds and what you could give it, and all the account holds
+unless you narrow it, by leaving places out or choosing a smaller role. A
+request made with it reaches what both the scope and the account hold:
+an Admin who later gives the account prod gives it to none of the tokens
+and bindings made before, and narrowing the account narrows them all at
+once. The server checks the scope for the pages, the CLI and MCP alike,
+and the vault decides on it as well. It never changes: to change one,
+make another and revoke the first. Someone who made one and then lost
+access shrinks nothing, so CI keeps working; offboarding them lists the
+tokens they issued, each with what it reaches. An account needs a grant
+before it gets a token or binding, since nothing it is given later
+reaches one made before. The tokens and bindings of 0.4 keep exactly what
+they reached: the first time this version checks a credential, it gives
+each one its account's grants then, after the conversion of grants on
+every project, and `coffre migrate` lists them before you deploy. Rolling
+back to 0.4 refuses them.
+
+- **API.** `POST /api/members/<member>/tokens` and `/bindings` take
+  `scope`, paths to roles as `PATCH /api/access` takes them; the tokens,
+  bindings and offboarding's `issuedTokens` lists say each one's `scope`,
+  and `token.create` and `token.bind` log it. A scope past the account or
+  past you is refused, logged as `beyond_account`.
+- **CLI.** `coffre tokens issue` and `coffre trust` take
+  `--scope market/dev=viewer,…`; `coffre tokens`, `coffre trust
+  <service>` and `coffre offboard` say what each reaches.
+- **MCP.** `issue_service_token` and `trust_workload` take `scope`, and
+  the approval page says what the token or binding will reach.
+- **Schema.** `0003_credential_scopes` adds `scope` to `credentials` and
+  `service_bindings`, and lets the app's login update it.
+
 **An Auditor of the whole instance reads the whole log**, the instance's
 own entries too: sign-ins, people, service accounts, settings. It verifies
 the log, as `coffre verify log` and the Audit page do, and runs nothing it
@@ -143,7 +176,8 @@ set lower on purpose. To fix one now,
 without setup: `wrangler hyperdrive update <id>
 --origin-connection-limit=<n>` for each config.
 
-**`coffre setup` refuses before it changes anything on Cloudflare.** For
+**`coffre setup` refuses before it changes Cloudflare, as long as the
+database holds still while it asks.** For
 an address whose DNS is elsewhere, served through one of the account's
 domains, setup made the fallback origin, its DNS record and the custom
 hostname before three of its refusals: a Worker without its key over a
@@ -154,8 +188,11 @@ administrator right after connecting, before it asks about Cloudflare, and
 the other two once it has read the account, before its first change there,
 adding a domain included, then again right before the logins change, in
 case the database changed while setup asked its questions. That last
-message now says "Neither login was changed". A run refused before left
-these behind, and a run after reuses them. Its Hyperdrive step also gives each config's own
+check comes after Cloudflare's changes, so a refusal it makes, for a
+database that took data or a login another deployment uses meanwhile, can
+still leave the domain, fallback origin, DNS record and custom hostname
+behind; its message now says "Neither login was changed". A run after
+reuses whatever a refused one left. Its Hyperdrive step also gives each config's own
 connection limit when one set lower was kept ("connection limits of 5 and
 7"), where it said "20 each".
 

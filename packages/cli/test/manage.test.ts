@@ -33,11 +33,11 @@ function fixture(answer: (call: Call) => unknown) {
 const TOKEN = 'coffre_svc_' + 'x'.repeat(40);
 
 test('tokens issue prints the token once, on stdout, and says on a terminal that it will not be shown again', async () => {
-  const { connect, calls, written, io } = fixture(() => ({ id: 'tok-1', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z' }));
+  const { connect, calls, written, io } = fixture(() => ({ id: 'tok-1', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z', scope: { 'market/dev': 'developer' } }));
   await manage.tokensIssue(connect, ['deploy-slides', '--label', 'CI', '--expires-in', '30'], io);
   assert.deepEqual(calls, [{ method: 'POST', path: '/members/token:deploy-slides/tokens', body: { expiresInDays: 30, label: 'CI' } }]);
   assert.equal(written.out, `${TOKEN}\n`);
-  assert.equal(written.err, "coffre: service:deploy-slides's bearer token tok-1, until 2027-01-01. It is shown this once\n");
+  assert.equal(written.err, "coffre: service:deploy-slides's bearer token tok-1, reaching developer on market/dev, until 2027-01-01. It is shown this once\n");
   assert.ok(!written.err.includes(TOKEN));
 });
 
@@ -45,12 +45,12 @@ test('tokens issue --output-file writes a new 0600 file, prints no token, and ne
   const dir = mkdtempSync(join(tmpdir(), 'coffre-tokens-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'token');
-  const { connect, written, io } = fixture(() => ({ id: 'tok-1', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z' }));
+  const { connect, written, io } = fixture(() => ({ id: 'tok-1', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z', scope: { 'market/dev': 'developer' } }));
   await manage.tokensIssue(connect, ['deploy-slides', '--output-file', path], io);
   assert.equal(readFileSync(path, 'utf8'), `${TOKEN}\n`);
   assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.ok(!written.out.includes(TOKEN) && !written.err.includes(TOKEN));
-  assert.match(written.out, /^wrote service:deploy-slides's bearer token tok-1, until 2027-01-01, to .*token, readable by you alone/);
+  assert.match(written.out, /^wrote service:deploy-slides's bearer token tok-1, reaching developer on market\/dev, until 2027-01-01, to .*token, readable by you alone/);
 
   // A file there already: refused before any token is made.
   const again = fixture(() => assert.fail('no token is issued'));
@@ -65,7 +65,7 @@ test('tokens issue --output-file writes a new 0600 file, prints no token, and ne
 });
 
 test('tokens issue takes 1 to 366 days, 90 unless told', async () => {
-  const { connect, calls, io } = fixture(() => ({ id: 't', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z' }));
+  const { connect, calls, io } = fixture(() => ({ id: 't', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z', scope: {} }));
   await manage.tokensIssue(connect, ['token:deploy'], io);
   assert.deepEqual(calls[0]!.body, { expiresInDays: 90, label: null });
   for (const bad of ['0', '367', '1.5', 'soon']) {
@@ -73,8 +73,18 @@ test('tokens issue takes 1 to 366 days, 90 unless told', async () => {
   }
 });
 
+test('tokens issue --scope narrows what it reaches, by path and role, repeated or a comma list; all the account holds unless told', async () => {
+  const { connect, calls, io } = fixture(() => ({ id: 't', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z', scope: {} }));
+  await manage.tokensIssue(connect, ['deploy', '--scope', 'market/dev=developer,market/prod=viewer', '--scope', 'billing=auditor'], io);
+  assert.deepEqual(calls[0]!.body, { expiresInDays: 90, label: null, scope: { 'market/dev': 'developer', 'market/prod': 'viewer', billing: 'auditor' } });
+  for (const bad of ['market/dev', 'market/dev=reader', '=viewer', 'a=b=c']) {
+    await assert.rejects(manage.tokensIssue(connect, ['deploy', '--scope', bad], io), manage.UsageError, bad);
+  }
+  assert.equal(calls.length, 1, 'nothing asked for a bad scope');
+});
+
 const LISTED = {
-  tokens: [{ id: 'tok-1', label: 'CI', hint: 'abcd', createdAt: '2026-10-01T00:00:00Z', createdBy: 'root@acme.example', expiresAt: '2027-01-01T00:00:00Z', lastUsedAt: null, lastUsedIp: null }],
+  tokens: [{ id: 'tok-1', label: 'CI', hint: 'abcd', createdAt: '2026-10-01T00:00:00Z', createdBy: 'root@acme.example', expiresAt: '2027-01-01T00:00:00Z', lastUsedAt: null, lastUsedIp: null, scope: { 'market/dev': 'viewer' } }],
 };
 
 test('tokens revoke shows what it would end, and ends it only with --apply', async () => {
@@ -409,6 +419,7 @@ const BINDING = {
   issuer: 'https://token.actions.githubusercontent.com',
   jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
   claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' },
+  scope: { 'market/dev': 'viewer', 'market/prod': 'viewer' },
   label: 'deploys',
   createdAt: '2026-10-01T00:00:00Z',
   createdBy: 'root@acme.example',

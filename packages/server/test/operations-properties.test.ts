@@ -145,7 +145,20 @@ async function scenario(operations: readonly Operation[]) {
       .innerJoin(storedSecrets, eq(storedSecrets.id, secretVersions.secretId)).where(eq(storedSecrets.environmentId, environmentId));
     return rows.map((row) => row.id);
   }
-  const credentials: { member: Member; id: string; token: string; live: boolean }[] = [];
+  /** Each credential, and for a service token its scope: what its account held when it was issued, by the model's keys. */
+  const credentials: { member: Member; id: string; token: string; live: boolean; scope: ReadonlyMap<string, string> | null }[] = [];
+  /** The credential `client(member)` presents: its newest live one, or its newest. */
+  const presented = (member: Member) =>
+    credentials.findLast((credential) => credential.member === member && credential.live) ?? credentials.findLast((credential) => credential.member === member);
+  /** Whether `grants`, or the scope of the credential `member` presents too, hold `key`'s role: any, or developer to write. */
+  const holdsAt = (member: Member, keys: readonly string[], write: boolean) => {
+    const held = (grants: ReadonlyMap<string, string>) => keys.some((key) => {
+      const role = grants.get(key);
+      return write ? role === 'developer' : role !== undefined;
+    });
+    const scope = presented(member)?.scope ?? null;
+    return held(model.grants[member]) && (scope === null || held(scope));
+  };
   const signedIn = (member: Member) => credentials.some((credential) => credential.member === member && credential.live);
   /** Whether ada manages and sees grants: as an Admin only, since her grants are viewer and developer. */
   const adaManages = () => model.role.name === 'admin' && model.active.ada && signedIn('ada');
@@ -165,16 +178,13 @@ async function scenario(operations: readonly Operation[]) {
   function may(member: Member, environment: Environment | undefined, write = false): boolean {
     if (!model.active[member] || model.project === null || model.project.archived || environment === undefined || environment.archived) return false;
     if (adaDevelops(member, environment.slug)) return true;
-    const covering = [`project:${model.project.generation}`, `env:${environment.n}`];
-    return covering.some((key) => {
-      const role = model.grants[member].get(key);
-      return write ? role === 'developer' : role !== undefined;
-    });
+    // A token reaches what both its scope and its account hold (D105).
+    return holdsAt(member, [`project:${model.project.generation}`, `env:${environment.n}`], write);
   }
   /** Whether `member` reads billing/prod/VALUE: a grant on billing/prod, or a role on prod, and a value or a live reference to a live source. */
   function mayBilling(member: Member | 'root'): boolean {
     if (model.billing.archived) return false;
-    if (member !== 'root' && (!model.active[member] || !(model.grants[member].has('billing:prod') || adaDevelops(member, 'prod')))) return false;
+    if (member !== 'root' && (!model.active[member] || !(holdsAt(member, ['billing:prod'], false) || adaDevelops(member, 'prod')))) return false;
     const { reference } = model.billing;
     if (reference === null) return true;
     const source = model.environments.find((each) => each.n === reference.source);
@@ -199,14 +209,16 @@ async function scenario(operations: readonly Operation[]) {
   async function session() {
     const signed = await signin.completeSignin({ provider: 'github', subject: 'ada-account', emails: [ADA], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'property' });
     assert.ok(signed.ok);
-    if (signed.ok) credentials.push({ member: 'ada', ...signed.credential, live: true });
+    if (signed.ok) credentials.push({ member: 'ada', ...signed.credential, live: true, scope: null });
   }
+  /** A token for ci, reaching all it holds now: refused while it holds nothing, which a token would reach forever. */
   async function issue() {
-    const issued = await root.tokens.issue('token:ci', { label: 'property', expiresInDays: 30 });
-    credentials.push({ member: 'ci', ...issued, live: true });
+    const { scope: _, ...issued } = await root.tokens.issue('token:ci', { label: 'property', expiresInDays: 30 });
+    credentials.push({ member: 'ci', ...issued, live: true, scope: new Map(model.grants.ci) });
   }
+  const issuable = () => model.active.ci && model.grants.ci.size > 0;
   function client(member: Member) {
-    const token = (credentials.findLast((credential) => credential.member === member && credential.live) ?? credentials.findLast((credential) => credential.member === member))?.token ?? 'coffre_svc_invalid';
+    const token = presented(member)?.token ?? 'coffre_svc_invalid';
     return createClient({ url: 'https://coffre.test', headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => fetchApi(request, runtime, { sourceIp: null }) });
   }
   async function state() {
@@ -336,7 +348,7 @@ async function scenario(operations: readonly Operation[]) {
   await root.members.add(principal('ada'));
   await root.members.add(principal('ci'));
   await session();
-  await issue();
+  await allowed(issue, false, true, 400);
   await createProject();
   await createEnvironment('dev', 'initial dev');
   await createEnvironment('prod', 'initial prod');
@@ -352,6 +364,7 @@ async function scenario(operations: readonly Operation[]) {
     await root.access.set(principal(member), { 'billing/prod': 'viewer' });
     model.grants[member].set('billing:prod', 'viewer');
   }
+  await issue();
   await allowed(() => root.members.remove('user:never-admitted@acme.example'), false, true, 404);
   await allowed(() => root.tokens.revoke('token:ci', '00000000-0000-4000-8000-000000000001'), false, true, 404);
   await invariants();
@@ -363,7 +376,7 @@ async function scenario(operations: readonly Operation[]) {
         if (!model.active[op.member]) model.grants[op.member].clear();
         model.active[op.member] = true;
         if (op.member === 'ada') await session();
-        else await issue();
+        else await allowed(issue, issuable(), true);
         break;
       }
       case 'grant':
@@ -414,7 +427,7 @@ async function scenario(operations: readonly Operation[]) {
         }
         break;
       }
-      case 'issue': await allowed(issue, model.active.ci, true); break;
+      case 'issue': await allowed(issue, issuable(), true); break;
       case 'revoke-token': {
         const tokens = credentials.filter((credential) => credential.member === 'ci');
         const selected = tokens[op.credential % tokens.length];
