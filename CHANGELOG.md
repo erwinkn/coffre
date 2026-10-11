@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+**Upgrading from 0.4.** This release changes what people and service
+accounts hold, so read what `coffre migrate` says before you deploy. The
+steps are the usual ones ([Upgrading](docs/deploy.md#upgrading)):
+
+1. **`coffre update`**, in the deployment's directory. It moves the pins
+   and adds the new `users.$user.apps.tsx` page.
+2. **`coffre migrate`** applies `0002_instance_roles` and
+   `0003_credential_scopes`, and 0.4 keeps serving on both. Then it lists
+   two things. First, each grant on every project, with what the vault
+   will replace it by and anything it loses: "service:deploy: maintainer
+   on every project → maintainer on market; not projects made later; loses
+   access-manager on market (keeps maintainer)". Second, each service
+   account's 0.4 tokens and trust bindings, which keep what the account
+   holds when 0.5 first checks them. An account that holds nothing is
+   flagged: "which will reach nothing: grant the account before you
+   deploy". The pipeline runs it right before the deploy, so run it
+   yourself first, from the deployment's directory, and read the lists.
+   To choose otherwise, grant, revoke or regrant on 0.4, then run it again
+   to check.
+3. **Deploy in one step.** The first request converts every grant on every
+   project, one member at a time, each logged as `system:vault`. A 0.4
+   instance owner becomes an Admin, and the root admin stays root admin.
+   Each 0.4 token and binding is sealed the first time it is checked
+   (`token.seal`). A 0.4 instance still serving during a rollout answers
+   401 to anything 0.5 has sealed.
+4. **Check `/readyz`**, then the Audit page or `coffre verify log`.
+
+Scripts that call `coffre grant '*'`, `coffre revoke '*'`, `coffre admit
+--owner`, or `PUT /api/members/<member>` with `{ owner }` stop working.
+Use roles and scopes instead (below). OIDC bindings need nothing: each
+existing one keeps working as a binding on its one event. Rolling back to
+0.4 is not an undo. It refuses every sealed token and binding, and every
+member who is no longer a Member or an Admin, until they are replaced.
+
 **Instance roles with scopes replace grants on every project.** Each
 person has one instance role, Member, Auditor, Developer, Admin or Owner,
 which applies in every project its scope takes in, the ones made later
