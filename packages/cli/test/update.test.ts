@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -540,9 +540,11 @@ test('a plan that reaches outside the routes, pins another package or names no p
     const files = ['package.json', 'pnpm-workspace.yaml'];
     const before = files.map((name) => readFileSync(join(dir, name), 'utf8'));
     const valid = { pages: { changes: [] }, start: [], packageManager: 'pnpm@11.8.0' };
+    // Beside the deployment, named after it: no other run's.
+    const sentinel = `${basename(dir)}.sentinel`;
     const plans: [string, unknown][] = [
-      ['"../sentinel.txt" is not a file in app/src/routes/', { ...valid, pages: { changes: [{ path: '../sentinel.txt', was: null, becomes: 'outside\n' }] } }],
-      ['"app/src/routes/../../../sentinel.txt" is not a file in app/src/routes/', { ...valid, pages: { changes: [{ path: 'app/src/routes/../../../sentinel.txt', was: null, becomes: 'outside\n' }] } }],
+      [`"../${sentinel}" is not a file in app/src/routes/`, { ...valid, pages: { changes: [{ path: `../${sentinel}`, was: null, becomes: 'outside\n' }] } }],
+      [`"app/src/routes/../../../${sentinel}" is not a file in app/src/routes/`, { ...valid, pages: { changes: [{ path: `app/src/routes/../../../${sentinel}`, was: null, becomes: 'outside\n' }] } }],
       ["typescript is not one of the Start app's packages", { ...valid, start: [{ name: 'typescript', from: '5.9.3', to: '999.0.0' }] }],
       ['packageManager 42 is not an exact pnpm', { ...valid, packageManager: 42 }],
     ];
@@ -552,7 +554,7 @@ test('a plan that reaches outside the routes, pins another package or names no p
       assert.equal(run.code, 1, run.stderr);
       assert.ok(run.stderr.includes(`coffre 9.9.9's own CLI could not say what it changes (${refused}). Nothing was changed`), run.stderr);
       assert.deepEqual(files.map((name) => readFileSync(join(dir, name), 'utf8')), before);
-      assert.ok(!existsSync(join(dir, '..', 'sentinel.txt')) && !existsSync(join(dir, 'sentinel.txt')));
+      assert.ok(!existsSync(join(dir, '..', sentinel)), `${sentinel} written outside the deployment`);
     }
   } finally {
     close();
@@ -608,9 +610,11 @@ test("the release's own CLI is the registry's, as the deployment's .npmrc names 
     // A home that is a project with its own @coffre/cli@9.9.9, and a global prefix with another: npx would run either.
     for (const [root, ran] of [[join(home, 'node_modules', '@coffre', 'cli'), 'home-ran'], [join(work, 'global', 'lib', 'node_modules', '@coffre', 'cli'), 'global-ran']] as const) {
       mkdirSync(root, { recursive: true });
-      for (const [name, text] of Object.entries(cli('9.9.9', plan('pnpm@6.6.6', ran)).files)) writeFileSync(join(root, name), text);
+      for (const [name, text] of Object.entries(cli('9.9.9', `#!/usr/bin/env node\n${plan('pnpm@6.6.6', ran)}`).files)) writeFileSync(join(root, name), text, { mode: 0o755 });
     }
     writeFileSync(join(home, 'package.json'), JSON.stringify({ dependencies: { '@coffre/cli': '9.9.9' } }));
+    mkdirSync(join(home, 'node_modules', '.bin'));
+    symlinkSync(join(home, 'node_modules', '@coffre', 'cli', 'main.mjs'), join(home, 'node_modules', '.bin', 'coffre'));
     mkdirSync(join(work, 'global', 'bin'), { recursive: true });
     symlinkSync(join(work, 'global', 'lib', 'node_modules', '@coffre', 'cli', 'main.mjs'), join(work, 'global', 'bin', 'coffre'));
     // The user's own registry answers nothing; the deployment's is coffre's.
