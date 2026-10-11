@@ -277,21 +277,25 @@ export type MigrationPlan = { applied: number; total: number; pending: string[] 
  * Which of this version's migrations a database has applied, and which it
  * has not, without changing it or waiting on a migration under way; and
  * whether this login could apply them (`notOwner`), as `migrateDatabase`
- * requires. A history that is not a prefix of this version's is refused,
- * as `migrateDatabase` refuses it.
+ * requires: thrown, when it cannot read which. A history that is not a
+ * prefix of this version's is refused, as `migrateDatabase` refuses it.
  */
 export async function migrationStatus(url: string): Promise<{ applied: string[]; pending: string[]; notOwner: NotOwner | null }> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
   try {
-    const history = await migrator.applied();
+    const notOwner = await migrator.notOwner();
+    // A login that may not even read the ledger is told why.
+    const history = await migrator.applied().catch((error: unknown) => {
+      throw notOwner ?? error;
+    });
     verifyHistory(expected, history, false);
     const applied = history?.length ?? 0;
     return {
       applied: expected.slice(0, applied).map((entry) => entry.tag),
       pending: expected.slice(applied).map((entry) => entry.tag),
-      notOwner: await migrator.notOwner(),
+      notOwner,
     };
   } finally {
     await migrator.close();
@@ -318,10 +322,10 @@ export async function migrateDatabase(
     await migrator.lock();
     locked = true;
 
-    const applied = await migrator.applied();
-    verifyHistory(expected, applied, false);
     const notOwner = await migrator.notOwner();
     if (notOwner !== null) throw notOwner;
+    const applied = await migrator.applied();
+    verifyHistory(expected, applied, false);
     const done = applied?.length ?? 0;
     await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
     await migrator.migrate(migrationsFolder(engine));

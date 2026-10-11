@@ -23,8 +23,9 @@ to get as far as Postgres's "permission denied for schema drizzle". Now
 it stops before asking, with the owner and the fix: "coffre's tables are
 owned by X, and this login, Y, is neither it nor a member of it: migrate
 with X's connection string, or, as a role that administers it, run GRANT
-X TO Y". With nothing to apply, it only warns, so the login can be fixed
-before the next migration needs it. `coffre setup` and `coffre-server
+X TO Y". With nothing to apply, a login that can still read the tables
+gets only a warning, so it can be fixed before the next migration needs
+it. `coffre setup` and `coffre-server
 migrate` refuse the same way.
 
 **CI runs `pnpm test:compat` again**, for both kinds: the newest release,

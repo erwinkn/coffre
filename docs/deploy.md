@@ -187,7 +187,8 @@ runs the previous version, by design. It stops unless:
   them, or be a member of the role that does. Otherwise it names that role
   and stops before it asks: migrate with that role's URL, or, as a role
   that administers it, `GRANT <owner> TO <login>`. With nothing to apply,
-  it only warns that the next migration needs another login.
+  a login that can still read the tables gets only a warning: the next
+  migration needs another login.
 - **the database is not ahead of that version.** A database a newer coffre
   migrated, as after rolling a deployment back, is refused, each migration
   it does not know named by when it was made and its hash, and nothing is

@@ -126,6 +126,7 @@ async function migrateDeployment(
   try {
     status = await migrationStatus(url.href);
   } catch (error) {
+    if (error instanceof NotOwner) throw new MigrateError(migrationFailure(error));
     if (!(error instanceof DatabaseAhead)) throw error;
     throw new MigrateError(
       `${where} is ahead of coffre ${deployment.version}: ${error.message.replace(/^the database /, '')}. ` +

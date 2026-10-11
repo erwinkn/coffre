@@ -371,6 +371,14 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
   deployer.password = 'deployer-only-p4ss';
   const refusal = /coffre's tables are owned by setup_owner, and this login, setup_deployer, is neither it nor a member of it: migrate with setup_owner's connection string, or, as a role that administers it, run GRANT setup_owner TO setup_deployer/;
 
+  // One that may not even read the ledger is refused, up to date as the database is.
+  const unread = await migrateIn(dir, deployer.href);
+  assert.equal(unread.code, 1);
+  assert.match(unread.output, new RegExp(`${refusal.source}\\. Nothing was changed`));
+  assert.doesNotMatch(unread.output, /permission denied/);
+
+  // PlanetScale's reads and writes every table, and owns none.
+  await asSuperuser('postgres', (client) => client.query('GRANT pg_read_all_data, pg_write_all_data TO setup_deployer'));
   // Up to date, it applies nothing, and says the next migration needs another login.
   const current = await migrateIn(dir, deployer.href);
   assert.equal(current.code, 0, current.output);
