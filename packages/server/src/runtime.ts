@@ -31,8 +31,13 @@ export type CoffreRuntime = {
   schema: { migrated: boolean };
 };
 
-/** Per configuration: a settled value, never a pending read (AGENTS.md, "What an isolate keeps"). */
-const schemas = new WeakMap<ResolvedConfig, { migrated: boolean }>();
+/**
+ * What a configuration knows of its database, for as long as it lives: the
+ * isolate's, or the process's. Settled values, never a pending read
+ * (AGENTS.md, "What an isolate keeps").
+ */
+type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean } };
+const known = new WeakMap<ResolvedConfig, Known>();
 
 /**
  * The application's services around a database: once per invocation on
@@ -53,12 +58,14 @@ export function createRuntime(
   let workloads: WorkloadService | null = null;
   let mcp: McpService | null = null;
   let verifier: IdentityVerifier;
+  const { schema, scopes } = knownOf(config);
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
       db,
       chainKey: config.auditChainKey,
       vault,
       signin: config.auth.signin,
+      scopes,
     });
     verifier = signin;
     const trusted = config.auth.signin.workloads;
@@ -83,17 +90,17 @@ export function createRuntime(
     publicUrl: config.publicUrl,
     verifier,
     waitUntil,
-    schema: schemaOf(config),
+    schema,
   };
 }
 
-function schemaOf(config: ResolvedConfig): { migrated: boolean } {
-  let schema = schemas.get(config);
-  if (schema === undefined) {
-    schema = { migrated: false };
-    schemas.set(config, schema);
+function knownOf(config: ResolvedConfig): Known {
+  let kept = known.get(config);
+  if (kept === undefined) {
+    kept = { schema: { migrated: false }, scopes: { sealed: false } };
+    known.set(config, kept);
   }
-  return schema;
+  return kept;
 }
 
 /** What a handler gets: the runtime's stores and the request's caller. */

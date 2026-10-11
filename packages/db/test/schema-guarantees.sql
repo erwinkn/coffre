@@ -313,7 +313,7 @@ BEGIN
             WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    UPDATE service_bindings SET label = label, last_used_at = last_used_at, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
+    UPDATE service_bindings SET label = label, scope = scope, last_used_at = last_used_at, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
     RAISE NOTICE 'PASS: coffre_app changes a binding only where its MAC allows, and never deletes one';
 END
 $$;

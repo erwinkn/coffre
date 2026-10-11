@@ -466,6 +466,9 @@ export type Api = {
         hint: string;
         expiresAt: string;
         lastUsedAt: string | null;
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
       }[];
       apps: {
         id: string;
@@ -578,6 +581,9 @@ export type Api = {
           hint: string;
           expiresAt: string;
           lastUsedAt: string | null;
+          scope: null | {
+            [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          };
         }[];
         apps: {
           id: string;
@@ -616,6 +622,9 @@ export type Api = {
         expiresAt: string;
         lastUsedAt: string | null;
         lastUsedIp: string | null;
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
       }[];
     };
   };
@@ -623,11 +632,17 @@ export type Api = {
     input: {
       expiresInDays: number;
       label?: string | null;
+      scope?: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      };
     };
     output: {
       id: string;
       token: string;
       expiresAt: string;
+      scope: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      };
     };
   };
   "DELETE /members/:member/tokens/:id": {
@@ -647,6 +662,9 @@ export type Api = {
         claims: {
           [key: string]: string | string[];
         };
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
         label: string | null;
         createdAt: string;
         createdBy: string;
@@ -661,6 +679,9 @@ export type Api = {
         [key: string]: string | string[];
       };
       issuer?: string | null;
+      scope?: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      };
       label?: string | null;
       replaces?: string[];
     };
@@ -670,6 +691,9 @@ export type Api = {
       jwksUri: string;
       claims: {
         [key: string]: string | string[];
+      };
+      scope: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
       };
       replaces: {
         id: string;
@@ -683,6 +707,9 @@ export type Api = {
         jwksUri: string;
         claims: {
           [key: string]: string | string[];
+        };
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
         };
         label: string | null;
         createdAt: string;
@@ -1214,6 +1241,9 @@ export type BindingPlan = {
   claims: {
     [key: string]: string | string[];
   };
+  scope: {
+    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+  };
   replaces: {
     id: string;
     why: "asked" | "keys_moved";
@@ -1227,6 +1257,9 @@ export type BindingView = {
   jwksUri: string;
   claims: {
     [key: string]: string | string[];
+  };
+  scope: null | {
+    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
   };
   label: string | null;
   createdAt: string;
@@ -1512,6 +1545,9 @@ export type OffboardingReport = {
     hint: string;
     expiresAt: string;
     lastUsedAt: string | null;
+    scope: null | {
+      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    };
   }[];
   apps: {
     id: string;
@@ -1626,6 +1662,9 @@ export type ServiceTokenRow = {
   expiresAt: string;
   lastUsedAt: string | null;
   lastUsedIp: string | null;
+  scope: null | {
+    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+  };
 };
 
 export type SessionRow = {

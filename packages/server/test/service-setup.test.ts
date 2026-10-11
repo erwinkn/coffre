@@ -186,7 +186,8 @@ test('an account with no grant is its maker\'s, or theirs who run the instance',
   await assert.rejects(ada.access.set(CI, { 'market/dev': 'viewer' }), { status: 403 });
   await ada.members.add('token:ci-ada');
   await assert.rejects(bo.tokens.issue('token:ci-ada', { label: 'x', expiresInDays: 1 }), { status: 403 });
-  assert.equal((await ada.tokens.issue('token:ci-ada', { label: 'x', expiresInDays: 1 })).token.length > 0, true);
+  // Its maker manages it, though a token would reach nothing: it needs a grant first.
+  await assert.rejects(ada.tokens.issue('token:ci-ada', { label: 'x', expiresInDays: 1 }), { status: 400, message: /give the account a grant first/ });
   assert.deepEqual((await ada.members.list()).members.map((member) => [member.member, member.managed]), [['token:ci-ada', true]]);
 });
 

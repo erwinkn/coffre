@@ -53,12 +53,19 @@ export function issuingBinding(createdBy: unknown): string | null {
   return typeof createdBy === 'string' && createdBy.startsWith(EXCHANGED) ? createdBy.slice(EXCHANGED.length) : null;
 }
 
-/** The tuple's kind and fields: an exchanged credential's are its own. */
+/**
+ * The tuple's kind and fields: an exchanged credential's are its own. A
+ * token's or a binding's scope makes another kind again, which covers it:
+ * the rows of 0.4 had none, and still check as they were sealed until the
+ * app seals them with one (`sealScopes`); a scope cleared or changed fails
+ * either way.
+ */
 function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
-  if (table === 'credentials' && issuingBinding((row as { createdBy?: unknown }).createdBy) !== null) {
-    return { kind: 'exchanged_credentials', fields: [...FIELDS.credentials, 'createdBy'] };
-  }
-  return { kind: table, fields: FIELDS[table] };
+  const { createdBy, scope } = row as { createdBy?: unknown; scope?: unknown };
+  const exchanged = table === 'credentials' && issuingBinding(createdBy) !== null;
+  const kind = exchanged ? 'exchanged_credentials' : table;
+  const fields = exchanged ? [...FIELDS.credentials, 'createdBy'] : FIELDS[table];
+  return scope == null ? { kind, fields } : { kind: `scoped_${kind}`, fields: [...fields, 'scope'] };
 }
 
 export type AuthRow = { [K in AuthTable]: Fields[K] & { authMac: Buffer } }[AuthTable];

@@ -1,4 +1,4 @@
-import { ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
 import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -86,6 +86,11 @@ const secretValue = z
   .refine((value) => !value.includes('\0'), 'a value cannot contain NUL bytes');
 
 const role = z.enum(ROLE_NAMES);
+/** A token's or a binding's scope, each place by path and its role: `{ "market/dev": "developer" }`. All its account holds when left out. */
+const credentialScope = z
+  .record(z.string().max(200), role)
+  .refine((scope) => Object.keys(scope).length <= MAX_SCOPE_PLACES, `a scope names at most ${MAX_SCOPE_PLACES} places`)
+  .optional();
 
 /** Sessions and service tokens are coffre's own sign-in; behind Cloudflare Access there are none. */
 function signin(ctx: ApiContext) {
@@ -300,6 +305,7 @@ export const routes = {
     input: z.object({
       label: z.string().trim().min(1).max(120).nullable().default(null),
       expiresInDays: z.number().int().min(1).max(366),
+      scope: credentialScope,
     }),
     run: (ctx, { params, input }) => signin(ctx).issueServiceToken(ctx, serviceId(params.member), input),
   }),
@@ -324,6 +330,7 @@ export const routes = {
       claims: z
         .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
         .refine((claims) => Object.keys(claims).length <= MAX_CLAIMS, `a binding names at most ${MAX_CLAIMS} claims`),
+      scope: credentialScope,
       label: z.string().trim().min(1).max(120).nullable().default(null),
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
     }).strict(),

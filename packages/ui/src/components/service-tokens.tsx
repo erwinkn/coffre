@@ -1,4 +1,5 @@
 import type { ServiceTokenRow } from '@coffre/client';
+import { credentialScopeInWords } from '@coffre/core/access';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
@@ -7,6 +8,7 @@ import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { Card } from './page';
+import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { Key, Plus, X } from './icons';
 
@@ -17,7 +19,7 @@ const LIFETIMES = [30, 90, 180, 365] as const;
  * OIDC. A value exists in exactly
  * one place, this dialog, for as long as it stays open: coffre keeps a hash.
  */
-export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens: ServiceTokenRow[] }) {
+export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string; tokens: ServiceTokenRow[]; grants: HeldGrant[] }) {
   const change = revokeCredential(useCoffre(), serviceId);
   const revoke = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
@@ -42,6 +44,7 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
               <thead>
                 <tr>
                   <th>Token</th>
+                  <th>Reaches</th>
                   <th className="col-shrink">Issued (UTC)</th>
                   <th className="col-shrink">Last used</th>
                   <th className="col-shrink">Expires</th>
@@ -65,6 +68,7 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
                             </span>
                           </span>
                         </td>
+                        <td>{token.scope === null ? 'All its account holds' : credentialScopeInWords(token.scope)}</td>
                         <td className="nowrap">
                           <span className="cell-stack">
                             <Timestamp iso={token.createdAt} />
@@ -123,7 +127,7 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
                       </tr>
                       <RowFailure
                         status={state}
-                        columns={5}
+                        columns={6}
                         onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
                       />
                     </Fragment>
@@ -135,16 +139,17 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
         )}
       </Card>
       <div className="table-actions">
-        <IssueToken serviceId={serviceId} />
+        <IssueToken serviceId={serviceId} grants={grants} />
       </div>
     </>
   );
 }
 
-function IssueToken({ serviceId }: { serviceId: string }) {
+function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGrant[] }) {
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState('');
   const [days, setDays] = useState<number>(90);
+  const [scope, setScope] = useState(() => wholeScope(grants));
   const [issued, setIssued] = useState<{ token: string; expiresAt: string } | null>(null);
   const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
@@ -153,6 +158,7 @@ function IssueToken({ serviceId }: { serviceId: string }) {
     setOpen(false);
     setIssued(null);
     setLabel('');
+    setScope(wholeScope(grants));
     setError(null);
   }
 
@@ -177,6 +183,7 @@ function IssueToken({ serviceId }: { serviceId: string }) {
                   coffre.tokens.issue(memberRef('service', serviceId), {
                     label: label.trim() === '' ? null : label.trim(),
                     expiresInDays: days,
+                    scope,
                   }),
                 {
                   affects: affects.credentials(memberRef('service', serviceId)),
@@ -207,12 +214,13 @@ function IssueToken({ serviceId }: { serviceId: string }) {
                 </select>
               </label>
             </div>
+            <ScopePicker grants={grants} value={scope} onChange={setScope} />
             <ErrorLine error={error} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={close}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="submit" disabled={pending}>
+              <button className="btn btn-primary" type="submit" disabled={pending || Object.keys(scope).length === 0}>
                 {pending && <Spinner />}
                 Issue token
               </button>

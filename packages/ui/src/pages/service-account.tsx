@@ -29,12 +29,14 @@ export function ServiceAccountSignInPage() {
   const ways = signInWays(shell, access) ?? { tokens: false, workloads: false };
   const { data: credentials } = useSuspenseQuery(queries.credentials(client, member, ways.tokens));
   const { data: bindings } = useSuspenseQuery(queries.bindings(client, member, ways.workloads));
+  // What a new token or binding reaches, unless narrowed: everything the account holds, which its manager reaches.
+  const grants = access?.ok === true ? access.grants : [];
   return (
     <>
       {bindings !== null &&
-        (bindings.ok ? <TrustedWorkloads serviceId={account} bindings={bindings.bindings} /> : <Notice tone="bad">{bindings.error}</Notice>)}
+        (bindings.ok ? <TrustedWorkloads serviceId={account} bindings={bindings.bindings} grants={grants} /> : <Notice tone="bad">{bindings.error}</Notice>)}
       {credentials !== null &&
-        (credentials.ok ? <ServiceTokens serviceId={account} tokens={credentials.tokens} /> : <Notice tone="bad">{credentials.error}</Notice>)}
+        (credentials.ok ? <ServiceTokens serviceId={account} tokens={credentials.tokens} grants={grants} /> : <Notice tone="bad">{credentials.error}</Notice>)}
     </>
   );
 }

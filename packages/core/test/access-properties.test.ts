@@ -9,6 +9,8 @@ import {
   covers,
   grantKind,
   inScope,
+  isCredentialScope,
+  issuesCredential,
   instanceRoleGrants,
   makesProjects,
   mayManageAccess,
@@ -140,6 +142,39 @@ test(`roles, scopes and running the instance match the model, seed ${settings.se
   // A scope written another way decides the same.
   const normal = normalScope(actor.scope);
   for (const place of everyPlace()) assert.equal(inScope(normal, place), inScope(actor.scope, place));
+}, settings));
+
+const grants = gs.arrays(grant, { maxSize: 6 }).map((held) => [...new Map(held.map((item) => [JSON.stringify([item.projectId, item.environmentId]), item])).values()]);
+
+/** A service account as `issuesCredential` weighs it, its grants' places named as checks name them. */
+function account(held: Holdings['grants']) {
+  const place = (item: Holdings['grants'][number]): Place => item.environmentId === null
+    ? { projectId: item.projectId! }
+    : { projectId: item.projectId!, environmentId: item.environmentId, environmentSlug: item.environmentId.split('/')[1]! };
+  return { grants: held.map((item) => ({ role: item.role, place: place(item) })), admittedBy: null };
+}
+
+test(`a credential reaches what both its scope and its account hold, and never more than the account held when it was issued, seed ${settings.seed}`, () => hegel.test((tc) => {
+  const atIssue = tc.draw(grants);
+  const scope = tc.draw(grants);
+  const now = tc.draw(grants);
+  const service = (held: Holdings['grants'], credentialScope: Holdings['credentialScope'] = null): Holdings =>
+    ({ isRootAdmin: false, role: 'member', scope: { projects: 'all', environments: 'all' }, grants: held, credentialScope });
+  assert.equal(isCredentialScope(scope), true);
+  // Who runs the instance gives anything, so only the account bounds what they issue.
+  const root: Holdings = { isRootAdmin: true, role: 'owner', scope: { projects: 'all', environments: 'all' }, grants: [] };
+  const issued = issuesCredential(root, null, 'user:root', account(atIssue), account(scope).grants);
+  for (const place of everyPlace()) {
+    for (const permission of permissions) {
+      const through = allows(service(now, scope), permission, place);
+      assert.equal(through, modelAllows(service(now), permission, place) && modelAllows(service(scope), permission, place));
+      // Issued, whatever the account holds now, a request with it holds no more than the account did then.
+      if (issued && through) assert.equal(modelAllows(service(atIssue), permission, place), true, JSON.stringify({ atIssue, scope, now, permission, place }));
+    }
+  }
+  // Issued only within the account: each of its grants' every permission, where it is.
+  const within = account(scope).grants.every(({ role, place }) => rights[role].every((permission) => modelAllows(service(atIssue), permission, place)));
+  assert.equal(issued, within);
 }, settings));
 
 test('a scope narrows only the role: grants reach past it, and a project is in it only with all its environments', () => {

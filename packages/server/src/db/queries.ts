@@ -520,6 +520,8 @@ export type MemberRow = {
     expiresAt: Date;
     lastUsedAt: Date | null;
     lastUsedIp: string | null;
+    /** A service token's scope, as stored (`readScope`). */
+    scope: string | null;
   }[];
   /** Sign-in accounts still bound. */
   identities: {
@@ -795,10 +797,13 @@ export async function findCredential(db: Queryable, chainKey: Buffer, by: { toke
   if (row.identity !== null) verifyAuthRow(chainKey, 'identities', row.identity);
   if (row.credential.identityId !== null && row.identity === null) throw new Error('credential identity is missing');
   const binding = issuingBinding(row.credential.createdBy);
+  const stands = binding === null ? null : await standingBinding(db, chainKey, binding, row.credential.principal, row.credential.generation);
   return {
     ...row.credential,
     /** For a credential a trust binding issued: whether that binding still stands. Null for any other. */
-    bindingStands: binding === null ? null : await bindingStands(db, chainKey, binding, row.credential.principal, row.credential.generation),
+    bindingStands: binding === null ? null : stands !== null,
+    /** Its scope, as stored: its own, or for one a binding issued, the binding's. */
+    scope: binding === null ? row.credential.scope : stands?.scope ?? null,
     identityRevokedAt: row.identity?.revokedAt ?? null,
     identityProvider: row.identity?.provider ?? null,
     identityIssuerHash: row.identity?.issuerHash ?? null,
@@ -909,23 +914,24 @@ export async function exchangeCandidates(db: Queryable, chainKey: Buffer, princi
 }
 
 /**
- * Whether a credential's binding still stands: its row the app's, not
- * revoked, no tombstone, of the same member and generation. It reads the
+ * A credential's binding, if it still stands: its row the app's, not
+ * revoked, no tombstone, of the same member and generation; null if not. It reads the
  * database clock, as `findCredential` does, so that Hyperdrive never
  * answers it from its cache: a cached "no tombstone" would let a credential
  * whose rows were put back after its binding was removed sign in again. A
  * query of its own, not a join in `findCredential`: only a credential a
  * binding issued asks it, and the exchange asks it under its transaction.
  */
-export async function bindingStands(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<boolean> {
+export async function standingBinding(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<BindingRow | null> {
   const { serviceBindings } = tablesOf(db);
   const [row] = await db
     .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(db, bindingId)), now: clock(db) })
     .from(serviceBindings)
     .where(eq(serviceBindings.id, bindingId));
-  return row !== undefined && !row.tombstoned && row.binding.revokedAt === null
+  const stands = row !== undefined && !row.tombstoned && row.binding.revokedAt === null
     && row.binding.principal === principal && row.binding.generation === generation
     && checkAuthRow(chainKey, 'service_bindings', row.binding);
+  return stands ? row.binding : null;
 }
 
 /**
@@ -951,7 +957,7 @@ export async function exchangesOf(db: Queryable, credentialIds: readonly string[
 
 /**
  * Whether this token, by its signing input's hash, was exchanged already.
- * Uncached, as `bindingStands` is: a cached "not yet" would send a replay
+ * Uncached, as `standingBinding` is: a cached "not yet" would send a replay
  * on to the vault and the commit, which refuses it only there.
  */
 export async function tokenConsumed(db: Queryable, hash: Buffer): Promise<boolean> {

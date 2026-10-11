@@ -326,6 +326,14 @@ const TEMPLATES: Record<string, Template> = {
     did: 'trusted CI runs to sign in as',
     tried: 'trust CI runs to sign in as',
     what: (facts) => subject(facts.entry),
+    then: ({ entry }) => reaching(entry),
+  },
+  // The tokens and bindings 0.4 made, given their own scope when 0.5 first checked a credential: what their account held then.
+  'token.seal': {
+    did: 'sealed',
+    tried: 'seal',
+    what: ({ entry }) => [`${sealedOf(entry)} of `, ...subject(entry)],
+    then: ({ entry }) => reaching(entry, ', reaching nothing'),
   },
   'token.unbind': {
     did: 'stopped trusting CI runs to sign in as',
@@ -365,7 +373,7 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => (text(entry.metadata.provider) === null ? [] : [`with ${text(entry.metadata.provider)}`]),
   },
   sign_out: { did: 'signed out', tried: 'sign out', what: () => [] },
-  'token.create': { did: 'issued a bearer token to', tried: 'issue a bearer token to', what: (facts) => subject(facts.entry) },
+  'token.create': { did: 'issued a bearer token to', tried: 'issue a bearer token to', what: (facts) => subject(facts.entry), then: ({ entry }) => reaching(entry) },
   'token.revoke': { did: 'revoked a bearer token of', tried: 'revoke a bearer token of', what: (facts) => subject(facts.entry) },
   'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [] },
   'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [] },
@@ -425,6 +433,29 @@ function article(name: string): string {
 function scoped(entry: AuditEntry): Part[] {
   const scope = entry.metadata.scope as { projects?: unknown; environments?: unknown } | undefined;
   return scope === undefined || (scope.projects === 'all' && scope.environments === 'all') ? [] : [', with a scope'];
+}
+
+/**
+ * What a token or binding reaches, its scope, each role with the places it
+ * holds, counted, as the log names them by id: `, reaching developer on 2 places`.
+ */
+function reaching(entry: AuditEntry, none = ''): Part[] {
+  const scope = entry.metadata.scope;
+  if (!Array.isArray(scope)) return [];
+  if (scope.length === 0) return none === '' ? [] : [none];
+  const byRole = new Map<string, number>();
+  for (const grant of scope as { role?: unknown }[]) {
+    const role = text(grant.role);
+    if (role !== null) byRole.set(role, (byRole.get(role) ?? 0) + 1);
+  }
+  return [`, reaching ${[...byRole].map(([role, count]) => `${role} on ${plural(count, 'place')}`).join(', ')}`];
+}
+
+/** The tokens and trust bindings a `token.seal` names, counted: `2 tokens and a trust binding`. */
+function sealedOf(entry: AuditEntry): string {
+  const count = (key: string) => (Array.isArray(entry.metadata[key]) ? (entry.metadata[key] as unknown[]).length : 0);
+  const parts = [[count('tokens'), 'token'], [count('bindings'), 'trust binding']] as const;
+  return parts.filter(([n]) => n > 0).map(([n, one]) => plural(n, one)).join(' and ') || 'nothing';
 }
 
 /**

@@ -210,14 +210,24 @@ export class McpApprovals {
     let basis: string | null = null;
     if (status === 'pending') {
       const api = this.#client(ctx);
+      const unread = (error: unknown): Detail[] => {
+        if (!(error instanceof CoffreError)) throw error;
+        return [{ label: 'Note', value: `coffre could not read what this replaces: ${error.message}`, warn: true }];
+      };
+      // Read once: the page shows what the change replaces, and Approve compares its basis with this one.
+      // Unread, the rest of the page still shows, and nothing is approved without a basis.
+      let replaced: Replaced | null = null;
+      let missing: Detail[] = [];
       try {
-        // Read once: the page shows what the change replaces, and Approve compares its basis with this one.
-        const replaced = (await tool.change!.replaces?.(api, args)) ?? null;
-        details = await tool.change!.preview(api, args, viewing, replaced?.details ?? []);
+        replaced = (await tool.change!.replaces?.(api, args)) ?? null;
+      } catch (error) {
+        missing = unread(error);
+      }
+      try {
+        details = await tool.change!.preview(api, args, viewing, replaced?.details ?? missing);
         basis = replaced === null ? null : basisOf(replaced);
       } catch (error) {
-        if (!(error instanceof CoffreError)) throw error;
-        details = [{ label: 'Note', value: `coffre could not read what this replaces: ${error.message}` }];
+        details = unread(error);
       }
       // The same call approved before, whose making never answered: approving it again may make it twice.
       const earlier = (await unansweredApprovals(this.#deps.db, row.connectionId, row.digest)).filter((other) => other.id !== row.id);

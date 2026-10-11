@@ -10,7 +10,7 @@ import { parseArgs } from 'node:util';
 import { INSTANCE_ROLES, isInstanceRole, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion } from '@coffre/client';
 
-import { describeRemoval, serviceMember } from './trust.ts';
+import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
 
 /** Where a command writes: what it answers on `out`, what it tells a person on `err`. */
 export type Io = {
@@ -533,7 +533,7 @@ export async function tokens(connect: () => CoffreClient, args: string[], io: Io
   if (list.length === 0) io.out.write(`${shownMember(service)} holds no bearer token: coffre tokens issue ${serviceName(service)}\n`);
   for (const token of list) {
     io.out.write(
-      `${token.id}  …${token.hint}  ${(token.label ?? '-').padEnd(16)}  expires ${day(token.expiresAt)}  last used ${day(token.lastUsedAt)}\n`,
+      `${token.id}  …${token.hint}  ${(token.label ?? '-').padEnd(16)}  expires ${day(token.expiresAt)}  last used ${day(token.lastUsedAt)}  reaches ${reaches(token.scope)}\n`,
     );
   }
 }
@@ -554,11 +554,17 @@ function days(text: string | undefined): number {
 export async function tokensIssue(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(
     args,
-    { 'expires-in': { type: 'string' }, label: { type: 'string' }, 'output-file': { type: 'string' } },
+    { 'expires-in': { type: 'string' }, label: { type: 'string' }, scope: { type: 'string', multiple: true }, 'output-file': { type: 'string' } },
     ['<service>'],
   );
   const service = serviceMember(positionals[0]!);
   const expiresInDays = days(values['expires-in']);
+  let scope: ReturnType<typeof scopeFrom>;
+  try {
+    scope = scopeFrom(values.scope);
+  } catch (error) {
+    throw new UsageError((error as Error).message);
+  }
   const path = values['output-file'];
   const api = connect();
   let fd: number | null = null;
@@ -580,14 +586,14 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   process.once('exit', unmake);
   let issued: Awaited<ReturnType<CoffreClient['tokens']['issue']>>;
   try {
-    issued = await api.tokens.issue(service, { expiresInDays, label: values.label ?? null });
+    issued = await api.tokens.issue(service, { expiresInDays, label: values.label ?? null, ...(scope === undefined ? {} : { scope }) });
   } catch (error) {
     unmake();
     throw error;
   } finally {
     process.off('exit', unmake);
   }
-  const about = `${shownMember(service)}'s bearer token ${issued.id}, until ${day(issued.expiresAt)}`;
+  const about = `${shownMember(service)}'s bearer token ${issued.id}, reaching ${reaches(issued.scope)}, until ${day(issued.expiresAt)}`;
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
     closeSync(fd);

@@ -104,6 +104,7 @@ test('a plan and a list show every claim in full', () => {
     issuer: 'https://token.actions.githubusercontent.com',
     jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
     claims: { event_name: 'push', ref: 'refs/heads/main' },
+    scope: { 'market/dev': 'developer' as const, 'market/prod': 'viewer' as const, 'api/dev': 'developer' as const },
     replaces: [{ id: 'old', why: 'keys_moved' as const }],
   };
   assert.equal(
@@ -115,6 +116,7 @@ test('a plan and a list show every claim in full', () => {
       '  keys     https://token.actions.githubusercontent.com/.well-known/jwks',
       '  claims   event_name  push',
       '           ref         refs/heads/main',
+      '  reaches  developer on market/dev, api/dev; viewer on market/prod',
       '  replaces old: the issuer moved its keys',
       '',
     ].join('\n'),
@@ -122,8 +124,10 @@ test('a plan and a list show every claim in full', () => {
   assert.equal(describeBindings('token:api-deploy', []), 'service:api-deploy trusts no CI runs: none signs in as it by OIDC\n');
   const listed = describeBindings('token:api-deploy', [
     { ...plan, id: 'b1', label: 'prod', createdAt: '2026-10-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
+    { ...plan, scope: null, id: 'b0', label: null, createdAt: '2026-09-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
   ]);
   assert.match(listed, /^b1  prod  \(added by lead@acme.example 2026-10-03, never used\)\n  profile  github\n/);
+  assert.match(listed, /\n  reaches  all its account holds\n$/, 'one of 0.4 the app has not sealed yet');
 });
 
 test('a binding says, in a sentence, which CI runs it lets sign in: platform, repository or project, workflow, ref', () => {

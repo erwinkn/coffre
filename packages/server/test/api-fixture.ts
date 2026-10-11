@@ -209,3 +209,19 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(environments);
   await owner.delete(projects);
 }
+
+/**
+ * Give a service account `viewer` on a project of its own, `<name>-reads`,
+ * made straight in the database, so that the app's log holds none of it:
+ * a token or a binding reaches only what its account holds when it is
+ * made (docs/design/instance-roles.md, "Credentials' scopes").
+ */
+export async function holdSomething(owner: Database, vault: Vault, service: string, actor: string): Promise<string> {
+  const { projects } = tablesOf(owner);
+  const slug = `${service.replace(/^token:/, '')}-reads`;
+  const id = randomUUID();
+  await owner.insert(projects).values({ id, slug, name: slug });
+  const granted = await vault.setAccess({ actor, principal: service, changes: [{ projectId: id, environmentId: null, role: 'viewer', expiresAt: null }] });
+  if (!granted.ok) throw new Error(`could not give ${service} something to hold: ${granted.refusal.message}`);
+  return id;
+}

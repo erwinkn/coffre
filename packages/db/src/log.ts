@@ -225,12 +225,6 @@ export function entryColumns(db: Queryable) {
  */
 export type Authenticity = { authentic: (entry: StoredEntry) => boolean; forged: (entry: StoredEntry) => void };
 
-/**
- * All a reader without the vault's key can do: take every entry in its name
- * as its own. `coffre migrate` and the app read the log so.
- */
-export const KEYLESS: Authenticity = { authentic: () => true, forged: () => {} };
-
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
 export const LOOK_BACK = { page: 32, pages: 32 };
 
@@ -241,8 +235,8 @@ export type Newest = StoredEntry | 'none' | 'forged' | 'unreached';
  * The newest of the entries `page` reads, newest first and before a seq,
  * that `check` finds authentic, read back a page at a time: 'none' when
  * there are none at all, 'forged' when every one is in the vault's name but
- * not its own, and 'unreached' when LOOK_BACK such entries still leave more
- * unread.
+ * not its own, and 'unreached' once it has read LOOK_BACK such entries
+ * (1024), whether or not more are left.
  */
 export async function newestAuthentic(page: (before: bigint | undefined) => Promise<StoredEntry[]>, check: Authenticity): Promise<Newest> {
   let before: bigint | undefined;

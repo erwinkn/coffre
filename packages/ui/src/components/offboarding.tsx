@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router';
+import { credentialScopeInWords } from '@coffre/core/access';
 import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
@@ -239,7 +240,8 @@ function IssuedTokens({ report }: { report: PrincipalReport }) {
                       service:{serviceName(token.service)}
                     </Link>
                     <small>
-                      {token.label ?? 'No label'} · <span className="mono">{token.hint}</span>
+                      {token.label ?? 'No label'} · <span className="mono">{token.hint}</span> · reaches{' '}
+                      {token.scope === null ? 'all its account holds' : credentialScopeInWords(token.scope)}
                     </small>
                   </span>
                 </td>

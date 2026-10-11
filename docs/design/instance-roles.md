@@ -140,9 +140,8 @@ Inside the setting, a person who holds access somewhere
   takes holding all of `market`;
 - **manages it** (`managesService`) while they reach every grant it holds:
   issue, list and revoke its tokens, add and remove its trust bindings,
-  change and take away its grants, remove it. A token reads everything its
-  account holds, so a Developer of `dev` manages no account that also
-  holds `market/prod`, whoever gave it that.
+  change and take away its grants, remove it. A Developer of `dev`
+  manages no account that also holds `market/prod`, whoever gave it that.
 
 Outside the setting, or beyond what they hold, nothing changes: an Admin
 gives and takes grants where its scope reaches, as before, and with them
@@ -158,7 +157,7 @@ Developer of every `dev`:
 | give it `developer` on `market/dev` | yes |
 | give it `viewer` on `market/prod` | no: outside the setting, and she holds nothing there |
 | give it `maintainer` on `market` | no: she holds neither the project nor that role |
-| issue a token for it, or trust `ci.yml` to sign in as it | yes, while it holds only what she reaches |
+| issue a token for it, or trust `ci.yml` to sign in as it | yes, while it holds only what she reaches; the token reaches `developer` on `market/dev`, or `viewer` there if she says so |
 | the same, once an Admin gives it `viewer` on `market/prod` | no: she does not reach prod |
 
 Every step is in the log, with who took it. A person's lists show them
@@ -176,10 +175,10 @@ Four rules close what reaching every grant leaves open:
   they no longer do. Its tokens and bindings keep working until revoked,
   as anything an Admin issued does: offboarding a person lists the tokens
   they issued (`issuedTokens`), to revoke.
-- **A wider grant widens its credentials.** An Admin who gives prod to an
-  account a Developer set up for dev gives it to the tokens and bindings
-  that Developer made, which the account's page lists, by who made each.
-  Read them before granting it more.
+- **A wider grant widens no credential.** Each token and binding carries
+  its own scope, fixed when it is made ("Credentials' scopes", below): an
+  Admin who gives prod to an account a Developer set up for dev gives it
+  to none of the tokens and bindings that Developer made.
 - **A removed account is its remover's.** A person brings back only an
   account they removed themselves, as its row says; one someone else
   removed, an Admin or another person, comes back only through those who
@@ -209,6 +208,84 @@ up to 1024 of those, 32 at a time; when there are such entries but none of
 its own within reach, the setting is closed (`projects only []`), never
 the default, so inserting rows into the log never opens it. Only a log
 with no `settings.change` at all is everywhere.
+
+## Credentials' scopes
+
+Every service token and trust binding carries its own **scope**: grants,
+as its account's are, a role on a project or an environment. It is fixed
+when the credential is made, and a request made with it holds what both
+the scope and the account hold then (`allows`, which asks the scope
+first):
+
+| | `market/dev` | `market/prod` |
+|---|---|---|
+| ci-web holds | `developer` | `viewer`, given after the token |
+| its token's scope, made before | `developer` | |
+| a request with the token | reads and writes | nothing |
+| once ci-web holds only `viewer` on `market/dev` | reads | nothing |
+
+So widening an account widens none of its credentials, and narrowing it
+narrows them all at once. A scope is the shape of the account's grants
+rather than a role's filters (`all`, `only`, `except`): a filter that
+takes in projects or environments made later would let a grant the
+account is given later through, which is the widening the scope is there
+to stop. A grant on a project in a scope does reach the environments made
+in it later, as the account's own grant on it does (`covers`): that is no
+wider than the account, which holds them through the same grant, and
+taking it back from the account takes it from the credential.
+
+**Making one.** Whoever manages the account (`managesService`) makes a
+credential whose every grant is one the account holds, every permission
+of its role there, and one they could give it (`givesService`):
+`issuesCredential`, which the API checks for the pages, the CLI and MCP
+alike, and logs `beyond_account` when it refuses. Left out, the scope is
+everything the account holds, or, for a binding that replaces others
+(`--replace`, or its issuer's keys moved), what those reached of what
+the account still holds, so trusting a workload again never widens it.
+Through MCP, Approve reads the scope again and is refused if it changed
+since the page showed it. One that reaches nothing is refused: the
+account needs a grant first. The scope never changes after; to change
+it, make another and revoke the first. Its issuer losing access later
+shrinks nothing, so CI keeps working when they leave: offboarding them
+lists the tokens they issued, each with its scope, to revoke.
+
+| Ada, a Developer of every `dev`, for ci-web, which holds `developer` on `market/dev` | Answer |
+|---|---|
+| a token, scope left out | `developer` on `market/dev` |
+| a token for `viewer` on `market/dev` | yes |
+| a token for `maintainer` on `market/dev`, or anything on `market/prod` | no: ci-web does not hold it |
+
+**Where it is enforced.** The app reads the scope with the credential,
+and asks `allows` with it on every check; it passes it to every vault
+call (`credentialScope`), and the vault decides on it too, so a token
+scoped to `dev` that asks the vault for a value in `prod` is refused and
+logged (`no_grant`). A credential a binding issued for a CI run carries
+its binding's.
+
+**Where it lives.** A `scope` column on `credentials` and
+`service_bindings`, from migration `0003_credential_scopes`: the grants as
+JSON, projects and environments by id, under the row's MAC (the app's,
+`auth_mac`), which a scope makes another kind of tuple: a scope changed
+or cleared around the app fails it, and the credential is refused, as a
+token row changed around it is. The app's login gains `UPDATE (scope)` for
+the conversion below.
+
+**Tokens and bindings of 0.4.** They have no scope. Once per Node
+process or Worker isolate (a Worker builds its runtime each request, so
+the isolate keeps the flag beside its configuration), before it checks
+its first credential, the app seals each live one with what its account holds then, after the vault's conversion
+of the grants on every project (`sealScopes`), so each keeps exactly what
+it reached. Each account's are sealed in one transaction with a
+`token.seal` entry naming them, so a row put back unsealed and sealed
+again shows in the log. A vault that cannot answer seals nothing, and the
+credential is uncheckable (503) until it can. One that 0.4 makes while
+both run reaches what its account holds, as in 0.4, until the next
+process or isolate seals it. `coffre migrate` lists them by account
+(`unsealedCredentials`, which `sealScopes` reads too), and says which
+account holds nothing, whose credentials would reach nothing for good.
+Rolling back to 0.4 fails closed: a sealed row fails 0.4's MAC, and its
+token or binding is refused; so does a 0.4 instance still serving while
+0.5 rolls out, for every row 0.5 has sealed.
 
 ## Where it lives
 
@@ -259,12 +336,13 @@ checks out now: a genuine row put back after a report stays left.
 One rule says whether a report stands, `reportStands` in
 `@coffre/db/grants`: the vault applies it to its own entries, passing over
 those forged in its name, and `coffre migrate`, which holds no key to tell
-them apart, to every entry in its name. So `coffre migrate` lists every
+them apart, to every entry in its name (`tamperedMembers`, as the app's
+lists do). So `coffre migrate` lists every
 member the vault may convert, with what it makes of them, and marks one
 with a standing report: "left as it is: the vault reported their row
-tampered with (if that report is forged: …)". What a key decides, it
+tampered with (if the vault finds that report forged, it makes: …)". What a key decides, it
 cannot: the vault converts a marked member whose reports are all forged,
-unless more are forged than it reads past (1024), and leaves an unmarked
+unless 1024 or more are forged, all it reads back, and leaves an unmarked
 one whose row was changed and not yet reported, or whose genuine report an
 access entry forged after it covers. A forged report never hides a
 conversion. Root admins it cannot tell either: the vault's configuration
@@ -335,20 +413,32 @@ grant given is an `access.grant` with `reason: 'every-project'`.
   answers one member's role, scope and the grants the caller manages in one
   SQL query, for their page. `PATCH /api/access/<member>`
   takes projects and environments only: `*` is a 400. Making a project or
-  an environment no longer answers `inherited`.
+  an environment no longer answers `inherited`. `POST
+  /api/members/<member>/tokens` and `/bindings` take a credential's
+  `scope` by path, as `PATCH /api/access` does, `{ "market/dev":
+  "viewer" }`, all the account holds when left out; tokens, bindings and
+  offboarding's `issuedTokens` list it the same way, null for one of 0.4
+  not sealed yet. `token.create` and `token.bind` log it, by id.
 - **CLI.** `coffre members add <member> --role <role> [--projects …]
   [--environments …]`; `coffre grant` takes a project or an environment;
   `coffre settings service-accounts --except-environments prod` sets the
   setting, `coffre settings` shows it. `coffre offboard` of an account its
-  manager runs removes it, without the report.
+  manager runs removes it, without the report. `coffre tokens issue` and
+  `coffre trust` take `--scope market/dev=viewer,…`, and `coffre tokens`,
+  `coffre trust <service>` and `coffre offboard` say what each reaches.
 - **MCP.** `admit_member` takes `role` and `scope`; `set_access` takes
   projects and environments; tools for running the instance are listed to
   those who run it, and those for service accounts to anyone who holds
-  access, each checked against the account as the API checks it. The
-  setting itself is the pages' and the CLI's, as permanent deletion is.
+  access, each checked against the account as the API checks it;
+  `issue_service_token` and `trust_workload` take a `scope`, which the
+  approval page shows. The setting itself is the pages' and the CLI's, as
+  permanent deletion is.
 - **UI.** A person's role is one dropdown, with a compact scope editor
   under it for every role but Member. "Grant on every project" is gone; a
   service account's Access tab grants on projects and environments only,
   and to someone who set it up, only what they may give. Service accounts
   is in the sidebar of anyone who sets one up, listing those they manage;
-  Settings edits who sets them up with the same scope editor.
+  Settings edits who sets them up with the same scope editor. Issuing a
+  token or trusting a workload lists the account's grants, each kept or
+  left out, at its role or a smaller one; each token and binding says
+  what it reaches.

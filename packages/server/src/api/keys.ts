@@ -1,5 +1,5 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
-import type { Purpose, Refusal, SecretRef, Vault, Via, WrappedKey } from '@coffre/core/vault';
+import type { Purpose, Refusal, SecretRef, Through, Vault, Via, WrappedKey } from '@coffre/core/vault';
 
 /**
  * The app's half of envelope encryption. It encrypts and decrypts values
@@ -9,7 +9,7 @@ import type { Purpose, Refusal, SecretRef, Vault, Via, WrappedKey } from '@coffr
  */
 
 /** Who is asking the vault, and why: the operation id ties the vault's entries to the app's for the same action. */
-export type Asking = { principal: string; requestId: string | null; operationId: string | null; credentialId?: string | null };
+export type Asking = Through & { principal: string; requestId: string | null; operationId: string | null; credentialId?: string | null };
 
 export type Keyed<T> = { ok: true; values: T[] } | { ok: false; refusal: Refusal };
 

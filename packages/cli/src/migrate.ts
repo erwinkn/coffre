@@ -14,7 +14,7 @@ import { parseArgs } from 'node:util';
 import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
-import { everyProjectPreview, type EveryProjectPreview } from '@coffre/db/grants';
+import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
 import { DatabaseAhead, migrateDatabase, migrationStatus } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
@@ -134,7 +134,7 @@ async function migrateDeployment(
   const { applied, pending } = status;
   if (pending.length === 0) {
     out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
-    out.write(describeEveryProject(await previewEveryProject(url)));
+    out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
   if (!options.yes && terminal === null) {
@@ -147,17 +147,69 @@ async function migrateDeployment(
   } finally {
     steps.end();
   }
-  out.write(describeEveryProject(await previewEveryProject(url)));
+  out.write(describeFirstRun(await previewFirstRun(url)));
 }
 
-/** What the vault will make of the grants on every project of 0.4 still there, read with the owner's login. */
-async function previewEveryProject(url: URL): Promise<EveryProjectPreview[]> {
+/** What this version does to 0.4's rows when it first runs, which the database says: what `coffre migrate` shows. */
+export type FirstRun = {
+  everyProject: EveryProjectPreview[];
+  unsealed: Unsealed[];
+  /** The members who hold a live grant on a project or an environment now. */
+  holding: ReadonlySet<string>;
+};
+
+/**
+ * What the vault will make of the grants on every project of 0.4 still
+ * there, and the tokens and bindings the app will seal, read with the
+ * owner's login.
+ */
+async function previewFirstRun(url: URL): Promise<FirstRun> {
   const { db, close } = await openDatabase(url.href);
   try {
-    return await everyProjectPreview(db, Date.now());
+    const at = new Date();
+    const [everyProject, unsealed, grants] = await Promise.all([everyProjectPreview(db, at.getTime()), unsealedCredentials(db, at), readGrants(db, { liveAt: at.getTime() })]);
+    return { everyProject, unsealed, holding: new Set(grants.filter((grant) => grant.projectId !== null).map((grant) => grant.principal)) };
   } finally {
     await close();
   }
+}
+
+export function describeFirstRun({ everyProject, unsealed, holding }: FirstRun): string {
+  // What a member holds once the vault has converted: their grants on a place, and what it makes of those on every project, unless it leaves them.
+  const converted = everyProject.filter((preview) => !preview.reported && preview.conversion.grants.length > 0).map((preview) => preview.principal);
+  const holds = new Set([...holding, ...converted]);
+  return describeEveryProject(everyProject) + describeUnsealed(unsealed, new Set(unsealed.map((row) => row.principal).filter((principal) => !holds.has(principal))));
+}
+
+/**
+ * The tokens and trust bindings of 0.4, which carry no scope of their own,
+ * by account: when this version first checks a credential, each keeps what
+ * its account holds then (`sealScopes` in @coffre/server), and nothing the
+ * account is given after reaches it. An account that holds nothing then
+ * (`empty`) seals them reaching nothing, for good. Nothing when there are none.
+ *
+ *   service:ci-web   2 tokens and 1 trust binding
+ *   service:idle     1 token, which will reach nothing: grant the account before you deploy, or reissue it after
+ */
+export function describeUnsealed(unsealed: readonly Unsealed[], empty: ReadonlySet<string> = new Set()): string {
+  if (unsealed.length === 0) return '';
+  const lines = [
+    '',
+    'Service tokens and trust bindings now carry their own scope, and what an account is given later reaches none made before.',
+    "When this version first checks a credential, each of these keeps what its account holds then, after any conversion above:",
+  ];
+  for (const principal of [...new Set(unsealed.map((row) => row.principal))]) {
+    const theirs = unsealed.filter((row) => row.principal === principal);
+    const tokens = theirs.filter((row) => row.kind === 'token').length;
+    const bindings = theirs.length - tokens;
+    const what = [tokens === 0 ? null : count(tokens, 'token'), bindings === 0 ? null : count(bindings, 'trust binding')].filter((part) => part !== null);
+    const nothing = empty.has(principal)
+      ? `, which will reach nothing: grant the account before you deploy, or reissue ${theirs.length === 1 ? 'it' : 'them'} after`
+      : '';
+    lines.push(`  ${shownMember(principal)}: ${what.join(' and ')}${nothing}`);
+  }
+  lines.push('Grant or revoke before you deploy to choose what they keep; to change one after, issue another and revoke it.', '');
+  return lines.join('\n');
 }
 
 /**
@@ -172,7 +224,7 @@ async function previewEveryProject(url: URL): Promise<EveryProjectPreview[]> {
  *   service:deploy          maintainer on every project → maintainer on market, billing; not projects made later;
  *                           loses access-manager on billing (keeps maintainer)
  *   service:old             viewer on every project → left as it is: the vault reported their row tampered with
- *                           (if that report is forged: viewer on market, billing; not projects made later)
+ *                           (if the vault finds that report forged, it makes: viewer on market, billing; not projects made later)
  */
 export function describeEveryProject(previews: readonly EveryProjectPreview[]): string {
   if (previews.length === 0) return '';
@@ -201,7 +253,7 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
     const later = conversion.narrowed.some((loss) => loss.kind === 'later-projects') ? ['not projects made later'] : [];
     const after = [[...role, ...grants].join(', and ') || 'nothing', ...later, ...narrower].join('; ');
     // Whether the vault's report is its own, only the vault can tell: either way, what it does is said.
-    const then = reported ? `left as it is: the vault reported their row tampered with (if that report is forged: ${after})` : after;
+    const then = reported ? `left as it is: the vault reported their row tampered with (if the vault finds that report forged, it makes: ${after})` : after;
     lines.push(`  ${shownMember(principal)}: ${was} → ${then}`);
   }
   lines.push(

@@ -215,7 +215,13 @@ export function need(
 
 /** The caller, as the vault knows them, for this request. */
 export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provenance?: string | null }, operationId: string | null = null): Asking {
-  return { principal: formatMember(ctx.caller.principal), requestId: ctx.requestId, operationId, credentialId: ctx.provenance ?? null };
+  return {
+    principal: formatMember(ctx.caller.principal),
+    requestId: ctx.requestId,
+    operationId,
+    credentialId: ctx.provenance ?? null,
+    credentialScope: ctx.caller.credentialScope,
+  };
 }
 
 /**

@@ -19,7 +19,10 @@ coffre tokens issue api-deploy --output-file api-deploy.token   # or a bearer to
 ```
 
 A member is admitted before it holds anything: `coffre grant` does not make
-one, and says so. With a bearer token, store it in your CI provider's secret store. The
+one, and says so. Grant before you trust or issue: each binding and token
+reaches what its account holds when it is made, or less with `--scope
+market/prod=viewer`, and nothing the account is given later. To widen one,
+make another and remove the first. With a bearer token, store it in your CI provider's secret store. The
 CLI reads no environment variable, and a secret is never a flag or an
 argument, which `ps`, the shell's history and CI logs would show: the job
 pipes the token to `coffre login --token`, which saves the session the

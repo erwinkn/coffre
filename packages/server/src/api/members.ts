@@ -43,7 +43,7 @@ import { badRequest, conflict, forbidden, notFound, vaultRefused } from './error
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
-import { accountOf, managedAccount, notManager, serviceSettingFor, setsUp } from './services.ts';
+import { accountOf, managedAccount, notManager, readScope, scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
@@ -108,6 +108,8 @@ export type IssuedToken = {
   hint: string;
   expiresAt: string;
   lastUsedAt: string | null;
+  /** What it reaches, of what its account holds (`ServiceTokenRow`). */
+  scope: ScopeByPath | null;
 };
 
 /**
@@ -490,6 +492,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       hint: token.tokenHint,
       expiresAt: token.expiresAt.toISOString(),
       lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
+      scope: scopeByPath(readScope(token.scope), known),
     })),
     apps,
     references: made,
@@ -663,6 +666,7 @@ export async function putMember(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
+      credentialScope: ctx.caller.credentialScope,
     });
     if (!result.ok) throw vaultRefused(result.refusal);
     // Housekeeping: rows of an earlier membership are dead already, by their generation.
@@ -714,6 +718,7 @@ export async function removeMember(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
+      credentialScope: ctx.caller.credentialScope,
     });
     if (!result.ok) {
       if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') {

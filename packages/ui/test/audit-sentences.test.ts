@@ -196,6 +196,8 @@ test('every other action has a sentence', () => {
     [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a bearer token to service:ci-deploy'],
     [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'trusted CI runs to sign in as service:api-deploy'],
     [{ action: 'token.unbind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'stopped trusting CI runs to sign in as service:api-deploy'],
+    [{ action: 'token.seal', actor: 'system:app', metadata: { principalType: 'service', principalId: 'ci-web', tokens: ['t1', 't2'], bindings: ['b1'], scope: [{ role: 'developer' }, { role: 'viewer' }] } }, 'sealed 2 tokens and 1 trust binding of service:ci-web, reaching developer on 1 place, viewer on 1 place'],
+    [{ action: 'token.seal', actor: 'system:app', metadata: { principalType: 'service', principalId: 'ci-web', tokens: ['t1'], bindings: [], scope: [] } }, 'sealed 1 token of service:ci-web, reaching nothing'],
     [{ action: 'token.unbind', decision: 'deny', reason: 'requires_instance_owner', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'tried to stop trusting CI runs to sign in as service:api-deploy: requires an instance owner'],
     [{ action: 'device.approve' }, 'approved a CLI sign-in'],
     [{ action: 'mcp.connect', metadata: { clientName: 'Claude' } }, 'connected Claude'],

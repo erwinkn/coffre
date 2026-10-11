@@ -12,8 +12,8 @@ import { and, desc, eq } from 'drizzle-orm';
 import { decideApproval } from '../src/db/queries.ts';
 import { callDigest } from '../src/mcp/approvals.ts';
 import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
-import { clientFor } from './api-fixture.ts';
-import { auditLog, mcpApprovals, mcpConnections } from './db/tables.ts';
+import { clientFor, holdSomething } from './api-fixture.ts';
+import { auditLog, credentials, mcpApprovals, mcpConnections } from './db/tables.ts';
 import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
 const OTHER = 'other@acme.example';
@@ -218,10 +218,13 @@ test('a value comes from the page only: the person types it, coffre writes it, a
 
 test('a token issued through an approval is shown on the page, once, and never to the client', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   const token = await connect(DEV, 'read manage-access');
   const id = ((await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 })).body.result!.structuredContent!.approval as { id: string }).id;
-  assert.ok((await view(id)).body.approval.details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
+  const details = (await view(id)).body.approval.details;
+  assert.ok(details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
+  assert.equal(details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads', 'what the token will reach: all the account holds');
   const decided = await decide(id, true);
   assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
   const issued = decided.body.shown.find((line) => line.label === 'Token')!.value;
@@ -230,6 +233,37 @@ test('a token issued through an approval is shown on the page, once, and never t
   assert.equal(result.body.result!.structuredContent!.status, 'approved');
   assert.equal(JSON.stringify(result.body).includes(issued), false);
   assert.equal(JSON.stringify(await approvalRows()).includes(issued), false);
+});
+
+test('a token or a binding reaches what the page said: an account given more since is refused on Approve, and no token is made', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
+  await root.members.add(`user:${DEV}`, { role: 'admin' });
+  const token = await connect(DEV, 'read manage-access');
+  const id = idOf(await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 }));
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads');
+  // Another Admin gives the account prod before the person approves: the token would reach it, which the page never said.
+  await root.access.set('token:ci-deploy', { 'market/prod': 'viewer' });
+  const decided = await decide(id, true, { shown });
+  assert.equal(decided.status, 409, JSON.stringify(decided.body));
+  assert.match(decided.body.message!, /changed since you opened it/);
+  const tokens = () => db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
+  assert.deepEqual(await tokens(), []);
+  // Opened again, the page says it, and Approve makes what it says.
+  const again = (await view(id)).body.approval;
+  assert.equal(again.details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads, market/prod');
+  assert.equal((await decide(id, true, { shown: again })).body.status, 'approved');
+  assert.equal((await tokens()).map((each) => JSON.parse(each.scope!) as unknown[]).flat().length, 2, 'it reaches both');
+
+  // A binding's basis is the server's plan: what its runs reach, and which bindings it takes the place of.
+  const trust = TOOL_BY_NAME.get('trust_workload')!.change!;
+  const plan = (scope: Record<string, string>, replaces: string[]) => ({ bindings: { preview: async () => ({ scope, replaces: replaces.map((each) => ({ id: each, why: 'keys_moved' })) }) } });
+  const basis = async (scope: Record<string, string>, replaces: string[] = []) =>
+    (await trust.replaces!(plan(scope, replaces) as never, { service: 'ci-deploy', profile: 'github', claims: { event_name: 'push' } } as never)).state;
+  assert.notDeepEqual(await basis({ market: 'viewer' }), await basis({ market: 'viewer', 'market/prod': 'viewer' }));
+  assert.notDeepEqual(await basis({ market: 'viewer' }), await basis({ market: 'viewer' }, ['b1']));
 });
 
 test('a change the person could not make is refused before anyone is asked; without Write, the step-up starts', async () => {
@@ -549,6 +583,7 @@ test('the basis Approve compares is the state the page showed, read once: a vers
 
 test('a change made whose outcome is not stored reads as being made, then unknown, never failed, and is never reported (L2)', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
+  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
   const token = await connect(DEV, 'read manage-access');
   const call = () => callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 });

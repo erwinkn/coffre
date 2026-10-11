@@ -11,7 +11,7 @@ import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { liveBindings, tombstoned } from '../src/db/queries.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
 const ROOT = 'admin@acme.example';
@@ -36,6 +36,8 @@ const SIGNIN = defineSignin({ publicUrl: 'https://secrets.acme.example', provide
 
 let db: { owner: Database; runtime: Database; close: () => Promise<void> };
 let deps: FixtureDeps;
+/** The project the service reads, made for it. */
+let reads: string;
 /** What each issuer's discovery answers, by URL. */
 let documents: Map<string, unknown>;
 
@@ -65,6 +67,7 @@ beforeEach(async () => {
   for (const [principal, owner] of [[`user:${LEAD}`, true], [`user:${DEV}`, false], [MEMBER, false]] as const) {
     assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal, ...(owner ? { role: 'admin' as const } : {}) })).ok, true);
   }
+  reads = await holdSomething(db.owner, deps.vault, MEMBER, `user:${ROOT}`);
 });
 
 const as = (id: string) => clientFor(deps, id);
@@ -88,7 +91,9 @@ const live = async () => (await as(LEAD).bindings.list(MEMBER)).bindings;
 
 test('an owner previews a binding, with the keys its issuer names, then saves it, logged as token.bind', async () => {
   const plan = await as(LEAD).bindings.preview(MEMBER, { profile: 'github', claims: { ...DEPLOY } });
-  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), replaces: [] });
+  // What its runs reach, left out: all the account holds.
+  const scope = { [`${SERVICE}-reads`]: 'viewer' as const };
+  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, replaces: [] });
   assert.deepEqual(await live(), [], 'a preview writes nothing');
   assert.deepEqual(await entries(), [], 'and logs nothing');
 
@@ -96,7 +101,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   assert.deepEqual(replaced, []);
   assert.deepEqual(
     { ...binding, id: undefined, createdAt: undefined },
-    { id: undefined, createdAt: undefined, profile: 'github', issuer: GITHUB, jwksUri: KEYS, claims: plan.claims, label: 'deploys to prod', createdBy: LEAD, lastUsedAt: null },
+    { id: undefined, createdAt: undefined, profile: 'github', issuer: GITHUB, jwksUri: KEYS, claims: plan.claims, scope, label: 'deploys to prod', createdBy: LEAD, lastUsedAt: null },
   );
   assert.deepEqual(await live(), [binding]);
   // The service itself may see its bindings; another member may not.
@@ -108,7 +113,17 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
     actor: `user:${LEAD}`,
     action: 'token.bind',
     decision: 'allow',
-    metadata: { bindingId: binding.id, principalType: 'service', principalId: SERVICE, profile: 'github', issuer: GITHUB, jwksUri: KEYS, claims: plan.claims, replaces: [] },
+    metadata: {
+      bindingId: binding.id,
+      principalType: 'service',
+      principalId: SERVICE,
+      profile: 'github',
+      issuer: GITHUB,
+      jwksUri: KEYS,
+      claims: plan.claims,
+      scope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
+      replaces: [],
+    },
   });
 });
 
@@ -225,6 +240,9 @@ test('removing the service ends its bindings, and admitting it again does not br
   assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
   assert.deepEqual(await live(), []);
+  // Admitted again, it holds nothing, so a binding would reach nothing until it is given something.
+  await assert.rejects(bind(DEPLOY), /a credential reaches only what its account holds when it is made: give the account a grant first/);
+  assert.equal((await deps.vault.setAccess({ actor: `user:${ROOT}`, principal: MEMBER, changes: [{ projectId: reads, environmentId: null, role: 'viewer', expiresAt: null }] })).ok, true);
   // A new binding in the new generation counts.
   const { binding } = await bind(DEPLOY);
   assert.deepEqual((await live()).map((row) => row.id), [binding.id]);

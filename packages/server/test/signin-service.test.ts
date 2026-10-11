@@ -26,6 +26,7 @@ import {
 import {
   clientFor,
   contextFor,
+  holdSomething,
   openTestDatabase,
   resetDatabase,
   testDeps,
@@ -57,6 +58,8 @@ let signin: SigninService;
 let root: Asker;
 let lead: Asker;
 let dev: Asker;
+/** The project the service reads, all its tokens reach. */
+let reads: string;
 
 before(async () => {
   db = await openTestDatabase();
@@ -75,6 +78,7 @@ beforeEach(async () => {
   for (const id of [LEAD, DEV, GONE, SERVICE, RETIRED]) {
     assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: member(id), ...(id === LEAD ? { role: 'admin' as const } : {}) })).ok, true);
   }
+  reads = await holdSomething(db.owner, deps.vault, member(SERVICE), `user:${ROOT}`);
   await deactivate(GONE);
   await deactivate(RETIRED);
   [root, lead, dev] = await Promise.all([as(ROOT), as(LEAD), as(DEV)]);
@@ -329,6 +333,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     credentialId: result.credential.id,
     credentialGeneration: 0,
     exchanged: false,
+    credentialScope: null,
   });
   // What the vault said of them, which the request's caller is: no second call.
   assert.deepEqual([access.principal, access.status, access.generation], [`user:${DEV}`, 'active', 0]);
@@ -780,6 +785,7 @@ test('owners issue service tokens that verify as the service', async () => {
     credentialId: issued.id,
     credentialGeneration: 0,
     exchanged: false,
+    credentialScope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
   });
   assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
 
@@ -805,6 +811,7 @@ test('owners issue service tokens that verify as the service', async () => {
     label: 'deploys',
     targetCredentialId: issued.id,
     expiresAt: issued.expiresAt,
+    scope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
   });
 
   // A service's tokens do not show up as anyone's sessions.
@@ -944,6 +951,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     credentialId: approved.credential.id,
     credentialGeneration: 0,
     exchanged: false,
+    credentialScope: null,
   });
   assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);
 
