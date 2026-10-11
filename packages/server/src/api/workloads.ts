@@ -49,8 +49,10 @@ import {
   issuedScope,
   managedAccount,
   notManager,
+  parseScope,
   readScope,
   scopeByPath,
+  sealCredentials,
   serviceSettingFor,
   setsUp,
   storedScope,
@@ -222,6 +224,8 @@ export class WorkloadService {
       if (error instanceof BindingInvalid) throw badRequest(error.message);
       throw error;
     }
+    // Its scope's shape too, before the issuer is asked anything: what it names is checked once the bindings it replaces are known.
+    if (input.scope !== undefined) parseScope(input.scope);
     return withRefusals(this.#deps, async () => {
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
       const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
@@ -394,7 +398,8 @@ export class WorkloadService {
    * 3. its signature under that issuer's keys, then its audience, times and
    *    claims against those bindings;
    * 4. that it is not spent yet, a read;
-   * 5. the member, from the vault, outside any transaction;
+   * 5. the member, from the vault, outside any transaction, and a binding
+   *    0.4 made sealed with what it holds (`sealCredentials`);
    * 6. in one transaction that holds the log's head: the member and the
    *    binding again, the times again, the binding's rate, the token spent,
    *    the credential issued and `token.exchange` logged, or none of it.
@@ -442,6 +447,8 @@ export class WorkloadService {
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
+    // One 0.4 made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
+    if (binding.scope === null) await sealCredentials(db, chainKey, standing, [{ kind: 'binding', id: binding.id, principal: member }]);
 
     const service = member.slice('token:'.length);
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;

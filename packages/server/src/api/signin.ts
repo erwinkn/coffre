@@ -40,7 +40,7 @@ import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember } from './paths.ts';
-import { issuedScope, managedAccount, notManager, readScope, scopeByPath, sealScopes, storedScope, type ScopeByPath } from './services.ts';
+import { issuedScope, managedAccount, notManager, readScope, scopeByPath, sealCredentials, sealScopes, storedScope, type ScopeByPath } from './services.ts';
 
 export type SigninServiceDeps = {
   db: Database;
@@ -116,6 +116,12 @@ export type PendingState = PendingSignin & {
 const PENDING_TTL_SECONDS = 10 * 60;
 
 export type IssuedCredential = { id: string; token: string; expiresAt: string };
+
+/** A service token as issued: its value, once, and what it reaches, by path. */
+export type IssuedServiceToken = IssuedCredential & { scope: ScopeByPath };
+
+/** What issuing a service token would make: what it reaches, by path. */
+export type TokenPlan = { scope: ScopeByPath };
 
 export type SigninResult =
   | { ok: true; principal: PrincipalRef; credential: IssuedCredential }
@@ -494,6 +500,11 @@ export class SigninService {
         && row.identityIssuerHash === this.#issuerHash(row.identityProvider ?? '')));
   }
 
+  /** A live service token 0.4 made, or a run's credential its binding issued, that carries no scope yet. */
+  #unsealed(row: NonNullable<Awaited<ReturnType<typeof findCredential>>>, access: Access, now: Date): boolean {
+    return row.kind === 'service' && row.scope === null && this.#liveCredential(row, access, now);
+  }
+
   async #issue(
     tx: Transaction,
     kind: CredentialKind,
@@ -531,18 +542,26 @@ export class SigninService {
    */
   async verify(token: string, request: { sourceIp: string | null } = { sourceIp: null }): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
-    const { db } = this.#deps;
+    const { db, chainKey } = this.#deps;
     const now = new Date();
+    const tokenHash = hashToken(token);
 
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
     try {
       if (!this.#scopes.sealed) {
-        await sealScopes(db, this.#deps.chainKey, this.#deps.vault);
+        await sealScopes(db, chainKey, this.#deps.vault);
         this.#scopes.sealed = true;
       }
-      row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
+      row = await findCredential(db, chainKey, { tokenHash });
       if (row !== null) access = await this.#deps.vault.access(row.principal);
+      // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
+      if (row !== null && access !== null && this.#unsealed(row, access, now)) {
+        const binding = issuingBinding(row.createdBy);
+        await sealCredentials(db, chainKey, access, [binding === null ? { kind: 'token', id: row.id, principal: row.principal } : { kind: 'binding', id: binding, principal: row.principal }]);
+        row = await findCredential(db, chainKey, { tokenHash });
+        if (row !== null && this.#unsealed(row, access, now)) throw new Error('its scope could not be sealed');
+      }
     } catch (error) {
       if (error instanceof AuthRowTampered) throw error;
       throw new CredentialUncheckable(error);
@@ -751,22 +770,14 @@ export class SigninService {
     ctx: Asker,
     serviceId: string,
     input: { label: string | null; expiresInDays: number; scope?: ScopeByPath },
-  ): Promise<IssuedCredential & { scope: ScopeByPath }> {
+  ): Promise<IssuedServiceToken> {
     if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > MAX_SERVICE_TOKEN_DAYS) {
       throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
     }
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
-      // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
-      const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
-      if (!managed) throw notManager(ctx, 'token.create', details, 'issue its tokens');
-      const refusal = () => new Refusal(
-        notFound('unknown service'),
-        denied(ctx, 'token.create', 'unknown_principal', { metadata: details }),
-      );
-      if (standing.status !== 'active') throw refusal();
-      const { scope, byPath } = await issuedScope(this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.create', metadata: details });
+      const { standing, scope, byPath, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
       return audited(this.#deps, async (tx, log) => {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
@@ -785,6 +796,25 @@ export class SigninService {
         return { ...credential, scope: byPath };
       });
     });
+  }
+
+  /** What a token issued now would reach, checked as issuing one is (`issueServiceToken`); issues nothing. */
+  async planServiceToken(ctx: Asker, serviceId: string, input: { label: string | null; scope?: ScopeByPath }): Promise<TokenPlan> {
+    const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
+    return withRefusals(this.#deps, async () => ({ scope: (await this.#tokenScope(ctx, serviceId, input.scope, details)).byPath }));
+  }
+
+  /** Who may issue the service's tokens (`managesService`), and what one would reach (`issuedScope`). */
+  async #tokenScope(ctx: Asker, serviceId: string, wanted: ScopeByPath | undefined, details: Record<string, unknown>) {
+    // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
+    const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
+    if (!managed) throw notManager(ctx, 'token.create', details, 'issue its tokens');
+    const refusal = () => new Refusal(
+      notFound('unknown service'),
+      denied(ctx, 'token.create', 'unknown_principal', { metadata: details }),
+    );
+    if (standing.status !== 'active') throw refusal();
+    return { standing, refusal, ...await issuedScope(this.#deps.db, ctx, setting, standing, wanted, { action: 'token.create', metadata: details }) };
   }
 
   /**

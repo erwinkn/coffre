@@ -448,9 +448,9 @@ coffre's page (section 7).
 | `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
 | `admit_member {member, role?, scope?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m` |
 | `offboard_member {member}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m`; the page shows its report |
-| `issue_service_token {service, label?, expiresInDays}` | manage-access | ✗ ✗ ✗ | ✓, the token is shown on the page only | `POST /members/:m/tokens` |
+| `issue_service_token {service, label?, expiresInDays, scope?}` | manage-access | ✗ ✗ ✗ | ✓, the token is shown on the page only | `POST /members/:m/tokens`, previewed with `?dryRun=1` |
 | `revoke_service_token {service, id}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m/tokens/:id` |
-| `trust_workload {service, profile, issuer?, claims, label?}` | manage-access | ✗ ✗ ✗ | ✓ | `POST /members/:m/bindings`, previewed with `?dryRun=1` |
+| `trust_workload {service, profile, issuer?, claims, scope?, label?}` | manage-access | ✗ ✗ ✗ | ✓ | `POST /members/:m/bindings`, previewed with `?dryRun=1` |
 | `untrust_workload {service, id}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m/bindings/:id` |
 
 The hints are for the client. Overwriting a live value counts as
@@ -553,8 +553,10 @@ The page shows:
 
 - the client;
 - the change in coffre's words, with what it replaces. The preview comes
-  from the API's own previews: `?dryRun=1` for secrets and bindings, the
-  member report for access and offboarding;
+  from the API's own previews: `?dryRun=1` for secrets, tokens and
+  bindings, the member report for access and offboarding. What a token or
+  a binding reaches is part of the basis Approve compares, and Approve
+  makes it with that scope, not one the server works out again;
 - what the client wrote, labelled as the app's ("The app says", "The app
   calls it"), never as coffre's;
 - for `trust_workload`, what each numeric ID names, read back from

@@ -643,6 +643,10 @@ export type Api = {
       scope: {
         [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
       };
+    } | {
+      scope: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      };
     };
   };
   "DELETE /members/:member/tokens/:id": {
@@ -1690,5 +1694,11 @@ export type SetResult = {
     } | {
       reference: string;
     };
+  };
+};
+
+export type TokenPlan = {
+  scope: {
+    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
   };
 };

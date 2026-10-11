@@ -6,11 +6,13 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
 
 import { shownMember } from '@coffre/core/schemas';
+import type { Role } from '@coffre/core/access';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, credentials, serviceBindings } from './db/tables.ts';
+import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
 import { exchangeCandidates, exchangesSince } from '../src/db/queries.ts';
@@ -224,6 +226,57 @@ test("a run's credential reaches what both its binding's scope and the account h
     runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, scope: { 'market/dev': 'viewer' }, label: null, replaces: [] }, { dryRun: true }),
     { status: 403 },
   );
+});
+
+test('a binding 0.4 makes after the app sealed is sealed by its first exchange, and a run credential of one by its first check: an account widened after reaches neither', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  for (const environment of ['dev', 'prod']) {
+    await root.environments.create(`market/${environment}`, { name: environment });
+    await root.secrets.set(`market/${environment}`, { API_KEY: `${environment}-key` });
+  }
+  await root.access.set(MEMBER, { 'market/dev': 'developer' });
+  // The app checks a credential, and so seals what there is, before 0.4 makes one.
+  assert.equal(await caller((await trade(token(rsa))).body.token!), `service:${SERVICE}`);
+  /** Put `id` back as 0.4 would have made it: no scope, its MAC over 0.4's tuple. */
+  const unseal = async (id: string) => {
+    const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
+    const { authMac: _, ...fields } = { ...row!, scope: null };
+    await db.owner.update(serviceBindings).set({ scope: null, authMac: authMac(deps.chainKey, 'service_bindings', fields) }).where(eq(serviceBindings.id, id));
+  };
+  const scope = async () => (await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.scope;
+  const seals = async () => (await appEntries('token.seal')).map((entry) => entry.metadata.bindings);
+  const reveal = async (credential: string, path: string) =>
+    (await answer(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }), runtime, ui, IP)).status;
+
+  await unseal(bound);
+  const first = (await trade(token(rsa))).body.token!;
+  assert.notEqual(await scope(), null, 'sealed as it exchanged, before the run used its credential');
+  assert.deepEqual(await seals(), [[bound]]);
+  // A run's credential whose binding carries no scope, as one 0.4's binding issued: its first check seals the binding.
+  await unseal(bound);
+  assert.equal(await reveal(first, 'market/dev'), 200);
+  assert.notEqual(await scope(), null);
+  assert.deepEqual(await seals(), [[bound], [bound]]);
+
+  await root.access.set(MEMBER, { 'market/prod': 'viewer' });
+  const later = (await trade(token(rsa))).body.token!;
+  for (const credential of [first, later]) {
+    assert.equal(await reveal(credential, 'market/prod'), 403, "the account's later grant reaches no run");
+    assert.equal(await reveal(credential, 'market/dev'), 200);
+  }
+});
+
+test("a binding's scope of the wrong shape is refused before its issuer is asked anything", async () => {
+  const fetches = issuer.fetches;
+  const shapes: Record<string, Role>[] = [{ 'market/dev/KEY': 'viewer' }, { 'market/dev': 'owner' }];
+  for (const scope of shapes) {
+    await assert.rejects(
+      runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, scope, label: null, replaces: [] }, { dryRun: true }),
+      { status: 400 },
+    );
+  }
+  assert.equal(issuer.fetches, fetches);
 });
 
 test('a token is spent once used, in any spelling: the ES256 twin of a signature is refused as replayed', async () => {

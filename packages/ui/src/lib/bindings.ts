@@ -29,6 +29,23 @@ export function summary(binding: Pick<BindingView, 'profile' | 'issuer' | 'claim
   return { title: new URL(binding.issuer).host, detail: `sub ${claims.sub}` };
 }
 
+/**
+ * What a new binding reaches, in the Trust dialog: what the person chose in
+ * the picker, or until they do, what the server makes it, which the request
+ * leaves out: what the bindings it replaces reached, or all the account
+ * holds. Once a plan says it, the picker shows it.
+ */
+export type ScopeChoice = { scope: BindingPlan['scope']; chosen: boolean };
+
+/** The scope the dialog asks for: the person's, or none, for the server's own. */
+export function askedScope(choice: ScopeChoice): { scope?: BindingPlan['scope'] } {
+  return choice.chosen ? { scope: choice.scope } : {};
+}
+
+/** The picker once a plan came back: what the server would make, unless the person chose. */
+export function planned(choice: ScopeChoice, plan: Pick<BindingPlan, 'scope'>): ScopeChoice {
+  return choice.chosen ? choice : { scope: plan.scope, chosen: false };
+}
 
 export type Platform = 'github' | 'gitlab' | 'other';
 export type RefKind = 'branch' | 'tag';

@@ -2,7 +2,7 @@ import type { BindingPlan, BindingView } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { Fragment, useState } from 'react';
-import { bindingOf, EMPTY_FORM, summary, type Form, type RefKind } from '../lib/bindings';
+import { askedScope, bindingOf, EMPTY_FORM, planned, summary, type Form, type RefKind, type ScopeChoice } from '../lib/bindings';
 import { removeBinding } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { affects } from '../lib/queries';
@@ -195,20 +195,21 @@ function Exposure({ events }: { events: string[] }) {
   );
 }
 
-/** What the bindings a plan replaces reached, when it is not what the new one reaches: a scope chosen again is said. */
+/** What the bindings a plan replaces reached, beside what the new one reaches: the same, unless the person chose again. */
 function Reached({ plan, bindings }: { plan: BindingPlan; bindings: BindingView[] }) {
   const reached = [...new Set(plan.replaces.flatMap((replaced) => {
     const scope = bindings.find((binding) => binding.id === replaced.id)?.scope;
     return scope === undefined ? [] : [scope === null ? 'all its account holds' : credentialScopeInWords(scope)];
   }))];
-  if (reached.every((words) => words === credentialScopeInWords(plan.scope))) return null;
+  if (reached.every((words) => words === credentialScopeInWords(plan.scope))) return <> This one reaches what {plan.replaces.length === 1 ? 'it' : 'they'} did.</>;
   return <> {plan.replaces.length === 1 ? 'It' : 'They'} reached {reached.join('; ')}: this one reaches what it says above.</>;
 }
 
 function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; grants: HeldGrant[]; bindings: BindingView[] }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
-  const [scope, setScope] = useState(() => wholeScope(grants));
+  const whole = (): ScopeChoice => ({ scope: wholeScope(grants), chosen: false });
+  const [choice, setChoice] = useState(whole);
   const [plan, setPlan] = useState<BindingPlan | null>(null);
   const coffre = useCoffre();
   const member = memberRef('service', serviceId);
@@ -218,12 +219,12 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
     setForm((current) => ({ ...current, ...changes }));
     setPlan(null);
   };
-  const input = () => ({ ...bindingOf(form), scope, label: form.label.trim() === '' ? null : form.label.trim(), replaces: [] });
+  const input = () => ({ ...bindingOf(form), ...askedScope(choice), label: form.label.trim() === '' ? null : form.label.trim(), replaces: [] });
 
   function close() {
     setOpen(false);
     setForm(EMPTY_FORM);
-    setScope(wholeScope(grants));
+    setChoice(whole());
     setPlan(null);
     setError(null);
     lookup.setError(null);
@@ -237,7 +238,14 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
       setError((problem as Error).message);
       return;
     }
-    void run(() => coffre.bindings.preview(member, request), { affects: [], onSuccess: setPlan });
+    void run(() => coffre.bindings.preview(member, request), {
+      affects: [],
+      // One that replaces bindings reaches what they did unless told: the picker says so, should the person go back.
+      onSuccess: (next) => {
+        setPlan(next);
+        setChoice((current) => planned(current, next));
+      },
+    });
   }
 
   const field = (label: string, key: keyof Form, props: { placeholder?: string; mono?: boolean; hint?: string } = {}) => (
@@ -411,9 +419,9 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
 
             <ScopePicker
               grants={grants}
-              value={scope}
+              value={choice.scope}
               onChange={(next) => {
-                setScope(next);
+                setChoice({ scope: next, chosen: true });
                 setPlan(null);
               }}
             />
@@ -423,7 +431,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
               <button className="btn" type="button" onClick={close}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="submit" disabled={pending || Object.keys(scope).length === 0}>
+              <button className="btn btn-primary" type="submit" disabled={pending || Object.keys(choice.scope).length === 0}>
                 {pending && <Spinner />}
                 Review
               </button>
@@ -453,7 +461,8 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
                 className="btn btn-primary"
                 type="button"
                 disabled={pending}
-                onClick={() => void run(() => coffre.bindings.create(member, input()), { affects: affects.bindings(member), onSuccess: close })}
+                // What the review said it reaches, whatever the account holds by now.
+                onClick={() => void run(() => coffre.bindings.create(member, { ...input(), scope: plan.scope }), { affects: affects.bindings(member), onSuccess: close })}
               >
                 {pending && <Spinner />}
                 Save binding

@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, SetResult, TokenPlan } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -44,6 +44,7 @@ export type {
   ServiceTokenRow,
   SessionRow,
   SetResult,
+  TokenPlan,
   WorkloadIds,
 } from './api.ts';
 
@@ -256,9 +257,14 @@ export function createClient(options: ClientOptions) {
 
     tokens: {
       list: (member: string) => call('GET /members/:member/tokens', { member }),
+      /** What the token would reach, as the server would issue it now; issues nothing. */
+      preview: (member: string, input: RouteInput<'POST /members/:member/tokens'>) => {
+        const [method, route] = address('POST /members/:member/tokens', { member });
+        return send(method, `${route}?dryRun=1`, input) as Promise<TokenPlan>;
+      },
       /** The value is in the answer, and only there. */
       issue: (member: string, input: RouteInput<'POST /members/:member/tokens'>) =>
-        call('POST /members/:member/tokens', { member }, input),
+        call('POST /members/:member/tokens', { member }, input) as Promise<Extract<RouteOutput<'POST /members/:member/tokens'>, { token: string }>>,
       revoke: (member: string, id: string) => call('DELETE /members/:member/tokens/:id', { member, id }),
     },
 
