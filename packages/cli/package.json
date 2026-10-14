@@ -25,7 +25,7 @@
   "scripts": {
     "build": "tsdown && node scripts/copy-templates.ts && node scripts/copy-migrations.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --conditions=coffre:source --test"
+    "test": "node --conditions=coffre:source --test 'test/*.test.ts'"
   },
   "devDependencies": {
     "@coffre/client": "workspace:*",
