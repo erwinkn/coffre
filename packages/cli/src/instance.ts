@@ -23,11 +23,13 @@
  *
  * `coffre login <url>` also pins the directory it ran in to that origin,
  * for it and every directory below, in a file of its own beside the
- * sessions (`Pins`). A command uses `--url`, else the nearest pinned
- * directory's instance, else the default.
+ * sessions (`Pins`). A repository can name its instance for everyone who
+ * clones it, in a `coffre.json` it commits (`parseRepoFile`). A command uses
+ * `--url`, else the nearest pinned directory or `coffre.json` above where it
+ * runs, a pin before a file in the same directory, else the default.
  */
 
-import { isAbsolute, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { apiMember, type AuthInfo } from '@coffre/client';
 
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
@@ -104,10 +106,17 @@ export type Pins = { version: 1; directories: Record<string, string> };
 /** The pin that applies in a directory: its own, or its nearest pinned parent's. */
 export type Pin = { directory: string; origin: string };
 
-/** Which instance a command means, and why: `--url`, the directory's pin, or the default. */
-export type Choice =
-  | { origin: string; by: 'url' | 'default' }
-  | { origin: string; by: 'pin'; directory: string };
+/**
+ * What names the instance where a command runs: a pinned directory, or a
+ * directory's `coffre.json`, whichever is nearer.
+ */
+export type Local = { origin: string; by: 'pin' | 'file'; directory: string };
+
+/** Which instance a command means, and why: `--url`, the directory's pin or `coffre.json`, or the default. */
+export type Choice = { origin: string; by: 'url' } | { origin: string; by: 'default' } | Local;
+
+/** The file a repository names its instance in. */
+export const REPO_FILE = 'coffre.json';
 
 const MODES: readonly AuthMode[] = ['signin', 'cloudflare'];
 const KINDS: readonly SessionKind[] = ['token', 'access', 'run'];
@@ -188,9 +197,8 @@ export function pinFor(pins: Pins, directory: string): Pin | null {
   return found;
 }
 
-/** Pin `directory` to `origin`, unless the pin that applies there says so already. */
+/** Pin `directory` to `origin`. */
 export function withPin(pins: Pins, directory: string, origin: string): Pins {
-  if (pinFor(pins, directory)?.origin === origin) return pins;
   return { version: 1, directories: { ...pins.directories, [directory]: origin } };
 }
 
@@ -202,15 +210,65 @@ export function withoutPins(pins: Pins, origin: string): { pins: Pins; unpinned:
 }
 
 /**
- * The instance a command means: `--url`, else the pin that applies where
- * it runs, else the default. A pinned instance is the one, signed in there
- * or not: never another one's session in its place. Whichever it is
- * passes `instanceOrigin`, as a typed one does: a saved default is only as
- * sound as the file it was read from.
+ * The origin a repository's `coffre.json` names, committed beside its code
+ * so that a clone uses its instance with no `--url` and no pin:
+ *
+ *   { "url": "https://coffre.acme.example" }
+ *
+ * Only that: a file anyone can commit picks where the CLI goes, never what
+ * it carries, which stays that instance's own session. So it holds no
+ * credential and nothing else, and its URL is an origin as written.
  */
-export function choose(flags: SessionFlags, store: Store, pin: Pin | null): Choice {
+export function parseRepoFile(text: string): string {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error('it is not JSON');
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('expected { "url": "https://…" }');
+  const others = Object.keys(raw).filter((key) => key !== 'url');
+  if (others.length > 0) throw new Error(`it holds only "url", never a credential or anything else: not ${others.map((key) => JSON.stringify(key)).join(', ')}`);
+  const { url } = raw as { url?: unknown };
+  if (typeof url !== 'string') throw new Error('expected { "url": "https://…" }');
+  const origin = instanceOrigin(url);
+  if (origin !== url) throw new Error(`"url" is an origin, written as one: ${JSON.stringify(origin)}, not ${JSON.stringify(url)}`);
+  return origin;
+}
+
+/**
+ * What names the instance in `directory`, a real path: walking up from it,
+ * the first directory pinned or holding a `coffre.json`, the pin first.
+ * Your home and the directories above it hold no project's `coffre.json`,
+ * as a login there pins nothing. `read` gives a file's text, or null if
+ * there is none; a file there that cannot be read or used is an error,
+ * never a reason to look further up.
+ */
+export function localFor(pins: Pins, directory: string, home: string, read: (path: string) => string | null): Local | null {
+  const pin = pinFor(pins, directory);
+  for (let at = directory; !within(home, at) && !(pin !== null && within(pin.directory, at)); at = dirname(at)) {
+    const path = join(at, REPO_FILE);
+    const text = read(path);
+    if (text !== null) {
+      try {
+        return { origin: parseRepoFile(text), by: 'file', directory: at };
+      } catch (error) {
+        throw new Error(`cannot use ${path}: ${(error as Error).message}`);
+      }
+    }
+    if (dirname(at) === at) break;
+  }
+  return pin === null ? null : { ...pin, by: 'pin' };
+}
+
+/**
+ * The instance a command means: `--url`, else the pin or `coffre.json` that
+ * applies where it runs, else the default. That instance is the one, signed
+ * in there or not: never another one's session in its place.
+ */
+export function choose(flags: SessionFlags, store: Store, local: Local | null): Choice {
   if (flags.url !== undefined) return { origin: instanceOrigin(flags.url), by: 'url' };
-  if (pin !== null) return { origin: instanceOrigin(pin.origin), by: 'pin', directory: pin.directory };
+  if (local !== null) return { ...local, origin: instanceOrigin(local.origin) };
   if (store.current !== null) return { origin: instanceOrigin(store.current), by: 'default' };
   throw new Error('not signed in anywhere yet: run `coffre login <url>`');
 }
@@ -302,9 +360,10 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
  * is given: `readSession` refused an empty one, which falling back to the
  * saved session would have taken for none.
  */
-export function resolveTarget(flags: SessionFlags, store: Store, pin: Pin | null = null, now: Date = new Date()): Target {
+export function resolveTarget(flags: SessionFlags, store: Store, local: Local | null = null, now: Date = new Date()): Target {
   const explicitMode = parseMode(flags.authMode);
-  const { origin } = choose(flags, store, pin);
+  const choice = choose(flags, store, local);
+  const { origin } = choice;
 
   if (flags.service !== undefined) {
     if (explicitMode === 'cloudflare') {
@@ -319,7 +378,11 @@ export function resolveTarget(flags: SessionFlags, store: Store, pin: Pin | null
   const stored = store.instances[origin];
   const mode: AuthMode = explicitMode ?? stored?.mode ?? 'signin';
   const relogin = `run \`coffre login ${origin}\``;
-  if (stored === undefined || stored.mode !== mode) throw new Error(`not signed in to ${origin}: ${relogin}`);
+  if (stored === undefined || stored.mode !== mode) {
+    // A clone's first command: where the instance came from, so that a URL the repository chose is not taken for one you did.
+    const named = choice.by === 'file' ? `, which ${join(choice.directory, REPO_FILE)} names` : '';
+    throw new Error(`not signed in to ${origin}${named}: ${relogin}`);
+  }
   const by = stored.kind ?? 'person';
   if (mode === 'cloudflare') {
     if (by !== 'access') return { origin, mode, by, credential: { kind: 'cloudflared' } };

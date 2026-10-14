@@ -25,6 +25,23 @@ file, so a CLI before this one, which rewrites the sessions' file in the
 shape it knows, keeps every session and never drops a pin; it ignores
 them and uses the default everywhere.
 
+**A repository names its instance in `coffre.json`.** Commit
+`{ "url": "https://secrets.acme.example" }` as `coffre.json`, and every
+clone uses that instance below it with no `--url` and no pin: a command
+uses `--url`, else the nearest pin or `coffre.json` above the directory,
+your own pin first in the same one, else the default. The file picks the
+URL only. Commands still send that instance's own session, so a fresh
+clone's first one says `not signed in to https://secrets.acme.example,
+which /home/ada/Code/acme/coffre.json names`, and `coffre login`, with no URL,
+signs in there after saying which file named it, pinning nothing.
+`whoami` and `use` say `named by ~/Code/acme/coffre.json`. A CI run's
+`--service` needs no `--url` there either: its ID token is asked for that
+URL, which no other instance takes. A secret handed to `coffre login`
+(`--token`, `--access-client-id`, `--id-token`) still goes only to a URL
+you name. A `coffre.json` that is a link, holds anything but `"url"`, or
+names something other than an origin stops the commands below it, with
+its path. One in your home directory or above it is ignored.
+
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description
 of the role is gone: the role field under it already says what each role

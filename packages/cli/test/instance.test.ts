@@ -8,8 +8,10 @@ import {
   emptyStore,
   instanceOrigin,
   isJsonContentType,
+  localFor,
   loginMode,
   parsePins,
+  parseRepoFile,
   parseStore,
   pinFor,
   resolveTarget,
@@ -18,6 +20,7 @@ import {
   withoutPins,
   withSession,
   withoutSession,
+  type Local,
   type Pins,
   type Store,
 } from '../src/instance.ts';
@@ -187,11 +190,10 @@ test('a directory uses its nearest pinned parent, and a sibling sharing a prefix
   assert.ok(within('/home/ada/..x', '/home/ada'), 'a directory whose name starts with two dots is still below');
 });
 
-test('a login pins its directory only where the pin that applies says otherwise', () => {
+test('a directory is pinned, or pinned again in place', () => {
   const pins = pinned();
-  assert.equal(withPin(pins, '/home/ada/Code/acme/web', THEIRS), pins, 'a pin below one to the same instance is redundant');
   assert.deepEqual(withPin(pins, '/home/ada/Code/acme/web', OURS).directories['/home/ada/Code/acme/web'], OURS);
-  assert.deepEqual(withPin(pins, '/home/ada/Code/acme', OURS).directories['/home/ada/Code/acme'], OURS, 'a directory is pinned again in place');
+  assert.deepEqual(withPin(pins, '/home/ada/Code/acme', OURS).directories['/home/ada/Code/acme'], OURS);
 });
 
 test('signing out unpins every directory pinned to that instance', () => {
@@ -211,8 +213,72 @@ test('the pins file is read whole or not at all: one this CLI cannot read is an 
   assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: { '/a': 'http://devbox:3000' } })), /plain HTTP/);
 });
 
+// --- coffre.json -------------------------------------------------------------
+
+test("a repository's coffre.json names an origin, and nothing else", () => {
+  assert.equal(parseRepoFile('{ "url": "https://coffre.acme.example" }\n'), THEIRS);
+  assert.equal(parseRepoFile('{"url":"http://127.0.0.1:3000"}'), 'http://127.0.0.1:3000', 'this machine, over HTTP, as login takes it');
+  assert.throws(() => parseRepoFile('{'), /^Error: it is not JSON$/);
+  for (const text of ['[]', '"https://coffre.acme.example"', 'null', '{}', '{"url":3}']) {
+    assert.throws(() => parseRepoFile(text), /^Error: expected \{ "url": "https:\/\/…" \}$/, text);
+  }
+  assert.throws(() => parseRepoFile(JSON.stringify({ url: THEIRS, token: 'coffre_cli_x' })), /^Error: it holds only "url", never a credential or anything else: not "token"$/);
+  assert.throws(() => parseRepoFile(JSON.stringify({ url: 'http://coffre.acme.example' })), /plain HTTP; use https:\/\/coffre\.acme\.example/);
+  assert.throws(() => parseRepoFile(JSON.stringify({ url: 'https://coffre.acme.example/api' })), /must be an origin/);
+  assert.throws(() => parseRepoFile(JSON.stringify({ url: 'https://ada@coffre.acme.example' })), /user name or password/);
+  for (const url of ['https://coffre.acme.example/', 'coffre.acme.example', 'HTTPS://Coffre.Acme.Example']) {
+    assert.throws(() => parseRepoFile(JSON.stringify({ url })), /^Error: "url" is an origin, written as one: "https:\/\/coffre\.acme\.example", not /, url);
+  }
+});
+
+test('walking up from a directory, the nearest pin or coffre.json names the instance, a pin first in the same directory', () => {
+  const files: Record<string, string> = {
+    '/home/ada/Code/acme/coffre.json': JSON.stringify({ url: OURS }),
+    '/home/ada/Code/acme/web/coffre.json': JSON.stringify({ url: OURS }),
+    '/home/ada/Code/coffre.json': JSON.stringify({ url: 'https://code.example' }),
+    '/home/ada/coffre.json': JSON.stringify({ url: 'https://home.example' }),
+    '/home/coffre.json': JSON.stringify({ url: 'https://above.example' }),
+    '/coffre.json': JSON.stringify({ url: 'https://root.example' }),
+    '/srv/repo/coffre.json': JSON.stringify({ url: THEIRS }),
+    '/srv/broken/coffre.json': JSON.stringify({ url: THEIRS, token: 'x' }),
+    '/home/ada/Code/acme/side/coffre.json': '{',
+  };
+  const read: string[] = [];
+  const at = (directory: string): Local | null => localFor(pinned(), directory, '/home/ada', (path) => (read.push(path), files[path] ?? null));
+  assert.deepEqual(at('/home/ada/Code/acme'), { origin: THEIRS, by: 'pin', directory: '/home/ada/Code/acme' }, 'a pin in the same directory');
+  assert.deepEqual(at('/home/ada/Code/acme/lib'), { origin: THEIRS, by: 'pin', directory: '/home/ada/Code/acme' });
+  assert.deepEqual(at('/home/ada/Code/acme/web/src'), { origin: OURS, by: 'file', directory: '/home/ada/Code/acme/web' }, 'a file below the pin');
+  assert.deepEqual(at('/home/ada/Code/other'), { origin: 'https://code.example', by: 'file', directory: '/home/ada/Code' }, 'a file above');
+  assert.deepEqual(at('/srv/repo/app'), { origin: THEIRS, by: 'file', directory: '/srv/repo' }, 'outside your home, too');
+  // Your home and above it, and the root, are no repository's.
+  assert.equal(at('/home/ada'), null);
+  assert.equal(at('/home'), null);
+  assert.equal(at('/srv'), null);
+  read.length = 0;
+  at('/home/ada/Code/acme/side/x');
+  assert.deepEqual(read, ['/home/ada/Code/acme/side/x/coffre.json'], 'a pin nearer than a broken file: the file is not read');
+  // The nearest file, unusable, is an error: never the file or the pin above it.
+  assert.throws(() => at('/srv/broken/app'), /^Error: cannot use \/srv\/broken\/coffre\.json: it holds only "url"/);
+  assert.throws(() => localFor(emptyPins(), '/home/ada/Code/acme/side', '/home/ada', (path) => files[path] ?? null), /^Error: cannot use \/home\/ada\/Code\/acme\/side\/coffre\.json: it is not JSON$/);
+});
+
+test('a coffre.json names the instance, and the session sent there is its own: with none, the error says where the URL came from', () => {
+  const file: Local = { origin: THEIRS, by: 'file', directory: '/home/ada/Code/acme' };
+  assert.deepEqual(choose({}, storeWith(), file), file);
+  assert.deepEqual(choose({ url: OURS }, storeWith(), file), { origin: OURS, by: 'url' }, '--url first');
+  assert.deepEqual(resolveTarget({}, storeWith(), file, NOW).credential, { kind: 'cloudflared' });
+  assert.throws(
+    () => resolveTarget({}, emptyStore(), file, NOW),
+    /^Error: not signed in to https:\/\/coffre\.acme\.example, which \/home\/ada\/Code\/acme\/coffre\.json names: run `coffre login https:\/\/coffre\.acme\.example`$/,
+  );
+  // A CI run's ID token is asked for that origin alone, which no other instance takes: it needs no --url.
+  assert.deepEqual(resolveTarget({ service: 'deploy' }, emptyStore(), file, NOW), {
+    origin: THEIRS, mode: 'signin', by: 'service', credential: { kind: 'workload', service: 'token:deploy' },
+  });
+});
+
 test('--url, then the pin that applies, then the default', () => {
-  const pin = { directory: '/home/ada/Code/acme', origin: THEIRS };
+  const pin: Local = { directory: '/home/ada/Code/acme', origin: THEIRS, by: 'pin' };
   assert.deepEqual(choose({ url: 'coffre.example.com' }, storeWith(), pin), { origin: OURS, by: 'url' });
   assert.deepEqual(choose({}, storeWith(), pin), { origin: THEIRS, by: 'pin', directory: '/home/ada/Code/acme' });
   assert.deepEqual(choose({}, storeWith(), null), { origin: OURS, by: 'default' });
@@ -227,12 +293,12 @@ test('a saved default or pin over plain HTTP is refused as a typed one is, a CI 
   assert.equal(store.current, insecure);
   for (const flags of [{}, { service: 'deploy' }]) {
     assert.throws(() => resolveTarget(flags, store, null, NOW), /refusing to send credentials over plain HTTP/);
-    assert.throws(() => resolveTarget(flags, storeWith(), { directory: '/home/ada/Code/acme', origin: insecure }, NOW), /plain HTTP/);
+    assert.throws(() => resolveTarget(flags, storeWith(), { directory: '/home/ada/Code/acme', origin: insecure, by: 'pin' }, NOW), /plain HTTP/);
   }
 });
 
 test('a directory pinned to an instance with no session asks for a login there, and never uses the default', () => {
-  const pin = { directory: '/home/ada/Code/gone', origin: 'https://gone.example.com' };
+  const pin: Local = { directory: '/home/ada/Code/gone', origin: 'https://gone.example.com', by: 'pin' };
   assert.throws(
     () => resolveTarget({}, storeWith(), pin, NOW),
     /^Error: not signed in to https:\/\/gone\.example\.com: run `coffre login https:\/\/gone\.example\.com`$/,

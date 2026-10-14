@@ -33,11 +33,12 @@ import {
   emptyStore,
   instanceOrigin,
   isJsonContentType,
+  localFor,
   loginMode,
   parseMode,
   parsePins,
   parseStore,
-  pinFor,
+  REPO_FILE,
   resolveTarget,
   within,
   withPin,
@@ -46,7 +47,7 @@ import {
   withoutSession,
   type AuthMode,
   type Credential,
-  type Pin,
+  type Local,
   type Pins,
   type Session,
   type Store,
@@ -147,15 +148,41 @@ function here(then: string): string {
   }
 }
 
-/** The pin that applies where the command runs, unless --url names the instance. */
-function pinHere(): Pin | null {
+/** Your home, as pins name it. */
+function realHome(): string {
+  return attempt(() => realpathSync(homedir()));
+}
+
+/**
+ * The pin or `coffre.json` that applies where the command runs, unless
+ * --url names the instance, and so without reading either.
+ */
+function localHere(): Local | null {
   if (sessionFlags.url !== undefined) return null;
-  return pinFor(readPins(), here('Name the instance with --url'));
+  return attempt(() => localFor(readPins(), here('Name the instance with --url'), realHome(), readRepoFile));
+}
+
+/** A `coffre.json`'s text, or null if there is none: one that is a link or no file is refused, not passed over. */
+function readRepoFile(path: string): string | null {
+  try {
+    const entry = lstatSync(path);
+    if (!entry.isFile()) throw new Error(`it is ${entry.isSymbolicLink() ? 'a symbolic link' : 'not a file'}, and a ${REPO_FILE} is a file of the repository's own`);
+    return readFileSync(path, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw new Error(`cannot use ${path}: ${(error as Error).message}`);
+  }
+}
+
+/** Why a command uses the instance it does, as `whoami` and `use` say: `pinned at ~/Code/acme`. */
+function because(local: Local): string {
+  return local.by === 'pin' ? `pinned at ${shown(local.directory)}` : `named by ${shown(join(local.directory, REPO_FILE))}`;
 }
 
 /** A directory as you would type it: `~/Code/acme`. */
 function shown(directory: string): string {
-  const home = attempt(() => realpathSync(homedir()));
+  const home = realHome();
   return home !== '/' && within(directory, home) ? `~${directory.slice(home.length)}` : directory;
 }
 
@@ -173,7 +200,7 @@ function attempt<T>(step: () => T): T {
 }
 
 function target(): Target {
-  return attempt(() => resolveTarget(sessionFlags, readStore(), pinHere()));
+  return attempt(() => resolveTarget(sessionFlags, readStore(), localHere()));
 }
 
 /** cloudflared keeps and refreshes the Access token; ask it each time. */
@@ -371,9 +398,18 @@ async function login(args: string[]): Promise<void> {
   // The directory to pin, known before anything is asked of the instance.
   const directory = here('A login pins the directory it runs in: run it from one that exists');
 
-  const requested = attempt(() => oneUrl(positionals[0], 'login')) ?? pinHere()?.origin ?? readStore().current;
+  const given = attempt(() => oneUrl(positionals[0], 'login'));
+  const local = given === undefined ? localHere() : null;
+  const requested = given ?? local?.origin ?? readStore().current;
   if (!requested) fail('usage: coffre login <url>, for example `coffre login https://coffre.example.com`');
   const origin = attempt(() => instanceOrigin(requested));
+  if (local?.by === 'file') {
+    // A clone names any URL it likes: you see where you sign in, and a secret you hand over goes only where you name it.
+    const file = shown(join(local.directory, REPO_FILE));
+    const handed = values.token ? '--token' : values['access-client-id'] !== undefined ? '--access-client-id <id>' : values['id-token'] ? `--service ${values.service} --id-token` : null;
+    if (handed !== null) fail(`${file} names ${origin}, and a secret goes only where you name it: \`coffre login ${origin} ${handed}\``);
+    process.stderr.write(`Signing in to ${origin}, which ${file} names\n`);
+  }
   // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
   const kept = readStore().instances[origin];
   if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
@@ -425,17 +461,24 @@ async function keepSession(origin: string, kept: Session | undefined, mode: Auth
 /**
  * Pin the directory a login ran in to its instance, for it and every
  * directory below: unless it is your home or above it, where the default
- * the login set is enough.
+ * the login set is enough, or a pin or `coffre.json` there names it already.
  */
 function pinTo(directory: string, origin: string): void {
-  if (within(attempt(() => realpathSync(homedir())), directory)) return;
+  if (within(realHome(), directory)) return;
   const pins = readPins();
-  const pinned = withPin(pins, directory, origin);
-  if (pinned === pins) {
-    process.stdout.write(`${shown(pinFor(pins, directory)!.directory)} is pinned to it already\n`);
+  // A pin here comes before any coffre.json, one that cannot be used included.
+  const local = (() => {
+    try {
+      return localFor(pins, directory, realHome(), readRepoFile);
+    } catch {
+      return null;
+    }
+  })();
+  if (local?.origin === origin) {
+    process.stdout.write(local.by === 'pin' ? `${shown(local.directory)} is pinned to it already\n` : `${shown(join(local.directory, REPO_FILE))} names it already\n`);
     return;
   }
-  writePins(pinned);
+  writePins(withPin(pins, directory, origin));
   process.stdout.write(`Pinned ${shown(directory)} to it: coffre uses ${origin} there and in every directory below\n`);
 }
 
@@ -648,7 +691,7 @@ async function accessLogin(origin: string): Promise<void> {
 async function logout(args: string[]): Promise<void> {
   parse(args, {}, ['<url>'], 1);
   const store = readStore();
-  const requested = attempt(() => oneUrl(args[0], 'logout')) ?? pinHere()?.origin ?? store.current;
+  const requested = attempt(() => oneUrl(args[0], 'logout')) ?? localHere()?.origin ?? store.current;
   if (!requested) fail('not signed in anywhere');
   const origin = attempt(() => instanceOrigin(requested));
   const session = store.instances[origin];
@@ -703,8 +746,8 @@ async function whoami(args: string[]): Promise<void> {
   }
   const store = readStore();
   const session = store.instances[to.origin];
-  const choice = attempt(() => choose(sessionFlags, store, pinHere()));
-  const why = choice.by === 'pin' ? ` (pinned at ${shown(choice.directory)})` : choice.by === 'default' ? ' (the default)' : '';
+  const choice = attempt(() => choose(sessionFlags, store, localHere()));
+  const why = choice.by === 'default' ? ' (the default)' : choice.by === 'url' ? '' : ` (${because(choice)})`;
   const via = {
     person: { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode],
     token: 'a bearer token, from coffre login --token',
@@ -726,22 +769,24 @@ async function whoami(args: string[]): Promise<void> {
 
 /**
  * Switch the default instance, or list them: the one used here starred,
- * each with the directories pinned to it.
+ * each with the directories pinned to it, and the `coffre.json` here.
  */
 function use(args: string[]): void {
   parse(args, {}, ['<url>'], 1);
   const store = readStore();
-  const pin = pinHere();
+  const local = localHere();
+  const file = local?.by === 'file' ? local : null;
   if (args[0] === undefined) {
     const pinned = Object.entries(readPins().directories);
-    const origins = [...new Set([...Object.keys(store.instances), ...pinned.map(([, origin]) => origin)])];
+    const origins = [...new Set([...Object.keys(store.instances), ...pinned.map(([, origin]) => origin), ...(file === null ? [] : [file.origin])])];
     if (origins.length === 0) fail('not signed in anywhere yet: run `coffre login <url>`');
-    const used = pin?.origin ?? store.current;
+    const used = local?.origin ?? store.current;
     for (const origin of origins) {
       const session = store.instances[origin];
       const why = [
         ...(origin === store.current ? ['the default'] : []),
         ...pinned.filter(([, to]) => to === origin).map(([directory]) => `pinned at ${shown(directory)}`),
+        ...(file?.origin === origin ? [because(file)] : []),
       ];
       const who = session === undefined ? 'not signed in' : (session.principal?.id ?? '');
       process.stdout.write(`${`${origin === used ? '*' : ' '} ${origin.padEnd(36)} ${who.padEnd(24)} ${why.join(', ')}`.trimEnd()}\n`);
@@ -752,8 +797,9 @@ function use(args: string[]): void {
   if (!(origin in store.instances)) fail(`not signed in to ${origin}: run \`coffre login ${origin}\``);
   writeStore({ ...store, current: origin });
   process.stdout.write(`Now using ${origin} by default\n`);
-  if (pin !== null && pin.origin !== origin) {
-    process.stdout.write(`  but not here: ${shown(pin.directory)} is pinned to ${pin.origin}, and \`coffre login ${origin}\` pins this directory to it\n`);
+  if (local !== null && local.origin !== origin) {
+    const named = local.by === 'pin' ? `${shown(local.directory)} is pinned to ${local.origin}` : `${shown(join(local.directory, REPO_FILE))} names ${local.origin}`;
+    process.stdout.write(`  but not here: ${named}, and \`coffre login ${origin}\` pins this directory to it\n`);
   }
 }
 
@@ -1342,7 +1388,7 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags, pinHere());
+      return verifyInstance(more, readStore(), sessionFlags, localHere());
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);

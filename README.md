@@ -232,6 +232,29 @@ to the instance. The pins, which hold no secret, are in
 through a symbolic link uses its target's pin. Earlier CLIs do not
 read them, and use the default everywhere.
 
+A repository can name its instance for everyone who clones it, in a
+`coffre.json` it commits, which holds that and nothing else:
+
+```json
+{ "url": "https://secrets.acme.example" }
+```
+
+Below it, a command with no `--url` and no nearer pin uses that instance:
+the nearest pin or `coffre.json` above the directory wins, your own pin
+first in the same directory, and a `coffre.json` in your home or above it
+is ignored. The file only picks where commands go. What they carry is
+still that instance's own session, so a clone that names another URL
+reaches nothing you are signed in to. A fresh clone's first command says
+so, `not signed in to https://secrets.acme.example, which
+/home/ada/Code/acme/coffre.json names`, and `coffre login`, with no URL, signs in
+there after saying which file named it. That login pins nothing, as the
+file already routes the repository; `whoami` and `use` say `named by
+~/Code/acme/coffre.json`. A secret handed to `coffre login` (`--token`,
+`--access-client-id`, `--id-token`) goes only to a URL you name. A
+`coffre.json` that is not a file, holds another key, or names anything
+but an origin, as `https://…` (or `http://` on this machine), stops the
+commands below it with its path, rather than send them elsewhere.
+
 The CLI reads no environment variable, and a secret is never a flag or an
 argument: a command asks for it at a hidden prompt, or reads it from stdin.
 CI signs in as a
