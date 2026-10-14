@@ -262,7 +262,8 @@ export const ENTRIES: readonly Entry[] = SECTIONS.flatMap(({ entries }): readonl
 
 const SESSION_FLAGS = `  Session flags, before the command: coffre [flags] <command>, for that command alone
     --url <url>                     which instance to talk to; else the one this directory is pinned
-                                    to, by a login in it or above it; else the default
+                                    to, by a login in it or above it, or its repository's coffre.json
+                                    names, { "url": "https://…" }, whichever is nearer; else the default
     --service <name>                the service account a CI run signs in as, by OIDC: its ID token,
                                     which a trust binding accepts (coffre trust); on GitHub Actions, with
                                     \`permissions: id-token: write\`, nothing else

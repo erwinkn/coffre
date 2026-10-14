@@ -63,14 +63,26 @@ for (const linked of [false, true]) {
   });
 }
 
-/** A coffre that knows one credential of each kind a CI run signs in with, and keeps every request. */
+/**
+ * A coffre that knows one credential of each kind a CI run signs in with,
+ * and signs a person in by a device login approved at once, and keeps every
+ * request. It plays GitHub's runner too, at /runner: an ID token for its
+ * own origin alone.
+ */
 async function ciInstance(t: test.TestContext) {
   const seen: { method: string; url: string; headers: Record<string, string | string[] | undefined>; body: string }[] = [];
+  let origin = '';
   const server = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += String(chunk);
     seen.push({ method: req.method!, url: req.url!, headers: req.headers, body });
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/api/auth') return send(200, { signin: { providers: [] }, access: null });
+    if (req.url === '/api/auth/device') return send(200, { device_code: 'device', user_code: 'BCDF-GHJK', verification_uri_complete: `${origin}/approve`, interval: 1, expires_in: 60 });
+    if (req.url === '/api/auth/device/token') return send(200, { access_token: 'coffre_cli_ada', expires_at: '2099-01-01T00:00:00Z' });
+    if (req.url?.startsWith('/runner?')) {
+      return new URL(req.url, origin).searchParams.get('audience') === origin ? send(200, { value: 'id.token.ok' }) : send(400, {});
+    }
     if (req.url === '/api/auth/oidc') {
       const { token } = JSON.parse(body) as { token: string };
       return token === 'id.token.ok' ? send(200, { token: 'coffre_svc_run', expiresAt: '2099-01-01T00:05:00.000Z' }) : send(401, { error: 'unauthenticated', reason: 'no_match', message: 'no' });
@@ -90,18 +102,19 @@ async function ciInstance(t: test.TestContext) {
   t.after(() => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }));
   const address = server.address();
   assert.ok(address !== null && typeof address !== 'string');
-  return { origin: `http://127.0.0.1:${address.port}`, seen };
+  origin = `http://127.0.0.1:${address.port}`;
+  return { origin, seen };
 }
 
 /**
  * The CLI, `input` on its stdin: not spawnSync, which would stop the server in this process from answering it.
- * `gone`, it runs in `cwd` removed once it started, as another shell might.
+ * `gone`, it runs in `cwd` removed once it started, as another shell might; `more`, with those variables too.
  */
-async function cli(home: string, args: string[], input: string, cwd?: string, gone = false): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_')));
+async function cli(home: string, args: string[], input: string, cwd?: string, gone = false, more: Record<string, string> = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && !key.startsWith('ACTIONS_ID_TOKEN_')));
   const removed = `import { rmSync } from 'node:fs'; process.cwd(); rmSync(process.cwd(), { recursive: true }); process.argv.splice(1, 0, ${JSON.stringify(main)}); await import(${JSON.stringify(pathToFileURL(main).href)});`;
   const node = gone ? ['--conditions=coffre:source', '--input-type=module', '-e', removed, '--'] : ['--conditions=coffre:source', main];
-  const child = spawn(process.execPath, [...node, ...args], { cwd, env: { ...env, HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [...node, ...args], { cwd, env: { ...env, HOME: home, ...more }, stdio: ['pipe', 'pipe', 'pipe'] });
   let [stdout, stderr] = ['', ''];
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
@@ -372,4 +385,91 @@ test('login refuses an --auth-mode it does not know before asking the instance a
   assert.equal(typo.stderr, 'coffre: --auth-mode must be one of signin, cloudflare, not "signon"\n');
   assert.equal(seen.length, 0);
   assert.ok(!existsSync(join(home, '.coffre', 'directories.json')));
+});
+
+test("a repository's coffre.json names its instance for a fresh clone, which signs in there, and a pin still comes first", async (t) => {
+  const a = await ciInstance(t);
+  const b = await ciInstance(t);
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'coffre-repo-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const directory of ['code/acme/src', 'code/bad', 'code/linked', 'code/other']) mkdirSync(join(home, directory), { recursive: true });
+  writeFileSync(join(home, 'code/acme/coffre.json'), `${JSON.stringify({ url: a.origin }, null, 2)}\n`);
+  symlinkSync(join(home, 'code/acme/src'), join(home, 'through'));
+  const at = (directory: string, args: string[], input = '', env: Record<string, string> = {}) => cli(home, args, input, join(home, directory), false, env);
+  const first = async (directory: string, args: string[]) => {
+    const run = await at(directory, args);
+    assert.equal(run.status, 0, run.stderr);
+    return run.stdout.split('\n')[0];
+  };
+
+  // Not signed in yet: the error says where the URL came from, and nothing is sent.
+  const fresh = await at('code/acme/src', ['whoami']);
+  assert.equal(fresh.status, 1);
+  assert.equal(fresh.stderr, `coffre: not signed in to ${a.origin}, which ${join(home, 'code/acme/coffre.json')} names: run \`coffre login ${a.origin}\`\n`);
+  assert.equal(a.seen.length, 0);
+  assert.equal((await at('code/acme', ['use'])).stdout, `* ${a.origin.padEnd(36)} ${'not signed in'.padEnd(24)} named by ~/code/acme/coffre.json\n`);
+
+  // A secret goes only where you name it, not where a clone says.
+  for (const [args, input] of [[['--token'], 'coffre_svc_ci\n'], [['--access-client-id', 'id.access'], 'shh\n'], [['--service', 'deploy', '--id-token'], 'id.token.ok\n']] as const) {
+    const handed = await at('code/acme/src', ['login', ...args], input);
+    assert.equal(handed.status, 1);
+    assert.match(handed.stderr, new RegExp(`^coffre: ~/code/acme/coffre\\.json names ${a.origin}, and a secret goes only where you name it: \`coffre login ${a.origin} ${args[0]}`));
+  }
+  assert.equal(a.seen.length, 0);
+
+  // A login with no URL signs in where the file says, says so first, and pins nothing.
+  const login = await at('code/acme/src', ['login', '--no-browser']);
+  assert.equal(login.status, 0, login.stderr);
+  assert.match(login.stderr, new RegExp(`^Signing in to ${a.origin}, which ~/code/acme/coffre\\.json names\n`));
+  assert.match(login.stdout, /\n~\/code\/acme\/coffre\.json names it already\n$/);
+  assert.equal(existsSync(join(home, '.coffre', 'directories.json')), false);
+  assert.equal(JSON.parse(readFileSync(join(home, '.coffre', 'credentials.json'), 'utf8')).instances[a.origin].token, 'coffre_cli_ada');
+  assert.equal(await first('code/acme/src', ['whoami']), `service:deploy (service account) on ${a.origin} (named by ~/code/acme/coffre.json), via coffre sign-in`);
+  // By its real path, through a link.
+  assert.equal(await first('through', ['whoami']), `service:deploy (service account) on ${a.origin} (named by ~/code/acme/coffre.json), via coffre sign-in`);
+
+  // A CI run's ID token, asked for that origin, needs no --url either.
+  const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${a.origin}/runner`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'bearer' };
+  const ci = await at('code/acme', ['--service', 'deploy', 'whoami'], '', runner);
+  assert.equal(ci.status, 0, ci.stderr);
+  assert.match(ci.stdout, new RegExp(`^service:deploy \\(service account\\) on ${a.origin} \\(named by ~/code/acme/coffre\\.json\\), via the run's ID token, as --service\n`));
+
+  // Your own pin comes first, in the same directory; signing out of it hands the directory back to the file.
+  assert.equal((await at('.', ['login', b.origin, '--token'], 'coffre_svc_ci\n')).status, 0);
+  const pin = await at('code/acme', ['login', b.origin, '--token'], 'coffre_svc_ci\n');
+  assert.equal(pin.status, 0, pin.stderr);
+  assert.match(pin.stdout, /\nPinned ~\/code\/acme to it/);
+  assert.equal(await first('code/acme/src', ['whoami']), `service:deploy (service account) on ${b.origin} (pinned at ~/code/acme), via a bearer token, from coffre login --token`);
+  assert.equal(await first('code/acme', ['--url', a.origin, 'whoami']), `service:deploy (service account) on ${a.origin}, via coffre sign-in`);
+  assert.match((await at('code/acme', ['logout', b.origin])).stdout, /\n {2}Unpinned ~\/code\/acme\n/);
+  assert.equal(await first('code/acme/src', ['whoami']), `service:deploy (service account) on ${a.origin} (named by ~/code/acme/coffre.json), via coffre sign-in`);
+
+  // Switching the default says when the file here names another instance.
+  assert.equal((await at('.', ['login', b.origin, '--token'], 'coffre_svc_ci\n')).status, 0);
+  assert.equal((await at('code/acme', ['use', a.origin])).stdout, `Now using ${a.origin} by default\n`);
+  assert.equal(
+    (await at('code/acme', ['use', b.origin])).stdout,
+    `Now using ${b.origin} by default\n  but not here: ~/code/acme/coffre.json names ${a.origin}, and \`coffre login ${b.origin}\` pins this directory to it\n`,
+  );
+
+  // A file that cannot be used stops every command below it, but --url, rather than send one elsewhere.
+  for (const [contents, why] of [
+    [JSON.stringify({ url: a.origin, token: 'coffre_cli_ada' }), 'it holds only "url", never a credential or anything else: not "token"'],
+    [JSON.stringify({ url: `${a.origin}/` }), `"url" is an origin, written as one: "${a.origin}", not "${a.origin}/"`],
+    ['{', 'it is not JSON'],
+  ]) {
+    writeFileSync(join(home, 'code/bad/coffre.json'), contents);
+    const bad = await at('code/bad', ['whoami']);
+    assert.equal(bad.status, 1);
+    assert.equal(bad.stderr, `coffre: cannot use ${join(home, 'code/bad/coffre.json')}: ${why}\n`);
+  }
+  assert.equal((await at('code/bad', ['--url', b.origin, 'whoami'])).status, 0);
+  // A linked one too: a coffre.json is the repository's own file.
+  symlinkSync(join(home, 'code/acme/coffre.json'), join(home, 'code/linked/coffre.json'));
+  const linked = await at('code/linked', ['whoami']);
+  assert.equal(linked.status, 1);
+  assert.equal(linked.stderr, `coffre: cannot use ${join(home, 'code/linked/coffre.json')}: it is a symbolic link, and a coffre.json is a file of the repository's own\n`);
+  // Your home is no repository: a coffre.json there names nothing.
+  writeFileSync(join(home, 'coffre.json'), JSON.stringify({ url: a.origin }));
+  assert.equal(await first('code/other', ['whoami']), `service:deploy (service account) on ${b.origin} (the default), via a bearer token, from coffre login --token`);
 });
