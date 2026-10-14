@@ -14,7 +14,8 @@
     // Names the vault key below, and is not secret: from `coffre setup`. A
     // rotation gives the new key a new ID.
     "VAULT_KEY_ID": "vault-1",
-    // Comma-separated emails: the first people in, whom nobody can remove.
+    // Comma-separated emails: whoever signs in first becomes the Owner, while
+    // the instance has none. Keep it to people you would trust as Owner.
     "BOOTSTRAP_OWNERS": "you@example.com"
   },
   "secrets": {

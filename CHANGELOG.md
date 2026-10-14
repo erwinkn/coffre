@@ -20,9 +20,17 @@ instance: a member like any other, in People, changed by the same rules.
   (`BOOTSTRAP_OWNERS` in a deployment `coffre init` writes) names who
   becomes an Owner by signing in while the instance has none, logged as
   the vault's ("no Owner was left, and the deployment names them to take
-  over"). At any other time it does nothing. That is a new instance's first
+  over"). While there is one it does nothing. That is a new instance's first
   sign-in, and the way back into one whose Owners are all gone: name an
-  email you control, deploy, sign in.
+  email you control, deploy, sign in. Keep it to people you would trust as
+  Owner: should every Owner's row fail the vault's check, the next one it
+  names to sign in takes over.
+- **Owners are changed by the usual rules.** An Admin of the whole
+  instance makes and unmakes Owners, but for the last, as it did 0.5's
+  Owners; a root admin was beyond its reach, and their Owners are not.
+- **An Owner who can't sign in any more** (a lost GitHub account) is not
+  recovered by editing the list, as a root admin was: the instance still
+  has its Owner. Keep two Owners until `coffre recover owner` exists.
 - **A wrong vault key is an outage.** A vault given the wrong key checks
   no member's row, the Owner's included, so every request answers 503 and
   nobody signs in, with the reason in the app's log, where before root

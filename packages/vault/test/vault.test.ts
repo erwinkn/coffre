@@ -886,7 +886,7 @@ test('a person sets up a service account in the vault too: no more than they hol
  * `count` entries in the vault's name, linked to the chain, each with a
  * made-up MAC: what anyone who can insert rows can write.
  */
-async function forgeEntries(count: number, entry: { action: string; code?: string; subjectPrincipal?: string; metadata?: string }): Promise<void> {
+async function forgeEntries(count: number, entry: { action: string; actor?: string; code?: string; subjectPrincipal?: string; metadata?: string }): Promise<void> {
   const { auditLog, auditChainHead } = tablesOf(db.owner);
   const [head] = await db.owner.select().from(auditChainHead);
   const mac = Buffer.alloc(32, 7);
@@ -894,7 +894,7 @@ async function forgeEntries(count: number, entry: { action: string; code?: strin
   const rows = [];
   for (let i = 0; i < count; i += 1) {
     const fields = {
-      seq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: ROOT,
+      seq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: entry.actor ?? ROOT,
       action: entry.action, decision: entry.action === 'vault.tampered' ? 'deny' : 'allow', code: entry.code ?? null,
       subjectPrincipal: entry.subjectPrincipal ?? null, projectId: null, environmentId: null, secretId: null, secretVersionId: null,
       operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: entry.metadata ?? '{}',
@@ -2640,6 +2640,34 @@ test('a vault of 0.6 turns the root admins of 0.5 into Owners once, and from the
   assert.equal((await later.access(SAM)).role, 'developer');
   assert.equal((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').length, 1);
   assert.equal((await later.verifyLog({})).ok, true, 'the log replays to every row');
+});
+
+test('a root admin row forged in the vault\'s name converts nobody on a new instance, and is reported', async () => {
+  await places(db.owner);
+  await forgeEntries(1, { action: 'member.add', actor: 'system:vault', subjectPrincipal: ROOT, metadata: JSON.stringify({ role: 'member', rootAdmin: true }) });
+  const vault = await namingOwners('root@acme.example', 'sam@acme.example');
+  assert.equal((await vault.access(ADA)).status, 'unknown');
+  // Nobody was made an Owner by it: Sam, signing in first, is the bootstrap's, and root, named too, stays out.
+  assert.deepEqual((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert'), []);
+  assert.equal((await vault.access(SAM)).role, 'owner');
+  assert.equal((await vault.access(ROOT)).status, 'unknown');
+  // Reported by the conversion's check, and by root's own, which it is about.
+  const reports = (await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'vault.tampered').map(entryView);
+  assert.deepEqual(reports.map((entry) => [entry.code, entry.subject]).sort(), [['forged_entry', null], ['forged_entry', ROOT]].sort());
+});
+
+test('more conversion entries forged than the vault reads back hide whether it converted: it converts nobody', async () => {
+  await places(db.owner);
+  await rootRowOf05(ROOT);
+  await forgeEntries(1024, { action: 'root-admins.convert', actor: 'system:vault', metadata: JSON.stringify({ owners: [] }) });
+  const vault = await namingOwners('root@acme.example', 'sam@acme.example');
+  // Not converted, as a converted instance is not again: root, a Member of 0.5's making, is no Owner by it.
+  assert.equal((await store.member(db.owner, ROOT))?.role, 'member');
+  assert.equal((await store.member(db.owner, SAM)), undefined);
+  // Nor does anyone own it, so root, named, signing in, is the bootstrap's.
+  assert.equal((await vault.access(ROOT)).role, 'owner');
+  const [made] = (await store.vaultPage(db.owner, undefined, 1)).map(entryView);
+  assert.deepEqual([made!.action, made!.detail.reason], ['member.role', 'bootstrap']);
 });
 
 test('a conversion entry forged in the vault\'s name stops nothing, and is reported', async () => {

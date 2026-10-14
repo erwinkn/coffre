@@ -508,7 +508,13 @@ export async function rootAdminRows(db: Queryable, limit: number): Promise<Store
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'member.add'), eq(auditLog.decision, 'allow'), like(auditLog.metadata, '%"rootAdmin":true%')))
+    .where(and(
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.action, 'member.add'),
+      eq(auditLog.actor, 'system:vault'),
+      eq(auditLog.decision, 'allow'),
+      like(auditLog.metadata, '%"rootAdmin":true%'),
+    ))
     .orderBy(asc(auditLog.seq))
     .limit(limit);
   return stored(rows);

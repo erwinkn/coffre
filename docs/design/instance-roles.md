@@ -327,9 +327,13 @@ the vault reads again under the person's row and the log's head (`Bootstrap`
 in the model, `BootstrapOnlyWithoutOwner`). At any other time, the list
 does nothing. That covers a new instance and recovery alike: an instance
 whose every Owner is gone, or whose Owners' rows fail the check, takes the
-first named person to sign in. An Owner who exists but cannot sign in any
-more is not recovered by this; that is a command of its own, not built yet
-(`coffre recover owner`).
+first named person to sign in, even one an Owner removed: the list is a
+standing way in, to keep to people one would trust as Owner. An Owner who
+exists but cannot sign in any more is not recovered by this; that is a
+command of its own, not built yet (`coffre recover owner`). Owners are
+made and unmade by whoever runs the instance, an Admin of all of it
+included, as any role is: 0.5's root admins were beyond an Admin's reach,
+and the Owners they become are not.
 
 **Upgrading from 0.5.** The first call of a 0.6 vault makes every email
 the configuration names an Owner of the whole instance, once, as

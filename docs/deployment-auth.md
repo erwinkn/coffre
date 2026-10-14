@@ -195,15 +195,27 @@ the whole instance, the first person it names to sign in becomes one, made
 a member by the vault itself and logged as such (`system:vault`, "no Owner
 was left, and the deployment names them to take over"). Two named people
 signing in at once make one Owner: the other is told they are not a
-member, and the Owner admits them. Once there is an Owner, the list does
-nothing at all; an Owner of one project (a scope) does not count. That is
-both the first sign-in of a new instance and the way back into one with no
+member, and the Owner admits them. While there is an Owner, the list does
+nothing; an Owner of one project (a scope) does not count. That is both
+the first sign-in of a new instance and the way back into one with no
 Owner left: change the list to an email you control, deploy, and sign in.
+
+So the list is a standing way in, not a record of who was first. If every
+Owner's row stops passing the vault's check, as whoever can write to the
+database can make it, the next person it names to sign in takes the
+instance over, even one an Owner removed since. Keep it to people you
+would trust as Owner, and take people off it when they leave.
+
+It does not help an Owner who exists but can no longer sign in, having
+lost their GitHub account for one: the instance still has its Owner. Keep
+a second Owner for that.
 
 The instance keeps an Owner from then on. The last Owner of the whole
 instance cannot be demoted, narrowed to a scope, or removed, by anyone,
 themselves included: "you're the last Owner of the whole instance: make
-someone else an Owner first". Make another Owner before you leave.
+someone else an Owner first". Make another Owner before you leave. Any
+Admin or Owner of the whole instance makes and unmakes Owners, but for
+the last, and nobody changes their own role.
 
 Every other identity must also be an active member, which the vault
 decides. Signing in, with a provider or through Access, authenticates the

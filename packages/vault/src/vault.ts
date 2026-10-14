@@ -646,12 +646,12 @@ class VaultService implements Vault {
    */
   async #rootAdminsToConvert(db: Queryable, reports: NewEntry[]): Promise<boolean> {
     const check = this.#check(reports, null);
+    const converted = await newestAuthentic((before) => store.newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
+    if (converted !== 'none' && converted !== 'forged') return false;
     const rows = await store.rootAdminRows(db, LOOK_BACK.page);
     const rooted = rows.filter((entry) => this.#authentic(entry));
     for (const entry of rows) if (!rooted.includes(entry)) check.forged(entry);
-    if (rooted.length === 0) return false;
-    const converted = await newestAuthentic((before) => store.newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
-    return converted === 'none' || converted === 'forged';
+    return rooted.length > 0;
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
@@ -1381,21 +1381,20 @@ class VaultService implements Vault {
   /**
    * Make a person the configuration names an Owner of the whole instance,
    * when it has none: the first one in, and the way back in once every
-   * Owner is gone. Asked at every `access` about them, so an unlocked read
-   * is the quick way out, when they or anyone else owns it. Then one
-   * decision, under their row and the log's head, reads again: two named
-   * people signing in at once make one Owner.
+   * Owner is gone. Asked at `access` about any of them who owns nothing, so
+   * an unlocked read is the quick way out, when someone else owns it. What
+   * it finds is a hint, never a report: its reads can pair a row with
+   * grants another decision committed between them. Then one decision,
+   * under their row and the log's head, reads again, and reports: two named
+   * people signing in at once make one Owner. Whether it made them one.
    */
-  async #bootstrap(principal: string): Promise<void> {
-    if ((await this.#settled()) !== null) return;
-    const reports: NewEntry[] = [];
-    const owner = await this.#anOwner(this.#db, reports);
-    await this.#record(reports);
-    if (owner !== null) return;
-    await this.#decideNow([principal], async (d) => {
+  async #bootstrap(principal: string): Promise<boolean> {
+    if ((await this.#anOwner(this.#db, [])) !== null) return false;
+    const made = await this.#decideNow([principal], async (d) => {
       await lockLogHead(d.tx);
-      if ((await this.#anOwner(d.tx, d.reports)) === null) await this.#makeOwner(d, principal, 'bootstrap');
+      return { made: (await this.#anOwner(d.tx, d.reports)) === null && (await this.#makeOwner(d, principal, 'bootstrap')) };
     });
+    return made.ok && made.made;
   }
 
   /**
@@ -1499,7 +1498,13 @@ class VaultService implements Vault {
    */
   async access(principal: string): Promise<Access> {
     const superseded = await this.#settled();
-    if (superseded === null && this.#bootstrapOwner(principal)) await this.#bootstrap(principal);
+    const access = await this.#read(principal, superseded);
+    if (superseded !== null || !this.#bootstrapOwner(principal) || (access.status === 'active' && ownsInstance(access))) return access;
+    return (await this.#bootstrap(principal)) ? this.#read(principal, superseded) : access;
+  }
+
+  /** `access`, as the rows are now. */
+  async #read(principal: string, superseded: string | null): Promise<Access> {
     const read = async (db: Queryable, reports: NewEntry[]) => {
       const [row, held, at] = await Promise.all([store.member(db, principal), store.grants(db, principal), this.#now(db)]);
       const fault = await this.#integrity(db, principal, row, held, reports);

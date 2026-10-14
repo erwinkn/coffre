@@ -178,6 +178,19 @@ test('a service account holds project grants only, and no grant is on every proj
   assert.deepEqual(await refusals(), [['member.add', 'service_cannot_hold_role']]);
 });
 
+test('the last Owner of the whole instance stays one: 409, saying what to do first, until another is', async () => {
+  const last = { status: 409, reason: 'last_owner' };
+  await assert.rejects(root.members.remove(`user:${ROOT}`), { ...last, message: "you're the last Owner of the whole instance: make someone else an Owner first" });
+  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), { ...last, message: `user:${ROOT} is the last Owner of the whole instance: make someone else an Owner first` });
+  await assert.rejects(boss.members.remove(`user:${ROOT}`), last);
+  // An Owner of one project owns no instance.
+  await root.members.add(ADA, { role: 'owner', scope: { projects: { only: ['market'] } } });
+  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), last);
+  // Another Owner of all of it, and an Admin may take root's away.
+  await root.members.add(ADA, { role: 'owner' });
+  assert.equal((await boss.members.add(`user:${ROOT}`, { role: 'admin' })).instanceRole, 'admin');
+});
+
 test("a project's access list shows who reaches it by their instance role, with no grant", async () => {
   await root.members.add(ADA, { role: 'developer', scope: { environments: { only: ['dev'] } } });
   await root.members.add(LEAD, { role: 'auditor', scope: { projects: { only: ['billing'] } } });

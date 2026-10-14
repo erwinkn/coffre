@@ -76,7 +76,10 @@ export function onAProject(project: string): void {
  * when a scope narrows it. Only those who run the instance are told the scope (null otherwise).
  */
 export function roleInWords(member: { instanceRole: InstanceRole; scope: Scope | null }): string {
-  const { name } = INSTANCE_ROLES[member.instanceRole];
+  // A role this CLI does not know, as an instance of 0.5 says `root-admin`, is said as the instance says it.
+  const known: { name: string } | undefined = INSTANCE_ROLES[member.instanceRole];
+  if (known === undefined) return String(member.instanceRole);
+  const { name } = known;
   return member.scope === null || unscoped(member.scope) ? name : `${name}, ${scopeInWords(member.scope)}`;
 }
 

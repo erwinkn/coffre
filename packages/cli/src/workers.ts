@@ -316,7 +316,7 @@ export class Cloudflare {
 
   /**
    * Sign in to Cloudflare, choose the account, read what is there, and ask
-   * what setup cannot know: coffre's address, its root admins, and, when
+   * what setup cannot know: coffre's address, its first Owner, and, when
    * another deployment has its names, a name of its own. Every refusal
    * comes before its first change, a domain added or a custom hostname
    * made: a run refused leaves nothing behind.
