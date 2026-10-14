@@ -218,10 +218,15 @@ cd ~/Code/acme/web && coffre whoami
 ```
 
 A login where the CLI already holds a session the instance still knows
-keeps it and only pins; `coffre logout` first for a new one. A login in
+keeps it and only pins; `coffre logout` first for a new one. Only the
+instance answering that it does not know the session starts a new login:
+if it cannot be asked, the login stops and keeps the session. A login in
 your home directory, or above it, sets the default only. A directory
 pinned to an instance you are not signed in to says so, and never falls
-back to another instance. `coffre logout` unpins every directory pinned
+back to another instance. Nor does a command that cannot tell which pin
+applies, with a pins file it cannot read or reached through a symbolic
+link, or run in a directory removed since: it stops, and `--url` names
+the instance instead. `coffre logout` unpins every directory pinned
 to the instance. The pins, which hold no secret, are in
 `~/.coffre/directories.json`, by real path, so a directory reached
 through a symbolic link uses its target's pin. Earlier CLIs do not

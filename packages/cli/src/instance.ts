@@ -162,7 +162,7 @@ export function parsePins(text: string): Pins {
     throw new Error('it is not JSON');
   }
   const candidate = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Pins>;
-  if (candidate.version !== 1 || typeof candidate.directories !== 'object' || candidate.directories === null) {
+  if (candidate.version !== 1 || typeof candidate.directories !== 'object' || candidate.directories === null || Array.isArray(candidate.directories)) {
     throw new Error('this CLI does not know its shape: a later coffre wrote it, perhaps');
   }
   const directories: Record<string, string> = {};
@@ -204,12 +204,14 @@ export function withoutPins(pins: Pins, origin: string): { pins: Pins; unpinned:
 /**
  * The instance a command means: `--url`, else the pin that applies where
  * it runs, else the default. A pinned instance is the one, signed in there
- * or not: never another one's session in its place.
+ * or not: never another one's session in its place. Whichever it is
+ * passes `instanceOrigin`, as a typed one does: a saved default is only as
+ * sound as the file it was read from.
  */
 export function choose(flags: SessionFlags, store: Store, pin: Pin | null): Choice {
   if (flags.url !== undefined) return { origin: instanceOrigin(flags.url), by: 'url' };
-  if (pin !== null) return { origin: pin.origin, by: 'pin', directory: pin.directory };
-  if (store.current !== null) return { origin: store.current, by: 'default' };
+  if (pin !== null) return { origin: instanceOrigin(pin.origin), by: 'pin', directory: pin.directory };
+  if (store.current !== null) return { origin: instanceOrigin(store.current), by: 'default' };
   throw new Error('not signed in anywhere yet: run `coffre login <url>`');
 }
 

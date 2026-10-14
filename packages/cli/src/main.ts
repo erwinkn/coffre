@@ -44,6 +44,7 @@ import {
   withoutPins,
   withSession,
   withoutSession,
+  type AuthMode,
   type Credential,
   type Pin,
   type Pins,
@@ -60,6 +61,7 @@ import {
   serviceName,
   shownMember,
   unreachable,
+  Unreachable,
   type CoffreClient,
 } from '@coffre/client';
 import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
@@ -83,9 +85,19 @@ function writeStore(store: Store): void {
   writePrivate(CREDENTIALS_PATH, 'credentials', store);
 }
 
+/**
+ * Read the pins: none only if there is no file. One this CLI cannot read,
+ * or reached through a symbolic link, which `writePrivate` refuses too, is
+ * an error: a link, dangling or not, would let another file say where
+ * credentials go.
+ */
 function readPins(): Pins {
-  if (!existsSync(PINS_PATH)) return emptyPins();
   try {
+    for (const path of [dirname(PINS_PATH), PINS_PATH]) {
+      const found = lstatSync(path, { throwIfNoEntry: false });
+      if (found === undefined) return emptyPins();
+      if (found.isSymbolicLink()) throw new Error('it is reached through a symbolic link');
+    }
     return parsePins(readFileSync(PINS_PATH, 'utf8'));
   } catch (error) {
     fail(`cannot read the pinned directories in ${PINS_PATH}: ${(error as Error).message}. Name the instance with --url, or move the file away`);
@@ -122,20 +134,23 @@ function writePrivate(path: string, what: string, value: unknown): void {
   }
 }
 
-/** Where the command runs, as pins name it: its real path, or null if it is gone. */
-function here(): string | null {
+/**
+ * Where the command runs, as pins name it: its real path. A directory gone
+ * since is an error, not one without a pin: that would be the default
+ * instance's, whatever its pin said.
+ */
+function here(then: string): string {
   try {
     return realpathSync(process.cwd());
-  } catch {
-    return null;
+  } catch (error) {
+    fail(`cannot tell which directory this is: ${(error as Error).message}. ${then}`);
   }
 }
 
 /** The pin that applies where the command runs, unless --url names the instance. */
 function pinHere(): Pin | null {
   if (sessionFlags.url !== undefined) return null;
-  const directory = here();
-  return directory === null ? null : pinFor(readPins(), directory);
+  return pinFor(readPins(), here('Name the instance with --url'));
 }
 
 /** A directory as you would type it: `~/Code/acme`. */
@@ -352,6 +367,10 @@ async function login(args: string[]): Promise<void> {
     if (values[name]?.trim() === '') fail(`--${name} is empty: an unset variable, perhaps`);
   }
 
+  const mode = attempt(() => parseMode(sessionFlags.authMode));
+  // The directory to pin, known before anything is asked of the instance.
+  const directory = here('A login pins the directory it runs in: run it from one that exists');
+
   const requested = attempt(() => oneUrl(positionals[0], 'login')) ?? pinHere()?.origin ?? readStore().current;
   if (!requested) fail('usage: coffre login <url>, for example `coffre login https://coffre.example.com`');
   const origin = attempt(() => instanceOrigin(requested));
@@ -363,29 +382,39 @@ async function login(args: string[]): Promise<void> {
   if (values.token) await tokenLogin(origin);
   else if (values['access-client-id'] !== undefined) await accessServiceLogin(origin, values['access-client-id'].trim());
   else if (values.service !== undefined) await runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
-  else if (!(await keepSession(origin, kept))) {
-    const mode = attempt(() => parseMode(sessionFlags.authMode)) ?? (await askMode(origin));
-    await (mode === 'cloudflare' ? accessLogin(origin) : deviceLogin(origin, values['no-browser']));
+  else if (!(await keepSession(origin, kept, mode))) {
+    const asked = mode ?? (await askMode(origin));
+    await (asked === 'cloudflare' ? accessLogin(origin) : deviceLogin(origin, values['no-browser']));
   }
-  pinHereTo(origin);
+  pinTo(directory, origin);
 }
 
 /**
  * A person's session on coffre's own sign-in, saved here, that the instance
  * still knows: made the default again, rather than a new one asked for.
+ * Only the instance saying it does not know it, 401, replaces it: any other
+ * failure leaves it as it is, and says so.
  */
-async function keepSession(origin: string, kept: Session | undefined): Promise<boolean> {
-  if (kept === undefined || kept.kind !== undefined || kept.mode !== 'signin' || !kept.token || sessionFlags.authMode === 'cloudflare') return false;
+async function keepSession(origin: string, kept: Session | undefined, mode: AuthMode | undefined): Promise<boolean> {
+  if (kept === undefined || kept.kind !== undefined || kept.mode !== 'signin' || !kept.token || mode === 'cloudflare') return false;
   if (kept.expiresAt && Date.parse(kept.expiresAt) <= Date.now()) return false;
   const token = kept.token;
-  const me = await createClient({
-    url: origin,
-    headers: () => ({ authorization: `Bearer ${token}` }),
-    transport: (request) => fetch(request, { redirect: 'manual' }),
-  })
-    .me()
-    .catch(() => null);
-  if (me === null) return false;
+  let me: Me;
+  try {
+    me = await createClient({
+      url: origin,
+      headers: () => ({ authorization: `Bearer ${token}` }),
+      transport: (request) =>
+        fetch(request, { redirect: 'manual' }).catch((error: unknown) => {
+          throw new Unreachable(origin, error);
+        }),
+    }).me();
+    if (typeof me?.principal?.id !== 'string') throw new Error('GET /api/me did not answer as coffre does');
+  } catch (error) {
+    if (error instanceof CoffreError && error.status === 401) return false;
+    const why = (error as Error).message;
+    fail(`could not check the session saved for ${origin}, which is kept: ${why}. Retry, or \`coffre logout ${origin}\` first for a new one`);
+  }
   writeStore(withSession(readStore(), origin, kept));
   const ends = kept.expiresAt ? `, until ${kept.expiresAt.slice(0, 10)}` : '';
   process.stdout.write(`Signed in to ${origin} as ${me.principal.id} already${ends}: \`coffre logout\` first for a new session\n`);
@@ -398,9 +427,8 @@ async function keepSession(origin: string, kept: Session | undefined): Promise<b
  * directory below: unless it is your home or above it, where the default
  * the login set is enough.
  */
-function pinHereTo(origin: string): void {
-  const directory = here();
-  if (directory === null || within(attempt(() => realpathSync(homedir())), directory)) return;
+function pinTo(directory: string, origin: string): void {
+  if (within(attempt(() => realpathSync(homedir())), directory)) return;
   const pins = readPins();
   const pinned = withPin(pins, directory, origin);
   if (pinned === pins) {

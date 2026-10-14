@@ -206,6 +206,7 @@ test('the pins file is read whole or not at all: one this CLI cannot read is an 
   });
   assert.throws(() => parsePins('not json'), /not JSON/);
   assert.throws(() => parsePins(JSON.stringify({ version: 2, directories: {} })), /does not know its shape/);
+  assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: [] })), /does not know its shape/);
   assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: { 'Code/acme': THEIRS } })), /pins "Code\/acme"/);
   assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: { '/a': 'http://devbox:3000' } })), /plain HTTP/);
 });
@@ -218,6 +219,16 @@ test('--url, then the pin that applies, then the default', () => {
   assert.equal(resolveTarget({}, storeWith(), pin, NOW).origin, THEIRS);
   // A CI run's ID token goes where the directory is pinned too, as it went to the default.
   assert.equal(resolveTarget({ service: 'deploy' }, emptyStore(), pin, NOW).origin, THEIRS);
+});
+
+test('a saved default or pin over plain HTTP is refused as a typed one is, a CI run’s ID token too', () => {
+  const insecure = 'http://secrets.acme.example';
+  const store = withSession(emptyStore(), insecure, { mode: 'signin', token: 'coffre_cli_x', obtainedAt: '2026-09-26T00:00:00Z' });
+  assert.equal(store.current, insecure);
+  for (const flags of [{}, { service: 'deploy' }]) {
+    assert.throws(() => resolveTarget(flags, store, null, NOW), /refusing to send credentials over plain HTTP/);
+    assert.throws(() => resolveTarget(flags, storeWith(), { directory: '/home/ada/Code/acme', origin: insecure }, NOW), /plain HTTP/);
+  }
 });
 
 test('a directory pinned to an instance with no session asks for a login there, and never uses the default', () => {

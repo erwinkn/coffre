@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, statSync,
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { parseStore } from '../src/instance.ts';
 
@@ -80,6 +80,7 @@ async function ciInstance(t: test.TestContext) {
       req.headers.authorization === 'Bearer coffre_cli_ada' ||
       req.headers.authorization === 'Bearer coffre_svc_run' ||
       (req.headers['cf-access-client-id'] === 'id.access' && req.headers['cf-access-client-secret'] === 'shh');
+    if (req.url === '/api/me' && req.headers.authorization === 'Bearer coffre_cli_busy') return send(500, { error: 'internal', message: 'something went wrong' });
     if (req.url === '/api/me' && known) return send(200, { principal: { type: 'service', id: 'deploy' }, registered: true, features: { mcp: null, workloads: true }, environments: [] });
     if (req.method === 'PATCH' && req.url === '/api/secrets/app/prod' && known) return send(200, { operationId: 'op', keys: { KEY: { version: 1 } } });
     send(401, { error: 'unauthenticated', message: 'that credential is unknown, expired or revoked' });
@@ -92,10 +93,15 @@ async function ciInstance(t: test.TestContext) {
   return { origin: `http://127.0.0.1:${address.port}`, seen };
 }
 
-/** The CLI, `input` on its stdin: not spawnSync, which would stop the server in this process from answering it. */
-async function cli(home: string, args: string[], input: string, cwd?: string): Promise<{ status: number | null; stdout: string; stderr: string }> {
+/**
+ * The CLI, `input` on its stdin: not spawnSync, which would stop the server in this process from answering it.
+ * `gone`, it runs in `cwd` removed once it started, as another shell might.
+ */
+async function cli(home: string, args: string[], input: string, cwd?: string, gone = false): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_')));
-  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...args], { cwd, env: { ...env, HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const removed = `import { rmSync } from 'node:fs'; process.cwd(); rmSync(process.cwd(), { recursive: true }); process.argv.splice(1, 0, ${JSON.stringify(main)}); await import(${JSON.stringify(pathToFileURL(main).href)});`;
+  const node = gone ? ['--conditions=coffre:source', '--input-type=module', '-e', removed, '--'] : ['--conditions=coffre:source', main];
+  const child = spawn(process.execPath, [...node, ...args], { cwd, env: { ...env, HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
   let [stdout, stderr] = ['', ''];
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
@@ -275,4 +281,95 @@ test("a person's login keeps the session the instance still knows, and only pins
   writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: origin, instances: { [origin]: { ...ada, token: 'coffre_cli_gone' } } }), { mode: 0o600 });
   await cli(home, ['login', origin, '--no-browser'], '', join(home, 'code'));
   assert.ok(seen.some(({ url }) => url === '/api/auth'), 'no new sign-in was started');
+});
+
+/** A home with `code/a` pinned to `a`, `b` the default, and what each instance has been asked. */
+async function pinnedHome(t: test.TestContext) {
+  const a = await ciInstance(t);
+  const b = await ciInstance(t);
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'coffre-pins-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const directory of ['code/a', 'elsewhere']) mkdirSync(join(home, directory), { recursive: true });
+  const at = (directory: string, args: string[], input = '') => cli(home, args, input, join(home, directory));
+  assert.equal((await at('code/a', ['login', a.origin, '--token'], 'coffre_svc_ci\n')).status, 0);
+  assert.equal((await at('.', ['login', b.origin, '--token'], 'coffre_svc_ci\n')).status, 0);
+  const asked = { a: a.seen.length, b: b.seen.length };
+  return {
+    b: b.origin,
+    home,
+    at,
+    pinsFile: join(home, '.coffre', 'directories.json'),
+    /** The requests sent since, to each. */
+    since: () => ({ a: a.seen.length - asked.a, b: b.seen.length - asked.b }),
+    refused: async (directory: string, error: RegExp) => {
+      const run = await at(directory, ['whoami']);
+      assert.equal(run.status, 1, run.stdout);
+      assert.match(run.stderr, error);
+    },
+  };
+}
+
+test('pins are read from the file the CLI wrote, not through a link, dangling or not', async (t) => {
+  const { b, home, at, pinsFile, since, refused } = await pinnedHome(t);
+  const elsewhere = join(home, 'elsewhere', 'pins.json');
+  writeFileSync(elsewhere, readFileSync(pinsFile));
+  rmSync(pinsFile);
+  symlinkSync(elsewhere, pinsFile);
+  await refused('code/a', /cannot read the pinned directories in .*directories\.json: it is reached through a symbolic link\. Name the instance with --url/);
+  rmSync(elsewhere);
+  await refused('code/a', /it is reached through a symbolic link/);
+  assert.deepEqual(since(), { a: 0, b: 0 });
+  assert.equal((await at('code/a', ['--url', b, 'whoami'])).status, 0);
+});
+
+test('a pins file whose directories are a list, not a record, stops a command', async (t) => {
+  const { pinsFile, since, refused } = await pinnedHome(t);
+  writeFileSync(pinsFile, JSON.stringify({ version: 1, directories: [] }));
+  await refused('code/a', /cannot read the pinned directories .*: this CLI does not know its shape/);
+  assert.deepEqual(since(), { a: 0, b: 0 });
+});
+
+test('a command run in a directory removed since stops, unless --url names the instance', async (t) => {
+  const { b, home, since } = await pinnedHome(t);
+  mkdirSync(join(home, 'code/a/gone'));
+  const gone = await cli(home, ['whoami'], '', join(home, 'code/a/gone'), true);
+  assert.equal(gone.status, 1, gone.stdout);
+  assert.match(gone.stderr, /^coffre: cannot tell which directory this is: .*\. Name the instance with --url\n$/);
+  assert.deepEqual(since(), { a: 0, b: 0 });
+  const named = await cli(home, ['--url', b, 'whoami'], '', join(home, 'elsewhere'), true);
+  assert.equal(named.status, 0, named.stderr);
+  assert.deepEqual(since(), { a: 0, b: 1 });
+});
+
+/** A home with a person's session saved, by `token`, for the instance. */
+async function savedHome(t: test.TestContext, token: string) {
+  const { origin, seen } = await ciInstance(t);
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'coffre-pins-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, 'code'));
+  mkdirSync(join(home, '.coffre'), { mode: 0o700 });
+  const credentials = join(home, '.coffre', 'credentials.json');
+  const saved = JSON.stringify({ version: 2, current: origin, instances: { [origin]: { mode: 'signin', token, expiresAt: '2099-01-01T00:00:00Z', obtainedAt: '2026-10-01T00:00:00Z' } } });
+  writeFileSync(credentials, saved, { mode: 0o600 });
+  return { origin, seen, home, credentials, saved };
+}
+
+test("a person's login replaces the saved session only when the instance says it does not know it", async (t) => {
+  // The instance answers GET /api/me for this one with a 500.
+  const { origin, seen, home, credentials, saved } = await savedHome(t, 'coffre_cli_busy');
+  const busy = await cli(home, ['login', origin, '--no-browser'], '', join(home, 'code'));
+  assert.equal(busy.status, 1, busy.stdout);
+  assert.equal(busy.stderr, `coffre: could not check the session saved for ${origin}, which is kept: something went wrong. Retry, or \`coffre logout ${origin}\` first for a new one\n`);
+  assert.equal(readFileSync(credentials, 'utf8'), saved);
+  assert.ok(!seen.some(({ url }) => url.startsWith('/api/auth')), 'a new sign-in was started');
+  assert.ok(!existsSync(join(home, '.coffre', 'directories.json')));
+});
+
+test('login refuses an --auth-mode it does not know before asking the instance anything', async (t) => {
+  const { origin, seen, home } = await savedHome(t, 'coffre_cli_ada');
+  const typo = await cli(home, ['--auth-mode', 'signon', 'login', origin, '--no-browser'], '', join(home, 'code'));
+  assert.equal(typo.status, 1, typo.stdout);
+  assert.equal(typo.stderr, 'coffre: --auth-mode must be one of signin, cloudflare, not "signon"\n');
+  assert.equal(seen.length, 0);
+  assert.ok(!existsSync(join(home, '.coffre', 'directories.json')));
 });
