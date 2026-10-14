@@ -1394,21 +1394,22 @@ class VaultService implements Vault {
    * it finds is a hint, never a report: its reads can pair a row with
    * grants another decision committed between them. Then one decision,
    * under their row and the log's head, reads again, and reports: two named
-   * people signing in at once make one Owner. Whether it decided, so that
-   * their row may have changed since `access` read it: made an Owner by it,
-   * or by another request of theirs in the meantime.
+   * people signing in at once make one Owner. Whether their row may have
+   * changed since `access` read it: they own the instance now, made an Owner
+   * by this decision or by another request of theirs meanwhile, or the
+   * decision ran. Only an Owner found or made is kept as seen (`owned`).
    */
   async #bootstrap(principal: string): Promise<boolean> {
-    if ((await this.#anOwner(this.#db, [])) !== null) {
+    const found = await this.#anOwner(this.#db, []);
+    if (found !== null) {
       this.#prepared.owned = true;
-      return false;
+      return found === principal;
     }
     const decided = await this.#decideNow([principal], async (d) => {
       await lockLogHead(d.tx);
-      if ((await this.#anOwner(d.tx, d.reports)) === null) await this.#makeOwner(d, principal, 'bootstrap');
-      return {};
+      return { owned: (await this.#anOwner(d.tx, d.reports)) !== null || (await this.#makeOwner(d, principal, 'bootstrap')) };
     });
-    if (decided.ok) this.#prepared.owned = true;
+    if (decided.ok && decided.owned) this.#prepared.owned = true;
     return decided.ok;
   }
 
@@ -1513,9 +1514,15 @@ class VaultService implements Vault {
    */
   async access(principal: string): Promise<Access> {
     const superseded = await this.#settled();
+    const knew = this.#prepared.owned;
     const access = await this.#read(principal, superseded);
-    if (access.status === 'active' && ownsInstance(access)) this.#prepared.owned = true;
-    if (superseded !== null || !this.#bootstrapOwner(principal) || this.#prepared.owned) return access;
+    if (access.status === 'active' && ownsInstance(access)) {
+      this.#prepared.owned = true;
+      return access;
+    }
+    if (superseded !== null || !this.#bootstrapOwner(principal)) return access;
+    // An Owner seen since the read may be this person, made one by another request of theirs: read again, once.
+    if (this.#prepared.owned) return knew ? access : this.#read(principal, superseded);
     return (await this.#bootstrap(principal)) ? this.#read(principal, superseded) : access;
   }
 

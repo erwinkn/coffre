@@ -2707,3 +2707,82 @@ test('a conversion entry forged in the vault\'s name stops nothing, and is repor
   const reports = (await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'vault.tampered').map(entryView);
   assert.deepEqual(reports.map((entry) => entry.code), ['forged_entry']);
 });
+
+/**
+ * `database`, whose first read about `principal`'s row in the log, once
+ * armed, waits after its answer arrived until released: another request
+ * runs in between, as on a busy instance.
+ */
+function pausedReadAbout(database: Database, principal: string) {
+  let paused = () => {};
+  let release = () => {};
+  const reached = new Promise<void>((resolve) => (paused = resolve));
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let armed = false;
+  const wrap = <Q extends object>(query: Q): Q => new Proxy(query, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target) as unknown;
+      if (property === 'then' && typeof value === 'function') {
+        return (resolve: (result: unknown) => void, reject: (error: unknown) => void) =>
+          (value as (ok: (result: unknown) => unknown) => Promise<unknown>).call(target, async (result: unknown) => {
+            const { sql, params } = (target as { toSQL(): { sql: string; params: unknown[] } }).toSQL();
+            if (armed && sql.includes('audit_log') && params.includes(principal)) {
+              armed = false;
+              paused();
+              await released;
+            }
+            return result;
+          }).then(resolve, reject);
+      }
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const result = (value as (...args: unknown[]) => unknown).apply(target, args);
+        return typeof result === 'object' && result !== null && 'toSQL' in result ? wrap(result) : result;
+      };
+    },
+  });
+  const wrapped = new Proxy(database, {
+    get(target, property) {
+      if (property === 'select') return (...args: Parameters<Database['select']>) => wrap(target.select(...args));
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  return { database: wrapped, arm: () => void (armed = true), reached, release };
+}
+
+for (const shared of [false, true]) {
+  test(`a person's request that read them before another request of theirs bootstrapped them answers them an Owner (${shared ? 'one process' : 'two processes'})`, { timeout: 10_000 }, async () => {
+    await places(db.owner);
+    const config = configure({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] });
+    const prepared = await prepareVault(config);
+    const slow = pausedReadAbout(db.vault, ROOT);
+    const first = openVault(slow.database, prepared);
+    const other = openVault(await db.connect(), shared ? prepared : await prepareVault(config));
+    // Both settled first, so that only root's requests remain.
+    assert.equal((await first.access(ADA)).status, 'unknown');
+    assert.equal((await other.access(ADA)).status, 'unknown');
+    slow.arm();
+    const pending = first.access(ROOT);
+    await slow.reached;
+    assert.equal((await other.access(ROOT)).role, 'owner');
+    slow.release();
+    const answer = await pending;
+    assert.deepEqual([answer.status, answer.role], ['active', 'owner']);
+  });
+}
+
+test('a row the log never admitted makes nobody an Owner, and is not taken for one: the next named person bootstraps', async () => {
+  await places(db.owner);
+  const prepared = await prepareVault(configure({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] }));
+  const vault = openVault(db.vault, prepared);
+  assert.equal((await vault.access(ADA)).status, 'unknown');
+  // Root's row, written around the vault, with no entry of the vault's behind it.
+  await db.owner.transaction((tx) => store.insertMember(tx, {
+    principal: ROOT, status: 'active', role: 'member', scope: EVERYWHERE, generation: 0, createdAt: Date.now(), createdBy: 'system:vault',
+    statusChangedAt: Date.now(), statusChangedBy: 'system:vault', accessSeq: 0n, mac: Buffer.alloc(32),
+  }));
+  assert.equal((await vault.access(ROOT)).status, 'tampered');
+  assert.equal(prepared.owned, false);
+  assert.equal((await vault.access(SAM)).role, 'owner');
+});
