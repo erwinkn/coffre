@@ -96,7 +96,7 @@ export function assignableToEnvironment(role: Role): boolean {
 export const INSTANCE_ROLES = {
   member: {
     name: 'Member',
-    description: 'Only what projects grant.',
+    description: 'None.',
     permissions: [],
   },
   auditor: {
@@ -116,7 +116,7 @@ export const INSTANCE_ROLES = {
   },
   owner: {
     name: 'Owner',
-    description: 'Everything an admin does, and read every secret.',
+    description: 'Everything, every secret included.',
     permissions: [...PERMISSIONS],
   },
 } as const satisfies Record<string, {

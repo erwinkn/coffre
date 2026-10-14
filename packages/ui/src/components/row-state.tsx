@@ -17,13 +17,17 @@ export function rowClass(status: ItemStatus): string {
   return '';
 }
 
-/** In place of a row's actions while its change is on its way. */
+/**
+ * In place of a row's actions while its change is on its way. Where the
+ * actions column fits only a button, the words go from sight, not from the
+ * page: they stay for a screen reader and the spinner's tooltip.
+ */
 export function RowPending({ status }: { status: ItemStatus }) {
   if (status.state !== 'pending') return null;
   return (
-    <span className="row-pending">
+    <span className="row-pending" title={status.words.pending}>
       <Spinner size={13} />
-      {status.words.pending}
+      <span className="row-pending-words">{status.words.pending}</span>
     </span>
   );
 }
