@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+**The CLI picks the instance by directory.** With several instances, a
+company's and your own, `coffre login <url>` pins the directory it ran in
+to that instance, for it and every directory below, as well as making it
+the default. A command then uses `--url`, else the nearest pinned
+directory's instance, else the default, so `~/Code/acme` talks to
+secrets.acme.example and `~/Code/mine` to your own, without `--url` or
+another login. `coffre whoami` says why: "on https://secrets.acme.example
+(pinned at ~/Code/acme)", or "(the default)"; `coffre use` lists the
+directories pinned to each instance and stars the one used here. A
+directory pinned to an instance you are not signed in to says to sign in
+there, and never uses the default's session instead. `coffre login` with a
+session the instance still knows keeps it and only pins (`coffre logout`
+first for a new one), and one in your home directory sets the default
+only. `coffre logout` unpins the instance's directories. The pins live in
+`~/.coffre/directories.json`, beside the sessions rather than in their
+file, so a CLI before this one, which rewrites the sessions' file in the
+shape it knows, keeps every session and never drops a pin; it ignores
+them and uses the default everywhere.
+
 ## 0.5.1 (2026-10-11)
 
 **`coffre update` moves a deployment with the new release's pages.** The

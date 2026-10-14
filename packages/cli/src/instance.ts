@@ -3,7 +3,7 @@
  *
  * One person often has several instances (a company's and their own), so
  * sessions are kept per origin in one file, and `coffre login <url>` makes
- * that origin the current one:
+ * that origin the default one:
  *
  *   {
  *     "version": 2,
@@ -18,10 +18,16 @@
  * bearer token (`--token`), an Access service token's secret
  * (`--access-client-id`), or the credential its ID token buys
  * (`--service`); each saved as the instance's session. The session flags
- * pick another instance than the current one, `--url`, or sign one command
- * in as a service by its ID token, `--service` (`flags.ts`).
+ * pick another instance than the one a command would use, `--url`, or sign
+ * one command in as a service by its ID token, `--service` (`flags.ts`).
+ *
+ * `coffre login <url>` also pins the directory it ran in to that origin,
+ * for it and every directory below, in a file of its own beside the
+ * sessions (`Pins`). A command uses `--url`, else the nearest pinned
+ * directory's instance, else the default.
  */
 
+import { isAbsolute, relative, sep } from 'node:path';
 import { apiMember, type AuthInfo } from '@coffre/client';
 
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
@@ -80,6 +86,29 @@ export type SessionFlags = {
   authMode?: string;
 };
 
+/**
+ * Which instance each pinned directory uses, by its real path, in
+ * `~/.coffre/directories.json`:
+ *
+ *   {
+ *     "version": 1,
+ *     "directories": { "/home/ada/Code/acme": "https://coffre.acme.example" }
+ *   }
+ *
+ * Not in the credentials file: a CLI from before pins rewrites that one in
+ * the shape it knows, which would drop them unseen, and leaves this one
+ * alone. It holds no secret.
+ */
+export type Pins = { version: 1; directories: Record<string, string> };
+
+/** The pin that applies in a directory: its own, or its nearest pinned parent's. */
+export type Pin = { directory: string; origin: string };
+
+/** Which instance a command means, and why: `--url`, the directory's pin, or the default. */
+export type Choice =
+  | { origin: string; by: 'url' | 'default' }
+  | { origin: string; by: 'pin'; directory: string };
+
 const MODES: readonly AuthMode[] = ['signin', 'cloudflare'];
 const KINDS: readonly SessionKind[] = ['token', 'access', 'run'];
 
@@ -114,6 +143,74 @@ export function parseStore(text: string): Store {
       ? candidate.current
       : null;
   return { version: 2, current, instances };
+}
+
+export function emptyPins(): Pins {
+  return { version: 1, directories: {} };
+}
+
+/**
+ * Read the pins file. Unlike the sessions, one this CLI cannot read is an
+ * error, not an empty file: that would send a pinned directory's commands
+ * to the default instance.
+ */
+export function parsePins(text: string): Pins {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error('it is not JSON');
+  }
+  const candidate = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Pins>;
+  if (candidate.version !== 1 || typeof candidate.directories !== 'object' || candidate.directories === null) {
+    throw new Error('this CLI does not know its shape: a later coffre wrote it, perhaps');
+  }
+  const directories: Record<string, string> = {};
+  for (const [directory, origin] of Object.entries(candidate.directories)) {
+    if (!isAbsolute(directory) || typeof origin !== 'string') throw new Error(`it pins ${JSON.stringify(directory)} to ${JSON.stringify(origin)}`);
+    directories[directory] = instanceOrigin(origin);
+  }
+  return { version: 1, directories };
+}
+
+/** Whether `directory` is `ancestor` or below it. */
+export function within(directory: string, ancestor: string): boolean {
+  const path = relative(ancestor, directory);
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+/** The pin that applies in `directory`, a real path: the longest pinned one it is in. */
+export function pinFor(pins: Pins, directory: string): Pin | null {
+  let found: Pin | null = null;
+  for (const [pinned, origin] of Object.entries(pins.directories)) {
+    if (within(directory, pinned) && (found === null || pinned.length > found.directory.length)) found = { directory: pinned, origin };
+  }
+  return found;
+}
+
+/** Pin `directory` to `origin`, unless the pin that applies there says so already. */
+export function withPin(pins: Pins, directory: string, origin: string): Pins {
+  if (pinFor(pins, directory)?.origin === origin) return pins;
+  return { version: 1, directories: { ...pins.directories, [directory]: origin } };
+}
+
+/** Every pin to `origin` taken out, and the directories they pinned. */
+export function withoutPins(pins: Pins, origin: string): { pins: Pins; unpinned: string[] } {
+  const kept = Object.entries(pins.directories).filter(([, pinned]) => pinned !== origin);
+  const unpinned = Object.entries(pins.directories).filter(([, pinned]) => pinned === origin).map(([directory]) => directory);
+  return { pins: { version: 1, directories: Object.fromEntries(kept) }, unpinned };
+}
+
+/**
+ * The instance a command means: `--url`, else the pin that applies where
+ * it runs, else the default. A pinned instance is the one, signed in there
+ * or not: never another one's session in its place.
+ */
+export function choose(flags: SessionFlags, store: Store, pin: Pin | null): Choice {
+  if (flags.url !== undefined) return { origin: instanceOrigin(flags.url), by: 'url' };
+  if (pin !== null) return { origin: pin.origin, by: 'pin', directory: pin.directory };
+  if (store.current !== null) return { origin: store.current, by: 'default' };
+  throw new Error('not signed in anywhere yet: run `coffre login <url>`');
 }
 
 export function parseMode(raw: string | undefined): AuthMode | undefined {
@@ -203,13 +300,9 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
  * is given: `readSession` refused an empty one, which falling back to the
  * saved session would have taken for none.
  */
-export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new Date()): Target {
+export function resolveTarget(flags: SessionFlags, store: Store, pin: Pin | null = null, now: Date = new Date()): Target {
   const explicitMode = parseMode(flags.authMode);
-  const requested = flags.url ?? store.current;
-  if (!requested) {
-    throw new Error('not signed in anywhere yet: run `coffre login <url>`');
-  }
-  const origin = instanceOrigin(requested);
+  const { origin } = choose(flags, store, pin);
 
   if (flags.service !== undefined) {
     if (explicitMode === 'cloudflare') {

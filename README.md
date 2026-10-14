@@ -117,9 +117,9 @@ needs only its address:
 ```sh
 coffre setup                                # a new deployment's logins, migrations and keys; on Workers, Cloudflare and deploys on push (docs/deploy.md)
 pnpm exec coffre migrate --yes              # in a deployment, before its deploy: its pinned version's migrations
-coffre login https://secrets.acme.example   # a device login: approve it in the browser
-coffre whoami
-coffre use                                  # the instances you are signed in to
+coffre login https://secrets.acme.example   # a device login: approve it in the browser; pins this directory to it
+coffre whoami                               # who you are, where, and why there
+coffre use                                  # the instances you are signed in to, and the directories pinned to each
 coffre sessions                             # where you are signed in; sessions revoke <id> signs one out
 coffre identities                           # the accounts you sign in with
 
@@ -202,9 +202,34 @@ use `--format shell`, which quotes values literally, including quotes and
 newlines, or use `coffre run` to pass them directly to a child process.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
-(mode 0600), and can be revoked from the account page. The CLI reads no
-environment variable, and a secret is never a flag or an argument: a command
-asks for it at a hidden prompt, or reads it from stdin. CI signs in as a
+(mode 0600), and can be revoked from the account page.
+
+With several instances, say your company's and your own, each directory
+picks its own. `coffre login <url>` pins the directory it ran in to that
+instance, for it and every directory below, and makes the instance the
+default too. A command uses `--url`, else the nearest pinned directory's
+instance, else the default (`coffre use <url>` switches it):
+
+```sh
+cd ~/Code/acme && coffre login https://secrets.acme.example
+cd ~/Code/mine && coffre login https://secrets.example.com
+cd ~/Code/acme/web && coffre whoami
+# ada@acme.example (user) on https://secrets.acme.example (pinned at ~/Code/acme), via coffre sign-in
+```
+
+A login where the CLI already holds a session the instance still knows
+keeps it and only pins; `coffre logout` first for a new one. A login in
+your home directory, or above it, sets the default only. A directory
+pinned to an instance you are not signed in to says so, and never falls
+back to another instance. `coffre logout` unpins every directory pinned
+to the instance. The pins, which hold no secret, are in
+`~/.coffre/directories.json`, by real path, so a directory reached
+through a symbolic link uses its target's pin. Earlier CLIs do not
+read them, and use the default everywhere.
+
+The CLI reads no environment variable, and a secret is never a flag or an
+argument: a command asks for it at a hidden prompt, or reads it from stdin.
+CI signs in as a
 service account, a machine identity: by OIDC, its ID token matched by a trust
 binding, `--service`, with nothing to store ([docs/ci.md](docs/ci.md)); or
 with a bearer token from the service account's page, piped to `coffre login
