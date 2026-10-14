@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**The CLI picks the instance by directory.** With several instances, a
+company's and your own, `coffre login <url>` pins the directory it ran in
+to that instance, for it and every directory below, as well as making it
+the default. A command then uses `--url`, else the nearest pinned
+directory's instance, else the default, so `~/Code/acme` talks to
+secrets.acme.example and `~/Code/mine` to your own, without `--url` or
+another login. `coffre whoami` says why: "on https://secrets.acme.example
+(pinned at ~/Code/acme)", or "(the default)"; `coffre use` lists the
+directories pinned to each instance and stars the one used here. A
+directory pinned to an instance you are not signed in to says to sign in
+there, and never uses the default's session instead, nor does a command
+that cannot tell which pin applies (a pins file it cannot read, or reached
+through a symbolic link, or a directory removed since): it stops, and
+`--url` names the instance. `coffre login` with a session the instance
+still knows keeps it and only pins (`coffre logout` first for a new one;
+only the instance saying it does not know the session starts a new
+login), and one in your home directory sets the default only. `coffre
+logout` unpins the instance's directories. The pins live in
+`~/.coffre/directories.json`, beside the sessions rather than in their
+file, so a CLI before this one, which rewrites the sessions' file in the
+shape it knows, keeps every session and never drops a pin; it ignores
+them and uses the default everywhere.
+
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description
 of the role is gone: the role field under it already says what each role

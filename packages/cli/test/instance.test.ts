@@ -2,15 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  choose,
   credentialHeaders,
+  emptyPins,
   emptyStore,
   instanceOrigin,
   isJsonContentType,
   loginMode,
+  parsePins,
   parseStore,
+  pinFor,
   resolveTarget,
+  within,
+  withPin,
+  withoutPins,
   withSession,
   withoutSession,
+  type Pins,
   type Store,
 } from '../src/instance.ts';
 
@@ -92,7 +100,7 @@ test('signing out of the current instance falls back to another one', () => {
 // --- resolution ---------------------------------------------------------------
 
 test('with no session flags, the current instance and its session are used', () => {
-  assert.deepEqual(resolveTarget({}, storeWith(), NOW), {
+  assert.deepEqual(resolveTarget({}, storeWith(), null, NOW), {
     origin: OURS,
     mode: 'signin',
     by: 'person',
@@ -101,7 +109,7 @@ test('with no session flags, the current instance and its session are used', () 
 });
 
 test('--url picks another saved instance, with that instance’s mode', () => {
-  assert.deepEqual(resolveTarget({ url: 'coffre.acme.example' }, storeWith(), NOW), {
+  assert.deepEqual(resolveTarget({ url: 'coffre.acme.example' }, storeWith(), null, NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
     by: 'person',
@@ -111,9 +119,9 @@ test('--url picks another saved instance, with that instance’s mode', () => {
 
 test('a CI run signs in with `coffre login`, and its session is used as a person’s is', () => {
   const token = withSession(emptyStore(), OURS, { mode: 'signin', kind: 'token', token: 'coffre_svc_ci', expiresAt: null, obtainedAt: '2026-09-26T00:00:00Z' });
-  assert.deepEqual(resolveTarget({}, token, NOW), { origin: OURS, mode: 'signin', by: 'token', credential: { kind: 'token', token: 'coffre_svc_ci' } });
+  assert.deepEqual(resolveTarget({}, token, null, NOW), { origin: OURS, mode: 'signin', by: 'token', credential: { kind: 'token', token: 'coffre_svc_ci' } });
   const access = withSession(emptyStore(), THEIRS, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh', obtainedAt: '2026-09-26T00:00:00Z' });
-  assert.deepEqual(resolveTarget({}, access, NOW), {
+  assert.deepEqual(resolveTarget({}, access, null, NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
     by: 'access',
@@ -128,9 +136,9 @@ test('a CI run signs in with `coffre login`, and its session is used as a person
     expiresAt: '2026-09-26T12:05:00Z',
     obtainedAt: '2026-09-26T12:00:00Z',
   });
-  assert.equal(resolveTarget({}, run, NOW).by, 'run');
+  assert.equal(resolveTarget({}, run, null, NOW).by, 'run');
   assert.throws(
-    () => resolveTarget({}, run, new Date('2026-09-26T12:06:00Z')),
+    () => resolveTarget({}, run, null, new Date('2026-09-26T12:06:00Z')),
     /lasted until 12:05:00: sign in again, `coffre login https:\/\/coffre\.example\.com --service token:api-deploy`/,
   );
   // An unknown kind, from a later CLI say, is no session at all.
@@ -139,24 +147,95 @@ test('a CI run signs in with `coffre login`, and its session is used as a person
 
 test('an instance with no saved session asks for a login there', () => {
   assert.throws(
-    () => resolveTarget({ url: 'https://other.example.com' }, storeWith(), NOW),
+    () => resolveTarget({ url: 'https://other.example.com' }, storeWith(), null, NOW),
     /not signed in to https:\/\/other\.example\.com: run `coffre login https:\/\/other\.example\.com`/,
   );
-  assert.throws(() => resolveTarget({}, emptyStore(), NOW), /coffre login <url>/);
+  assert.throws(() => resolveTarget({}, emptyStore(), null, NOW), /coffre login <url>/);
 });
 
 test('a saved token is not sent to the same origin under a different mode', () => {
   assert.throws(
-    () => resolveTarget({ authMode: 'cloudflare' }, storeWith(), NOW),
+    () => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW),
     /not signed in to https:\/\/coffre\.example\.com/,
   );
-  assert.throws(() => resolveTarget({ authMode: 'dev' }, storeWith(), NOW), /--auth-mode must be one of signin, cloudflare/);
+  assert.throws(() => resolveTarget({ authMode: 'dev' }, storeWith(), null, NOW), /--auth-mode must be one of signin, cloudflare/);
 });
 
 test('an expired session is refused locally with the date it ended', () => {
   assert.throws(
-    () => resolveTarget({}, storeWith(), new Date('2026-11-01T00:00:00Z')),
+    () => resolveTarget({}, storeWith(), null, new Date('2026-11-01T00:00:00Z')),
     /ended on 2026-10-26: run `coffre login https:\/\/coffre\.example\.com`/,
+  );
+});
+
+// --- pinned directories -------------------------------------------------------
+
+function pinned(): Pins {
+  let pins = withPin(emptyPins(), '/home/ada/Code/acme', THEIRS);
+  pins = withPin(pins, '/home/ada/Code/acme/side', OURS);
+  return pins;
+}
+
+test('a directory uses its nearest pinned parent, and a sibling sharing a prefix is not below it', () => {
+  const pins = pinned();
+  assert.deepEqual(pinFor(pins, '/home/ada/Code/acme'), { directory: '/home/ada/Code/acme', origin: THEIRS });
+  assert.deepEqual(pinFor(pins, '/home/ada/Code/acme/web/src'), { directory: '/home/ada/Code/acme', origin: THEIRS });
+  assert.deepEqual(pinFor(pins, '/home/ada/Code/acme/side/x'), { directory: '/home/ada/Code/acme/side', origin: OURS });
+  assert.equal(pinFor(pins, '/home/ada/Code/acme-old'), null);
+  assert.equal(pinFor(pins, '/home/ada/Code'), null);
+  assert.ok(within('/home/ada', '/'));
+  assert.ok(within('/home/ada/..x', '/home/ada'), 'a directory whose name starts with two dots is still below');
+});
+
+test('a login pins its directory only where the pin that applies says otherwise', () => {
+  const pins = pinned();
+  assert.equal(withPin(pins, '/home/ada/Code/acme/web', THEIRS), pins, 'a pin below one to the same instance is redundant');
+  assert.deepEqual(withPin(pins, '/home/ada/Code/acme/web', OURS).directories['/home/ada/Code/acme/web'], OURS);
+  assert.deepEqual(withPin(pins, '/home/ada/Code/acme', OURS).directories['/home/ada/Code/acme'], OURS, 'a directory is pinned again in place');
+});
+
+test('signing out unpins every directory pinned to that instance', () => {
+  const { pins, unpinned } = withoutPins(withPin(pinned(), '/srv/other', THEIRS), THEIRS);
+  assert.deepEqual(unpinned, ['/home/ada/Code/acme', '/srv/other']);
+  assert.deepEqual(pins.directories, { '/home/ada/Code/acme/side': OURS });
+});
+
+test('the pins file is read whole or not at all: one this CLI cannot read is an error, never no pins', () => {
+  assert.deepEqual(parsePins(JSON.stringify({ version: 1, directories: { '/home/ada/Code/acme': 'coffre.acme.example' } })).directories, {
+    '/home/ada/Code/acme': THEIRS,
+  });
+  assert.throws(() => parsePins('not json'), /not JSON/);
+  assert.throws(() => parsePins(JSON.stringify({ version: 2, directories: {} })), /does not know its shape/);
+  assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: [] })), /does not know its shape/);
+  assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: { 'Code/acme': THEIRS } })), /pins "Code\/acme"/);
+  assert.throws(() => parsePins(JSON.stringify({ version: 1, directories: { '/a': 'http://devbox:3000' } })), /plain HTTP/);
+});
+
+test('--url, then the pin that applies, then the default', () => {
+  const pin = { directory: '/home/ada/Code/acme', origin: THEIRS };
+  assert.deepEqual(choose({ url: 'coffre.example.com' }, storeWith(), pin), { origin: OURS, by: 'url' });
+  assert.deepEqual(choose({}, storeWith(), pin), { origin: THEIRS, by: 'pin', directory: '/home/ada/Code/acme' });
+  assert.deepEqual(choose({}, storeWith(), null), { origin: OURS, by: 'default' });
+  assert.equal(resolveTarget({}, storeWith(), pin, NOW).origin, THEIRS);
+  // A CI run's ID token goes where the directory is pinned too, as it went to the default.
+  assert.equal(resolveTarget({ service: 'deploy' }, emptyStore(), pin, NOW).origin, THEIRS);
+});
+
+test('a saved default or pin over plain HTTP is refused as a typed one is, a CI run’s ID token too', () => {
+  const insecure = 'http://secrets.acme.example';
+  const store = withSession(emptyStore(), insecure, { mode: 'signin', token: 'coffre_cli_x', obtainedAt: '2026-09-26T00:00:00Z' });
+  assert.equal(store.current, insecure);
+  for (const flags of [{}, { service: 'deploy' }]) {
+    assert.throws(() => resolveTarget(flags, store, null, NOW), /refusing to send credentials over plain HTTP/);
+    assert.throws(() => resolveTarget(flags, storeWith(), { directory: '/home/ada/Code/acme', origin: insecure }, NOW), /plain HTTP/);
+  }
+});
+
+test('a directory pinned to an instance with no session asks for a login there, and never uses the default', () => {
+  const pin = { directory: '/home/ada/Code/gone', origin: 'https://gone.example.com' };
+  assert.throws(
+    () => resolveTarget({}, storeWith(), pin, NOW),
+    /^Error: not signed in to https:\/\/gone\.example\.com: run `coffre login https:\/\/gone\.example\.com`$/,
   );
 });
 

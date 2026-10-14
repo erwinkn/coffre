@@ -8,7 +8,7 @@
  */
 import { parseArgs } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
-import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -27,17 +27,27 @@ import { memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
+  choose,
   credentialHeaders,
+  emptyPins,
   emptyStore,
   instanceOrigin,
   isJsonContentType,
   loginMode,
   parseMode,
+  parsePins,
   parseStore,
+  pinFor,
   resolveTarget,
+  within,
+  withPin,
+  withoutPins,
   withSession,
   withoutSession,
+  type AuthMode,
   type Credential,
+  type Pin,
+  type Pins,
   type Session,
   type Store,
   type Target,
@@ -51,12 +61,14 @@ import {
   serviceName,
   shownMember,
   unreachable,
+  Unreachable,
   type CoffreClient,
 } from '@coffre/client';
 import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
+const PINS_PATH = join(homedir(), '.coffre', 'directories.json');
 
 // `coffre export … | head` closes the pipe early; that is the reader being
 // done, not an error worth a stack trace.
@@ -70,28 +82,81 @@ function readStore(): Store {
 }
 
 function writeStore(store: Store): void {
-  const directory = dirname(CREDENTIALS_PATH);
+  writePrivate(CREDENTIALS_PATH, 'credentials', store);
+}
+
+/**
+ * Read the pins: none only if there is no file. One this CLI cannot read,
+ * or reached through a symbolic link, which `writePrivate` refuses too, is
+ * an error: a link, dangling or not, would let another file say where
+ * credentials go.
+ */
+function readPins(): Pins {
+  try {
+    for (const path of [dirname(PINS_PATH), PINS_PATH]) {
+      const found = lstatSync(path, { throwIfNoEntry: false });
+      if (found === undefined) return emptyPins();
+      if (found.isSymbolicLink()) throw new Error('it is reached through a symbolic link');
+    }
+    return parsePins(readFileSync(PINS_PATH, 'utf8'));
+  } catch (error) {
+    fail(`cannot read the pinned directories in ${PINS_PATH}: ${(error as Error).message}. Name the instance with --url, or move the file away`);
+  }
+}
+
+function writePins(pins: Pins): void {
+  writePrivate(PINS_PATH, 'pinned directories', pins);
+}
+
+/** Write one of the CLI's files, readable by you alone, in a directory only you can enter. */
+function writePrivate(path: string, what: string, value: unknown): void {
+  const directory = dirname(path);
   try {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
-    if (lstatSync(directory).isSymbolicLink() || (existsSync(CREDENTIALS_PATH) && lstatSync(CREDENTIALS_PATH).isSymbolicLink())) {
-      throw new Error('a symbolic link is not a credentials path');
+    if (lstatSync(directory).isSymbolicLink() || (existsSync(path) && lstatSync(path).isSymbolicLink())) {
+      throw new Error(`a symbolic link is not a ${what} path`);
     }
     chmodSync(directory, 0o700);
     if ((statSync(directory).mode & 0o777) !== 0o700) throw new Error('directory permissions must be 0700');
     // Creation modes do not tighten an existing file. Replace it privately,
     // so a shared inode or a failed write never receives a new session.
-    const temporary = join(directory, `.credentials-${crypto.randomUUID()}`);
+    const temporary = join(directory, `.write-${crypto.randomUUID()}`);
     try {
-      writeFileSync(temporary, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
       chmodSync(temporary, 0o600);
       if ((statSync(temporary).mode & 0o777) !== 0o600) throw new Error('file permissions must be 0600');
-      renameSync(temporary, CREDENTIALS_PATH);
+      renameSync(temporary, path);
     } finally {
       rmSync(temporary, { force: true });
     }
   } catch (error) {
-    fail(`cannot secure credentials at ${CREDENTIALS_PATH}: ${error instanceof Error ? error.message : String(error)}`);
+    fail(`cannot secure ${what} at ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/**
+ * Where the command runs, as pins name it: its real path. A directory gone
+ * since is an error, not one without a pin: that would be the default
+ * instance's, whatever its pin said.
+ */
+function here(then: string): string {
+  try {
+    return realpathSync(process.cwd());
+  } catch (error) {
+    fail(`cannot tell which directory this is: ${(error as Error).message}. ${then}`);
+  }
+}
+
+/** The pin that applies where the command runs, unless --url names the instance. */
+function pinHere(): Pin | null {
+  if (sessionFlags.url !== undefined) return null;
+  return pinFor(readPins(), here('Name the instance with --url'));
+}
+
+/** A directory as you would type it: `~/Code/acme`. */
+function shown(directory: string): string {
+  const home = attempt(() => realpathSync(homedir()));
+  return home !== '/' && within(directory, home) ? `~${directory.slice(home.length)}` : directory;
 }
 
 function fail(message: string): never {
@@ -108,7 +173,7 @@ function attempt<T>(step: () => T): T {
 }
 
 function target(): Target {
-  return attempt(() => resolveTarget(sessionFlags, readStore()));
+  return attempt(() => resolveTarget(sessionFlags, readStore(), pinHere()));
 }
 
 /** cloudflared keeps and refreshes the Access token; ask it each time. */
@@ -268,11 +333,14 @@ function printMe(me: Me): void {
 }
 
 /**
- * Sign in to an instance and make it the current one. How depends on who
- * vouches for people there, which the CLI finds out by asking (`loginMode`):
+ * Sign in to an instance, make it the default, and pin the directory the
+ * login ran in to it. How depends on who vouches for people there, which
+ * the CLI finds out by asking (`loginMode`):
  *
  * - coffre's own sign-in: the CLI shows a code, you approve it in a browser
  *   where you are signed in, and the CLI receives a session token of its own.
+ *   A session saved here that the instance still knows is kept: the login
+ *   only pins.
  * - Cloudflare Access: the CLI hands over to `cloudflared`, which keeps the
  *   Access token from then on.
  */
@@ -299,7 +367,11 @@ async function login(args: string[]): Promise<void> {
     if (values[name]?.trim() === '') fail(`--${name} is empty: an unset variable, perhaps`);
   }
 
-  const requested = attempt(() => oneUrl(positionals[0], 'login')) ?? readStore().current;
+  const mode = attempt(() => parseMode(sessionFlags.authMode));
+  // The directory to pin, known before anything is asked of the instance.
+  const directory = here('A login pins the directory it runs in: run it from one that exists');
+
+  const requested = attempt(() => oneUrl(positionals[0], 'login')) ?? pinHere()?.origin ?? readStore().current;
   if (!requested) fail('usage: coffre login <url>, for example `coffre login https://coffre.example.com`');
   const origin = attempt(() => instanceOrigin(requested));
   // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
@@ -307,12 +379,68 @@ async function login(args: string[]): Promise<void> {
   if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
     fail(`signed in to ${origin} as ${kept.principal?.id ?? 'a person'}: \`coffre logout ${origin}\` first, or sign the run in from a home of its own`);
   }
-  if (values.token) return tokenLogin(origin);
-  if (values['access-client-id'] !== undefined) return accessServiceLogin(origin, values['access-client-id'].trim());
-  if (values.service !== undefined) return runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
-  const mode = attempt(() => parseMode(sessionFlags.authMode)) ?? (await askMode(origin));
-  if (mode === 'cloudflare') return accessLogin(origin);
+  if (values.token) await tokenLogin(origin);
+  else if (values['access-client-id'] !== undefined) await accessServiceLogin(origin, values['access-client-id'].trim());
+  else if (values.service !== undefined) await runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
+  else if (!(await keepSession(origin, kept, mode))) {
+    const asked = mode ?? (await askMode(origin));
+    await (asked === 'cloudflare' ? accessLogin(origin) : deviceLogin(origin, values['no-browser']));
+  }
+  pinTo(directory, origin);
+}
 
+/**
+ * A person's session on coffre's own sign-in, saved here, that the instance
+ * still knows: made the default again, rather than a new one asked for.
+ * Only the instance saying it does not know it, 401, replaces it: any other
+ * failure leaves it as it is, and says so.
+ */
+async function keepSession(origin: string, kept: Session | undefined, mode: AuthMode | undefined): Promise<boolean> {
+  if (kept === undefined || kept.kind !== undefined || kept.mode !== 'signin' || !kept.token || mode === 'cloudflare') return false;
+  if (kept.expiresAt && Date.parse(kept.expiresAt) <= Date.now()) return false;
+  const token = kept.token;
+  let me: Me;
+  try {
+    me = await createClient({
+      url: origin,
+      headers: () => ({ authorization: `Bearer ${token}` }),
+      transport: (request) =>
+        fetch(request, { redirect: 'manual' }).catch((error: unknown) => {
+          throw new Unreachable(origin, error);
+        }),
+    }).me();
+    if (typeof me?.principal?.id !== 'string') throw new Error('GET /api/me did not answer as coffre does');
+  } catch (error) {
+    if (error instanceof CoffreError && error.status === 401) return false;
+    const why = (error as Error).message;
+    fail(`could not check the session saved for ${origin}, which is kept: ${why}. Retry, or \`coffre logout ${origin}\` first for a new one`);
+  }
+  writeStore(withSession(readStore(), origin, kept));
+  const ends = kept.expiresAt ? `, until ${kept.expiresAt.slice(0, 10)}` : '';
+  process.stdout.write(`Signed in to ${origin} as ${me.principal.id} already${ends}: \`coffre logout\` first for a new session\n`);
+  printMe(me);
+  return true;
+}
+
+/**
+ * Pin the directory a login ran in to its instance, for it and every
+ * directory below: unless it is your home or above it, where the default
+ * the login set is enough.
+ */
+function pinTo(directory: string, origin: string): void {
+  if (within(attempt(() => realpathSync(homedir())), directory)) return;
+  const pins = readPins();
+  const pinned = withPin(pins, directory, origin);
+  if (pinned === pins) {
+    process.stdout.write(`${shown(pinFor(pins, directory)!.directory)} is pinned to it already\n`);
+    return;
+  }
+  writePins(pinned);
+  process.stdout.write(`Pinned ${shown(directory)} to it: coffre uses ${origin} there and in every directory below\n`);
+}
+
+/** A device login: a code shown here, approved in a browser signed in to coffre. */
+async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
   let started: Response;
   try {
     started = await fetch(`${origin}/api/auth/device`, {
@@ -341,7 +469,7 @@ async function login(args: string[]): Promise<void> {
     `\nTo sign in, open\n\n    ${device.verification_uri_complete}\n\n` +
       `and check that it shows the code  ${device.user_code}\n\n`,
   );
-  if (!values['no-browser'] && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
+  if (!noBrowser && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
   process.stderr.write('Waiting for you to approve it…\n');
 
   const session = await pollDevice(origin, device.device_code, device.interval, device.expires_in);
@@ -520,10 +648,20 @@ async function accessLogin(origin: string): Promise<void> {
 async function logout(args: string[]): Promise<void> {
   parse(args, {}, ['<url>'], 1);
   const store = readStore();
-  const requested = attempt(() => oneUrl(args[0], 'logout')) ?? store.current;
+  const requested = attempt(() => oneUrl(args[0], 'logout')) ?? pinHere()?.origin ?? store.current;
   if (!requested) fail('not signed in anywhere');
   const origin = attempt(() => instanceOrigin(requested));
   const session = store.instances[origin];
+  const { pins, unpinned } = withoutPins(readPins(), origin);
+  const unpin = () => {
+    if (unpinned.length === 0) return;
+    writePins(pins);
+    process.stdout.write(`  Unpinned ${unpinned.map(shown).join(', ')}\n`);
+  };
+  if (session === undefined && unpinned.length > 0) {
+    process.stdout.write(`Not signed in to ${origin}\n`);
+    return unpin();
+  }
   if (session === undefined) fail(`not signed in to ${origin}`);
 
   if (session.kind === undefined && session.mode === 'signin' && session.token) {
@@ -547,6 +685,7 @@ async function logout(args: string[]): Promise<void> {
 
   writeStore(withoutSession(store, origin));
   process.stdout.write(`Signed out of ${origin}\n`);
+  unpin();
   if (session.kind === 'token' || session.kind === 'access') {
     process.stdout.write(`  The ${session.kind === 'token' ? 'bearer token' : 'Access service token'} is forgotten here, and works elsewhere until it is revoked.\n`);
   } else if (session.mode === 'cloudflare' && session.kind === undefined) {
@@ -562,7 +701,10 @@ async function whoami(args: string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify({ origin: to.origin, ...me }, null, 2)}\n`);
     return;
   }
-  const session = readStore().instances[to.origin];
+  const store = readStore();
+  const session = store.instances[to.origin];
+  const choice = attempt(() => choose(sessionFlags, store, pinHere()));
+  const why = choice.by === 'pin' ? ` (pinned at ${shown(choice.directory)})` : choice.by === 'default' ? ' (the default)' : '';
   const via = {
     person: { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode],
     token: 'a bearer token, from coffre login --token',
@@ -570,7 +712,7 @@ async function whoami(args: string[]): Promise<void> {
     run: "the run's ID token, from coffre login --service",
     service: "the run's ID token, as --service",
   }[to.by];
-  process.stdout.write(`${named(me.principal.type, me.principal.id)} on ${to.origin}, via ${via}\n`);
+  process.stdout.write(`${named(me.principal.type, me.principal.id)} on ${to.origin}${why}, via ${via}\n`);
   if (to.by === 'person' && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
@@ -582,24 +724,37 @@ async function whoami(args: string[]): Promise<void> {
   printMe(me);
 }
 
-/** Switch the current instance, or list them. */
+/**
+ * Switch the default instance, or list them: the one used here starred,
+ * each with the directories pinned to it.
+ */
 function use(args: string[]): void {
   parse(args, {}, ['<url>'], 1);
   const store = readStore();
+  const pin = pinHere();
   if (args[0] === undefined) {
-    const origins = Object.keys(store.instances);
+    const pinned = Object.entries(readPins().directories);
+    const origins = [...new Set([...Object.keys(store.instances), ...pinned.map(([, origin]) => origin)])];
     if (origins.length === 0) fail('not signed in anywhere yet: run `coffre login <url>`');
+    const used = pin?.origin ?? store.current;
     for (const origin of origins) {
       const session = store.instances[origin];
-      const marker = origin === store.current ? '*' : ' ';
-      process.stdout.write(`${marker} ${origin.padEnd(36)} ${session.principal?.id ?? ''}\n`);
+      const why = [
+        ...(origin === store.current ? ['the default'] : []),
+        ...pinned.filter(([, to]) => to === origin).map(([directory]) => `pinned at ${shown(directory)}`),
+      ];
+      const who = session === undefined ? 'not signed in' : (session.principal?.id ?? '');
+      process.stdout.write(`${`${origin === used ? '*' : ' '} ${origin.padEnd(36)} ${who.padEnd(24)} ${why.join(', ')}`.trimEnd()}\n`);
     }
     return;
   }
   const origin = attempt(() => instanceOrigin(args[0]));
   if (!(origin in store.instances)) fail(`not signed in to ${origin}: run \`coffre login ${origin}\``);
   writeStore({ ...store, current: origin });
-  process.stdout.write(`Now using ${origin}\n`);
+  process.stdout.write(`Now using ${origin} by default\n`);
+  if (pin !== null && pin.origin !== origin) {
+    process.stdout.write(`  but not here: ${shown(pin.directory)} is pinned to ${pin.origin}, and \`coffre login ${origin}\` pins this directory to it\n`);
+  }
 }
 
 async function get(args: string[]): Promise<void> {
@@ -1187,7 +1342,7 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags);
+      return verifyInstance(more, readStore(), sessionFlags, pinHere());
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);

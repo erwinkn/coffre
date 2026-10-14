@@ -16,7 +16,7 @@ import { parseArgs } from 'node:util';
 import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
-import { credentialHeaders, instanceOrigin, resolveTarget, type SessionFlags, type Store } from '../instance.ts';
+import { credentialHeaders, instanceOrigin, resolveTarget, type Pin, type SessionFlags, type Store } from '../instance.ts';
 import { style, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
 import { Checks, expect, Failure, stop } from './checks.ts';
@@ -60,7 +60,7 @@ and writes its canary and its grants. Exits 1 when a check fails.`;
 /** What the run issued, to revoke at its end. */
 type Issued = { member: string; id: string };
 
-export async function verifyInstance(args: string[], store: Store, session: SessionFlags, out: Output = process.stdout): Promise<void> {
+export async function verifyInstance(args: string[], store: Store, session: SessionFlags, pin: Pin | null, out: Output = process.stdout): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -79,7 +79,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
         '--service is for other commands',
     );
   }
-  const requested = positionals[0] ?? session.url ?? store.current;
+  const requested = positionals[0] ?? session.url ?? pin?.origin ?? store.current;
   if (!requested) stop(1, 'coffre: not signed in anywhere yet: run `coffre login <url>` first');
   let origin: string;
   try {
