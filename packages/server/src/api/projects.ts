@@ -22,7 +22,7 @@ import {
   projectFolderOf,
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { can, canAnywhere, instanceRoleOf, permissionsAt, placeOf, seesProject } from './caller.ts';
+import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
@@ -39,11 +39,10 @@ export type Me = {
   registered: boolean;
   /** Refused by the vault: their record failed its integrity check. */
   tampered: boolean;
-  instanceRole: InstanceRole | 'root-admin';
+  instanceRole: InstanceRole;
   /** Where their instance role applies, projects by slug. */
   scope: Scope;
-  isRootAdmin: boolean;
-  /** Whether they run the instance: an admin or owner with no scope, or a root admin. */
+  /** Whether they run the instance: an admin or owner with no scope. */
   runsInstance: boolean;
   canReadAudit: boolean;
   /** Whether they set up any service account: who runs the instance, or a person who could give one a grant somewhere. */
@@ -111,9 +110,8 @@ export async function me(ctx: ApiContext): Promise<Me> {
     principal: caller.principal,
     registered: caller.registered,
     tampered: caller.tampered,
-    instanceRole: instanceRoleOf(caller),
+    instanceRole: caller.role,
     scope: scopeView(caller.scope, known),
-    isRootAdmin: caller.isRootAdmin,
     runsInstance: runsInstance(caller),
     canReadAudit: canAnywhere(caller, 'audit.read'),
     setsUpServices: setsUp(caller, setting, known),

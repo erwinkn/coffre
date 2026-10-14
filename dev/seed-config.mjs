@@ -2,14 +2,14 @@ const LOCAL_SEED_CONFIG = Object.freeze({
     databaseUrl: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
     apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
-    rootAdmin: 'admin@acme.example',
+    owner: 'admin@acme.example',
 });
 
 /**
  * Identities the login page lists as seeded personas.
  *
- * Root admin is deployment config (`COFFRE_ROOT_ADMINS`), not a directory row.
- * Everyone else must be registered here before `createGrant` will accept them,
+ * The Owner is the vault's bootstrap (`COFFRE_BOOTSTRAP_OWNERS`): signing
+ * in first makes them one, so they are not listed here. Everyone else must be registered here before `createGrant` will accept them,
  * some with an instance role and its scope. `outsider@` is registered with no
  * grants so the closed-door view is a denial, not `/unregistered`.
  */
@@ -52,7 +52,7 @@ const LOCAL_TARGETS = Object.freeze({
     databaseUrl: /^postgresql:\/\/coffre_owner:local-dev-only@127\.0\.0\.1:\d{2,5}\/coffre[a-z0-9_]*$/,
     apiUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
     idpUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
-    rootAdmin: /^admin@acme\.example$/,
+    owner: /^admin@acme\.example$/,
 });
 
 /**
@@ -67,7 +67,7 @@ export function loadLocalSeedConfig(env) {
         databaseUrl: env.DATABASE_URL ?? LOCAL_SEED_CONFIG.databaseUrl,
         apiUrl: env.COFFRE_DEV_URL ?? LOCAL_SEED_CONFIG.apiUrl,
         idpUrl: env.COFFRE_DEV_IDP_URL ?? LOCAL_SEED_CONFIG.idpUrl,
-        rootAdmin: env.COFFRE_ROOT_ADMINS ?? LOCAL_SEED_CONFIG.rootAdmin,
+        owner: env.COFFRE_BOOTSTRAP_OWNERS ?? LOCAL_SEED_CONFIG.owner,
     };
 
     for (const [key, pattern] of Object.entries(LOCAL_TARGETS)) {

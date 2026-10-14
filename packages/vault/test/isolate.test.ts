@@ -57,7 +57,7 @@ function within<T>(ms: number, work: Promise<T>): Promise<T> {
 }
 
 function config() {
-  return resolveVaultConfig({ kek: { id: 'vault-isolate-test', key: randomBytes(32).toString('base64') }, rootAdmins: ['root@acme.example'] });
+  return resolveVaultConfig({ kek: { id: 'vault-isolate-test', key: randomBytes(32).toString('base64') }, bootstrapOwners: ['root@acme.example'] });
 }
 
 test('a first call answers while another first call waits on its own I/O', postgresOnly('a database that never answers'), async () => {

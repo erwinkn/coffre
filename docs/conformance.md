@@ -81,7 +81,7 @@ The people:
 
 | | |
 |---|---|
-| root admin | `root@conformance.example`, the one root admin the vault is told of |
+| admin | `root@conformance.example`, the one bootstrap Owner the vault is told of, and so the instance's Owner |
 | reader | a viewer on `conformance/dev` |
 | leaver | a developer on `conformance/dev`, in a browser and in the CLI (a device login); removed along the way |
 | bulk reader | a viewer on `conformance/bulk`, where there are more values than the bulk limit |
@@ -100,7 +100,7 @@ In order, since each builds on the ones before:
 |---|---|
 | health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
 | browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
-| sign-in | The root admin signs in through GitHub, and is the root admin |
+| sign-in | The admin signs in through GitHub, the first to, and is the Owner of the whole instance |
 | setup, personas | The admin creates the project, its values and the people above |
 | pages in a browser | Signed in as the admin, `/projects`, the project and `/audit`, in headless Chrome, over the DevTools protocol: each shows its heading once its scripts have run and settled, with no uncaught error, console error or failed load. Run between setup and personas. It is what caught wrangler's `keep_names` wrapping the functions seroval writes into a signed-in page in an `__name` only the Worker has |
 | sign-in error, once | A member's address that GitHub now gives another account is refused as `account_mismatch`, and sent back to `/login?error=account_mismatch&with=github&via=github`. The server's HTML says the address already signs in with another GitHub account; in Chrome, the page says it, then its address is `/login`, and a reload shows no error |
@@ -115,9 +115,9 @@ In order, since each builds on the ones before:
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what a token from CI needs: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
 | verify with a token | `coffre verify instance`, the built CLI in a home of its own, signed in with that token, piped to `coffre login --token`, and its canary's value piped in, as CI runs it: every check [as no one and with the token](#against-a-running-instance) passes, but the token's verification, which it skips. Neither the token nor the canary shows in what it prints |
-| login as a user, login as the admin | `coffre login`, in a CLI of each one's own, approved by the reader and by the root admin in their browsers |
-| verify as a user | `coffre verify instance` with the reader's session, a plain user: it exits 1, says plainly it needs an admin or owner of the whole instance, or a root admin, and makes nothing. The session still works. No member, grant, project or environment changes |
-| verify as the admin, verify again | With the root admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
+| login as a user, login as the admin | `coffre login`, in a CLI of each one's own, approved by the reader and by the admin in their browsers |
+| verify as a user | `coffre verify instance` with the reader's session, a plain user: it exits 1, says plainly it needs an admin or owner of the whole instance, and makes nothing. The session still works. No member, grant, project or environment changes |
+| verify as the admin, verify again | With the admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
 | verify interrupted | The same, stopped with Ctrl-C mid-run: it exits 130, its credential revoked and the session still signed in, and nothing it printed shows a credential or a canary |
 | verify leftovers | After the runs: the service holds no credential, the CLI's session is the one `coffre login` made, `conformance/live/CANARY` is as the live setup wrote it, no other member, grant, project or environment changed, and the runs' entries are in the audit log |
 | verify keys | `coffre verify keys` with the admin's session: the deployment's own keys pass, piped in, vault ID included; a wrong vault key and a malformed app key are each named. No key shows in what it prints |
@@ -221,7 +221,7 @@ deployment it booted.
 | token reveal | The canary is revealed once, its value is the one given, and the audit log holds exactly one allowed `secret.read` of it under the reveal's operation and request |
 | token scan | The canary's value, as text, base64 or hex, is in no answer to any GET route, as the token or as no one, nor in any page: only in its reveal |
 | token scope | The token sees the canary's project and reads its environment, and nothing more: every other environment it is told of, a made-up place and the members refuse it, and the audit entries it reads are about its project only |
-| token verification | The whole audit chain verifies. Verifying is for owners and root admins, which a token cannot be, so this is skipped with a token, and says it was not checked |
+| token verification | The whole audit chain verifies. Verifying is for auditors, admins and owners of the whole instance, which a token cannot be, so this is skipped with a token, and says it was not checked |
 
 Each prints ✓, ✗ or – and a line, and the run exits 1 on any ✗. Behind
 Cloudflare Access, which turns everyone away before coffre answers, neither
@@ -231,7 +231,7 @@ verifies the audit log as you.
 ### Signed in as an owner
 
 ```sh
-coffre login https://secrets.example.com     # once, as an owner or a root admin
+coffre login https://secrets.example.com     # once, as an admin or owner of the whole instance
 coffre verify instance
 ```
 
@@ -255,7 +255,7 @@ Signed in as anyone else, it says so and stops before it makes anything.
 
 | Check | What must hold |
 |---|---|
-| owner | The session is an owner's or a root admin's |
+| owner | The session is an admin's or owner's of the whole instance |
 | setup | What step 1 and 2 found and made, a fresh canary and a fresh credential |
 | token, token reveal, token scan, token scope | The token tier, as the fresh credential. Its last check, token verification, which a token can only skip, is left out: yours comes next |
 | owner verification | The whole audit chain verifies, read by you |
@@ -314,7 +314,7 @@ Checking https://secrets.example.com, as no one and with the bearer token `coffr
   ✓ token reveal        one secret.read of CANARY, entry 57, under request 1d3a7bc8-3fcf-419f-9771-c83026072506
   ✓ token scan          72 answers from 15 GET routes and 13 pages, as the token and as no one: no value
   ✓ token scope         only conformance/live; 6 reads elsewhere refused: no other environment of conformance, a made-up place, the members
-  – token verification  verification is for owners and root admins, which this token is not: not checked
+  – token verification  verification is for auditors, admins and owners of the whole instance, which this token is not: not checked
 
 ✓ Conformant
 ```

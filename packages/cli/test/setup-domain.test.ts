@@ -165,7 +165,7 @@ test("DNS elsewhere, two domains on the account, wrangler's login refused: setup
   cloudflare.state.denied.add('ssl').add('dns');
   const { output, code } = await setup('first', async (terminal) => {
     await start(terminal, ADDRESS);
-    await terminal.waitFor('Root admins');
+    await terminal.waitFor('First Owner');
     terminal.send('\r');
     // Not a token, then one Cloudflare refuses, then the one made on the dashboard.
     await terminal.waitFor('Paste a Cloudflare API token, hidden as you paste it');
@@ -221,7 +221,7 @@ test("the run after the DNS change: no token asked, as wrangler's login is enoug
   for (const name of [ADDRESS, `_cf-custom-hostname.${ADDRESS}`, `_acme-challenge.${ADDRESS}`]) cloudflare.state.published.add(name);
   const { output, code } = await setup('first', async (terminal) => {
     await start(terminal, ADDRESS, null);
-    await terminal.waitFor('Root admins');
+    await terminal.waitFor('First Owner');
     terminal.send('\r');
     await terminal.waitFor('coffre is at', 60_000);
   });
@@ -253,7 +253,7 @@ async function refused(where: string, databaseUrl: string, address: string, down
     'Which Cloudflare account?': `${DOWN.repeat(down)}\r`,
     "coffre's address": `\x15${address}\r`,
     "This deployment's name": '\r',
-    'Root admins': '\r',
+    'First Owner': '\r',
     'Which of your domains serves': '\r',
     'How should coffre be reached?': '\r',
     'The domain to add': '\r',
@@ -290,7 +290,7 @@ test("DNS elsewhere, Workers without their keys over a database in use: setup re
   assert.deepEqual(writes, [], 'nothing written to Cloudflare');
   assert.equal(code, 1, text);
   assert.match(text, /✗ The app Worker coffre-used has no APP_KEY, but the database already holds data/);
-  assert.ok(!text.includes('Root admins'), 'refused before the questions left');
+  assert.ok(!text.includes('First Owner'), 'refused before the questions left');
   assert.equal(cloudflare.state.hostnames.get('zone-1')?.length ?? 0, 0);
 });
 
@@ -456,7 +456,7 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
     'dev',
     async (terminal) => {
       await choose(terminal);
-      await terminal.waitFor('Root admins');
+      await terminal.waitFor('First Owner');
       terminal.send('\r');
       await githubAndKeys(terminal, pages);
       await terminal.waitFor('coffre is at', 60_000);
@@ -500,7 +500,7 @@ test("DNS elsewhere, on a database too small for both Hyperdrive configs: setup 
     'Which Cloudflare account?': '\r',
     "coffre's address": '\x15small.example.org\r',
     "This deployment's name": '\r',
-    'Root admins': '\r',
+    'First Owner': '\r',
     'Which of your domains serves': '\r',
   });
   assert.deepEqual(requests.filter(({ method }) => method !== 'GET').map(({ method, path }) => `${method} ${path}`), [], 'nothing written to Cloudflare');

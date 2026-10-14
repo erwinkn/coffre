@@ -205,8 +205,7 @@ export const vaultMembers = pgTable(
     principal: text().primaryKey(),
     status: text().notNull(),
     // An owner of 0.4: an Admin, unless `role` says otherwise. Written as
-    // whether `role` administers, for a vault of 0.4 to read. Root admins
-    // come from the vault's configuration, never from a row.
+    // whether `role` administers, for a vault of 0.4 to read.
     owner: boolean().notNull().default(false),
     // A person's instance role (`INSTANCE_ROLES` in @coffre/core/access),
     // and where it applies, as JSON (`Scope`, projects by id); null on a row

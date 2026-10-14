@@ -453,7 +453,9 @@ at its edges, `user:<email>`, `token:<id>` and `sync:<id>`, so the
 credentials and device approvals reference it by foreign key. Root admins
 still come from the vault's configuration; the vault writes a member row for
 each the first time it is asked about one, so the app has a row to point at,
-and a row never makes anyone a root admin.
+and a row never makes anyone a root admin. (0.6 replaced root admins with
+Owners of the whole instance, members like anyone: see
+[instance-roles.md](instance-roles.md#owners-of-the-whole-instance).)
 
 **Generations revoke** (S2, building on #23's fix for A08). A removal sets
 `status`, clears `owner` and the grants, bumps `generation` and logs, in one

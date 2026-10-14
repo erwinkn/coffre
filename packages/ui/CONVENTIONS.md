@@ -58,6 +58,6 @@ How coffre's pages place and word things. The styles they name are in
 ## Words
 
 - Sentence case for every label, button, tag and column: "Never",
-  "Expired", "Root admin", "Consider rotating". `coffre` stays lowercase.
+  "Expired", "Last used", "Consider rotating". `coffre` stays lowercase.
 - A machine identity is a service account; a bearer token is one of its
   credentials.

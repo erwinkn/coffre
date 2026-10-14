@@ -337,8 +337,8 @@ test("the source's side sees who reads through its references, and the reads are
 
   const lent = (await max.references.list('market/prod/DATABASE_URL')).references;
   assert.deepEqual(lent.map((reference) => [reference.holder, reference.source, reference.readers, reference.canBreak]), [
-    // Ada develops billing, so she reads its prod as Bo does.
-    ['billing/prod/DATABASE_URL', 'market/prod/DATABASE_URL', [`user:${ADA}`, `user:${BO}`], true],
+    // Ada develops billing, so she reads its prod as Bo does; the Owner reads everything.
+    ['billing/prod/DATABASE_URL', 'market/prod/DATABASE_URL', [`user:${ADA}`, `user:${ROOT}`, `user:${BO}`], true],
   ]);
   // Bo sees what billing holds, not who reads it.
   assert.deepEqual((await bo.references.list('billing')).references.map((reference) => [reference.holder, reference.readers, reference.canBreak]), [

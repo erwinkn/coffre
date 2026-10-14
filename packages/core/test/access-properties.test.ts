@@ -15,6 +15,7 @@ import {
   makesProjects,
   mayManageAccess,
   normalScope,
+  ownsInstance,
   roleGrants,
   runsInstance,
   type Filter,
@@ -68,7 +69,6 @@ const filter = (values: readonly string[]) => gs.oneOf(
 );
 const scope = gs.record({ projects: filter(projects), environments: filter(slugs) });
 const holder = gs.record({
-  isRootAdmin: gs.booleans(),
   role: gs.sampledFrom(instanceRoles),
   scope,
   grants: gs.arrays(grant, { maxSize: 8 }).map((held) => [...new Map(held.map((item) => [JSON.stringify([item.projectId, item.environmentId]), item])).values()]),
@@ -87,7 +87,6 @@ function modelAdmits(filter: Filter, value: string | null): boolean {
  * an environment, that environment.
  */
 function modelAllows(member: Holdings, permission: Permission, place: Place): boolean {
-  if (member.isRootAdmin) return true;
   const slug = place.environmentId == null ? undefined : place.environmentSlug;
   const scoped = modelAdmits(member.scope.projects, place.projectId)
     && (slug === undefined ? member.scope.environments === 'all' : modelAdmits(member.scope.environments, slug));
@@ -114,7 +113,7 @@ test(`access decisions match the independent role and scope model, seed ${settin
   // have already been checked by the vault/caller. A service account is a
   // member everywhere, holding only its grants.
   for (const kind of ['user', 'token'] as const) {
-    const holdings: Holdings = kind === 'token' ? { ...member, isRootAdmin: false, role: 'member', scope: { projects: 'all', environments: 'all' } } : member;
+    const holdings: Holdings = kind === 'token' ? { ...member, role: 'member', scope: { projects: 'all', environments: 'all' } } : member;
     for (const place of everyPlace()) {
       for (const permission of permissions) {
         assert.equal(allows(holdings, permission, place), modelAllows(holdings, permission, place), JSON.stringify({ kind, holdings, permission, place }));
@@ -135,10 +134,12 @@ test(`roles, scopes and running the instance match the model, seed ${settings.se
   }
   const administers = actor.role === 'admin' || actor.role === 'owner';
   const everywhere = actor.scope.projects === 'all' && actor.scope.environments === 'all';
-  assert.equal(runsInstance(actor), actor.isRootAdmin || (administers && everywhere));
+  assert.equal(runsInstance(actor), administers && everywhere);
+  // An Owner of the whole instance is an Owner whose scope narrows nothing: one of a project owns no instance.
+  assert.equal(ownsInstance(actor), actor.role === 'owner' && everywhere);
   // A project made now is one no `only` lists, and none `except` lists.
   const takesNewProjects = actor.scope.projects === 'all' || 'except' in actor.scope.projects;
-  assert.equal(makesProjects(actor), actor.isRootAdmin || (administers && takesNewProjects && actor.scope.environments === 'all'));
+  assert.equal(makesProjects(actor), administers && takesNewProjects && actor.scope.environments === 'all');
   // A scope written another way decides the same.
   const normal = normalScope(actor.scope);
   for (const place of everyPlace()) assert.equal(inScope(normal, place), inScope(actor.scope, place));
@@ -159,11 +160,11 @@ test(`a credential reaches what both its scope and its account hold, and never m
   const scope = tc.draw(grants);
   const now = tc.draw(grants);
   const service = (held: Holdings['grants'], credentialScope: Holdings['credentialScope'] = null): Holdings =>
-    ({ isRootAdmin: false, role: 'member', scope: { projects: 'all', environments: 'all' }, grants: held, credentialScope });
+    ({ role: 'member', scope: { projects: 'all', environments: 'all' }, grants: held, credentialScope });
   assert.equal(isCredentialScope(scope), true);
   // Who runs the instance gives anything, so only the account bounds what they issue.
-  const root: Holdings = { isRootAdmin: true, role: 'owner', scope: { projects: 'all', environments: 'all' }, grants: [] };
-  const issued = issuesCredential(root, null, 'user:root', account(atIssue), account(scope).grants);
+  const owner: Holdings = { role: 'owner', scope: { projects: 'all', environments: 'all' }, grants: [] };
+  const issued = issuesCredential(owner, null, 'user:root', account(atIssue), account(scope).grants);
   for (const place of everyPlace()) {
     for (const permission of permissions) {
       const through = allows(service(now, scope), permission, place);
@@ -179,13 +180,13 @@ test(`a credential reaches what both its scope and its account hold, and never m
 
 test('a scope narrows only the role: grants reach past it, and a project is in it only with all its environments', () => {
   const scope: Scope = { projects: 'all', environments: { only: ['dev'] } };
-  const developer: Holdings = { isRootAdmin: false, role: 'developer', scope, grants: [{ projectId: 'billing', environmentId: null, role: 'viewer' }] };
+  const developer: Holdings = { role: 'developer', scope, grants: [{ projectId: 'billing', environmentId: null, role: 'viewer' }] };
   const at = (projectId: string, slug: string): Place => ({ projectId, environmentId: `${projectId}/${slug}`, environmentSlug: slug });
   assert.equal(allows(developer, 'secret.write', at('market', 'dev')), true);
   assert.equal(allows(developer, 'secret.read', at('market', 'prod')), false);
   assert.equal(allows(developer, 'secret.read', at('billing', 'prod')), true, 'the grant reaches past the scope');
   assert.equal(allows(developer, 'secret.write', at('billing', 'prod')), false);
-  const admin: Holdings = { isRootAdmin: false, role: 'admin', scope, grants: [] };
+  const admin: Holdings = { role: 'admin', scope, grants: [] };
   assert.equal(mayManageAccess(admin, at('market', 'dev')), true);
   assert.equal(mayManageAccess(admin, { projectId: 'market' }), false, 'a grant on market would reach market/prod');
   assert.equal(allows(admin, 'secret.read', at('market', 'dev')), false, 'an admin reads no values');
@@ -203,7 +204,7 @@ test('a grant whose fields name no coherent place covers nothing', () => {
     { projectId: null, environmentId: null, role: 'owner' as const },
   ]) {
     assert.equal(grantKind(grant), null);
-    const holder: Holdings = { isRootAdmin: false, role: 'member', scope: { projects: 'all', environments: 'all' }, grants: [grant] };
+    const holder: Holdings = { role: 'member', scope: { projects: 'all', environments: 'all' }, grants: [grant] };
     for (const place of everyPlace()) {
       assert.equal(covers(grant, place), false, JSON.stringify({ grant, place }));
       for (const permission of permissions) assert.equal(allows(holder, permission, place), false);

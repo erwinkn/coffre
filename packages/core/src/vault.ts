@@ -56,9 +56,11 @@ export interface Vault {
   endReferences(input: EndReferencesInput): Promise<Outcome<{ seqs: number[] }>>;
 
   /**
-   * What one principal holds right now: the app asks once per request. A
-   * decision, its rows checked: lists of who holds what read the rows
-   * themselves, and need not ask.
+   * What one principal holds right now: the app asks once per request,
+   * and at sign-in for each verified email. A decision, its rows checked:
+   * lists of who holds what read the rows themselves, and need not ask.
+   * While the instance has no Owner of all of it, a person the vault's
+   * `bootstrapOwners` names becomes one here, logged (`reason: 'bootstrap'`).
    */
   access(principal: string): Promise<Access>;
   /** Set roles at several places for one principal: all of it, or none. */
@@ -96,10 +98,16 @@ export interface Vault {
   /**
    * What the vault's configuration says, which the app shows: the keys its
    * checkpoints verify under, by the key id each checkpoint names (the one
-   * it signs with now, and those of the KEKs it replaced), and the root
-   * admins, as principals.
+   * it signs with now, and those of the KEKs it replaced).
    */
-  about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: string[] }>;
+  about(): Promise<{
+    checkpointKeys: Record<string, CheckpointKey>;
+    /**
+     * @deprecated Always empty: an app of 0.5, deployed after this vault,
+     * lists and checks root admins here until it is. Gone in 0.7.
+     */
+    rootAdmins: [];
+  }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
    * under now, and each one's check, as the vault wrote it. None of it is
@@ -150,8 +158,12 @@ export type RefusalCode =
   | 'ended'
   /** Not allowed to manage access, members or the log. */
   | 'not_allowed'
-  /** Root admins come from the vault's configuration and cannot be changed. */
-  | 'root_admin'
+  /**
+   * The change would leave the instance without an Owner of all of it: the
+   * last one is not demoted, narrowed or removed, by anyone, until another
+   * is made.
+   */
+  | 'last_owner'
   /** Well-formed, but not something the rules allow: a project role on an environment, a service account with an instance role. */
   | 'invalid'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
@@ -282,22 +294,19 @@ export type Access = {
   /**
    * `unknown` for someone never admitted, `tampered` for a member whose row
    * fails the vault's integrity check: refused everything, as `removed` is.
-   * Root admins are always active.
    */
   status: 'active' | 'removed' | 'unknown' | 'tampered';
   /** Advanced by removal, even if the app cannot commit its credential revocations. */
   generation: number;
-  isRootAdmin: boolean;
   /**
    * Their instance role and its scope, while active: `member` everywhere
-   * for service accounts and anyone not active, `owner` everywhere for
-   * root admins. Scopes name projects by id.
+   * for service accounts and anyone not active. Scopes name projects by id.
    */
   role: InstanceRole;
   scope: Scope;
   /** Live grants only, and none unless active. */
   grants: Grant[];
-  /** When the status last changed, and who changed it; null for root admins and strangers. */
+  /** When the status last changed, and who changed it; null for strangers. */
   since: string | null;
   by: string | null;
 };
@@ -325,7 +334,9 @@ export type AdmitInput = Correlation & Through & {
   /**
    * A person's instance role, and where it applies (everywhere, left out).
    * Left out, an existing member keeps theirs and a new one is a `member`.
-   * Changing it takes someone who runs the instance, about someone else.
+   * Changing it takes someone who runs the instance, about someone else,
+   * and never leaves the instance without an Owner of all of it
+   * (`last_owner`).
    */
   role?: InstanceRole;
   scope?: Scope;

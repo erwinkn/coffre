@@ -31,7 +31,7 @@ test('the vault leaves an idle connection open for the server to reuse: it never
     socket: join(dir, 'vault.sock'),
     database: db.vault,
     kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
-    rootAdmins: ['root@acme.example'],
+    bootstrapOwners: ['root@acme.example'],
   });
   const agent = new Agent({ keepAlive: true });
   try {

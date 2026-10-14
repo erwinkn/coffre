@@ -45,7 +45,7 @@ export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   previousKeks: [], // older vault keys: what they wrapped still opens, and what the vault signed under them verifies
-  rootAdmins: ['erwin@example.com'],
+  bootstrapOwners: ['erwin@example.com'], // who becomes the Owner by signing in, while the instance has none
 }));
 ```
 
@@ -75,11 +75,11 @@ export default { fetch: (request: Request) => handler.fetch(request, { context: 
 // src/vault.ts
 import { serveVault } from '@coffre/vault/node';
 
-await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runtime:…@db:5432/coffre', kek, rootAdmins });
+await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runtime:…@db:5432/coffre', kek, bootstrapOwners });
 ```
 
 For local development or tests, run one process with
-`vault: await localVault({ database, kek, rootAdmins })` in the
+`vault: await localVault({ database, kek, bootstrapOwners })` in the
 server. `database` is a Postgres URL, or `file:` for SQLite in
 local development and tests.
 
@@ -131,12 +131,12 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey }`
-and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
+and, for the vault, `{ database, kek, previousKeks?, bootstrapOwners,
 signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
 `signingKey` is required only with a vault key a key service holds.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
-a public URL with a path, no root admin) fails it with a message naming the
+a public URL with a path, no bootstrap Owner) fails it with a message naming the
 setting.
 
 Migrations live in `@coffre/db`, and run before the deploy, in the
@@ -146,7 +146,7 @@ directory `coffre migrate` applies the migrations that CLI carries, which
 are the pinned version's: it refuses to run as another version, or on a
 database a newer coffre migrated, and asks no instance. Anywhere else, it
 migrates an instance's database, and first asks the instance which version
-it runs (`/me`, to owners and root admins only), refusing unless the CLI is
+it runs (`/me`, to admins and owners of the whole instance only), refusing unless the CLI is
 that version. `coffre-server migrate`, the server's own command, stays for
 the Node conformance harness and SQLite. A Worker has no files, so the migrations each version ships are compiled into
 `@coffre/db/schema-version` from their journals: `/me` reports how many the
@@ -416,11 +416,11 @@ and membership generations. The interface:
 |---|---|
 | `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment |
 | `reference`, `endReferences` | make references, each a `reference.create` entry of its own, which every read through one is checked against; end them, each a `reference.end` naming it ([design](design/environments.md#references)) |
-| `access(principal)` | one principal's status, owner flag and grants, their rows checked; the app asks once per request |
+| `access(principal)` | one principal's status, instance role and grants, their rows checked; the app asks once per request, and it makes a bootstrap Owner while the instance has none |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
-| `about` | the public key checkpoints verify under, and the root admins: what only its configuration says |
+| `about` | the public keys checkpoints verify under: what only its configuration says; and `rootAdmins`, always empty, for an app of 0.5 during a deploy, until 0.7 |
 | `verifyLog` | check the vault's MACs over the prefix the app verified (asked with no head, the whole chain too), every checkpoint, and replay members and grants |
 
 Every argument and result is plain data, and a refusal is a value, not a
@@ -441,13 +441,15 @@ naming the provider and key id, and the next checkpoint is refused, so
 `/readyz` turns red. A key service that cannot answer is not a verdict; the
 next call asks again. With a local vault key, the vault knows sooner: its keys
 come from the vault key, so a wrong one holds none of those its entries were
-written under, and the vault writes nothing at all.
+written under: the vault writes nothing at all, and can check no member's
+row, so every member's request answers 503.
 [restore.md](restore.md#if-the-vault-key-is-wrong) shows what an operator sees.
 
 The vault owns everything that decides access: the vault key,
 grants (`(principal, place) → role`, one per member per place, with an
-optional expiry), principal status (active or removed), the root admins (from
-its configuration, so no row anywhere makes someone one), and its log entries.
+optional expiry), principal status (active or removed) and instance role,
+who may become the first Owner (`bootstrapOwners`, from its configuration),
+and its log entries.
 Whether a caller is still in, and what they may do, comes only from
 `vault.access`. `can()` stays a plain function over the grants that call
 returned.
@@ -489,7 +491,7 @@ them, which starts them over.
 
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
-| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `bulkLimit`; `signingKey` with a KMS key |
+| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `bootstrapOwners`, `bulkLimit`; `signingKey` with a KMS key |
 | Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 

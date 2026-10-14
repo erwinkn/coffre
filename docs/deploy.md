@@ -255,7 +255,7 @@ acme-secrets/
   app/src/routes/_solo.tsx     the sign-in pages' frame, { ...solo }; its pages in _solo/
   app/vite.config.ts           cloudflare(…), tanstackStart(), viteReact(), coffre()
   app/wrangler.jsonc           HYPERDRIVE, VAULT service binding, Cron
-  vault/src/worker.ts          vault(env => ({ database, kek, rootAdmins }))
+  vault/src/worker.ts          vault(env => ({ database, kek, bootstrapOwners }))
   vault/wrangler.jsonc         VAULT_HYPERDRIVE; no public route
 ```
 
@@ -358,7 +358,7 @@ of this section itself. Say yes, and it:
 
 1. signs in to Cloudflare through wrangler's browser login, and asks which
    account when there are several;
-2. asks coffre's address and the root admins. An address under one of the
+2. asks coffre's address and its first Owner's email. An address under one of the
    account's domains becomes the app's custom domain; one whose DNS is
    elsewhere is served through one of them
    ([below](#a-domain-whose-dns-is-elsewhere));
@@ -371,8 +371,8 @@ of this section itself. Say yes, and it:
    PNG, `node_modules/@coffre/cli/assets/github-app-logo.png`, to upload
    there under Display information;
 5. fills in both `wrangler.jsonc`: the account, the Hyperdrive ids, the
-   address and its route, GitHub's client ID, the root admins and the vault
-   ID;
+   address and its route, GitHub's client ID, the Owner's email and the
+   vault ID;
 6. shows the keys on their screen, then deploys the vault and the app with
    them as secrets, on wrangler's stdin;
 7. when the deployment is a GitHub repository, makes the Cloudflare token
@@ -517,8 +517,9 @@ GitHub App whose callback is `<PUBLIC_URL>/auth/callback/github`, with
 read-only access to email addresses, as setup makes it, and, for its logo,
 [coffre's mark](../packages/cli/assets/github-app-logo.png). An OAuth app
 with that callback works too. Set
-`ROOT_ADMINS` in `vault/wrangler.jsonc`: the first people in, whom nobody can
-remove through the API. `VAULT_KEY_ID` comes with the keys, in step 3.
+`BOOTSTRAP_OWNERS` in `vault/wrangler.jsonc`: who becomes the instance's
+Owner by signing in first, while it has none
+([deployment-auth.md](deployment-auth.md#the-first-owner)). `VAULT_KEY_ID` comes with the keys, in step 3.
 
 For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
 ([deployment-auth.md](deployment-auth.md)).
@@ -596,8 +597,8 @@ it cannot derive its signing key from it, and needs a third key,
 ### 4. Deploy
 
 `pnpm run deploy` deploys the vault, then builds the app with Vite and
-deploys what it built. `pnpm build` builds both without deploying them. Route the app to `PUBLIC_URL`, sign in as a
-root admin, then try the CLI:
+deploys what it built. `pnpm build` builds both without deploying them. Route the app to `PUBLIC_URL`, sign in as the
+Owner, the first time, then try the CLI:
 
 ```sh
 coffre login https://secrets.example.com
@@ -611,7 +612,7 @@ acme-secrets/
   app/src/server.ts      { fetch: Start's handler, coffre.request(request) its context }; coffre.schedule()
   app/src/routes/        the root and coffre's routes, as on Workers
   app/vite.config.ts     tanstackStart(), viteReact(), coffre()
-  src/vault.ts           serveVault({ socket, database, kek, rootAdmins })
+  src/vault.ts           serveVault({ socket, database, kek, bootstrapOwners })
   .env.example           app settings
   vault.env.example      vault settings
 ```
@@ -634,7 +635,7 @@ cp vault.env.example vault.env
 chmod 600 .env vault.env
 ```
 
-Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, then
+Fill in `PUBLIC_URL`, the GitHub OAuth settings and `BOOTSTRAP_OWNERS`, then
 the values from `coffre setup`'s screen ([step 3 above](#3-keys-and-secrets)
 says what each key is for). `.env` takes the app key, `APP_KEY`, and
 the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,

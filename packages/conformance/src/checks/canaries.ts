@@ -55,7 +55,7 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
 
   const token = (value: string) => (url: string) => fetch(url, { headers: { authorization: `Bearer ${value}` } });
   const browsers = {
-    'the root admin': people.admin.browser,
+    'the Owner': people.admin.browser,
     'the reader': people.reader.browser,
     'the bulk reader': people.bulk.browser,
     'the leaver, removed': people.leaver.browser,

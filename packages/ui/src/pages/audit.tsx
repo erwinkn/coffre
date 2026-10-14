@@ -378,7 +378,7 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
     return (
       <Toggletip
         align="end"
-        label="Only owners and root admins can check the log: it takes every entry, and you see only your projects'."
+        label="Only auditors, admins and owners of the whole instance can check the log: it takes every entry, and you see only your projects'."
       >
         <button type="button" className="chain-note">
           <Info size={14} />

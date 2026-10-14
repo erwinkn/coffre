@@ -5,6 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { and, asc, count, eq } from 'drizzle-orm';
 
 import { PROJECT_PAGES } from '@coffre/core/pages';
+import { EVERYWHERE } from '@coffre/core/access';
 
 import { auditLog, projects, vaultMembers } from './db/tables.ts';
 import {
@@ -69,7 +70,7 @@ async function auditCount(): Promise<number> {
   return row.n;
 }
 
-test('root admins and instance owners create projects without implicit secret grants', async () => {
+test('Owners create projects without implicit secret grants', async () => {
   await root.members.add(OWNER, { role: 'admin' });
   assert.deepEqual(await root.projects.create('market', { name: 'Market' }), {
     project: { slug: 'market', name: 'Market', archivedAt: null },
@@ -106,9 +107,9 @@ test('creating a project or environment that exists changes nothing and logs not
   assert.equal(await auditCount(), logged);
 });
 
-test('only configured bootstrap principals project as root admins', async () => {
+test('the bootstrap Owner owns the instance, as an Owner like any other', async () => {
   const me = await root.me();
-  assert.equal(me.instanceRole, 'root-admin');
+  assert.deepEqual([me.instanceRole, me.scope, me.runsInstance], ['owner', EVERYWHERE, true]);
   assert.equal(me.canReadAudit, true);
   const them = await outsider.me();
   assert.equal(them.instanceRole, 'member');
@@ -361,7 +362,7 @@ test('two owners adding the same member at once both succeed, and one of them cr
     .from(auditLog)
     .where(and(eq(auditLog.action, 'member.add'), eq(auditLog.decision, 'allow')))
     .orderBy(asc(auditLog.seq));
-  // The root admin's own row, made on first use; LEAD, READER, CI, OWNER; then the new member once.
+  // The Owner's own row, the bootstrap's; LEAD, READER, CI, OWNER; then the new member once.
   assert.deepEqual(creates.map(({ subject }) => subject), [
     'user:admin@acme.example', LEAD, READER, CI, OWNER, 'user:new@acme.example',
   ]);

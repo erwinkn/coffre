@@ -279,7 +279,8 @@ test('the audit chain verifies across history, restore, and import', async () =>
 
 test('creating a project does not grant its creator access to secrets', async () => {
   assert.deepEqual((await deps.vault.access(`user:${ROOT}`)).grants, []);
-  assert.deepEqual((await root.members.list('market')).members.map((entry) => entry.member), [`user:${READER}`]);
+  // Listed by the role that reaches market, as an Owner: no grant of the project's making.
+  assert.deepEqual((await root.members.list('market')).members.map((entry) => [entry.member, entry.grants.length]), [[`user:${ROOT}`, 0], [`user:${READER}`, 1]]);
 });
 
 test('a member shows what they still hold', async () => {

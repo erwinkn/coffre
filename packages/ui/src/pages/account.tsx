@@ -93,7 +93,6 @@ export function AccountProfilePage() {
                   principalId: principal.id,
                   instanceRole: instanceRole ?? 'member',
                   scope,
-                  isRootAdmin: instanceRole === 'root-admin',
                 }}
               />
             </Fact>

@@ -7,7 +7,7 @@ type Env = {
   VAULT_HYPERDRIVE: Hyperdrive;
   VAULT_KEY_ID: string;
   VAULT_KEY: string;
-  ROOT_ADMINS: string;
+  BOOTSTRAP_OWNERS: string;
 };
 
 export default vault((env: Env) => ({
@@ -16,7 +16,8 @@ export default vault((env: Env) => ({
   // After a rotation, the vault keys before it, so the data keys they wrapped
   // still open and the records signed under them before it still verify:
   // previousKeks: [{ id: 'vault-2026-04-01-k7q2xm', key: env.OLD_VAULT_KEY }],
-  rootAdmins: env.ROOT_ADMINS.split(',').map((email) => email.trim()),
+  // Who becomes the Owner by signing in, while the instance has none.
+  bootstrapOwners: env.BOOTSTRAP_OWNERS.split(',').map((email) => email.trim()),
   // The vault derives its signing key from the vault key. With a key a key
   // service holds, such as awsKms(…), it needs one of its own: signingKey: env.SIGNING_KEY.
 }));

@@ -35,6 +35,8 @@ REMOVALS=(
   "Referencing SourceRecheckInReference ReferencedSourcesStayLive"
   "Referencing ArchiveRefusedWhileRead ReferencedSourcesStayLive"
   "Referencing ReferenceRereadInDeletion EveryReferenceBreakable"
+  "Owners LastOwnerCheckUnderHead OwnerStays"
+  "Bootstrap BootstrapCheckUnderHead BootstrapOnlyWithoutOwner"
 )
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

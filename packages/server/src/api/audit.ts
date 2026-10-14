@@ -151,8 +151,7 @@ export type AuditQuery = {
 
 /**
  * Newest first, both authors. Whoever reads the whole log reads everything:
- * a root admin, and an Auditor, Admin or Owner whose scope narrows nothing
- * (`readsWholeLog`). Anyone else reads the projects and environments where
+ * an Auditor, Admin or Owner whose scope narrows nothing (`readsWholeLog`). Anyone else reads the projects and environments where
  * they hold `audit.read`, by a grant or their instance role, and nothing
  * else: an entry about no place, such as a sign-in or a member's removal,
  * is the instance's, and theirs alone.
@@ -271,7 +270,7 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
 /** What the keys are checked against (`AuditKeys`): for those who run the instance, whose keys they are. */
 export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
   if (!runsInstance(ctx.caller)) {
-    throw forbidden('only a root admin, or an admin or owner of the whole instance, may read what the keys are checked against');
+    throw forbidden('only an admin or owner of the whole instance may read what the keys are checked against');
   }
   const { current, checks } = await ctx.vault.keyChecks();
   return {
@@ -296,7 +295,7 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
  */
 export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
   if (!readsWholeLog(ctx.caller)) {
-    throw forbidden('only those who read the whole log may verify it: a root admin, or an auditor, admin or owner of the whole instance');
+    throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
   }
   const failed = (author: 'app' | 'vault', failedAtSeq: number | bigint | null, reason: string, through: bigint | null) => ({
     ok: false as const,

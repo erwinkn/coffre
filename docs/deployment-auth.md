@@ -172,34 +172,62 @@ Do not treat this application check as a substitute for protecting the data
 plane. The Worker receives PostgreSQL access only through its Hyperdrive
 binding; the Scaleway database has no public endpoint.
 
-## Root-admin bootstrap
+## The first Owner
 
-Root admins are the vault's configuration (`vault/src/worker.ts`), not the
-app's: at least one human email.
+coffre's most powerful people are its **Owners of the whole instance**:
+members like any other, with the Owner role and no scope, in People, and
+changed by the same rules. The vault's configuration names who may become
+the first one (`vault/src/worker.ts`):
 
 ```ts
-rootAdmins: ['first.admin@example.com'],
+bootstrapOwners: ['first.owner@example.com'],
 ```
 
-`coffre init` reads them from the vault's `ROOT_ADMINS` var, comma-separated.
+`coffre init` reads them from the vault's `BOOTSTRAP_OWNERS` var,
+comma-separated. Each value must be an email, and match what that person
+signs in with: a verified address of their GitHub or OIDC account, or the
+`email` claim Cloudflare Access emits (who must then be allowed by the
+Access policy). An empty or malformed list makes a new instance
+unadministrable, so the vault refuses to start with one.
 
-Each value must be an email, and match what the first person signs in with:
-a verified address of their GitHub or OIDC account, or the `email` claim
-Cloudflare Access emits (who must then be allowed by the Access policy).
-Service accounts cannot be root admins. Root admins are the
-configuration-owned bootstrap principals that can create the first project and
-grant; an empty or malformed list makes a new instance unadministrable, so the
-vault refuses to start with one.
+The list only **bootstraps**. While the instance has no active Owner of
+the whole instance, the first person it names to sign in becomes one, made
+a member by the vault itself and logged as such (`system:vault`, "no Owner
+was left, and the deployment names them to take over"). Two named people
+signing in at once make one Owner: the other is told they are not a
+member, and the Owner admits them. While there is an Owner, the list does
+nothing; an Owner of one project (a scope) does not count. That is both
+the first sign-in of a new instance and the way back into one with no
+Owner left: change the list to an email you control, deploy, and sign in.
 
-Every non-root identity must also be an active member, which the vault
+So the list is a standing way in, not a record of who was first. If every
+Owner's row stops passing the vault's check, as whoever can write to the
+database can make it, the next person it names to sign in to a fresh
+vault process or Worker isolate (a deploy starts fresh ones) takes the
+instance over, even one an Owner removed since. Keep it to people you
+would trust as Owner, and take people off it when they leave.
+
+It does not help an Owner who exists but can no longer sign in, having
+lost their GitHub account for one: the instance still has its Owner. Keep
+a second Owner for that.
+
+The instance keeps an Owner from then on. The last Owner of the whole
+instance cannot be demoted, narrowed to a scope, or removed, by anyone,
+themselves included: "you're the last Owner of the whole instance: make
+someone else an Owner first". Make another Owner before you leave. Any
+Admin or Owner of the whole instance makes and unmakes Owners, but for
+the last, and nobody changes their own role.
+
+Every other identity must also be an active member, which the vault
 decides. Signing in, with a provider or through Access, authenticates the
 person; it does not register them in this Coffre instance. An authenticated
 but unregistered browser is confined to `/unregistered`, while `/api`
 returns `403 registration_required` for everything but `GET /api/me`.
 
-Changes to `rootAdmins` are deployment configuration changes. Keep at
-least one controlled bootstrap identity until the operational recovery path is
-defined and tested.
+Before 0.6 the list was `rootAdmins` (`ROOT_ADMINS`), people who held
+everything and were in no member row. 0.6 reads that name too, for one
+release, and turns those root admins into Owners once ("Upgrading from 0.5"
+in the [release notes](../CHANGELOG.md)).
 
 ## Local development
 
@@ -208,7 +236,7 @@ defined and tested.
 `dev/idp` runs on :8081) stands in for GitHub and for an OpenID Connect
 provider, and its authorize page asks which seeded person you are. Plain
 HTTP is accepted for a provider on loopback only, so no deployment can end
-up trusting it. The seed signs in the same way, as the root admin, and
+up trusting it. The seed signs in the same way, first, as the Owner, and
 conformance does too, with the dev IdP in its own process for the run.
 It also plays a CI platform under `/workloads`, which a trust binding may
 name in development: `curl -s -X POST http://127.0.0.1:8081/workloads/token
@@ -220,7 +248,7 @@ against Access-shaped tokens.
 ### Email admission
 
 Generic OIDC providers must send `email_verified: true` before an address can
-match an invitation or bootstrap a root administrator. Google also requires a
+match an invitation or bootstrap an Owner. Google also requires a
 Gmail address or a Workspace `hd` claim. A third-party Google account may still
 carry an address whose ownership has changed.
 

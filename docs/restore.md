@@ -24,8 +24,8 @@ instead of deriving one from the vault key. See [keys.md](keys.md).
 Keep the keys apart from the backups. A backup alone opens nothing, and the
 keys alone hold nothing; whoever has both has every value.
 
-Check your escrow before you need it: `coffre verify keys`, as an owner or a
-root admin, asks for the vault key and the app key you keep, and checks
+Check your escrow before you need it: `coffre verify keys`, as an Admin or
+Owner of the whole instance, asks for the vault key and the app key you keep, and checks
 each against the running instance on your machine, sending neither. A vault
 key it replaced is named as such ([keys.md](keys.md#check-your-escrow)). Do
 it once the keys are saved, and after every rotation.
@@ -161,7 +161,7 @@ Restore:
 
 Before reopening traffic:
 
-1. `coffre verify log`, as an owner or root admin. It must say `audit log OK`,
+1. `coffre verify log`, as an Owner. It must say `audit log OK`,
    verified through the newest entry, with the last checkpoint the backup
    held. It checks every link, both authors' MACs, every checkpoint against
    the prefix it signed, and replays the members and grants.
@@ -193,26 +193,34 @@ With a local vault key, the vault's own keys come from it
 ([keys.md](keys.md#a-local-key)). A vault key other than the one that
 wrapped the data, whether a mistyped key under the right `VAULT_KEY_ID` or
 the wrong escrowed key, holds none of the keys the vault's entries were written under, which
-the vault sees at its first call. It then writes nothing at all, and refuses
-every key operation, reads and writes alike, and every change of access:
+the vault sees at its first call. It then writes nothing at all, and
+refuses every key operation and every change of access. It cannot check
+anyone's member row either, since it sealed them under the same keys, the
+Owner's included: it says of no member who they are, so nobody signs in,
+and every request from a member's session or token answers
 
 ```
-HTTP 503  {"error":"unavailable","reason":"wrong_kek",
-           "message":"the vault's entries are under vault:3f1c…, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config"}
+HTTP 503  {"error":"unavailable","message":"coffre cannot check who you are right now"}
+```
+
+while the app's log says why:
+
+```
+checking who called failed … the vault's entries are under vault:3f1c…, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config
 ```
 
 The scheduled checkpoint is refused too, so `/readyz` turns red after the
-next beat (`checkpointed: false`), and verification fails at the first
-entry the vault wrote, which `coffre verify log` explains:
+next beat (`checkpointed: false`).
+
+A vault key replaced and then dropped from `previousKeks` shows the other
+way: the values under the new vault key read, and `coffre verify log` fails
+at the first entry the vault wrote under the one dropped, saying why:
 
 ```
 written under vault:3f1c…, a key this verifier does not hold: either it is forged,
 or the vault wrote it under another vault key or signing key, which must stay configured:
 a vault key that was replaced stays in the vault's config, in previousKeks
 ```
-
-The same verdict, with the values under the new vault key readable, means a
-vault key replaced and then dropped from `previousKeks`.
 
 A vault key the vault's own keys do not come from, an earlier one in
 `previousKeks` or a KMS key beside a `signingKey`, is checked before the
@@ -265,9 +273,8 @@ this machine, against the compose Postgres, after `pnpm build`:
    - `coffre verify instance` passes, as no one and with the restored
      token, which reads the canary.
 5. It restarts the example with a random vault key under the same id, and checks
-   that the canary and a new write are both refused with `wrong_kek`, that
-   verification fails at the vault's first entry and says why, and that
-   `/readyz` turns red.
+   that its Owner cannot sign in, that reading the canary and a new write,
+   with the restored token, both answer 503, and that `/readyz` turns red.
 
 It drops both databases and stops what it started, however it ends. It
 does not drill a PlanetScale branch: there, the steps that differ are the

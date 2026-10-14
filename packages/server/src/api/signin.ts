@@ -45,7 +45,7 @@ import { issuedScope, managedAccount, notManager, readScope, scopeByPath, sealCr
 export type SigninServiceDeps = {
   db: Database;
   chainKey: Buffer;
-  /** Who is a member, and who is a root admin, is the vault's to say. */
+  /** Who is a member, and who owns the instance while nobody does, is the vault's to say. */
   vault: Vault;
   signin: SigninConfig;
   /**
@@ -300,7 +300,7 @@ export class SigninService {
       return await this.#completeSignin(profile, meta);
     } catch (error) {
       if (error instanceof SigninRefused) return refusal(error);
-      // Someone else bound this account, or created this root admin, first.
+      // Someone else bound this account first.
       if (isUniqueViolation(error)) return this.#completeSignin(profile, meta).catch(refusalOrThrow);
       throw error;
     }
@@ -447,8 +447,9 @@ export class SigninService {
   }
 
   /**
-   * The member, or root admin, that one of these verified emails names, as
-   * the vault knows them. The provider's primary address is tried first.
+   * The member that one of these verified emails names, as the vault knows
+   * them: asking makes one the vault's configuration names an Owner, while
+   * the instance has none (`bootstrapOwners`). The provider's primary address is tried first.
    * Principal ids are lowercase, and so are the emails a verified profile
    * carries.
    */
@@ -478,7 +479,7 @@ export class SigninService {
   async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access): Promise<boolean> {
     if (standing.status !== 'active') return false;
     const row = await memberStanding(tx, principalOf(principal));
-    return row !== null && row.generation === standing.generation && (row.status === 'active' || standing.isRootAdmin);
+    return row !== null && row.generation === standing.generation && row.status === 'active';
   }
 
   /** Revalidate the initiating credential under the app audit head. */

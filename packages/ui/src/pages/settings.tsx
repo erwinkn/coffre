@@ -24,7 +24,6 @@ export function SettingsPage() {
   const providers = auth?.signin?.providers.map((provider) => provider.label) ?? [];
 
   const principals = directory?.ok === true ? directory.principals : null;
-  const rootAdmins = principals?.filter((entry) => entry.isRootAdmin) ?? [];
   const users = principals?.filter((entry) => entry.principalType === 'user').length ?? 0;
   const tokens = principals?.filter((entry) => entry.principalType === 'service').length ?? 0;
 
@@ -56,15 +55,6 @@ export function SettingsPage() {
           </Fact>
           {principals !== null && (
             <>
-              <Fact label="Root admins">
-                <span className="fact-list">
-                  {rootAdmins.map((admin) => (
-                    <span key={admin.principalId} className="mono">
-                      {admin.principalId}
-                    </span>
-                  ))}
-                </span>
-              </Fact>
               <Fact label="Directory">
                 <span>
                   <Link to="/users">

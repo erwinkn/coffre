@@ -76,6 +76,8 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
   }
   // Not the caller's doing: the instance is misconfigured, and stays unable to open any value until restarted.
   if (refusal.code === 'wrong_kek') return new ApiError('unavailable', refusal.message, refusal.code);
+  // Valid, and refused only by who else owns the instance now: the message says what to do first.
+  if (refusal.code === 'last_owner') return new ApiError('conflict', refusal.message, refusal.code);
   return new ApiError('vault_refused', `the vault refused: ${refusal.message}`, refusal.code);
 }
 

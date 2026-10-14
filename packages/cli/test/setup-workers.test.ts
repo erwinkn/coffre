@@ -149,13 +149,13 @@ async function opened(prefix: string, seen = 0): Promise<string> {
   }
 }
 
-/** Yes to Cloudflare; the address and the root admins as they are offered, once signed in. */
+/** Yes to Cloudflare; the address and the first Owner as they are offered, once signed in. */
 async function answer(terminal: Session, address = ''): Promise<void> {
   await terminal.waitFor('Set Cloudflare up too?');
   terminal.send('\r');
   await terminal.waitFor("coffre's address");
   terminal.send(`${address}\r`);
-  await terminal.waitFor('Root admins');
+  await terminal.waitFor('First Owner');
   terminal.send('\r');
 }
 
@@ -191,7 +191,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     terminal.send('secrets\r');
     await terminal.waitFor('an address such as secrets.example.com');
     terminal.send(`\x15${ADDRESS}\r`);
-    await terminal.waitFor('Root admins');
+    await terminal.waitFor('First Owner');
     terminal.send('\r');
     // A browser on this machine: setup's page, GitHub's, and back.
     await terminal.waitFor("GitHub: create coffre's app");
@@ -209,7 +209,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.equal(code, 1, text);
   assert.match(text, /✓ Signed in to Cloudflare as ops@acme\.test, account Acme/);
   assert.match(text, /✓ coffre's address {2}secrets\.acme\.test/);
-  assert.match(text, /✓ Root admins {2}ops@acme\.test/);
+  assert.match(text, /✓ First Owner {2}ops@acme\.test/);
   assert.match(text, /✓ Created coffre_runtime and coffre_vault_runtime/);
   assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, a connection limit of 20 each\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime\n\s+max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20\n/);
   assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
@@ -220,7 +220,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   );
   assert.match(
     text,
-    /✓ Filled in app\/wrangler\.jsonc and vault\/wrangler\.jsonc\n\s+app\s+the account, Hyperdrive, GitHub's client ID, the address and its custom domain\n\s+vault\s+the account, Hyperdrive, the root admins and the vault ID\n/,
+    /✓ Filled in app\/wrangler\.jsonc and vault\/wrangler\.jsonc\n\s+app\s+the account, Hyperdrive, GitHub's client ID, the address and its custom domain\n\s+vault\s+the account, Hyperdrive, the first Owner and the vault ID\n/,
   );
   assert.match(text, /✓ Deployed the vault, coffre-vault, with its key/);
   assert.match(text, /✗ Deploy the app\n\s+wrangler could not deploy app\/dist\/server\/wrangler\.json/);
@@ -265,7 +265,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   const vault = readWorker(deployment(), 'vault/wrangler.jsonc');
   assert.deepEqual([app.accountId, app.hyperdrive, app.route, app.vars.PUBLIC_URL], ['acc-acme', configs[0]!.id, ADDRESS, `https://${ADDRESS}`]);
   assert.match(app.vars.GITHUB_CLIENT_ID!, /^Iv23li/);
-  assert.deepEqual([vault.accountId, vault.hyperdrive, vault.vars.ROOT_ADMINS, vault.vars.VAULT_KEY_ID], ['acc-acme', configs[1]!.id, 'ops@acme.test', vaultId]);
+  assert.deepEqual([vault.accountId, vault.hyperdrive, vault.vars.BOOTSTRAP_OWNERS, vault.vars.VAULT_KEY_ID], ['acc-acme', configs[1]!.id, 'ops@acme.test', vaultId]);
   assert.deepEqual(github.state.manifests.map((manifest) => manifest.callback_urls), [[`https://${ADDRESS}/auth/callback/github`]]);
 });
 
@@ -438,7 +438,7 @@ test("a second deployment on the same account: it takes names of its own, and th
       terminal.send('\x15coffre\r');
       await terminal.waitFor("another deployment's too");
       terminal.send('\x15coffre-try\r');
-      await terminal.waitFor('Root admins');
+      await terminal.waitFor('First Owner');
       terminal.send('\r');
       await terminal.waitFor("GitHub: create coffre's app");
       await fetch(await submitManifest(await (await fetch(await opened('http://127.0.0.1:', pages))).text()));
@@ -488,11 +488,11 @@ test("a deployment on another's database server: setup stops before giving their
   const third = another('third');
   await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_workers_three'));
   const { output, code } = await setup(
-    // Until it refuses: before the root admins, now; once, after them.
+    // Until it refuses: before the first Owner, now; once, after them.
     (terminal) =>
       answering(
         terminal,
-        { 'Set Cloudflare up too?': '\r', 'Which Cloudflare account?': '\r', "coffre's address": 'coffre-three.acme.test\r', "This deployment's name": '\r', 'Root admins': '\r' },
+        { 'Set Cloudflare up too?': '\r', 'Which Cloudflare account?': '\r', "coffre's address": 'coffre-three.acme.test\r', "This deployment's name": '\r', 'First Owner': '\r' },
         ['is also the login of'],
       ),
     third,
@@ -526,7 +526,7 @@ test("--reset-passwords on a database too small for both Hyperdrive configs: set
       (terminal) =>
         answering(
           terminal,
-          { 'Set Cloudflare up too?': '\r', 'Which Cloudflare account?': '\r', "coffre's address": 'coffre-small.acme.test\r', "This deployment's name": '\r', 'Root admins': '\r' },
+          { 'Set Cloudflare up too?': '\r', 'Which Cloudflare account?': '\r', "coffre's address": 'coffre-small.acme.test\r', "This deployment's name": '\r', 'First Owner': '\r' },
           ['raise max_connections'],
         ),
       small,
@@ -557,7 +557,7 @@ test('a Worker without its key over a database in use: setup stops before changi
   }
   cloudflare.state.scripts.get('acc-acme/coffre-vault')!.secrets.delete('VAULT_KEY');
   const files = ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
-  const { output, code } = await setup((terminal) => answering(terminal, { 'Set Cloudflare up too?': '\r', "coffre's address": '\r', 'Root admins': '\r' }, ['already holds data']));
+  const { output, code } = await setup((terminal) => answering(terminal, { 'Set Cloudflare up too?': '\r', "coffre's address": '\r', 'First Owner': '\r' }, ['already holds data']));
   const text = mainText(output);
   assert.equal(code, 1, text);
   assert.match(text, /✗ The vault Worker coffre-vault has no VAULT_KEY, but the database already holds data/);

@@ -9,7 +9,6 @@ const member = {
   tampered: false,
   instanceRole: 'admin',
   scope: { projects: 'all', environments: 'all' },
-  isRootAdmin: false,
   runsInstance: true,
   setsUpServices: true,
   canReadAudit: true,

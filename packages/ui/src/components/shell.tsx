@@ -65,7 +65,6 @@ const CURRENT = { 'aria-current': 'page' } as const;
 
 function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
   if (principal?.type === 'service') return 'Token';
-  if (instanceRole === 'root-admin') return 'Root admin';
   return INSTANCE_ROLES[instanceRole ?? 'member'].name;
 }
 

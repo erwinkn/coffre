@@ -2,6 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
+import { EVERYWHERE } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
 import { memberAccess } from '../src/db/queries.ts';
@@ -177,15 +178,30 @@ test('a service account holds project grants only, and no grant is on every proj
   assert.deepEqual(await refusals(), [['member.add', 'service_cannot_hold_role']]);
 });
 
+test('the last Owner of the whole instance stays one: 409, saying what to do first, until another is', async () => {
+  const last = { status: 409, reason: 'last_owner' };
+  await assert.rejects(root.members.remove(`user:${ROOT}`), { ...last, message: "you're the last Owner of the whole instance: make someone else an Owner first" });
+  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), { ...last, message: `${ROOT} is the last Owner of the whole instance: make someone else an Owner first` });
+  await assert.rejects(boss.members.remove(`user:${ROOT}`), last);
+  // An Owner of one project owns no instance.
+  await root.members.add(ADA, { role: 'owner', scope: { projects: { only: ['market'] } } });
+  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), last);
+  // Another Owner of all of it, and an Admin may take root's away.
+  await root.members.add(ADA, { role: 'owner' });
+  assert.equal((await boss.members.add(`user:${ROOT}`, { role: 'admin' })).instanceRole, 'admin');
+});
+
 test("a project's access list shows who reaches it by their instance role, with no grant", async () => {
   await root.members.add(ADA, { role: 'developer', scope: { environments: { only: ['dev'] } } });
   await root.members.add(LEAD, { role: 'auditor', scope: { projects: { only: ['billing'] } } });
   await root.access.set(CI, { 'market/prod': 'viewer' });
   const reach = async (path: string) => (await root.members.list(path)).members.map((member) => [member.member, member.instanceRole, member.grants.length, member.reachesByRole]);
   // Services first, then people, as every list is.
-  assert.deepEqual(await reach('market'), [[CI, 'member', 1, false], [ADA, 'developer', 0, true], [BOSS, 'admin', 0, true]]);
-  assert.deepEqual(await reach('market/prod'), [[CI, 'member', 1, false], [BOSS, 'admin', 0, true]]);
-  assert.deepEqual(await reach('billing/dev'), [[ADA, 'developer', 0, true], [BOSS, 'admin', 0, true], [LEAD, 'auditor', 0, true]]);
+  // The Owner, root, reaches everything by their role, as anyone's does.
+  const owner = [`user:${ROOT}`, 'owner', 0, true];
+  assert.deepEqual(await reach('market'), [[CI, 'member', 1, false], [ADA, 'developer', 0, true], owner, [BOSS, 'admin', 0, true]]);
+  assert.deepEqual(await reach('market/prod'), [[CI, 'member', 1, false], owner, [BOSS, 'admin', 0, true]]);
+  assert.deepEqual(await reach('billing/dev'), [[ADA, 'developer', 0, true], owner, [BOSS, 'admin', 0, true], [LEAD, 'auditor', 0, true]]);
 });
 
 test("where someone's role applies is told only to those who run the instance: a scope names projects others may not see", async () => {
@@ -276,8 +292,8 @@ test("a member's page reads their whole access in one request, which the server 
   // Nobody who manages no access asks; nobody who is no member is found.
   await assert.rejects(ada.members.access(ADA), { status: 403 });
   await assert.rejects(root.members.access('user:nobody@acme.example'), { status: 404 });
-  // A root admin, with no row, is one; a removed member holds nothing.
-  assert.equal((await root.members.access(`user:${ROOT}`)).instanceRole, 'root-admin');
+  // The Owner is a member like anyone; a removed member holds nothing.
+  assert.deepEqual(await root.members.access(`user:${ROOT}`).then(({ status, instanceRole, scope }) => [status, instanceRole, scope]), ['active', 'owner', EVERYWHERE]);
   await root.members.remove(ADA);
   assert.deepEqual(await root.members.access(ADA).then(({ status, grants, instanceRole }) => [status, grants, instanceRole]), ['removed', [], 'member']);
 });

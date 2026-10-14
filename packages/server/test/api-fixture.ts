@@ -52,9 +52,14 @@ export function waitUntil(promise: Promise<unknown>): void {
  * derives its signing key from the KEK. Another over the same database, as
  * a second instance would be, shares `keys`: rows sealed under another
  * deployment's keys are refused as tampered.
+ *
+ * `owners` own the instance from the start: the first is its bootstrap
+ * Owner, signed in as the vault opens, and makes the others Owners too, as
+ * a deployment's first Owner would. With none, nobody has signed in yet,
+ * and the configuration names someone who never comes.
  */
 export function testVault(
-  rootAdmins: readonly string[],
+  owners: readonly string[],
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
 ): TestVault {
@@ -62,16 +67,24 @@ export function testVault(
   const signingKey = derivedSigningKey(kek);
   let offset = 0;
   let current: Promise<LocalVault> | null = null;
-  const open = async () =>
-    localVault(
+  const open = async () => {
+    const opened = await localVault(
       {
         database: await openVaultDatabase(),
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
-        rootAdmins,
+        bootstrapOwners: owners.length > 0 ? owners : ['nobody@coffre.test'],
         ...config,
       },
       { clockOffset: () => offset },
     );
+    const [first, ...others] = owners.map((email) => `user:${email}`);
+    // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
+    const signedIn = first === undefined ? null : await opened.access(first).catch(() => null);
+    if (signedIn?.role === 'owner') {
+      for (const principal of others) await opened.admit({ actor: first, principal, role: 'owner' });
+    }
+    return opened;
+  };
   const call = (name: keyof Vault) => async (...args: unknown[]) => {
     assertOutsideTransaction(name);
     return ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
@@ -153,11 +166,11 @@ export function clientFor(
 
 export { openTestDatabase } from './db/engine.ts';
 
-/** Deps for a fresh instance with these root admins, over the restricted role. */
-export function testDeps(db: Database, rootAdmins: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {
+/** Deps for a fresh instance with these Owners (`testVault`), over the restricted role. */
+export function testDeps(db: Database, owners: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {
   return {
     db,
-    vault: testVault(rootAdmins),
+    vault: testVault(owners),
     chainKey: randomBytes(32),
     ...extra,
   };

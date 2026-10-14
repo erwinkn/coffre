@@ -82,7 +82,7 @@ for (const mode of ['modern', 'legacy'] as const) {
 }
 
 test('a tool beyond the API scope table is refused by the API itself, whatever the person may do', async () => {
-  // The root admin may reveal; a connection with only Read may not, even if a tool asked.
+  // The Owner may reveal; a connection with only Read may not, even if a tool asked.
   const ctx = { ...(await contextFor(deps, ROOT)), via: { connectionId: randomUUID(), clientId: CLAUDE_CODE, clientName: 'Claude Code', scopes: ['read'] as const } };
   const reveal = await serveApi(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/prod' }) }), ctx);
   assert.equal(reveal.status, 403);
@@ -229,7 +229,7 @@ test("each person's tools/list is what their roles reach somewhere, whatever the
     (await listFor(await connect('lead@acme.example'))).names.sort(),
     sorted(ANYONE, READS, WRITES, ARCHIVES, SERVICES, ['set_access', 'read_audit_log', 'create_environment']),
   );
-  // A root admin: every tool, whatever the connection holds.
+  // An Owner of the whole instance: every tool, whatever the connection holds.
   const everything = await listFor(await connect(ROOT, 'read'));
   assert.deepEqual(everything.names, [...TOOL_BY_NAME.keys()]);
   // No tool takes a value: an agent cannot supply one. Only reads say they are.

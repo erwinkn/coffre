@@ -33,14 +33,12 @@ export type CallerGrant = GrantPlace & {
  */
 export type Caller = {
   principal: PrincipalRef;
-  /** An active member, or a root admin. Everyone else only reaches sign-in. */
+  /** An active member. Everyone else only reaches sign-in. */
   registered: boolean;
   /** A member the vault refuses because their record failed its integrity check. */
   tampered: boolean;
   /** The membership this request authenticated, checked again before linking accounts. */
   generation: number;
-  /** Named in the vault's COFFRE_ROOT_ADMINS: everything, everywhere. */
-  isRootAdmin: boolean;
   /** Their instance role and where it applies, projects by id; `member` everywhere for services and strangers. */
   role: InstanceRole;
   scope: Scope;
@@ -61,7 +59,6 @@ export function callerFrom(principal: PrincipalRef, access: Access, credentialSc
     registered: access.status === 'active',
     tampered: access.status === 'tampered',
     generation: access.generation,
-    isRootAdmin: access.isRootAdmin,
     role: access.role,
     scope: access.scope,
     grants: access.grants.map((grant) => ({
@@ -110,10 +107,5 @@ export function seesProject(caller: Caller, project: { id: string; environments:
 /** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role; within their credential's scope. */
 export function canAnywhere(caller: Caller, permission: Permission): boolean {
   if (caller.credentialScope !== null && !caller.credentialScope.some((grant) => roleGrants(grant.role, permission))) return false;
-  return caller.isRootAdmin || instanceRoleGrants(caller.role, permission) || caller.grants.some((grant) => roleGrants(grant.role, permission));
-}
-
-/** How the API names someone's instance role: theirs, or `root-admin` for a root admin. */
-export function instanceRoleOf(holder: { isRootAdmin: boolean; role: InstanceRole }): InstanceRole | 'root-admin' {
-  return holder.isRootAdmin ? 'root-admin' : holder.role;
+  return instanceRoleGrants(caller.role, permission) || caller.grants.some((grant) => roleGrants(grant.role, permission));
 }

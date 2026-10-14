@@ -15,6 +15,7 @@ import {
   mayManageAccess,
   normalScope,
   NOTHING,
+  ownsInstance,
   runsInstance,
   setsUpServices,
   type Holdings,
@@ -120,8 +121,6 @@ export type PreparedVault = {
   options: Required<VaultOptions>;
   /** How far the log is verified; `verifyChain` in log.ts. The furthest any call got to. */
   verified: Anchor;
-  /** Root admins known to have a member row; rows are never deleted. */
-  rooted: Set<string>;
   /** What member rows are sealed under now; rows.ts. */
   rowKey: Buffer;
   /** Each signing key's row key: those after the first vouch for rows only until `since`, when the rows are sealed again. */
@@ -136,8 +135,19 @@ export type PreparedVault = {
   kekChecked: boolean;
   /** Why not, once decided that they do not. */
   wrongKek: string | null;
-  /** Whether this process has replaced the grants on every project of 0.4 there were when it started (`#convert`). */
+  /**
+   * Whether this process has made its upgrades (`#convert`): the root
+   * admins of 0.5 Owners, and the grants on every project of 0.4 there were
+   * when it started replaced.
+   */
   converted: boolean;
+  /**
+   * Whether this process has seen an Owner of the whole instance. The last
+   * one stays, so from then on the bootstrap need not look: recovering an
+   * instance whose Owners' rows all fail their check takes a deploy, whose
+   * processes look again (`#bootstrap`).
+   */
+  owned: boolean;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -146,13 +156,13 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0) },
     verified: UNVERIFIED,
-    rooted: new Set(),
     reported: new Set(),
     since: null,
     superseded: null,
     kekChecked: false,
     wrongKek: null,
     converted: false,
+    owned: false,
   };
 }
 
@@ -182,7 +192,7 @@ const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 const PERSON = /^user:/;
 const SERVICE = /^token:/;
 
-/** Who acts for the vault itself, as when it gives a root admin a member row. */
+/** Who acts for the vault itself, as when it makes a bootstrap Owner. */
 const VAULT_ACTOR = 'system:vault';
 
 // A KEK's check: a known value, the size of a data key, wrapped under it in
@@ -205,6 +215,9 @@ const TAMPERED_SUBJECT = "this member's record failed the vault's integrity chec
 
 /** The action of the vault's entry that signs a prefix of the log. */
 const CHECKPOINT = 'audit.checkpoint';
+
+/** The action of the vault's entry that says it turned the root admins of 0.5 into Owners, once (`#convertRootAdmins`). */
+const ROOT_ADMINS_CONVERT = 'root-admins.convert';
 
 /** The action of the vault's entry that holds the instance's settings, and changes them (`settings`). */
 const SETTINGS = 'settings.change';
@@ -270,7 +283,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   deleted: 'this project or environment was deleted',
   ended: 'the reference read through was ended',
   not_allowed: 'not allowed to change this',
-  root_admin: 'root admins are set in the vault configuration',
+  last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
   log_broken: 'the vault log does not hold from the last checkpoint',
   wrong_kek: "this vault's key does not open the data it holds",
@@ -594,11 +607,59 @@ class VaultService implements Vault {
    * Removing them clears both.
    */
   async #convert(): Promise<void> {
+    await this.#convertRootAdmins();
     for (const principal of await store.everyProjectHolders(this.#db)) {
-      if (this.#isRootAdmin(principal)) continue;
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
     this.#prepared.converted = true;
+  }
+
+  /**
+   * Turn the root admins of 0.5 into Owners of the whole instance, once, on
+   * an instance that ran 0.5 with one: its vault gave a root admin who
+   * signed in a row, in an entry of its own (`rootAdminRows`). Everyone the
+   * configuration names when this release first runs becomes an Owner, as
+   * `system:vault`, each `reason: 'root-admin'`, one who never signed in
+   * too: 0.5 held them root admins already. A `root-admins.convert` entry
+   * under the vault's MAC says it is done, with whom it made Owners, so from
+   * then on the list only bootstraps (`#bootstrap`). A new instance has no
+   * root admins to convert, and writes nothing. One decision, under every
+   * listed row and then the log's head, which reads again whether another
+   * process did it first. Entries forged in its name say nothing either way,
+   * and are reported.
+   */
+  async #convertRootAdmins(): Promise<void> {
+    const reports: NewEntry[] = [];
+    const due = await this.#rootAdminsToConvert(this.#db, reports);
+    // Not `#record`, which would settle the vault, and so convert, again.
+    if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
+    this.#reported(reports);
+    if (!due) return;
+    const principals = this.#config.bootstrapOwners.map((email) => `user:${email}`);
+    await this.#decideNow(principals, async (d) => {
+      await lockLogHead(d.tx);
+      if (!(await this.#rootAdminsToConvert(d.tx, d.reports))) return;
+      const owners: string[] = [];
+      for (const principal of principals) {
+        if (await this.#makeOwner(d, principal, 'root-admin')) owners.push(principal);
+      }
+      d.log.push({ actor: VAULT_ACTOR, action: ROOT_ADMINS_CONVERT, decision: 'allow', metadata: JSON.stringify({ owners }) });
+    });
+  }
+
+  /**
+   * Whether this instance had root admins, which the vault has not turned
+   * into Owners yet: an entry of its own gave one a row, and none says it
+   * converted them, unless too many forged ones hide whether one does.
+   */
+  async #rootAdminsToConvert(db: Queryable, reports: NewEntry[]): Promise<boolean> {
+    const check = this.#check(reports, null);
+    const converted = await newestAuthentic((before) => store.newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
+    if (converted !== 'none' && converted !== 'forged') return false;
+    const rows = await store.rootAdminRows(db, LOOK_BACK.page);
+    const rooted = rows.filter((entry) => this.#authentic(entry));
+    for (const entry of rows) if (!rooted.includes(entry)) check.forged(entry);
+    return rooted.length > 0;
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
@@ -934,7 +995,6 @@ class VaultService implements Vault {
   }
 
   async #refuseVersions(principal: string, code: 'bad_claim' | 'deleted', entries: NewEntry[]): Promise<Outcome<never>> {
-    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     return this.#decide([principal], async () => {
       throw new Refused(refusal(code, MESSAGES[code]), entries);
     });
@@ -995,7 +1055,6 @@ class VaultService implements Vault {
         throw new Refused(refusal('wrong_kek', wrongKek), secrets.map((secret) => entry(secret, 'deny', 'wrong_kek')));
       });
     }
-    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
       const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
@@ -1175,7 +1234,6 @@ class VaultService implements Vault {
         }),
       };
     };
-    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     return this.#decide([principal], async (d) => {
       const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
       // Both sides as the store has them: a grant on a slug matches there, and neither side may be deleted.
@@ -1250,7 +1308,6 @@ class VaultService implements Vault {
         ...traced(input),
       }),
     });
-    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     if (sealed.some((seal) => seal === null)) {
       return this.#decide([principal], async () => {
         throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), vias.map((via, i) => entry(via, sealed[i]!, 'deny', 'bad_claim')));
@@ -1307,69 +1364,111 @@ class VaultService implements Vault {
     });
   }
 
-  // --- who holds what -----------------------------------------------------------
+  // --- Owners of the whole instance -------------------------------------------------
 
-  #isRootAdmin(principal: string): boolean {
-    return principal.startsWith('user:') && this.#config.rootAdmins.includes(principal.slice('user:'.length));
+  /** Whether the configuration names `principal` to own the instance while nobody does (`bootstrapOwners`). */
+  #bootstrapOwner(principal: string): boolean {
+    return principal.startsWith('user:') && this.#config.bootstrapOwners.includes(principal.slice('user:'.length));
   }
 
   /**
-   * Give a root admin a member row the first time anyone asks about them:
-   * the app's sign-ins and sessions point at it, and their reads queue on
-   * it like anyone's. Logged, and made in a transaction of its own, under
-   * the log's lock: a decision that held the head and then waited for a
-   * member row would take the locks out of order. The row never makes
-   * anyone a root admin; the configuration does. Rows are never deleted, so
-   * one read finds it made already, as on every fresh isolate but the first,
-   * without queueing on the log's lock.
+   * An Owner of the whole instance other than `except`, as their row says
+   * and its check holds (`#integrity`), or null when there is none. A row
+   * changed around the vault owns nothing, and is reported. Read under the
+   * log's head, which every change to a member takes before it writes, the
+   * answer stands until the reader commits.
    */
-  async #rootRow(principal: string): Promise<void> {
-    if (this.#prepared.rooted.has(principal) || (await this.#settled()) !== null) return;
-    if ((await store.member(this.#db, principal)) !== undefined) {
-      this.#prepared.rooted.add(principal);
-      return;
+  async #anOwner(db: Queryable, reports: NewEntry[], except: string | null = null): Promise<string | null> {
+    for (const row of await store.instanceOwners(db)) {
+      if (row.principal === except) continue;
+      if ((await this.#integrity(db, row.principal, row, await store.grants(db, row.principal), reports)) === null) return row.principal;
     }
-    await this.#db.transaction(async (tx) => {
-      await lockLogHead(tx);
-      if ((await store.member(tx, principal)) !== undefined) return;
-      const appended = await this.#append(tx, [
-        {
-          actor: VAULT_ACTOR,
-          action: 'member.add',
-          decision: 'allow',
-          subjectPrincipal: principal,
-          metadata: JSON.stringify({ role: 'member', rootAdmin: true }),
-        },
-      ]);
-      const { occurredAt: at, seqStart } = appended;
-      const row = {
-        principal,
-        status: 'active' as const,
-        role: 'member' as const,
-        scope: EVERYWHERE,
-        generation: 0,
-        createdAt: at,
-        createdBy: VAULT_ACTOR,
-        statusChangedAt: at,
-        statusChangedBy: VAULT_ACTOR,
-        accessSeq: seqStart,
-      };
-      await store.insertMember(tx, { ...row, mac: memberMac(this.#prepared.rowKey, row, []) });
-    });
-    this.#prepared.rooted.add(principal);
+    return null;
   }
+
+  /**
+   * Make a person the configuration names an Owner of the whole instance,
+   * when it has none: the first one in, and the way back in once every
+   * Owner is gone. Asked at `access` about any of them who owns nothing, so
+   * an unlocked read is the quick way out, when someone else owns it. What
+   * it finds is a hint, never a report: its reads can pair a row with
+   * grants another decision committed between them. Then one decision,
+   * under their row and the log's head, reads again, and reports: two named
+   * people signing in at once make one Owner. Whether their row may have
+   * changed since `access` read it: an Owner found, who may have been made by
+   * another request of theirs meanwhile and since joined by others, or the
+   * decision ran. Only an Owner found or made is kept as seen (`owned`).
+   */
+  async #bootstrap(principal: string): Promise<boolean> {
+    if ((await this.#anOwner(this.#db, [])) !== null) {
+      this.#prepared.owned = true;
+      return true;
+    }
+    const decided = await this.#decideNow([principal], async (d) => {
+      await lockLogHead(d.tx);
+      return { owned: (await this.#anOwner(d.tx, d.reports)) !== null || (await this.#makeOwner(d, principal, 'bootstrap')) };
+    });
+    if (decided.ok && decided.owned) this.#prepared.owned = true;
+    return decided.ok;
+  }
+
+  /**
+   * Refuse a change that would leave `principal`, an Owner of the whole
+   * instance, no longer one, unless another is. Counted under the log's
+   * head: two changes at once, each demoting or removing a different
+   * Owner, lock different rows, and only the head puts one after the other.
+   */
+  async #keepAnOwner(d: Decision, actor: string, principal: string, refused: (code: RefusalCode, message?: string) => Refused): Promise<void> {
+    await lockLogHead(d.tx);
+    if ((await this.#anOwner(d.tx, d.reports, principal)) !== null) return;
+    throw refused('last_owner', actor === principal
+      ? "you're the last Owner of the whole instance: make someone else an Owner first"
+      : `${principal.slice('user:'.length)} is the last Owner of the whole instance: make someone else an Owner first`);
+  }
+
+  /**
+   * Make `principal`, a person, an Owner of the whole instance, as the
+   * vault, for `reason`: admitted, brought back, or given the role, the
+   * grants they hold kept. One whose row fails its check is started over
+   * first, as removing them would; one the log never admitted, whose row was
+   * written around the vault, is left as it is. Whether it made them one.
+   */
+  async #makeOwner(d: Decision, principal: string, reason: 'bootstrap' | 'root-admin'): Promise<boolean> {
+    const row = d.members.get(principal);
+    const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
+    if (subject.status === 'active' && ownsInstance(subject.live)) return false;
+    const tampered = subject.status === 'tampered';
+    if (tampered && (await this.#logged(d.tx, principal)) === undefined) return false;
+    const correlation = { operationId: randomUUID() };
+    const owner = { role: 'owner' as const, scope: EVERYWHERE };
+    d.grants.set(principal, [...subject.stored]);
+    d.touched.add(principal);
+    if (tampered) await this.#startOver(d, VAULT_ACTOR, principal, row, subject.fault!, correlation, (code, message) => new Refused(refusal(code, message ?? MESSAGES[code]), []));
+    if (row === undefined && !tampered) {
+      d.log.push(accessEntry(VAULT_ACTOR, 'member.add', principal, 'allow', correlation, { ...owner, reason }));
+      d.writes.push((at) => store.insertMember(d.tx, {
+        principal, status: 'active', ...owner, generation: 0, createdAt: at, createdBy: VAULT_ACTOR, statusChangedAt: at, statusChangedBy: VAULT_ACTOR, ...UNSEALED,
+      }));
+    } else if (tampered || row?.status === 'removed') {
+      // Coming back keeps the generation a removal, or the start over, moved on to.
+      d.log.push(accessEntry(VAULT_ACTOR, 'member.restore', principal, 'allow', correlation, { ...owner, reason }));
+      d.writes.push((at) => store.updateMember(d.tx, principal, { status: 'active', ...owner, statusChangedAt: at, statusChangedBy: VAULT_ACTOR }));
+    } else {
+      d.log.push(accessEntry(VAULT_ACTOR, 'member.role', principal, 'allow', correlation, { ...owner, previousRole: row!.role, previousScope: row!.scope, reason }));
+      d.writes.push(() => store.updateMember(d.tx, principal, owner));
+    }
+    return true;
+  }
+
+
+  // --- who holds what -----------------------------------------------------------
 
   /**
    * What `principal` holds, their row checked first (`#integrity`): a row
-   * that fails holds nothing, and is `tampered`. A root admin's come from the
-   * configuration, which no row can change.
+   * that fails holds nothing, and is `tampered`.
    */
   async #standing(db: Queryable, principal: string, row: Member | undefined, at: number, reports: NewEntry[]): Promise<Standing> {
     const none = NOTHING;
-    if (this.#isRootAdmin(principal)) {
-      const root: Holdings = { isRootAdmin: true, role: 'owner', scope: EVERYWHERE, grants: [] };
-      return { principal, status: 'active', live: root, all: root, fault: null, stored: [] };
-    }
     const grants = row === undefined ? [] : await store.grants(db, principal);
     const fault = await this.#integrity(db, principal, row, grants, reports);
     if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants };
@@ -1380,23 +1479,19 @@ class VaultService implements Vault {
     return {
       principal,
       status: 'active',
-      live: { isRootAdmin: false, role, scope, grants: held.filter((grant) => live(grant, at)) },
-      all: { isRootAdmin: false, role, scope, grants: held },
+      live: { role, scope, grants: held.filter((grant) => live(grant, at)) },
+      all: { role, scope, grants: held },
       fault,
       stored: grants,
     };
   }
 
   #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean): Access {
-    if (this.#isRootAdmin(principal)) {
-      return { principal, status: 'active', generation: row?.generation ?? 0, isRootAdmin: true, role: 'owner', scope: EVERYWHERE, grants: [], since: null, by: null };
-    }
     const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
     return {
       principal,
       status: tampered ? 'tampered' : !PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
       generation: row?.generation ?? 0,
-      isRootAdmin: false,
       ...(active ? roleOf(principal, row) : { role: 'member', scope: EVERYWHERE }),
       grants: active ? held.filter((grant) => live(grant, at) && grantKind(grant) !== null).map(view) : [],
       since: row ? iso(row.statusChangedAt) : null,
@@ -1408,14 +1503,33 @@ class VaultService implements Vault {
    * What `principal` holds now. Read without locks, the fast way; a row that
    * seems to fail its check is read again in one snapshot before anyone is
    * called tampered, since a change committed between two of the reads
-   * looks like one.
+   * looks like one. A person the configuration names to own the instance
+   * while nobody does becomes its Owner first, if nobody does
+   * (`#bootstrap`). A vault that holds no key the log's newest entries are
+   * under, given the wrong vault key, cannot tell a row it cannot check
+   * from one changed around it: it says so, an outage, rather than call the
+   * member tampered. A row it can check still answers, so a forged entry
+   * that stops it writing leaves the Owners able to sign in and find it.
    */
   async access(principal: string): Promise<Access> {
-    await this.#settled();
-    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
+    const superseded = await this.#settled();
+    const knew = this.#prepared.owned;
+    const access = await this.#read(principal, superseded);
+    if (access.status === 'active' && ownsInstance(access)) {
+      this.#prepared.owned = true;
+      return access;
+    }
+    if (superseded !== null || !this.#bootstrapOwner(principal)) return access;
+    // An Owner seen since the read may be this person, made one by another request of theirs: read again, once.
+    if (this.#prepared.owned) return knew ? access : this.#read(principal, superseded);
+    return (await this.#bootstrap(principal)) ? this.#read(principal, superseded) : access;
+  }
+
+  /** `access`, as the rows are now. */
+  async #read(principal: string, superseded: string | null): Promise<Access> {
     const read = async (db: Queryable, reports: NewEntry[]) => {
       const [row, held, at] = await Promise.all([store.member(db, principal), store.grants(db, principal), this.#now(db)]);
-      const fault = this.#isRootAdmin(principal) ? null : await this.#integrity(db, principal, row, held, reports);
+      const fault = await this.#integrity(db, principal, row, held, reports);
       return this.#access(principal, row, held, at, fault !== null);
     };
     const found: NewEntry[] = [];
@@ -1429,6 +1543,7 @@ class VaultService implements Vault {
     }
     const reports: NewEntry[] = [];
     const access = await this.#db.transaction((tx) => read(tx, reports), SNAPSHOT);
+    if (access.status === 'tampered' && superseded !== null) throw new Error(superseded);
     await this.#record(reports);
     return access;
   }
@@ -1448,7 +1563,6 @@ class VaultService implements Vault {
     const held = await store.grants(db);
     const newest = await store.newestAccessEntries(db);
     for (const row of rows) {
-      if (this.#isRootAdmin(row.principal)) continue;
       const grants = held.filter((grant) => grant.principal === row.principal);
       const entry = newest.get(row.principal);
       const holds = entry !== undefined && this.#authentic(entry) && this.#sealed(row, grants) && entry.seq === row.accessSeq;
@@ -1474,7 +1588,6 @@ class VaultService implements Vault {
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
-      if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const places = new Set<string>();
       for (const change of changes) {
         if (grantKind(change) === null) {
@@ -1521,7 +1634,7 @@ class VaultService implements Vault {
       const manages = where.every((place) => mayManageAccess(acting.live, place));
       if (!manages && !(SERVICE.test(principal) && PERSON.test(actor))) throw refused('not_allowed');
       // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
-      if (actor === principal && !acting.live.isRootAdmin && changes.some((change) => change.role !== null)) {
+      if (actor === principal && changes.some((change) => change.role !== null)) {
         throw refused('not_allowed', 'nobody grants themselves a role: ask another admin');
       }
 
@@ -1626,7 +1739,6 @@ class VaultService implements Vault {
         }
       }
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
-      if (this.#isRootAdmin(principal)) throw refused('root_admin');
       if (input.role !== undefined && !isInstanceRole(input.role)) throw refused('invalid', `no such instance role: ${input.role}`);
       if (input.scope !== undefined && (input.role === undefined || !isScope(input.scope))) throw refused('invalid', 'a scope is a role\'s: { projects, environments }, each all, only or except');
       const wanted = input.role === undefined ? undefined : { role: input.role, scope: input.role === 'member' ? EVERYWHERE : normalScope(input.scope ?? EVERYWHERE) };
@@ -1669,6 +1781,7 @@ class VaultService implements Vault {
       const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
       // Nobody sets their own role: running the instance never lets anyone widen what they hold themselves.
       if (changed && actor === principal) throw refused('not_allowed', 'nobody changes their own instance role: ask another admin');
+      if (changed && ownsInstance(subject.live) && !ownsInstance(wanted)) await this.#keepAnOwner(d, actor, principal, refused);
       if (changed) {
         entry('member.role', { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope });
         d.writes.push(() => store.updateMember(d.tx, principal, { role: wanted.role, scope: wanted.scope }));
@@ -1685,7 +1798,6 @@ class VaultService implements Vault {
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
-      if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
       const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
@@ -1703,6 +1815,7 @@ class VaultService implements Vault {
         if (!theirs) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members, and a service account whoever manages it');
       }
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
+      if (ownsInstance(subject.live)) await this.#keepAnOwner(d, actor, principal, refused);
 
       const revoked = held.filter((grant) => live(grant, d.at));
       for (const grant of revoked) {
@@ -2048,14 +2161,15 @@ class VaultService implements Vault {
     });
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: string[] }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: [] }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
     const until = Number(since ?? 0n);
     return {
       checkpointKeys: Object.fromEntries(signers.map(({ keyId, publicKey }, i) => [keyId, { publicKey, until: i === 0 ? null : until }])),
-      rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`),
+      // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
+      rootAdmins: [],
     };
   }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
+import { EVERYWHERE } from '@coffre/core/access';
 import { entryHash, sealEntry } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import { tablesOf } from '@coffre/db';
@@ -66,7 +67,7 @@ beforeEach(async () => {
 });
 
 /**
- * The API with a permission bug: it believes `id` is a root admin, so every
+ * The API with a permission bug: it believes `id` is an Owner of the whole instance, so every
  * check the app makes passes. Only the vault stands between them and a key.
  */
 function buggyClientFor(on: FixtureDeps, id: string): CoffreClient {
@@ -74,7 +75,7 @@ function buggyClientFor(on: FixtureDeps, id: string): CoffreClient {
     url: 'https://coffre.test',
     transport: async (request) => {
       const ctx = await contextFor(on, id);
-      ctx.caller = { ...ctx.caller, isRootAdmin: true, role: 'owner' };
+      ctx.caller = { ...ctx.caller, role: 'owner', scope: EVERYWHERE };
       return serveApi(request, ctx);
     },
   });
@@ -153,24 +154,38 @@ test('the bulk limit counts one read per secret, trips with its own code, and is
   assert.equal((await dev.secrets.reveal('market/dev')).values.API_KEY, 'sk_test');
 });
 
-test('a vault given the wrong KEK answers every value with 503, its entries stop verifying, and readiness goes red', async () => {
+test('a vault given the wrong KEK answers every request with 503, its entries stop verifying, and readiness goes red', async () => {
   // Restored with another key under the same id: the app's key is right, the vault's KEK is not. Its
   // keys come from its KEK, so it holds none the log's entries are under: it writes nothing, and says why.
   const misled = testDeps(db.runtime, [ROOT], {
     vault: testVault([ROOT], {}, { kek: randomBytes(32) }),
     chainKey: deps.chainKey,
   });
-  const admin = clientFor(misled, ROOT);
-  await assert.rejects(admin.secrets.reveal('market/dev/API_KEY'), {
-    status: 503,
-    code: 'unavailable',
-    reason: 'wrong_kek',
-    message: /^the vault's entries are under vault:\S+, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config$/,
-  });
-  await assert.rejects(admin.secrets.set('market/dev', { NEW: 'value' }), { status: 503, reason: 'wrong_kek' });
+  await assert.rejects(misled.vault.access(`user:${ROOT}`), /^Error: the vault's entries are under vault:\S+, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config$/);
+  // It can check nobody's row, the Owner's included: every request is an outage, never a verdict on who asks.
+  const runtime: CoffreRuntime = {
+    db: misled.db, vault: misled.vault, chainKey: misled.chainKey, signin: null, workloads: null, mcp: null,
+    auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }).resolve('https://coffre.test'),
+    publicUrl: 'https://coffre.test',
+    verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
+    waitUntil,
+    schema: { migrated: true },
+  };
+  const asOwner = (path: string, init: RequestInit = {}) => fetchApi(
+    new Request(`https://coffre.test${path}`, { ...init, headers: { 'content-type': 'application/json', cookie: `__Host-coffre_session=${ROOT}`, 'sec-fetch-site': 'same-origin' } }),
+    runtime,
+    { sourceIp: null },
+  );
+  for (const response of [
+    await asOwner('/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/dev/API_KEY' }) }),
+    await asOwner('/api/secrets/market/dev', { method: 'PATCH', body: JSON.stringify({ NEW: 'value' }) }),
+  ]) {
+    assert.equal(response.status, 503);
+    assert.doesNotMatch(await response.text(), /sk_test/);
+  }
   // The vault's keys come from its KEK, so its entries no longer verify either, and the answer says why.
-  const verdict = await admin.audit.verify();
-  assert.ok(!verdict.ok && verdict.author === 'vault');
+  const verdict = await misled.vault.verifyLog({});
+  assert.ok(!verdict.ok);
   assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
   const ready = await auditReadiness(db.runtime, misled.vault);

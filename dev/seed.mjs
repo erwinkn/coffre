@@ -3,8 +3,8 @@
 //
 // Writes go through the API, not straight into Postgres, so the seed itself is
 // audited like anything else -- and so the seed exercises the same envelope
-// and audit code path the CLI and UI use. It signs in as the root admin the
-// way a browser does, through the dev IdP's stand-in GitHub.
+// and audit code path the CLI and UI use. It signs in first, as the Owner the
+// vault bootstraps, the way a browser does, through the dev IdP's stand-in GitHub.
 
 import { browser } from './browser.mjs';
 import {
@@ -16,7 +16,7 @@ import {
 const local = loadLocalSeedConfig(process.env);
 const API = local.apiUrl;
 const IDP = local.idpUrl;
-const ADMIN = local.rootAdmin;
+const ADMIN = local.owner;
 
 const pg = (await import('pg')).default;
 const pool = new pg.Pool({

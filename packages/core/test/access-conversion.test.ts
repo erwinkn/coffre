@@ -82,7 +82,7 @@ test('where one grant cannot hold both, a project\'s goes on to its environments
   const auditor = convertEveryProjectGrants(person([all('viewer')], { grants: [held('billing', 'auditor')] }));
   assert.deepEqual(given(auditor), ['viewer market', 'viewer billing/dev']);
   assert.deepEqual(losses(auditor), ["viewer on billing's environments"]);
-  assert.ok(allows({ isRootAdmin: false, role: auditor.role, scope: auditor.scope, grants: [held('billing', 'auditor'), ...auditor.grants] }, 'secret.read', { projectId: 'billing', environmentId: 'billing/dev', environmentSlug: 'dev' }));
+  assert.ok(allows({ role: auditor.role, scope: auditor.scope, grants: [held('billing', 'auditor'), ...auditor.grants] }, 'secret.read', { projectId: 'billing', environmentId: 'billing/dev', environmentSlug: 'dev' }));
   // The other way round, the auditor's goes down instead, and billing reads on.
   const service = convertEveryProjectGrants({ ...person([all('auditor')], { grants: [held('billing', 'viewer')] }), person: false });
   assert.deepEqual(given(service), ['auditor market', 'auditor billing', 'viewer billing/dev']);
@@ -173,7 +173,7 @@ test(`nobody holds more after the conversion than before, nor less than it names
   const given = new Map(conversion.grants.map((grant) => [grant.environmentId ?? grant.projectId, grant]));
   const grants = [...input.grants.filter((grant) => !given.has(grant.environmentId ?? grant.projectId!)), ...given.values()];
   for (const at of [0, 1_500, 2_500]) {
-    const after: Holdings = { isRootAdmin: false, role: conversion.role, scope: conversion.scope, grants: grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > at) };
+    const after: Holdings = { role: conversion.role, scope: conversion.scope, grants: grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > at) };
     for (const project of [...projects, later]) {
       const places: Place[] = [{ projectId: project.id }, ...project.environments.map((environment) => ({ projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug }))];
       for (const place of places) {
@@ -194,7 +194,7 @@ test(`nobody holds more after the conversion than before, nor less than it names
     (loss.kind === 'environments' && place.environmentId == null && loss.projectId === place.projectId && (ROLES[loss.role].permissions as readonly Permission[]).includes(permission))
     || (loss.kind === 'lost' && loss.projectId === place.projectId && (loss.environmentId === null || loss.environmentId === place.environmentId) && (ROLES[loss.lost].permissions as readonly Permission[]).includes(permission)));
   for (const at of [0, 1_500, 2_500]) {
-    const after: Holdings = { isRootAdmin: false, role: conversion.role, scope: conversion.scope, grants: grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > at) };
+    const after: Holdings = { role: conversion.role, scope: conversion.scope, grants: grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > at) };
     for (const project of projects) {
       const places: Place[] = [{ projectId: project.id }, ...project.environments.map((environment) => ({ projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug }))];
       for (const place of places) {

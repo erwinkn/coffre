@@ -134,10 +134,17 @@ export function nameProblem(name: string): string | null {
   return /^[a-z0-9]([a-z0-9-]{0,55}[a-z0-9])?$/.test(name) ? null : 'lower-case letters, digits and dashes, at most 57';
 }
 
-/** Why a list of root admins will not do. Null when it will. */
+/** Why a list of bootstrap Owners will not do. Null when it will. */
 export function adminsProblem(answer: string): string | null {
   const wrong = answer.split(',').map((email) => email.trim()).filter((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   return wrong.length === 0 ? null : `not an email: ${wrong.map((email) => email || '(empty)').join(', ')}`;
+}
+
+/** The vault's var naming its bootstrap Owners: 0.5's `ROOT_ADMINS` while a deployment's vault reads that one still. */
+type OwnersVar = 'BOOTSTRAP_OWNERS' | 'ROOT_ADMINS';
+
+export function ownersVar(vars: Record<string, string | undefined>): OwnersVar {
+  return vars.BOOTSTRAP_OWNERS === undefined && vars.ROOT_ADMINS !== undefined ? 'ROOT_ADMINS' : 'BOOTSTRAP_OWNERS';
 }
 
 /**
@@ -254,7 +261,8 @@ export class Cloudflare {
   readonly #secrets: string[];
   readonly workers: Record<Component, WorkerConfig>;
   readonly address: string;
-  readonly rootAdmins: string;
+  /** The vault's var that names them, and its value: `BOOTSTRAP_OWNERS`, or `ROOT_ADMINS` in a deployment 0.5 or earlier wrote. */
+  readonly owners: { name: OwnersVar; value: string };
   readonly serving: Serving;
   /** The keys this run makes, for the Workers without theirs. */
   readonly keys: Keys | null;
@@ -280,7 +288,7 @@ export class Cloudflare {
     workers: Record<Component, WorkerConfig>,
     found: Found,
     administrator: URL,
-    answers: { address: string; rootAdmins: string; serving: Serving; token: string | null },
+    answers: { address: string; owners: { name: OwnersVar; value: string }; serving: Serving; token: string | null },
     checked: Checked,
     resetPasswords: boolean,
     secrets: string[],
@@ -291,7 +299,7 @@ export class Cloudflare {
     this.#found = found;
     this.#administrator = administrator;
     this.address = answers.address;
-    this.rootAdmins = answers.rootAdmins;
+    this.owners = answers.owners;
     this.serving = answers.serving;
     this.#secrets = secrets;
     this.#token = answers.token;
@@ -308,7 +316,7 @@ export class Cloudflare {
 
   /**
    * Sign in to Cloudflare, choose the account, read what is there, and ask
-   * what setup cannot know: coffre's address, its root admins, and, when
+   * what setup cannot know: coffre's address, its first Owner, and, when
    * another deployment has its names, a name of its own. Every refusal
    * comes before its first change, a domain added or a custom hostname
    * made: a run refused leaves nothing behind.
@@ -409,13 +417,14 @@ export class Cloudflare {
     }
     // The workers.dev address names the app Worker: its name, once settled.
     if (kind === 'workers.dev') address = workersDev(workers.app.name, (await ownSubdomain())!);
-    const admins = workers.vault.vars.ROOT_ADMINS;
+    const name = ownersVar(workers.vault.vars);
+    const admins = workers.vault.vars[name];
     const prefilled = placeholder(admins) && found.email !== null;
-    const rootAdmins = (
-      await textLine(keys, out, s, 'Root admins', 'their GitHub emails, comma-separated: the first people in', {
+    const owners = (
+      await textLine(keys, out, s, 'First Owner', 'their GitHub email, or several, comma-separated: the first to sign in owns coffre', {
         initial: placeholder(admins) ? (found.email ?? '') : admins,
-        // Sign-in checks the GitHub account's emails: one that is not among them leaves nobody able to sign in as root.
-        note: `${prefilled ? "That's your Cloudflare email. " : ''}Each must be an email on the GitHub account its admin will sign in with, or root is locked out.`,
+        // Sign-in checks the GitHub account's emails: one that is not among them leaves nobody able to sign in as the Owner.
+        note: `${prefilled ? "That's your Cloudflare email. " : ''}Each must be an email on the GitHub account its owner will sign in with, or nobody can take coffre over.`,
         check: adminsProblem,
       })
     )
@@ -424,7 +433,7 @@ export class Cloudflare {
       .join(',');
     out.write('\n');
     const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
-    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, settled, options.resetPasswords, secrets);
+    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, owners: { name, value: owners }, serving, token }, settled, options.resetPasswords, secrets);
   }
 
   /**
@@ -566,7 +575,7 @@ export class Cloudflare {
     return { text: `Made coffre's GitHub App, ${app.slug}`, details: app.url === '' ? [] : [app.url] };
   }
 
-  /** The rest of each wrangler.jsonc: the address and its route, the root admins, and the vault ID of a new vault key. */
+  /** The rest of each wrangler.jsonc: the address and its route, the bootstrap Owners, and the vault ID of a new vault key. */
   write(): Outcome {
     const url = `https://${this.address}`;
     const app = this.workers.app;
@@ -589,7 +598,7 @@ export class Cloudflare {
           ]),
     ]);
     this.#edit('vault', [
-      { path: ['vars', 'ROOT_ADMINS'], value: this.rootAdmins, what: 'the root admins' },
+      { path: ['vars', this.owners.name], value: this.owners.value, what: 'the first Owner' },
       ...(this.keys !== null && this.#missing.vault ? [{ path: ['vars', 'VAULT_KEY_ID'], value: this.keys.VAULT_KEY_ID, what: 'the vault ID' }] : []),
     ]);
     const changed = COMPONENTS.filter((component) => this.#wrote[component].size > 0);
@@ -896,7 +905,7 @@ function deploys(cloudflare: Cloudflare): string {
 export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
   const s = style(out);
   const url = `https://${cloudflare.address}`;
-  const first = cloudflare.rootAdmins.split(',')[0]!;
+  const first = cloudflare.owners.value.split(',')[0]!;
   return [
     '',
     `  ${s.green('✓')} ${s.bold(`coffre is at ${url}`)}`,

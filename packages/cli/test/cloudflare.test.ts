@@ -16,7 +16,7 @@ import { appManifest, appName, appSettings, convert, createGitHubApp, logoPath, 
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
-import { addressOf, addressProblem, adminsProblem, domainOf, isOurs, nameFrom, nameProblem, ourConfig, recordsOf } from '../src/workers.ts';
+import { addressOf, addressProblem, adminsProblem, domainOf, isOurs, nameFrom, nameProblem, ourConfig, ownersVar, recordsOf } from '../src/workers.ts';
 import { cancelTerminals, fakeCloudflare, fakeGitHub, fakeOpener, fakeTerminal, fakeWrangler, manifestForm, settle, submitManifest } from './fakes.ts';
 
 // Whatever a failed test leaves waiting, a prompt, a wrangler, a listener, goes: this file's process always ends.
@@ -108,7 +108,7 @@ test('wrangler.jsonc is read for what setup needs, and edited in place, its comm
       { name: 'coffre', accountId: null, hyperdrive: null, route: null },
     );
     assert.ok(placeholder(before.vars.PUBLIC_URL) && placeholder(before.vars.GITHUB_CLIENT_ID));
-    assert.ok(placeholder(readWorker(dir, 'vault/wrangler.jsonc').vars.ROOT_ADMINS));
+    assert.ok(placeholder(readWorker(dir, 'vault/wrangler.jsonc').vars.BOOTSTRAP_OWNERS));
 
     editWorker(dir, 'app/wrangler.jsonc', [
       { path: ['account_id'], value: 'acc-1', after: 'name' },
@@ -134,7 +134,7 @@ test('wrangler.jsonc is read for what setup needs, and edited in place, its comm
   }
 });
 
-test('the address and the root admins: what will do, and why not', () => {
+test('the address and the first Owner: what will do, and why not', () => {
   assert.equal(addressOf(' HTTPS://Secrets.Acme.test/login?x=1 '), 'secrets.acme.test');
   assert.equal(addressProblem('secrets.acme.test'), null);
   assert.equal(addressProblem('acme.test'), null);
@@ -145,6 +145,10 @@ test('the address and the root admins: what will do, and why not', () => {
   assert.equal(domainOf('secrets.example.org'), 'example.org');
   assert.equal(adminsProblem('a@acme.test, b@acme.test'), null);
   assert.match(adminsProblem('a@acme.test, nobody')!, /not an email: nobody/);
+  // A deployment 0.5 wrote names its first Owner ROOT_ADMINS, which its vault still reads: setup fills in that one.
+  assert.equal(ownersVar({ BOOTSTRAP_OWNERS: 'you@example.com' }), 'BOOTSTRAP_OWNERS');
+  assert.equal(ownersVar({ ROOT_ADMINS: 'ops@acme.test' }), 'ROOT_ADMINS');
+  assert.equal(ownersVar({}), 'BOOTSTRAP_OWNERS');
 });
 
 // --- whose a Worker and a Hyperdrive config are ---------------------------------------------

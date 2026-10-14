@@ -1071,10 +1071,9 @@ async function whoHasAccess(args: string[]): Promise<void> {
   }
 
   for (const member of result.members) {
-    const root = member.isRootAdmin ? '  [root admin]' : '';
-    const role = member.isRootAdmin || member.instanceRole === 'member' ? '' : `  ${manage.roleInWords(member)}`;
+    const role = member.instanceRole === 'member' ? '' : `  ${manage.roleInWords(member)}`;
     const tampered = member.tampered ? '  [record failed its integrity check: remove to start over]' : '';
-    process.stdout.write(`${named(member.principalType, member.principalId)}${root}${role}${tampered}\n`);
+    process.stdout.write(`${named(member.principalType, member.principalId)}${role}${tampered}\n`);
     for (const g of member.grants) {
       const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
       const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;

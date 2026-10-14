@@ -11,12 +11,11 @@ import {
 import {
   AdministrationItems,
   ProjectEmptyStateCopy,
-  RootAdminOnly,
+  MakesProjectsOnly,
   SecretReadOnly,
 } from '../src/components/affordances.ts';
 
 type Persona = {
-  root: boolean;
   instanceRole: Me['instanceRole'];
   scope?: Me['scope'];
   projectPermissions: Permission[];
@@ -32,9 +31,8 @@ type Persona = {
 };
 
 const PERSONAS: Record<string, Persona> = {
-  'root admin': {
-    root: true,
-    instanceRole: 'root-admin',
+  owner: {
+    instanceRole: 'owner',
     projectPermissions: [],
     environmentPermissions: [
       'secret.read',
@@ -48,7 +46,6 @@ const PERSONAS: Record<string, Persona> = {
     expected: { users: true, services: true, audit: true, newProject: true, revealSecret: true },
   },
   admin: {
-    root: false,
     instanceRole: 'admin',
     projectPermissions: [],
     environmentPermissions: [],
@@ -56,7 +53,6 @@ const PERSONAS: Record<string, Persona> = {
   },
   // Scoped to market, it lists people to grant them market, and makes no project: the new one is not market.
   'scoped admin': {
-    root: false,
     instanceRole: 'admin',
     scope: { projects: { only: ['market'] }, environments: 'all' },
     projectPermissions: ['audit.read', 'environment.manage', 'grant.manage', 'project.manage'],
@@ -65,7 +61,6 @@ const PERSONAS: Record<string, Persona> = {
   },
   // Scoped to all but billing, a new project is in its scope.
   'admin of all but billing': {
-    root: false,
     instanceRole: 'admin',
     scope: { projects: { except: ['billing'] }, environments: 'all' },
     projectPermissions: ['audit.read', 'environment.manage', 'grant.manage', 'project.manage'],
@@ -73,7 +68,6 @@ const PERSONAS: Record<string, Persona> = {
     expected: { users: true, services: true, audit: true, newProject: true, revealSecret: false },
   },
   auditor: {
-    root: false,
     instanceRole: 'member',
     projectPermissions: [],
     // Audit roles may be scoped to one environment, so /api/me projects that
@@ -82,21 +76,18 @@ const PERSONAS: Record<string, Persona> = {
     expected: { users: false, services: true, audit: true, newProject: false, revealSecret: false },
   },
   'access manager': {
-    root: false,
     instanceRole: 'member',
     projectPermissions: ['grant.manage'],
     environmentPermissions: [],
     expected: { users: false, services: true, audit: false, newProject: false, revealSecret: false },
   },
   developer: {
-    root: false,
     instanceRole: 'developer',
     projectPermissions: [],
     environmentPermissions: ['secret.read', 'secret.write', 'secret.archive'],
     expected: { users: false, services: true, audit: false, newProject: false, revealSecret: true },
   },
   outsider: {
-    root: false,
     instanceRole: 'member',
     projectPermissions: [],
     environmentPermissions: [],
@@ -110,11 +101,10 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
       principal: { type: 'user', id: `${name.replaceAll(' ', '-')}@example.test` },
       instanceRole: persona.instanceRole,
       scope: persona.scope ?? { projects: 'all', environments: 'all' },
-      isRootAdmin: persona.root,
-      runsInstance: persona.root || (persona.instanceRole === 'admin' && persona.scope === undefined),
+      runsInstance: (persona.instanceRole === 'admin' || persona.instanceRole === 'owner') && persona.scope === undefined,
       canReadAudit:
         persona.instanceRole === 'admin' ||
-        persona.root ||
+        persona.instanceRole === 'owner' ||
         persona.projectPermissions.includes('audit.read') ||
         persona.environmentPermissions.includes('audit.read'),
       // The server's to say (`setsUpServices`): anyone who holds something, as the setting is everywhere.
@@ -156,7 +146,7 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
           audit: createElement('a', { href: '/audit' }, 'Audit log'),
         }),
         createElement(
-          RootAdminOnly,
+          MakesProjectsOnly,
           { capabilities },
           createElement('button', null, 'New project'),
         ),
@@ -191,7 +181,7 @@ test('a signed-out shell exposes no privileged affordances', () => {
   });
 });
 
-test('root project empty states distinguish empty from archived-only instances', () => {
+test('a project maker\'s empty states distinguish empty from archived-only instances', () => {
   const capabilities = {
     canManageGrants: true,
     runsInstance: true,
@@ -219,7 +209,7 @@ test('root project empty states distinguish empty from archived-only instances',
   );
 });
 
-test('non-root archived-only project states point to the visible archived list', () => {
+test('archived-only project states, for someone who makes no project, point to the visible archived list', () => {
   const capabilities = {
     canManageGrants: true,
     runsInstance: false,

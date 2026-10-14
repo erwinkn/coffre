@@ -143,6 +143,16 @@ export function administers(role: InstanceRole): boolean {
 }
 
 /**
+ * Whether a role and its scope make someone an Owner of the whole
+ * instance: the one standing the instance always keeps at least one of,
+ * and the one its bootstrap gives while it has none. An Owner scoped to
+ * `market` owns market, not the instance.
+ */
+export function ownsInstance(standing: { role: InstanceRole; scope: Scope }): boolean {
+  return standing.role === 'owner' && unscoped(standing.scope);
+}
+
+/**
  * Which projects, or environments, a scope takes in: all of them, only
  * those listed, or all but those listed. Projects are listed by id, so a
  * rename keeps them; environments by slug, so `dev` is the `dev` of every
@@ -311,8 +321,6 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
  * cannot drift apart.
  */
 export type Holdings = {
-  /** Named in the vault's configuration: everything, everywhere. */
-  isRootAdmin: boolean;
   /** `member` for service accounts, and for anyone not active. */
   role: InstanceRole;
   scope: Scope;
@@ -323,7 +331,7 @@ export type Holdings = {
 };
 
 /** Someone who holds nothing: a stranger, a removed member, a tampered row. */
-export const NOTHING: Holdings = { isRootAdmin: false, role: 'member', scope: EVERYWHERE, grants: [] };
+export const NOTHING: Holdings = { role: 'member', scope: EVERYWHERE, grants: [] };
 
 /**
  * Whether a grant at `grant` reaches `place`:
@@ -353,7 +361,6 @@ export function covers(grant: GrantPlace, place: Place): boolean {
  */
 export function allows(holder: Holdings, permission: Permission, place: Place): boolean {
   if (holder.credentialScope != null && !holdsAt(holder.credentialScope, permission, place)) return false;
-  if (holder.isRootAdmin) return true;
   if (instanceRoleGrants(holder.role, permission) && inScope(holder.scope, place)) return true;
   return holdsAt(holder.grants, permission, place);
 }
@@ -374,14 +381,14 @@ export function mayManageAccess(actor: Holdings, place: Place): boolean {
 }
 
 /**
- * Whether the holder runs the instance: a root admin, or an Admin or Owner
- * whose scope narrows nothing. They add and remove people, set instance
+ * Whether the holder runs the instance: an Admin or Owner whose scope
+ * narrows nothing. They add and remove people, set instance
  * roles, and change the instance's settings; they read its whole log too
  * (`readsWholeLog`). A scoped Admin manages only inside its scope, so it
  * does none of these.
  */
 export function runsInstance(holder: Holdings): boolean {
-  return holder.isRootAdmin || (administers(holder.role) && unscoped(holder.scope));
+  return administers(holder.role) && unscoped(holder.scope);
 }
 
 /**
@@ -463,12 +470,12 @@ export function issuesCredential(
  * Whether the holder reads the whole log, the instance's own entries
  * (sign-ins, people, service accounts, settings) with every project's, and
  * verifies it: whoever holds `audit.read` by an instance role whose scope
- * narrows nothing, an Auditor's included, and a root admin. Reading, not
+ * narrows nothing, an Auditor's included. Reading, not
  * running: an Auditor of the whole instance changes nothing it reads about.
  * Anyone else reads the places they hold `audit.read` in.
  */
 export function readsWholeLog(holder: Holdings): boolean {
-  return holder.isRootAdmin || (instanceRoleGrants(holder.role, 'audit.read') && unscoped(holder.scope));
+  return instanceRoleGrants(holder.role, 'audit.read') && unscoped(holder.scope);
 }
 
 /**
@@ -478,7 +485,6 @@ export function readsWholeLog(holder: Holdings): boolean {
  * hold the project around them.
  */
 export function makesProjects(holder: Holdings): boolean {
-  if (holder.isRootAdmin) return true;
   const { projects, environments } = holder.scope;
   return administers(holder.role) && environments === 'all' && (projects === 'all' || 'except' in projects);
 }
