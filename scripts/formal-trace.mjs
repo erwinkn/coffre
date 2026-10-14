@@ -111,7 +111,7 @@ const show = (value) => {
     if ('who' in value && 'at' in value && Object.keys(value).length === 2) return `${value.who}@${value.at}`;
     if ('kind' in value && 'at' in value && 'id' in value) {
       if (value.kind.startsWith('access.')) return `${value.kind} ${value.who}@${value.at} (${value.id[0]})`;
-      if (value.kind === 'member.remove') return `member.remove ${value.who} (${value.id[0]})`;
+      if (value.kind.startsWith('member.')) return `${value.kind} ${value.who} (${value.id[0]})`;
       const via = value.via === undefined || value.via[0] === 'none' ? '' : ` via ${reference(value.via)}`;
       const reader = value.kind === 'secret.read' ? ` as ${value.who}` : '';
       return `${value.kind} ${value.at} (${value.id[0]})${via}${reader}`;
@@ -142,14 +142,15 @@ function change(name, before, after) {
   return [`${name} ${show(before)} -> ${show(after)}`];
 }
 
-const SHOWN = ['slug', 'archived', 'held', 'version', 'grants', 'refRow', 'status', 'gen', 'memberLock', 'head', 'log', 'creds'];
+const SHOWN = ['slug', 'archived', 'held', 'version', 'grants', 'owners', 'refRow', 'status', 'gen', 'memberLock', 'head', 'log', 'creds'];
 
 function describe(op) {
   switch (op.kind) {
     case 'none': return '';
     case 'read': case 'write': return `${op.kind} ${op.at} as ${op.who}`;
     case 'grant': case 'revoke': return `${op.kind} ${op.who}@${op.at} by ${op.actor}`;
-    case 'remove': return `remove ${op.who} by ${op.actor}`;
+    case 'remove': case 'demote': return `${op.kind} ${op.who} by ${op.actor}`;
+    case 'bootstrap': return `bootstrap ${op.who}`;
     case 'signin': return `signin ${op.who}`;
     case 'rotate': return 'rotate';
     default: return `${op.kind} ${op.at} by ${op.actor}`;

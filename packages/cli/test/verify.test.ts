@@ -195,9 +195,9 @@ test('coffre verify keys is refused before any key is asked for, for someone who
   assert.equal(run.stdout, '');
 });
 
-for (const role of ['user', 'root-admin'] as const) {
+for (const role of ['user', 'owner'] as const) {
   test(`coffre verify instance, as a ${role}, uses the session coffre login made, and leaves it signed in`, async (t) => {
-    const me = { principal: { type: 'user', id: 'root@acme.example' }, registered: true, tampered: false, instanceRole: role, isRootAdmin: role !== 'user', runsInstance: role !== 'user', canReadAudit: true, environments: [] };
+    const me = { principal: { type: 'user', id: 'root@acme.example' }, registered: true, tampered: false, instanceRole: role === 'user' ? 'member' : role, runsInstance: role !== 'user', canReadAudit: true, environments: [] };
     const instance = await fakeInstance(t, (method, path) =>
       method === 'GET' && path === '/api/me' ? me : method === 'GET' && path === '/api/audit/verification' ? { ok: true, entries: 12, through: 11, checkpoint: null } : undefined,
     );
@@ -207,10 +207,10 @@ for (const role of ['user', 'root-admin'] as const) {
     // A stand-in for an instance fails the anonymous checks; what matters here is what is done with the session.
     assert.equal(run.code, 1);
     if (role === 'user') {
-      assert.match(run.stdout, /✗ owner +root@acme\.example is not an admin or owner of all of http:\/\/127\.0\.0\.1:\d+, nor a root admin: nothing was made/);
+      assert.match(run.stdout, /✗ owner +root@acme\.example is not an admin or owner of all of http:\/\/127\.0\.0\.1:\d+: nothing was made/);
       assert.doesNotMatch(run.stdout, /setup|clean-up/);
     } else {
-      assert.match(run.stdout, /✓ owner +root@acme\.example, a root admin, with this CLI's session/);
+      assert.match(run.stdout, /✓ owner +root@acme\.example, an owner, with this CLI's session/);
       assert.match(run.stdout, /✓ owner verification +the whole chain verifies, as you: 12 entries, through entry 11/);
       assert.match(run.stdout, /✓ clean-up +nothing issued; your session stays/);
     }

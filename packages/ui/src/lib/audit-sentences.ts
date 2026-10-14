@@ -83,6 +83,13 @@ function subject(entry: AuditEntry): Part[] {
   return [{ member: `${entry.metadata.principalType === 'service' ? 'token' : 'user'}:${id}` }];
 }
 
+/** Why the vault made someone an Owner itself, said after it. */
+function owned(entry: AuditEntry): Part[] {
+  if (entry.metadata.reason === 'bootstrap') return [': no Owner was left, and the deployment names them to take over'];
+  if (entry.metadata.reason === 'root-admin') return [': they were a root admin'];
+  return [];
+}
+
 /** An MCP client, by the name it connected under. */
 function app(entry: AuditEntry): Part[] {
   return [text(entry.metadata.clientName) ?? 'an app'];
@@ -289,6 +296,7 @@ const TEMPLATES: Record<string, Template> = {
       ...subject(entry),
       ...(entry.metadata.rootAdmin === true ? [' as a root admin'] : entry.metadata.owner === true ? [' as an owner'] : asRole(entry)),
     ],
+    then: ({ entry }) => owned(entry),
   },
   'member.remove': {
     did: 'removed',
@@ -296,14 +304,34 @@ const TEMPLATES: Record<string, Template> = {
     what: (facts) => subject(facts.entry),
     then: ({ entry }) => (number(entry.metadata.revoked) === null ? [] : [`, who held ${plural(number(entry.metadata.revoked)!, 'grant')}`]),
   },
-  'member.restore': { did: 'brought back', tried: 'bring back', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
+  'member.restore': {
+    did: 'brought back',
+    tried: 'bring back',
+    what: ({ entry }) => [...subject(entry), ...asRole(entry)],
+    then: ({ entry }) => owned(entry),
+  },
   'member.role': {
     did: 'made',
     tried: 'make',
     what: ({ entry }) => [...subject(entry), ` ${article(roleName(text(entry.metadata.role) ?? 'member') ?? 'Member')}`, ...scoped(entry)],
     then: ({ entry }) => {
       const before = roleName(text(entry.metadata.previousRole) ?? '');
-      return [...(before === null ? [] : [`, was ${before}`]), ...(entry.metadata.reason === 'every-project' ? [', for their grants on every project'] : [])];
+      return [
+        ...(before === null ? [] : [`, was ${before}`]),
+        ...(entry.metadata.reason === 'every-project' ? [', for their grants on every project'] : []),
+        ...owned(entry),
+      ];
+    },
+  },
+  // The vault turning 0.5's root admins into Owners, once.
+  'root-admins.convert': {
+    did: 'ended',
+    tried: 'end',
+    what: () => ['root admins'],
+    then: ({ entry }) => {
+      const owners = Array.isArray(entry.metadata.owners) ? entry.metadata.owners.flatMap((owner) => text(owner) ?? []) : [];
+      if (owners.length === 0) return [': there were none to make Owners'];
+      return [', making Owners of ', ...owners.flatMap((member, i): Part[] => [...(i === 0 ? [] : [', ']), { member }])];
     },
   },
   'member.owner': {
@@ -509,6 +537,7 @@ const REASONS: Record<string, string> = {
   deleted: 'the place was deleted',
   not_allowed: 'not allowed',
   root_admin: 'root admins are set by the deployment',
+  last_owner: 'they are the last Owner of the whole instance',
   requires_instance_admin: 'requires an admin or owner of the whole instance',
   requires_instance_owner: 'requires an instance owner',
   own_role: 'nobody changes their own role',

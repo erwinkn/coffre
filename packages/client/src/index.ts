@@ -361,7 +361,7 @@ export function createClient(options: ClientOptions) {
     audit: {
       list: (query: RouteInput<'GET /audit'> = {}) => call('GET /audit', {}, query),
       verify: () => call('GET /audit/verification', {}),
-      /** What an escrowed key is checked against: public material, owners and root admins only. */
+      /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
     },
   };

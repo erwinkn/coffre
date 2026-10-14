@@ -40,8 +40,8 @@ export type Deployment = {
   kind: Kind;
   origin: string;
   idp: DevIdp;
-  /** The one root admin the vault is told of. */
-  rootAdmin: string;
+  /** The one bootstrap Owner the vault is told of: the first to sign in, who owns the instance. */
+  owner: string;
   /** Whether no heartbeat has run yet, so /readyz fails until `scheduled` runs. */
   beforeFirstBeat: boolean;
   /** What the Cron trigger does every five minutes. */
@@ -61,7 +61,7 @@ export type Deployment = {
   stop(): Promise<void>;
 };
 
-const ROOT_ADMIN = 'root@conformance.example';
+const OWNER = 'root@conformance.example';
 
 type Child = { name: string; child: ChildProcess; daemon: boolean; exited: boolean; output: Buffer[] };
 
@@ -226,7 +226,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       APP_KEY: KEYS.APP_KEY,
       VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
       VAULT_KEY: KEYS.VAULT_KEY,
-      ROOT_ADMINS: ROOT_ADMIN,
+      BOOTSTRAP_OWNERS: OWNER,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: runtime,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
       WRANGLER_SEND_METRICS: 'false',
@@ -235,7 +235,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       kind,
       origin,
       idp,
-      rootAdmin: ROOT_ADMIN,
+      owner: OWNER,
       beforeFirstBeat: true,
       async scheduled(options = {}) {
         const response = await fetch(`${origin}/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*`);
@@ -260,7 +260,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       DATABASE_URL: `file:${database}`,
       VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
       VAULT_KEY: KEYS.VAULT_KEY,
-      ROOT_ADMINS: ROOT_ADMIN,
+      BOOTSTRAP_OWNERS: OWNER,
     });
     await until('the vault socket', async () => existsSync(socket), 30, alive);
     // The pages as they run: the deployment's Start app, built by its own Vite.
@@ -281,7 +281,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       kind,
       origin,
       idp,
-      rootAdmin: ROOT_ADMIN,
+      owner: OWNER,
       beforeFirstBeat: false,
       // `serve` runs the job as it starts, and every five minutes after:
       // so restart the server.

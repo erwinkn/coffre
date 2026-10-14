@@ -311,7 +311,7 @@ test('only owners see reports, and only about someone who exists', async () => {
 
   const rootReport = await lead.members.get(`user:${ROOT}`);
   assert.equal(rootReport.status, 'active');
-  assert.equal(rootReport.instanceRole, 'root-admin');
+  assert.equal(rootReport.instanceRole, 'owner');
 });
 
 for (const readmitFirst of [false, true]) {

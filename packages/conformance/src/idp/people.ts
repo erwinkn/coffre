@@ -13,8 +13,8 @@ export interface Persona {
  * lands on a seeded account.
  */
 export const PERSONAS: readonly Persona[] = Object.freeze([
-  { email: 'admin@acme.example', name: 'Ada Admin', note: 'root admin' },
-  { email: 'lead@acme.example', name: 'Lea Lead', note: 'owner' },
+  { email: 'admin@acme.example', name: 'Ada Admin', note: 'owner of coffre' },
+  { email: 'lead@acme.example', name: 'Lea Lead', note: 'owner of market' },
   { email: 'dev@acme.example', name: 'Devon Dev', note: 'developer on dev' },
   { email: 'auditor@acme.example', name: 'Audrey Auditor', note: 'auditor' },
   { email: 'accessmgr@acme.example', name: 'Max Access', note: 'access manager' },

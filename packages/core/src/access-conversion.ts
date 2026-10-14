@@ -184,7 +184,7 @@ function holdsAlready(
   at: Place,
 ): boolean {
   const lasting = held.filter((other) => outlasts(other.expiresAt, grant.expiresAt));
-  return ROLES[grant.role].permissions.every((permission) => allows({ isRootAdmin: false, role, scope, grants: lasting }, permission, at));
+  return ROLES[grant.role].permissions.every((permission) => allows({ role, scope, grants: lasting }, permission, at));
 }
 
 /** Whether `role` holds nothing `wider` does not. */

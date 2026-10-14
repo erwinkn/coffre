@@ -5,6 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { and, asc, count, eq } from 'drizzle-orm';
 
 import { PROJECT_PAGES } from '@coffre/core/pages';
+import { EVERYWHERE } from '@coffre/core/access';
 
 import { auditLog, projects, vaultMembers } from './db/tables.ts';
 import {
@@ -106,9 +107,9 @@ test('creating a project or environment that exists changes nothing and logs not
   assert.equal(await auditCount(), logged);
 });
 
-test('only configured bootstrap principals project as root admins', async () => {
+test('the bootstrap Owner owns the instance, as an Owner like any other', async () => {
   const me = await root.me();
-  assert.equal(me.instanceRole, 'root-admin');
+  assert.deepEqual([me.instanceRole, me.scope, me.runsInstance], ['owner', EVERYWHERE, true]);
   assert.equal(me.canReadAudit, true);
   const them = await outsider.me();
   assert.equal(them.instanceRole, 'member');

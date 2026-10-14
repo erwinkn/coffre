@@ -16,7 +16,7 @@ export const coffre = createCoffre({
   database: env('DATABASE_URL'),
   vault: connectVault(env('VAULT_SOCKET')),
   // For tests or local SQLite development only, the vault in this process:
-  // vault: await localVault({ database: env('DATABASE_URL'), kek: …, rootAdmins: […] }),
+  // vault: await localVault({ database: env('DATABASE_URL'), kek: …, bootstrapOwners: […] }),
   auth: signin({
     providers: [
       github({

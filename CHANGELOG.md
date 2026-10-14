@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+**Owners replace root admins.** Root admins were emails in the vault's
+configuration that held everything, outside the member table and its
+rules: nobody could change or remove them, and they showed in People only
+because the vault said so. Now there is one kind of principal. The most
+anyone holds is the Owner role with no scope, an Owner of the whole
+instance: a member like any other, in People, changed by the same rules.
+
+- **The instance always has an Owner.** The last Owner of the whole
+  instance cannot be demoted, narrowed to a scope, or removed, by anyone,
+  themselves included: "you're the last Owner of the whole instance: make
+  someone else an Owner first" (409, `last_owner`). An Owner of one
+  project doesn't count. Two changes at once, each about a different
+  Owner, never leave none: the vault counts under the log's head, and
+  `formal/Coffre.tla` checks it.
+- **The list only bootstraps.** The vault's `bootstrapOwners`
+  (`BOOTSTRAP_OWNERS` in a deployment `coffre init` writes) names who
+  becomes an Owner by signing in while the instance has none, logged as
+  the vault's ("no Owner was left, and the deployment names them to take
+  over"). At any other time it does nothing. That is a new instance's first
+  sign-in, and the way back into one whose Owners are all gone: name an
+  email you control, deploy, sign in.
+- **A wrong vault key is an outage.** A vault given the wrong key checks
+  no member's row, the Owner's included, so every request answers 503 and
+  nobody signs in, with the reason in the app's log, where before root
+  admins got through to a `wrong_kek` answer and everyone else was refused
+  as tampered ([restore.md](docs/restore.md#if-the-vault-key-is-wrong)).
+- The API's `isRootAdmin` and the `root-admin` instance role are gone, as
+  is the vault's `root_admin` refusal, and `about()` no longer lists them.
+  Settings no longer lists root admins; Users does, as Owners.
+
+**Upgrading from 0.5.** Nothing to migrate, and nothing to change first:
+
+1. **`coffre update`**, then **`coffre migrate`**, which applies nothing.
+2. **Deploy.** The vault's first call makes every email its configuration
+   names (`rootAdmins`, `ROOT_ADMINS`) an Owner of the whole instance,
+   once, as `system:vault`: a member row for one who never signed in too,
+   so nobody loses what they held. A `root-admins.convert` entry records
+   it, after which the list only bootstraps. Someone you took off the list
+   before upgrading is not made an Owner.
+3. **Check Users**, where your root admins are now Owners: demote those
+   who should not be, keeping one, and make Owners of anyone else who
+   should run coffre.
+4. **Optionally, rename the setting**: `rootAdmins` and `ROOT_ADMINS` are
+   read for 0.6 only. In `vault/src/worker.ts`, `bootstrapOwners:
+   env.BOOTSTRAP_OWNERS.split(',')`, and the var in `vault/wrangler.jsonc`
+   (on Node, `src/vault.ts` and `vault.env`); `coffre setup` keeps
+   whichever name your vault reads.
+
+Rolling back to 0.5 leaves the new Owners Owners, and makes the listed
+emails root admins again.
+
 ## 0.5.1 (2026-10-11)
 
 **`coffre update` moves a deployment with the new release's pages.** The

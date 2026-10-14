@@ -117,12 +117,11 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
           principalId,
           instanceRole: found.instanceRole,
           scope: found.scope,
-          isRootAdmin: found.isRootAdmin,
           tampered: found.status === 'tampered',
           managed: principalType === 'service',
         }
       : yours
-        ? { principalType, principalId, instanceRole: 'member' as const, scope: null, isRootAdmin: false, tampered: false, managed: true }
+        ? { principalType, principalId, instanceRole: 'member' as const, scope: null, tampered: false, managed: true }
         : undefined;
 
   // Owners get a report about anyone ever registered, removed or not, so a
@@ -240,7 +239,6 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
  * its offboarding did instead.
  */
 export function PrincipalAccess({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
-  const { instanceRole } = useShell();
   const report = useReport(principalType, principalId);
   const { access: held, error, projects: access, offers } = useMemberAccess(principalType, principalId);
   const kind = KIND[principalType];
@@ -316,14 +314,11 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
             </div>
           )}
 
-          {/* A root admin manages every project, so nothing is out of view. */}
-          {instanceRole !== 'root-admin' && (
-            <p className="hint section-foot">
-              {held?.managed === true && principalType === 'service'
-                ? 'Only projects where you may give it access are listed: what you hold there, where the instance lets you.'
-                : 'Only projects where you manage access are listed.'}
-            </p>
-          )}
+          <p className="hint section-foot">
+            {held?.managed === true && principalType === 'service'
+              ? 'Only projects where you may give it access are listed: what you hold there, where the instance lets you.'
+              : 'Only projects where you manage access are listed.'}
+          </p>
 
         </>
       )}
@@ -335,7 +330,7 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
 
 /** What a person's instance role gives them, above the grants that add to it: nothing for a Member. */
 function InstanceRoleNote({ access }: { access: MemberAccess }) {
-  if (access.instanceRole === 'member' || access.instanceRole === 'root-admin') return null;
+  if (access.instanceRole === 'member') return null;
   const { name } = INSTANCE_ROLES[access.instanceRole];
   return (
     <div className="report-notice">

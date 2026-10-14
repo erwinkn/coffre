@@ -11,7 +11,7 @@ const local = {
   DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
   COFFRE_DEV_URL: 'http://127.0.0.1:3000',
   COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
-  COFFRE_ROOT_ADMINS: 'admin@acme.example',
+  COFFRE_BOOTSTRAP_OWNERS: 'admin@acme.example',
 };
 
 test('seed accepts the checked-in local development targets', () => {
@@ -20,7 +20,7 @@ test('seed accepts the checked-in local development targets', () => {
       'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
     apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
-    rootAdmin: 'admin@acme.example',
+    owner: 'admin@acme.example',
   });
 });
 
@@ -53,18 +53,18 @@ test('seed rejects a production database exported over the dev env file', () => 
   );
 });
 
-test('seed rejects a foreign root admin before resetting local data', () => {
+test('seed rejects a foreign Owner before resetting local data', () => {
   assert.throws(
     () =>
       loadLocalSeedConfig({
         ...local,
-        COFFRE_ROOT_ADMINS: 'production.admin@example.com',
+        COFFRE_BOOTSTRAP_OWNERS: 'production.admin@example.com',
       }),
-    /refuses non-local rootAdmin/,
+    /refuses non-local owner/,
   );
   assert.throws(
-    () => loadLocalSeedConfig({ ...local, COFFRE_ROOT_ADMINS: '' }),
-    /refuses non-local rootAdmin/,
+    () => loadLocalSeedConfig({ ...local, COFFRE_BOOTSTRAP_OWNERS: '' }),
+    /refuses non-local owner/,
   );
 });
 

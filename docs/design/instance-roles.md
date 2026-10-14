@@ -24,8 +24,10 @@ and reading everywhere took a grant on `*` beside it. 0.5 keeps one of each:
 | Admin | `audit.read`, `environment.manage`, `grant.manage`, `project.manage`; people and service accounts | no |
 | Owner | everything an Admin holds, and every secret permission, `secret.archive` too | yes |
 
-Root admins, named in the vault's configuration, are Owners everywhere and
-cannot be changed. Project roles (viewer, developer, maintainer,
+An Owner whose scope narrows nothing is an **Owner of the whole
+instance**: the instance always keeps one, and the vault's configuration
+names who becomes the first ("Owners of the whole instance", below).
+Project roles (viewer, developer, maintainer,
 access-manager, auditor, owner) are unchanged.
 
 ## The scope
@@ -54,8 +56,7 @@ Still one function in core, `allows`, which the app and the vault both ask:
 
 ```ts
 allows(holder, permission, place) =
-  holder.isRootAdmin
-  || (INSTANCE_ROLES[holder.role] holds permission && inScope(holder.scope, place))
+  (INSTANCE_ROLES[holder.role] holds permission && inScope(holder.scope, place))
   || holder.grants.some((grant) => covers(grant, place) && ROLES[grant.role] holds permission)
 ```
 
@@ -71,16 +72,16 @@ holds `viewer` on `billing`:
 
 ## Who runs the instance
 
-**Running the instance** takes a root admin, or an Admin or Owner whose
-scope narrows nothing (`runsInstance`): adding and removing people,
+**Running the instance** takes an Admin or Owner whose scope narrows
+nothing (`runsInstance`): adding and removing people,
 setting instance roles, the instance's settings, a member's offboarding
 report, deleting an archived project or environment for good. They manage
 every service account too; people set up their own where the setting lets
 them ("Setting up service accounts", below).
 
 **Reading the whole log** takes `audit.read` from an instance role whose
-scope narrows nothing: an Auditor, Admin or Owner everywhere, or a root
-admin (`readsWholeLog`). They read the instance's own entries, sign-ins,
+scope narrows nothing: an Auditor, Admin or Owner everywhere
+(`readsWholeLog`). They read the instance's own entries, sign-ins,
 people, service accounts and settings, beside every project's, and verify
 the log whole (`coffre verify log`), which a part of it could not be. An
 Auditor of the whole instance changes none of what it reads about: it runs
@@ -101,8 +102,7 @@ Nobody hands out more than they reach:
 - **Nobody changes their own instance role or scope**, not even an
   unscoped Admin: another admin does it, and the log says who.
 - An Admin holds no secret permission, scoped or not, and **nobody grants
-  themselves a role** (giving one up is fine; a root admin, who reads
-  everything anyway, is exempt). That stops a quiet read of one's own, and
+  themselves a role** (giving one up is fine). That stops a quiet read of one's own, and
   is no boundary: an Admin can grant a project role that reads to someone
   else, as an access manager can in a project, and an Admin can reach any
   value in its scope in three steps, each in the log, by admitting a
@@ -291,6 +291,60 @@ Rolling back to 0.4 fails closed: a sealed row fails 0.4's MAC, and its
 token or binding is refused; so does a 0.4 instance still serving while
 0.5 rolls out, for every row 0.5 has sealed.
 
+## Owners of the whole instance
+
+Written on 2026-10-14, from Erwin's decision D120. Before 0.6, root
+admins, emails in the vault's configuration (`rootAdmins`), held
+everything, outside the member table and its rules: nobody could change or
+remove them, they granted themselves anything, and the vault checked no
+row of theirs. 0.6 has one kind of principal. The most anyone holds is the
+Owner role with no scope, an **Owner of the whole instance**
+(`ownsInstance`): a member like any other, in People, changed by the rules
+above. An Owner scoped to `market` owns market, not the instance, and
+counts for neither rule below.
+
+**The instance always has one.** The last active Owner of the whole
+instance is not demoted, narrowed or removed, by anyone, themselves
+included: the vault refuses with `last_owner`, "you're the last Owner of
+the whole instance: make someone else an Owner first", and logs it. The
+vault counts the others under the log's head, after the rows it locks:
+`admit` and `remove` lock only the actor's row and the subject's, so two
+changes about different Owners, Ada removing herself while Omar's Admin
+demotes Omar, lock nothing in common, and a count under the rows alone
+would let both pass, leaving none. The head puts one after the other.
+`formal/Coffre.tla` models it (`Owners`: `OwnerStays`, which fails without
+`LastOwnerCheckUnderHead`). A row that fails the vault's check counts for
+nothing.
+
+**The configuration only bootstraps.** `bootstrapOwners` (0.5's
+`rootAdmins`, still read for 0.6) names who may become one. While the
+instance has no active Owner of the whole instance, the vault, asked about
+a person it names (`access`, at their sign-in or their next request), makes
+them one: admitted, brought back or given the role, as `system:vault`,
+with `reason: 'bootstrap'`. One whose row fails its check is started over
+first, as removing them would. Two named people at once make one Owner:
+the vault reads again under the person's row and the log's head (`Bootstrap`
+in the model, `BootstrapOnlyWithoutOwner`). At any other time, the list
+does nothing. That covers a new instance and recovery alike: an instance
+whose every Owner is gone, or whose Owners' rows fail the check, takes the
+first named person to sign in. An Owner who exists but cannot sign in any
+more is not recovered by this; that is a command of its own, not built yet
+(`coffre recover owner`).
+
+**Upgrading from 0.5.** The first call of a 0.6 vault makes every email
+the configuration names an Owner of the whole instance, once, as
+`system:vault`, `reason: 'root-admin'`: 0.5 held them root admins already,
+so one who never signed in gets a row too, and nobody loses anything. It
+does so only on an instance whose vault of 0.5 gave a root admin a row (its
+`member.add` with `rootAdmin: true`, under the vault's MAC): a new instance
+has none, and writes nothing. A `root-admins.convert` entry under the
+vault's MAC records it, naming whom it made Owners, and from then on the
+list only bootstraps; one forged in the vault's name is passed over and
+reported, and converts again. No migration: the rows are 0.5's, `role`
+`owner` and a null `scope`, sealed as 0.5 seals them, so 0.5 reads them
+during the rollout and after a rollback, when it holds the configured
+emails root admins again anyway.
+
 ## Where it lives
 
 Two nullable columns on `vault_members`, beside `owner`, from migration
@@ -330,12 +384,12 @@ SQL migration: once per process, before its first call does anything else
 anyway: core's `covers` knows only projects and environments. The first
 request after the upgrade waits for it, one member after another, so on an
 instance with many holders it may be slow; one cut short leaves the rest
-to the next. Two kinds of holder it leaves as they are: a member the vault
-has reported tampered with (`vault.tampered`), until their access next
-changes or they are started over, and a root admin while they are one,
-who holds everything anyway; once they are not, the next process converts
-theirs. The first is the vault's report in the log, not whether their row
-checks out now: a genuine row put back after a report stays left.
+to the next. It leaves a member the vault has reported tampered with
+(`vault.tampered`) as they are, until their access next changes or they
+are started over: the vault's report in the log decides, not whether
+their row checks out now, so a genuine row put back after a report stays
+left. A root admin of 0.5 kept theirs; 0.6 makes them an Owner first, then
+converts theirs like anyone's.
 
 One rule says whether a report stands, `reportStands` in
 `@coffre/db/grants`: the vault applies it to its own entries, passing over
@@ -349,8 +403,7 @@ cannot: the vault converts a marked member whose reports are all forged,
 unless 1024 or more are forged, all it reads back, and leaves an unmarked
 one whose row was changed and not yet reported, or whose genuine report an
 access entry forged after it covers. A forged report never hides a
-conversion. Root admins it cannot tell either: the vault's configuration
-names them, and the database does not.
+conversion.
 
 The rule (`convertEveryProjectGrants`, in core, with a property test that
 nobody ends up holding more anywhere, at any time, including in a project

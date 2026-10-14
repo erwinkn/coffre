@@ -77,7 +77,7 @@ pnpm dev        # Postgres, the dev IdP, coffre and its vault, then seed data
 ```
 
 Open http://127.0.0.1:3000 and sign in through either button as
-`admin@acme.example`, the root admin, or any seeded person (`lead@`, `dev@`,
+`admin@acme.example`, the Owner, or any seeded person (`lead@`, `dev@`,
 `auditor@`, `outsider@`, all at `acme.example`). The dev IdP plays GitHub and
 an OpenID Connect provider, and asks which person you are. `pnpm dev` runs a
 deployment like `examples/workers` on the packages' sources, so an edit
@@ -293,10 +293,12 @@ secret" could read them all. A project role with a project-wide permission
 (`environment.manage`, `grant.manage`, `project.manage`) cannot be granted
 on one environment: the API answers 409 rather than grant less than asked.
 
-**Root admins** are named in the vault's configuration, and no row anywhere
-makes someone one. They hold every permission everywhere, reading secrets
-included, so keep the list short. An Admin or Owner whose scope narrows
-nothing, or a root admin, **runs the instance**: adds and removes people,
+**Owners of the whole instance**, the Owner role with no scope, hold every
+permission everywhere, reading secrets included, so keep them few. The
+instance always has one: the vault's `bootstrapOwners` names who becomes
+the first by signing in, and the last cannot be demoted or removed until
+there is another ([deployment-auth.md](docs/deployment-auth.md#the-first-owner)).
+An Admin or Owner whose scope narrows nothing **runs the instance**: adds and removes people,
 sets instance roles and the instance's settings, and manages every service
 account. An Auditor, Admin or Owner whose scope narrows nothing reads the
 whole log, the instance's own entries included, and verifies it. A scoped

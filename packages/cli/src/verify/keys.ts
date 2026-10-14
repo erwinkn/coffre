@@ -1,7 +1,7 @@
 // `coffre verify keys`: whether the keys in escrow are this instance's,
 // checked on this machine. The instance gives what they are checked
-// against, which is no secret (`GET /audit/keys`, owners and root admins
-// only): each vault key's check, a known value the vault wrapped under it,
+// against, which is no secret (`GET /audit/keys`, for admins and owners of
+// the whole instance): each vault key's check, a known value the vault wrapped under it,
 // and the id the log records for the app key, a fingerprint of it. The vault
 // key is right if it opens the check of the key the vault wraps under now;
 // the app key, if it makes the same fingerprint. Neither key is sent, shown
@@ -20,7 +20,7 @@ export const KEYS_USAGE = `usage:
 
 Asks for the vault key, then the app key, without showing them, and checks
 each against the current instance, on this machine: neither is sent. Enter
-alone skips one. As an owner or a root admin.
+alone skips one. As an admin or owner of the whole instance.
 
   --vault-id   the vault ID kept with the vault key, to check as well. It
                is shown either way

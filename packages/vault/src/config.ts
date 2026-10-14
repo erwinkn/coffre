@@ -15,8 +15,11 @@ export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_00
 /** The vault as it runs: keys decoded, emails checked. */
 export type ResolvedVaultConfig = {
   keks: KekRegistry;
-  /** Emails, lowercased: always active, always owners, never changed through the API. */
-  rootAdmins: readonly string[];
+  /**
+   * Emails, lowercased: who becomes an Owner of the whole instance when it
+   * has none, signing in (`access` in vault.ts). Otherwise nothing.
+   */
+  bootstrapOwners: readonly string[];
   /**
    * The seeds of the vault's own keys, which MAC its log entries, seal member
    * rows and sign checkpoints: the first signs; every one verifies what it
@@ -33,13 +36,13 @@ export type ResolvedVaultConfig = {
 export type Kek = { id: string; key: string } | KekProvider;
 
 /**
- * What a deployment writes: every key coffre has, and who may always get
- * in. The app holds none of it.
+ * What a deployment writes: every key coffre has, and who may claim the
+ * instance while nobody owns it. The app holds none of it.
  *
  *   {
  *     kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials: { … } }),
  *     previousKeks: [{ id: 'vault-2025-01-10-k7q2xm', key: env.OLD_VAULT_KEY }],
- *     rootAdmins: ['admin@acme.example'],
+ *     bootstrapOwners: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
  *   }
  */
@@ -51,8 +54,6 @@ export type VaultConfig = {
    * on, and verifying what the vault wrote under them before the rotation.
    */
   previousKeks?: readonly Kek[];
-  /** At least one email: the only way into a fresh instance, and the only members nobody can remove. */
-  rootAdmins: readonly string[];
   /**
    * 32 random bytes, base64: the seed of the vault's own keys, which MAC its
    * log entries, seal member rows and sign checkpoints. Leave it out with a
@@ -62,7 +63,21 @@ export type VaultConfig = {
   signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
-};
+} & BootstrapOwners;
+
+/**
+ * At least one email, who becomes an Owner of the whole instance by signing
+ * in while it has none: the way into a fresh instance, and back into one
+ * whose every Owner is gone. While it has one, the list does nothing.
+ * `rootAdmins` is its name before 0.6, read for one release.
+ */
+type BootstrapOwners =
+  | { bootstrapOwners: readonly string[]; rootAdmins?: never }
+  | {
+      /** @deprecated 0.5's name for `bootstrapOwners`, read until 0.7: a root admin is an Owner now. */
+      rootAdmins: readonly string[];
+      bootstrapOwners?: never;
+    };
 
 function key32(value: string, what: string): Buffer {
   const raw = Buffer.from(value, 'base64');
@@ -113,7 +128,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
   if (twice !== undefined) throw new Error(`two vault keys share an id: ${twice}`);
   return {
     keks: new KekRegistry(current, previous),
-    rootAdmins: checkRootAdmins(config.rootAdmins),
+    bootstrapOwners: checkBootstrapOwners(config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
   };
@@ -178,18 +193,18 @@ function isHumanEmail(value: string): boolean {
 }
 
 /**
- * Root admins, lowercased the way they are compared. At least one, in every
- * mode: they are the only way into a fresh instance, and the only members
- * nobody can remove.
+ * The bootstrap Owners, lowercased the way they are compared. At least one,
+ * in every mode: they are the only way into a fresh instance, and back into
+ * one with no Owner left.
  */
-export function checkRootAdmins(emails: readonly string[]): string[] {
-  const rootAdmins = [...new Set(emails.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
-  if (rootAdmins.length === 0) {
-    throw new Error('rootAdmins must name at least one email, or nobody can manage coffre');
+export function checkBootstrapOwners(emails: readonly string[]): string[] {
+  const owners = [...new Set(emails.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
+  if (owners.length === 0) {
+    throw new Error('bootstrapOwners must name at least one email, or nobody can manage coffre');
   }
-  const invalid = rootAdmins.find((entry) => !isHumanEmail(entry));
+  const invalid = owners.find((entry) => !isHumanEmail(entry));
   if (invalid) {
-    throw new Error(`rootAdmins must be human email identities; invalid: ${invalid}`);
+    throw new Error(`bootstrapOwners must be human email identities; invalid: ${invalid}`);
   }
-  return rootAdmins.map((entry) => entry.toLowerCase());
+  return owners.map((entry) => entry.toLowerCase());
 }

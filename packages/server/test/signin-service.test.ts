@@ -455,19 +455,21 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
   assert.equal(await countRows(identities, eq(identities.principal, `user:${GONE}`)), 0);
 });
 
-test('a root admin needs no invitation, and nobody can remove them', async () => {
+test('the bootstrap Owner needs no invitation, and is not removed while they are the last Owner', async () => {
   const first = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.deepEqual(first.principal, { type: 'user', id: ROOT });
-  // The vault gave them a member row the first time it was asked about them.
+  // The vault made them the instance's Owner, a member row of its own, while it had none.
   const [row] = await db.owner
-    .select({ createdBy: vaultMembers.createdBy })
+    .select({ createdBy: vaultMembers.createdBy, role: vaultMembers.role, scope: vaultMembers.scope })
     .from(vaultMembers)
     .where(eq(vaultMembers.principal, `user:${ROOT}`));
-  assert.deepEqual(row, { createdBy: 'system:vault' });
+  assert.deepEqual(row, { createdBy: 'system:vault', role: 'owner', scope: null });
   assert.equal((await signin.verify(first.credential.token)).id, ROOT);
 
-  const removed = await deps.vault.remove({ actor: `user:${ROOT}`, principal: member(ROOT) });
-  assert.equal(removed.ok || removed.refusal.code, 'root_admin');
+  for (const actor of [ROOT, LEAD]) {
+    const removed = await deps.vault.remove({ actor: `user:${actor}`, principal: member(ROOT) });
+    assert.equal(removed.ok || removed.refusal.code, 'last_owner', actor);
+  }
   const again = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.equal((await signin.verify(again.credential.token)).id, ROOT);
 });

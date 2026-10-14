@@ -120,9 +120,7 @@ export type EveryProjectPreview = {
  * `reported`, by the vault's own rule (`tamperedMembers`) over the entries as
  * they read: whether that report is the vault's own, or forged so as to
  * hide what it will do, only the vault can tell. Any member the vault
- * converts is listed. A root admin's it leaves while they are one, until
- * they are not; which they are, the vault's configuration says and the
- * database does not, so they are listed too.
+ * converts is listed.
  */
 export async function everyProjectPreview(db: Queryable, at: number): Promise<EveryProjectPreview[]> {
   const { vaultMembers, projects, environments } = tablesOf(db);

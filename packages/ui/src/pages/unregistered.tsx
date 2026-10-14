@@ -46,7 +46,7 @@ export function UnregisteredPage() {
         , but coffre has not added you.
       </p>
       <p>
-        Ask a coffre admin or root admin to add your Access email under Users.
+        Ask a coffre admin or owner to add your Access email under Users.
       </p>
     </ClosedDoor>
   );

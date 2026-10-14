@@ -31,7 +31,7 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
   return {
     access: async (principal: string): Promise<Access> => {
       onAsk(principal);
-      return { principal, status: 'unknown', generation: 0, isRootAdmin: false, role: 'member', scope: EVERYWHERE, grants: [], since: null, by: null, ...known[principal] };
+      return { principal, status: 'unknown', generation: 0, role: 'member', scope: EVERYWHERE, grants: [], since: null, by: null, ...known[principal] };
     },
   };
 }
@@ -189,7 +189,7 @@ test('Cloudflare mode ignores the session cookie and signin mode ignores the Acc
   assert.equal(accessTokenForRequest(request, own), 'session-token');
 });
 
-test('a root admin is whoever the vault says, in one call', async () => {
+test('an Owner is whoever the vault says, in one call', async () => {
   const asked: string[] = [];
   const result = await authenticateRequest(
     new Request('https://coffre.example.test/api/me', {
@@ -202,7 +202,7 @@ test('a root admin is whoever the vault says, in one call', async () => {
       auth: cloudflare,
       verifier: { verify: async () => root },
       vault: vaultKnowing(
-        { 'user:admin@acme.example': { status: 'active', isRootAdmin: true, role: 'owner' } },
+        { 'user:admin@acme.example': { status: 'active', role: 'owner' } },
         (principal) => asked.push(principal),
       ),
     } as never,
@@ -221,7 +221,7 @@ test('a root admin is whoever the vault says, in one call', async () => {
   }
 });
 
-test('an unregistered non-root identity is marked for the closed-door boundary', async () => {
+test('an unregistered identity is marked for the closed-door boundary', async () => {
   const principal: Principal = {
     type: 'user',
     id: 'new@acme.example',
@@ -249,7 +249,6 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
       registered: false,
       tampered: false,
       generation: 0,
-      isRootAdmin: false,
       role: 'member',
       scope: EVERYWHERE,
       grants: [],
@@ -312,7 +311,6 @@ test('an active registered identity receives an auditable request context', asyn
         registered: true,
         tampered: false,
         generation: 0,
-        isRootAdmin: false,
         role: 'member',
         scope: EVERYWHERE,
         grants: [],

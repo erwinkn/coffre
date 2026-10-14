@@ -742,39 +742,44 @@ test("set_access's basis is a digest, as long for fifty expiring grants as for o
 });
 
 test('what a change replaces, unread on the page or on Approve, approves nothing: the page says so, and Approve is refused (L4)', async () => {
-  const root = await connect(ROOT, 'read manage-access');
-  const id = idOf(await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
-  const about = deps.vault.about;
+  // An access manager of market, whose list of members asks the vault where they set up service accounts.
+  const MANAGER = 'manager@acme.example';
+  const root = clientFor(deps, ROOT);
+  await root.members.add(`user:${MANAGER}`);
+  await root.access.set(`user:${MANAGER}`, { market: 'access-manager' });
+  const manager = await connect(MANAGER, 'read manage-access');
+  const id = idOf(await callRaw(manager, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
+  const settings = deps.vault.settings;
   const failing = async <T>(work: () => Promise<T>): Promise<T> => {
-    deps.vault.about = async () => {
+    deps.vault.settings = async () => {
       throw new Error('vault unreachable');
     };
     try {
       return await work();
     } finally {
-      deps.vault.about = about;
+      deps.vault.settings = settings;
     }
   };
   const held = async () => (await clientFor(deps, ROOT).members.list()).members.find((entry) => entry.member === `user:${OTHER}`)!.grants.map((grant) => grant.role);
 
   // The vault fails while the page reads the member's roles: it can't be approved, and a null basis is refused.
-  const blind = await failing(() => view(id, ROOT));
+  const blind = await failing(() => view(id, MANAGER));
   assert.equal(blind.body.approval.ready, false);
   assert.equal(blind.body.approval.basis, null);
-  const unread = await decide(id, true, { shown: blind.body.approval }, ROOT);
+  const unread = await decide(id, true, { shown: blind.body.approval }, MANAGER);
   assert.equal(unread.status, 409);
   assert.match(unread.body.message!, /could not read what this replaces/);
 
   // Read on the page, then the vault fails as Approve reads them again: refused, to retry.
-  const shown = (await view(id, ROOT)).body.approval;
+  const shown = (await view(id, MANAGER)).body.approval;
   assert.equal(shown.ready, true);
-  const retry = await failing(() => decide(id, true, { shown }, ROOT));
+  const retry = await failing(() => decide(id, true, { shown }, MANAGER));
   assert.equal(retry.status, 503);
   assert.match(retry.body.message!, /try again/);
   assert.deepEqual(await held(), ['viewer'], 'nothing applied');
   assert.deepEqual((await entries('mcp.approve')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'unconfirmed'], ['deny', 'unconfirmed']]);
 
   // Read on both sides: approved.
-  assert.equal((await decide(id, true, { shown }, ROOT)).body.status, 'approved');
+  assert.equal((await decide(id, true, { shown }, MANAGER)).body.status, 'approved');
   assert.deepEqual(await held(), ['auditor']);
 });

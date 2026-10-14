@@ -75,8 +75,7 @@ export function onAProject(project: string): void {
  * Someone's instance role in words: `Developer`, or `Developer, All projects · dev only`
  * when a scope narrows it. Only those who run the instance are told the scope (null otherwise).
  */
-export function roleInWords(member: { instanceRole: InstanceRole | 'root-admin'; scope: Scope | null }): string {
-  if (member.instanceRole === 'root-admin') return 'Root admin';
+export function roleInWords(member: { instanceRole: InstanceRole; scope: Scope | null }): string {
   const { name } = INSTANCE_ROLES[member.instanceRole];
   return member.scope === null || unscoped(member.scope) ? name : `${name}, ${scopeInWords(member.scope)}`;
 }

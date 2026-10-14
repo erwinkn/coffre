@@ -111,7 +111,7 @@ export async function setAccess(
     // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
     const self = grantee.type === ctx.caller.principal.type && grantee.id === ctx.caller.principal.id;
     const taken = located.find((want) => want.role !== null);
-    if (self && !ctx.caller.isRootAdmin && taken !== undefined) {
+    if (self && taken !== undefined) {
       throw new Refusal(conflict('nobody grants themselves a role: ask another admin'), denied(ctx, 'access.grant', 'own_grant', scoped(taken)));
     }
 

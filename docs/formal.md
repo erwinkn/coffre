@@ -49,6 +49,8 @@ counterexamples is printed in CI's log.
 | Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
 | A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
+| Demoting or removing an Owner of the whole instance counts the others under the head (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or demoted by another Admin at once, under rows the other does not lock: none left (`OwnerStays`) | |
+| A bootstrap reads under the head whether anyone owns the instance (`vault.ts`, `#bootstrap`) | two people the configuration names, signing in at once, both made Owners (`BootstrapOnlyWithoutOwner`) | |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
 re-read turned off:
@@ -122,6 +124,8 @@ Traces are shortened here; the script prints every step.
 | `NothingReleasedAfterRevocation` | No `secret.read` for a member follows the `access.revoke` or `member.remove` that took their last grant covering where it was decided, unless an `access.grant` covering it again comes between |
 | `NothingReleasedThroughEndedReference` | No `secret.read` through a reference follows its `reference.end`, or the deletion of its source's place or its holder's, in the log |
 | `EveryReferenceBreakable` | A reference that has not ended is held in a standing place, where the API can name its holder, and so break it |
+| `OwnerStays` | Once the instance has an active Owner of all of it, it always has one |
+| `BootstrapOnlyWithoutOwner` | A bootstrap makes an Owner only while the instance has none |
 | `ReferencedSourcesStayLive` | And if it is held in a live place, its source is neither archived nor deleted. The exception is a holder that was archived when its source was archived, and has been restored since: its reads refuse, as any broken reference's |
 
 ## The model
@@ -143,7 +147,8 @@ Traces are shortened here; the script prints every step.
   - delete, archive, restore or rename a place;
   - add an environment, or rename, archive or restore a key;
   - sign in;
-  - remove a member;
+  - remove a member, or take away their Owner role;
+  - make the bootstrap Owner;
   - rotate the vault's key;
   - make a reference, or break one.
 - **Each operation** follows its code path. For example, a read takes these
@@ -172,12 +177,14 @@ Traces are shortened here; the script prints every step.
 | Scenario | Who runs what | States |
 |---|---|---|
 | `Deletion` | One owner deletes a project or an environment, twice. Another grants, revokes, restores or renames, twice | 22 thousand |
-| `Reading` | A place is archived, then deleted. Meanwhile a root admin, a holder of an instance role and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 19 thousand |
+| `Reading` | A place is archived, then deleted. Meanwhile an Owner, a holder of an instance role and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 19 thousand |
 | `Members` | A member signs in, reads and writes, while an owner removes them or changes their grants, and the vault rotates its key | 249 thousand |
 | `Locks` | Two owners change each other's grants and remove a member, while the vault rotates its key, which locks every member's row | 15 thousand |
 | `Mixed` | Two owners run nearly every operation on places and grants, while a member reads, writes, signs in or rotates | 1 million |
 | `References` | A member reads through a reference while an owner breaks it, makes it again, or revokes or removes the reader, and either place is archived, then deleted | 113 thousand |
 | `Referencing` | An owner makes a reference while another archives, restores and archives again either place, and a third deletes one | 13 thousand |
+| `Owners` | Two Owners of the whole instance each leave, or take the other's role, while an Admin demotes or removes either | 1 thousand |
+| `Bootstrap` | Two people the configuration names sign in at once on an instance nobody owns, while an Admin demotes or removes one, or one leaves | 2 thousand |
 
 Every scenario starts from one project and its one environment, holding one
 secret. A third environment, in another project, holds a key that is a
@@ -200,7 +207,11 @@ reference to that secret in `References`, and none yet elsewhere.
   stands for one, scoped or not. Which places a scope takes in is a pure
   function, which the property tests check. The vault replacing the grants
   on every project of 0.4 is one decision per member, under those same
-  locks, and is not modelled apart.
+  locks, and is not modelled apart. Who owns the whole instance is state of
+  its own (`owners`), apart from the `"*"` an Owner reads by: the last-Owner
+  rule and the bootstrap decide on it, not on what anyone reads. Turning
+  0.5's root admins into Owners is one decision under every row it names
+  and the head, once, and is not modelled apart.
 - **The key service.** A remote KEK's intent transaction, budget and
   partial outages are left out. The key decision is modelled as with a
   local KEK, which holds the same locks in the same order.

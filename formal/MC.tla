@@ -34,13 +34,12 @@ DeletionGrants == {[who |-> "ada", at |-> "env"]}
 
 -----------------------------------------------------------------------------
 (* Reads during a deletion: a place is archived, then deleted, while members
-   holding each kind of grant, and a root admin, read and write there, and an
-   owner adds an environment or renames a key. *)
+   holding each kind of grant, an Owner's instance role ("*") among them,
+   read and write there, and an owner adds an environment or renames a key. *)
 
 ReadingMembers == {"ada", "olga", "root", "sam"}
 ReadingRank == [m \in ReadingMembers |-> AllRanks[m]]
 ReadingOwners == {"olga"}
-ReadingRoots == {"root"}
 ReadingProcs == {"reader", "archiver", "deleter"}
 ReadingOps == [p \in ReadingProcs |->
     CASE p = "reader" -> {Op("read", "root", "root", "env"), Op("read", "sam", "sam", "env"),
@@ -49,7 +48,7 @@ ReadingOps == [p \in ReadingProcs |->
       [] p = "archiver" -> {Op("archive", "olga", None, "proj"), Op("archive", "olga", None, "env")}
       [] p = "deleter" -> {Op("delete", "olga", None, "proj"), Op("delete", "olga", None, "env")}]
 ReadingBudget == [p \in ReadingProcs |-> IF p = "reader" THEN 2 ELSE 1]
-ReadingGrants == {[who |-> "ada", at |-> "proj"], [who |-> "sam", at |-> "*"]}
+ReadingGrants == {[who |-> "ada", at |-> "proj"], [who |-> "sam", at |-> "*"], [who |-> "root", at |-> "*"]}
 
 -----------------------------------------------------------------------------
 (* Members: a member signs in, reads and writes while an owner removes them
@@ -90,7 +89,6 @@ LocksGrants == {[who |-> "omar", at |-> "proj"]}
 MixedMembers == {"ada", "olga", "root", "sam"}
 MixedRank == [m \in MixedMembers |-> AllRanks[m]]
 MixedOwners == {"olga"}
-MixedRoots == {"root"}
 MixedProcs == {"owner1", "owner2", "member"}
 OwnerOps == {Op("archive", "olga", None, "proj"), Op("archive", "olga", None, "env"),
              Op("unarchive", "olga", None, "env"), Op("rename", "olga", None, "env"),
@@ -103,7 +101,7 @@ MixedOps == [p \in MixedProcs |->
             Op("write", "ada", "ada", "env"), Op("signin", "sam", "sam", None), Op("rotate", None, None, None)}
       ELSE OwnerOps]
 MixedBudget == [p \in MixedProcs |-> IF p = "owner1" THEN 2 ELSE 1]
-MixedGrants == {[who |-> "ada", at |-> "proj"], [who |-> "sam", at |-> "*"]}
+MixedGrants == {[who |-> "ada", at |-> "proj"], [who |-> "sam", at |-> "*"], [who |-> "root", at |-> "*"]}
 
 -----------------------------------------------------------------------------
 (* References: a member reads the source through the holder while an owner
@@ -142,5 +140,41 @@ ReferencingOps == [p \in ReferencingProcs |->
       [] p = "deleter" -> {Op("delete", "olga", None, "env"), Op("delete", "olga", None, "hold")}]
 ReferencingBudget == [p \in ReferencingProcs |-> IF p = "admin" THEN 3 ELSE 1]
 ReferencingGrants == {[who |-> "olga", at |-> "*"]}
+
+-----------------------------------------------------------------------------
+(* The last Owner: two Owners each leave, or take the other's role, while an
+   Admin of the whole instance demotes or removes either. Each removes or
+   demotes a different Owner under different rows, so only the head puts
+   one after the other: one of them must find no Owner left, and refuse. *)
+
+OwnersMembers == {"ada", "olga", "omar"}
+OwnersRank == [m \in OwnersMembers |-> AllRanks[m]]
+OwnersOwners == {"olga", "omar"}
+OwnersAdmins == {"ada"}
+OwnersProcs == {"olga", "omar", "ada"}
+OwnersOps == [p \in OwnersProcs |->
+    CASE p = "olga" -> {Op("remove", "olga", "olga", None), Op("demote", "olga", "omar", None)}
+      [] p = "omar" -> {Op("remove", "omar", "omar", None), Op("demote", "omar", "olga", None)}
+      [] p = "ada" -> {Op("demote", "ada", "olga", None), Op("demote", "ada", "omar", None),
+                       Op("remove", "ada", "omar", None)}]
+OwnersBudget == [p \in OwnersProcs |-> 1]
+OwnersGrants == {}
+
+-----------------------------------------------------------------------------
+(* The bootstrap: two people the configuration names sign in at once on an
+   instance nobody owns, while an Admin demotes or removes one of them, or
+   one leaves. One becomes the Owner; the other finds them, and does not. *)
+
+BootstrapMembers == {"ada", "root", "sam"}
+BootstrapRank == [m \in BootstrapMembers |-> AllRanks[m]]
+BootstrapOwners == {}
+BootstrapAdmins == {"ada"}
+BootstrapProcs == {"root", "sam", "ada"}
+BootstrapOps == [p \in BootstrapProcs |->
+    CASE p = "root" -> {Op("bootstrap", None, "root", None), Op("remove", "root", "root", None)}
+      [] p = "sam" -> {Op("bootstrap", None, "sam", None)}
+      [] p = "ada" -> {Op("demote", "ada", "root", None), Op("remove", "ada", "sam", None)}]
+BootstrapBudget == [p \in BootstrapProcs |-> IF p = "root" THEN 2 ELSE 1]
+BootstrapGrants == {}
 
 =============================================================================

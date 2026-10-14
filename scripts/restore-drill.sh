@@ -15,7 +15,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 root="$PWD"
-export COMPOSE_PROJECT_NAME=coffre
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 set -a
 # shellcheck disable=SC1091
 . ./.env.dev
@@ -55,7 +55,7 @@ start_coffre() {
     local state="$scratch/state-$1-$RANDOM"
     (
         cd examples/workers
-        export PUBLIC_URL="$COFFRE_DEV_URL" ROOT_ADMINS="$COFFRE_ROOT_ADMINS" WRANGLER_SEND_METRICS=false
+        export PUBLIC_URL="$COFFRE_DEV_URL" BOOTSTRAP_OWNERS="$COFFRE_BOOTSTRAP_OWNERS" WRANGLER_SEND_METRICS=false
         export GITHUB_CLIENT_ID=coffre-local GITHUB_CLIENT_SECRET=coffre-local-secret
         export APP_KEY="$COFFRE_APP_KEY" VAULT_KEY_ID="$COFFRE_VAULT_KEY_ID" VAULT_KEY="$2"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"

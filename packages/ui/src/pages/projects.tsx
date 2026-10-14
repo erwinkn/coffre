@@ -22,7 +22,7 @@ import { Tile } from '../components/tile';
 import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
-  RootAdminOnly,
+  MakesProjectsOnly,
 } from '../components/affordances';
 
 export function ProjectsPage() {
@@ -76,11 +76,11 @@ export function ProjectsPage() {
         </section>
       )}
 
-      <RootAdminOnly capabilities={capabilities}>
+      <MakesProjectsOnly capabilities={capabilities}>
         <div className="table-actions">
           <NewProject />
         </div>
-      </RootAdminOnly>
+      </MakesProjectsOnly>
 
       {archived.length > 0 && (
         <section aria-labelledby="archived-projects">

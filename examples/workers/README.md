@@ -25,8 +25,8 @@ Worker secrets. Everything below runs from this directory.
   App whose callback is `<PUBLIC_URL>/auth/callback/github`, with read-only
   access to email addresses, as `coffre setup` makes it. An OAuth app with
   that callback works too.
-- `vault/wrangler.jsonc`: `ROOT_ADMINS`, the emails of the first people in,
-  and `VAULT_KEY_ID`, which `coffre setup` gives you below.
+- `vault/wrangler.jsonc`: `BOOTSTRAP_OWNERS`, the email of who becomes the
+  Owner by signing in first, and `VAULT_KEY_ID`, which `coffre setup` gives you below.
 
 ## 2. The database and keys
 
@@ -107,7 +107,7 @@ deploys the vault, then builds the app with Vite and deploys what it
 built, which binds to the vault. Wrangler uploads that build as it is
 (`app/dist/server/wrangler.json`), without bundling it again. Route the app to
 `PUBLIC_URL` in the dashboard, or with `routes` in `app/wrangler.jsonc`, then
-sign in there as a root admin, and from a terminal:
+sign in there as the Owner, the first time, and from a terminal:
 
 ```sh
 coffre login https://secrets.example.com

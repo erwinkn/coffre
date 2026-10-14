@@ -75,13 +75,14 @@ export async function signIn(
 
 export async function signInAdmin(deployment: Deployment) {
   const browser = new Browser(deployment.origin);
-  const signed = await signIn(deployment, browser, deployment.rootAdmin);
-  expect(signed.ok, `the root admin was refused: ${'error' in signed ? signed.error : ''}`);
+  const signed = await signIn(deployment, browser, deployment.owner);
+  expect(signed.ok, `the bootstrap Owner was refused: ${'error' in signed ? signed.error : ''}`);
   const api = browser.client();
   const me = await api.me();
-  expect(me.principal.id === deployment.rootAdmin && me.isRootAdmin, 'signed in as someone else', me);
-  const admin: Person = { email: deployment.rootAdmin, member: `user:${deployment.rootAdmin}`, browser, api };
-  return { detail: `${admin.email}, root admin, through GitHub`, value: admin };
+  // Signing in first, with no Owner yet, made them the instance's Owner.
+  expect(me.principal.id === deployment.owner && me.instanceRole === 'owner' && me.runsInstance, 'signed in as someone else, or not as the Owner', me);
+  const admin: Person = { email: deployment.owner, member: `user:${deployment.owner}`, browser, api };
+  return { detail: `${admin.email}, the bootstrap Owner, through GitHub`, value: admin };
 }
 
 export async function setUp(admin: Person) {

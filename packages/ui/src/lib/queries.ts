@@ -66,7 +66,7 @@ export const keys = {
 /** Members' grants, as rows, and a row for each one whose instance role reaches the place listed. */
 function grantRows(members: Member[]): GrantRow[] {
   return members.flatMap((member): GrantRow[] => [
-    ...(member.reachesByRole && member.instanceRole !== 'root-admin'
+    ...(member.reachesByRole
       ? [{
           id: `${member.member}/instance-role`,
           principalType: member.principalType,
@@ -97,12 +97,11 @@ function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
     const { members, removed } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, scope, isRootAdmin, tampered, managed, grants }) => ({
+      ({ principalType, principalId, instanceRole, scope, tampered, managed, grants }) => ({
         principalType,
         principalId,
         instanceRole,
         scope,
-        isRootAdmin,
         tampered,
         managed,
         grants: grants.map(({ project, environment }) => ({ project, environment })),
@@ -311,7 +310,7 @@ export const queries = {
 /**
  * Whether the log holds, or why that is not known. Verifying is for those
  * who read the whole log (an Auditor, Admin or Owner whose scope narrows
- * nothing, a root admin): anyone else reads their projects' part of it, and a part cannot be
+ * nothing): anyone else reads their projects' part of it, and a part cannot be
  * checked as a chain, so for them it is a fact about the page, not a fault.
  */
 async function verifyChain(client: CoffreClient) {

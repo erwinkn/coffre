@@ -24,7 +24,7 @@ export type McpVia = { connectionId: string; clientId: string; clientName: strin
 export type ApiContext = {
   db: Database;
   chainKey: Buffer;
-  /** Keys, grants, who is a member, root admins: every decision the app cannot make alone. */
+  /** Keys, grants, who is a member and their role: every decision the app cannot make alone. */
   vault: Vault;
   /** Background work that must outlive the response, that is explicitly scheduled. */
   waitUntil: (promise: Promise<unknown>) => void;
@@ -241,8 +241,8 @@ export function vaultRefusal(
 }
 
 /**
- * Refuse, and log the refusal, unless the caller runs the instance: a root
- * admin, or an Admin or Owner whose scope narrows nothing (`runsInstance`).
+ * Refuse, and log the refusal, unless the caller runs the instance: an
+ * Admin or Owner whose scope narrows nothing (`runsInstance`).
  */
 export function requireInstance(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>, action: string, fields: EntryFields = {}, what = 'do that'): void {
   if (runsInstance(ctx.caller)) return;

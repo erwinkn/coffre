@@ -22,10 +22,10 @@ import { EVERYWHERE, type Scope } from '@coffre/core/access';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
-import { appendEntries, LogHeadMismatch, LogRewound } from '@coffre/db/log';
+import { appendEntries, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, sql } from 'drizzle-orm';
 
-import { checkRootAdmins, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
+import { checkBootstrapOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
@@ -74,7 +74,7 @@ type World = Awaited<ReturnType<typeof places>> & {
 function configure(overrides: Partial<ResolvedVaultConfig> = {}): ResolvedVaultConfig {
   return {
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    rootAdmins: ['root@acme.example'],
+    bootstrapOwners: ['root@acme.example'],
     signingKeys: [SIGNING_KEY],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
     ...overrides,
@@ -85,7 +85,10 @@ async function world(overrides: Partial<ResolvedVaultConfig> = {}, options: Vaul
   const config = configure(overrides);
   const clock = { offset: 0 };
   const open = async (database: Database) => openLocalVault(database, config, { clockOffset: () => clock.offset, ...options });
-  return { ...(await places(db.owner)), vault: await open(db.vault), clock, twin: async () => open(await db.connect()) };
+  const vault = await open(db.vault);
+  // Root signs in first, as on a new instance: the bootstrap makes them its Owner.
+  assert.equal((await vault.access(ROOT)).role, 'owner');
+  return { ...(await places(db.owner)), vault, clock, twin: async () => open(await db.connect()) };
 }
 
 /** A vault started afresh over the same database: it has verified nothing yet. */
@@ -748,7 +751,7 @@ test('a removed member is refused everything until admitted again, with no grant
   assert.equal(!again.ok && again.refusal.code, 'no_grant');
 });
 
-test('access is managed with the same rules as the app, and root admins are fixed', async () => {
+test('access is managed with the same rules as the app, and the last Owner stays one', async () => {
   const w = await world();
   await member(w, ADA, [[null, 'access-manager']]);
   await member(w, BOB, []);
@@ -776,9 +779,9 @@ test('access is managed with the same rules as the app, and root admins are fixe
   const byBob = await w.vault.setAccess({ actor: BOB, principal: ADA, changes: [change(null, null)] });
   assert.equal(!byBob.ok && byBob.refusal.code, 'not_allowed');
   const toRoot = await w.vault.setAccess({ actor: ROOT, principal: ROOT, changes: [change('viewer')] });
-  assert.equal(!toRoot.ok && toRoot.refusal.code, 'root_admin');
+  assert.equal(!toRoot.ok && toRoot.refusal.code, 'not_allowed');
   const removeRoot = await w.vault.remove({ actor: ROOT, principal: ROOT });
-  assert.equal(!removeRoot.ok && removeRoot.refusal.code, 'root_admin');
+  assert.deepEqual(!removeRoot.ok && removeRoot.refusal, { code: 'last_owner', message: "you're the last Owner of the whole instance: make someone else an Owner first" });
   const stranger = await w.vault.setAccess({ actor: ROOT, principal: 'user:eve@acme.example', changes: [change('viewer')] });
   assert.equal(!stranger.ok && stranger.refusal.code, 'not_a_member');
   const notOwner = await w.vault.admit({ actor: ADA, principal: 'user:eve@acme.example' });
@@ -789,9 +792,6 @@ test('access is managed with the same rules as the app, and root admins are fixe
   const revoked = await w.vault.setAccess({ actor: ADA, principal: BOB, changes: [change(null), change(null, null)] });
   assert.deepEqual(revoked, { ok: true, changes: ['revoked', 'revoked'] });
   assert.deepEqual((await w.vault.access(BOB)).grants, []);
-
-  // Root admins are the vault's configuration, which it says; members are rows anyone may list.
-  assert.deepEqual((await w.vault.about()).rootAdmins, [ROOT]);
 });
 
 // --- instance roles --------------------------------------------------------------
@@ -1448,15 +1448,15 @@ test('a rewrite sealed again with the vault\'s key is found against the head it 
 });
 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {
+  // An empty log has nothing to sign, and the refusal writes nothing to sign next.
+  const empty = await (await fresh()).checkpoint();
+  assert.equal(!empty.ok && empty.refusal.code, 'invalid');
+  assert.equal((await store.vaultPage(db.owner, undefined, 1)).length, 0);
   const w = await world();
   const { auditLog } = tablesOf(db.owner);
   const { checkpointKeys } = await w.vault.about();
   const signed = async () => (await vaultLog(w)).filter((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow');
   assert.deepEqual(await signed(), []);
-  // An empty log has nothing to sign, and the refusal writes nothing to sign next.
-  const empty = await w.vault.checkpoint();
-  assert.equal(!empty.ok && empty.refusal.code, 'invalid');
-  assert.deepEqual(await vaultLog(w), []);
 
   await member(w, ADA, [[w.dev, 'viewer']]);
   const last = (await vaultLog(w)).at(-1)!;
@@ -1545,7 +1545,8 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   await member(w, ADA, []);
   const [last] = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))).slice(-1) as StoredEntry[];
   const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
-  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 1 });
+  // Root's bootstrap, and Ada's admission.
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 2 });
   assert.deepEqual(await w.vault.verifyLog({ upTo: { ...upTo, hash: 'f'.repeat(64) } }), {
     ok: false,
     failedAtSeq: upTo.seq,
@@ -1979,22 +1980,25 @@ const hex = (key: Uint8Array) => Buffer.from(key).toString('hex');
 
 /** A vault from a deployment's own configuration, over places already made: several can follow one another. */
 async function configured(placed: Awaited<ReturnType<typeof places>>, keys: Pick<VaultConfig, 'kek' | 'previousKeks' | 'signingKey'>): Promise<World> {
-  const resolved = resolveVaultConfig({ rootAdmins: ['root@acme.example'], ...keys });
+  const resolved = resolveVaultConfig({ bootstrapOwners: ['root@acme.example'], ...keys });
   const clock = { offset: 0 };
   const vault = await openLocalVault(db.vault, resolved, { clockOffset: () => clock.offset });
+  // Root, signing in, owns the instance: the first such vault makes them its Owner, and the others find them one.
+  // One whose key the log moved on from answers nobody (`access`), and its test says how.
+  await vault.access(ROOT).catch((error: unknown) => assert.match(String(error), /a key this vault does not hold|the log moved on/));
   return { ...placed, vault, clock, twin: async () => openLocalVault(await db.connect(), resolved) };
 }
 
 test('a local KEK stands for one signing key: the same for the same KEK, another for another, never the KEK', () => {
   const kek = localKek('kek-1');
-  const one = resolveVaultConfig({ kek, rootAdmins: ['root@acme.example'] });
+  const one = resolveVaultConfig({ kek, bootstrapOwners: ['root@acme.example'] });
   assert.equal(one.signingKeys.length, 1);
-  assert.deepEqual(resolveVaultConfig({ kek, rootAdmins: ['root@acme.example'] }).signingKeys.map(hex), one.signingKeys.map(hex));
-  const other = resolveVaultConfig({ kek: localKek('kek-1'), rootAdmins: ['root@acme.example'] });
+  assert.deepEqual(resolveVaultConfig({ kek, bootstrapOwners: ['root@acme.example'] }).signingKeys.map(hex), one.signingKeys.map(hex));
+  const other = resolveVaultConfig({ kek: localKek('kek-1'), bootstrapOwners: ['root@acme.example'] });
   assert.notEqual(hex(other.signingKeys[0]!), hex(one.signingKeys[0]!));
   assert.notEqual(hex(one.signingKeys[0]!), Buffer.from(kek.key, 'base64').toString('hex'));
   // A signing key given is the one it signs with; the KEK's own only verifies, as after a move to KMS.
-  const given = resolveVaultConfig({ kek, rootAdmins: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64') });
+  const given = resolveVaultConfig({ kek, bootstrapOwners: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64') });
   assert.deepEqual(given.signingKeys.map(hex), [hex(SIGNING_KEY), hex(one.signingKeys[0]!)]);
 });
 
@@ -2135,6 +2139,8 @@ test('a vault still running with the replaced KEK, as during a deploy, writes no
   }
   const refused = await late.vault.setAccess({ actor: ROOT, principal: ADA, changes: [change] });
   assert.match(!refused.ok ? refused.refusal.message : '', /^the log moved on from this vault's key, vault:\S+, to vault:\S+: a vault given a newer vault key replaced it/);
+  // Nor does it say who anyone is: it can check no row, and it is an outage, not a verdict on Ada.
+  await assert.rejects(late.vault.access(ADA), /^Error: the log moved on from this vault's key/);
   assert.equal((await vaultLog(after)).length, logged, 'neither wrote anything');
   assert.equal((await after.vault.verifyLog({})).ok, true);
 });
@@ -2171,18 +2177,18 @@ test("what an escrowed vault key is checked against: each key's check, newest fi
 test('a KEK a key service holds needs a signing key, and the error says why', () => {
   const kms = awsKms({ keyArn: 'arn:aws:kms:eu-west-3:123456789012:key/kms', credentials: { accessKeyId: 'a', secretAccessKey: 'b' } });
   assert.throws(
-    () => resolveVaultConfig({ kek: kms, rootAdmins: ['root@acme.example'] }),
+    () => resolveVaultConfig({ kek: kms, bootstrapOwners: ['root@acme.example'] }),
     /^Error: signingKey is required with the aws-kms vault key arn:aws:kms:eu-west-3:123456789012:key\/kms: the vault derives its signing key only from a vault key it holds/,
   );
   const moved = resolveVaultConfig({
-    kek: kms, previousKeks: [localKek('kek-1')], rootAdmins: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64'),
+    kek: kms, previousKeks: [localKek('kek-1')], bootstrapOwners: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64'),
   });
   assert.equal(moved.signingKeys.length, 2, 'the signing key, and the key of the local KEK it replaced, for what that signed');
 });
 
 test('configuration', () => {
   const key = randomBytes(32).toString('base64');
-  const base = { kek: { id: 'kek-1', key }, rootAdmins: ['admin@example.com'], signingKey: key };
+  const base = { kek: { id: 'kek-1', key }, bootstrapOwners: ['admin@example.com'], signingKey: key };
   const resolved = resolveVaultConfig({
     ...base,
     previousKeks: [{ id: 'kek-0', key: randomBytes(32).toString('base64') }],
@@ -2214,10 +2220,13 @@ test('configuration', () => {
   ] as const) {
     assert.throws(() => resolveVaultConfig({ ...base, kek }), message);
   }
-  assert.deepEqual(checkRootAdmins(['First.Admin@example.com', ' second@example.org ']), ['first.admin@example.com', 'second@example.org']);
-  assert.throws(() => checkRootAdmins([]), /at least one/);
-  assert.throws(() => checkRootAdmins(['admin@example,com']), /human email/);
-  assert.throws(() => checkRootAdmins(['ci-deploy.access']), /human email/);
+  assert.deepEqual(checkBootstrapOwners(['First.Admin@example.com', ' second@example.org ']), ['first.admin@example.com', 'second@example.org']);
+  assert.throws(() => checkBootstrapOwners([]), /at least one/);
+  assert.throws(() => checkBootstrapOwners(['admin@example,com']), /human email/);
+  assert.throws(() => checkBootstrapOwners(['ci-deploy.access']), /human email/);
+  // 0.5's name, which a deployment's vault reads until 0.7, is the same list.
+  const { bootstrapOwners: _, ...unnamed } = base;
+  assert.deepEqual(resolveVaultConfig({ ...unnamed, rootAdmins: ['Old.Root@example.com'] }).bootstrapOwners, ['old.root@example.com']);
   for (const malformed of [
     'admin@.example.com',
     'admin@example..com',
@@ -2226,7 +2235,7 @@ test('configuration', () => {
     'admin..root@example.com',
     'admin@-example.com',
   ]) {
-    assert.throws(() => checkRootAdmins([malformed]), /human email/, malformed);
+    assert.throws(() => checkBootstrapOwners([malformed]), /human email/, malformed);
   }
 });
 
@@ -2382,7 +2391,8 @@ for (const overdue of [false, true]) {
       assert.equal(verification.failedAtSeq, Number(appended.seqStart));
       assert.match(verification.reason, /overdue/);
     } else {
-      assert.deepEqual(verification, { ok: true, entries: 1, pending: 1 });
+      // Root's bootstrap, and the intent.
+      assert.deepEqual(verification, { ok: true, entries: 2, pending: 1 });
     }
   });
 }
@@ -2453,3 +2463,178 @@ for (const duplicate of [false, true]) {
     if (!result.ok) assert.match(result.reason, duplicate ? /does not identify one item/ : /1 of 2 outcomes missing/);
   });
 }
+
+// --- Owners of the whole instance -------------------------------------------------
+
+const SAM = 'user:sam@acme.example';
+const CAROL = 'user:carol@acme.example';
+
+/** A vault whose configuration names `emails` to own the instance while nobody does, nobody signed in yet. */
+function namingOwners(...emails: string[]): Promise<LocalVault> {
+  return openLocalVault(db.vault, configure({ bootstrapOwners: emails }));
+}
+
+/** The vault's entries about owning the instance, as `[action, subject, outcome, reason or code]`. */
+async function ownership(w: World) {
+  return (await vaultLog(w))
+    .filter((entry) => entry.action.startsWith('member.') || entry.action === 'root-admins.convert')
+    .map((entry) => [entry.action, entry.subject, entry.outcome, entry.code ?? entry.detail.reason ?? null]);
+}
+
+test('the bootstrap makes the first one the list names to sign in an Owner, and the list does nothing once the instance has one', async () => {
+  const w = await world({ bootstrapOwners: ['sam@acme.example', 'root@acme.example'] });
+  // Root signed in first (`world`): an Owner of the whole instance, as the vault, for the bootstrap.
+  const root = await w.vault.access(ROOT);
+  assert.deepEqual([root.status, root.role, root.scope], ['active', 'owner', EVERYWHERE]);
+  // Sam is named too, and signs in after: nobody makes them anything.
+  assert.equal((await w.vault.access(SAM)).status, 'unknown');
+  const [added] = (await vaultLog(w)).filter((entry) => entry.action === 'member.add');
+  assert.deepEqual([added!.actor, added!.subject, added!.detail.role, added!.detail.scope, added!.detail.reason], ['system:vault', ROOT, 'owner', EVERYWHERE, 'bootstrap']);
+  // An Owner like any other: in the directory's rows, and changed by the rules.
+  assert.equal((await store.member(db.owner, ROOT))?.role, 'owner');
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: SAM, role: 'developer' })).ok);
+  assert.equal((await w.vault.access(SAM)).role, 'developer', 'the list gives Sam nothing while root owns the instance');
+  // A new instance had no root admins: nothing to convert, and no entry says so.
+  assert.deepEqual(await ownership(w), [['member.add', ROOT, 'allow', 'bootstrap'], ['member.add', SAM, 'allow', null]]);
+  assert.equal((await w.vault.verifyLog({})).ok, true);
+});
+
+test('two people the list names, signing in at once, make one Owner', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const first = await namingOwners('root@acme.example', 'sam@acme.example');
+  const second = await openLocalVault(await db.connect(), configure({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] }));
+  // Settled first, so that only the bootstraps wait on the head.
+  assert.equal((await first.access(ADA)).status, 'unknown');
+  assert.equal((await second.access(ADA)).status, 'unknown');
+  const [root, sam] = await headHeldWhile(() => [first.access(ROOT), second.access(SAM)]);
+  assert.deepEqual([root, sam].map((access) => access.status).sort(), ['active', 'unknown']);
+  assert.deepEqual((await store.instanceOwners(db.owner)).map((row) => row.principal).length, 1);
+});
+
+test('the last Owner of the whole instance is not demoted, narrowed or removed, by anyone, themselves included', async () => {
+  const w = await world();
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'admin' })).ok);
+  const last = (outcome: { ok: boolean; refusal?: { code: string; message: string } }) => !outcome.ok && outcome.refusal;
+  const theirs = { code: 'last_owner', message: 'user:root@acme.example is the last Owner of the whole instance: make someone else an Owner first' };
+  assert.deepEqual(last(await w.vault.admit({ actor: ADA, principal: ROOT, role: 'admin' })), theirs);
+  assert.deepEqual(last(await w.vault.admit({ actor: ADA, principal: ROOT, role: 'owner', scope: { projects: { only: [w.project] }, environments: 'all' } })), theirs);
+  assert.deepEqual(last(await w.vault.remove({ actor: ADA, principal: ROOT })), theirs);
+  assert.deepEqual(last(await w.vault.remove({ actor: ROOT, principal: ROOT })), { code: 'last_owner', message: "you're the last Owner of the whole instance: make someone else an Owner first" });
+  // An Owner of one project owns no instance, and counts for nothing here.
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner', scope: { projects: { only: [w.project] }, environments: 'all' } })).ok);
+  assert.deepEqual(last(await w.vault.remove({ actor: ADA, principal: ROOT })), theirs);
+  // Another Owner of all of it, and either may go.
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner' })).ok);
+  assert.ok((await w.vault.admit({ actor: ADA, principal: ROOT, role: 'admin' })).ok);
+  assert.deepEqual(last(await w.vault.remove({ actor: BOB, principal: BOB })), { code: 'last_owner', message: "you're the last Owner of the whole instance: make someone else an Owner first" });
+  assert.equal((await w.vault.access(ROOT)).role, 'admin', 'the list makes nobody an Owner while Bob is one');
+  const refused = (await vaultLog(w)).filter((entry) => entry.code === 'last_owner');
+  assert.deepEqual(refused.map((entry) => [entry.action, entry.actor, entry.subject]), [
+    ['member.add', ADA, ROOT], ['member.add', ADA, ROOT], ['member.remove', ADA, ROOT], ['member.remove', ROOT, ROOT],
+    ['member.remove', ADA, ROOT], ['member.remove', BOB, BOB],
+  ]);
+  assert.equal((await w.vault.verifyLog({})).ok, true);
+});
+
+/**
+ * `both` at once, each under rows the other does not lock, while another
+ * connection holds the log's head: each gets as far as it can without it,
+ * and only then may one take it. A check made before the head is made by
+ * both, on the same state; one made under it, by one after the other.
+ */
+async function headHeldWhile<T>(both: () => Promise<T>[]): Promise<T[]> {
+  const holder = await db.connect();
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let locked = () => {};
+  const isLocked = new Promise<void>((resolve) => (locked = resolve));
+  const holding = holder.transaction(async (tx) => {
+    await lockLogHead(tx);
+    locked();
+    await held;
+  });
+  await isLocked;
+  const running = both();
+  await sleep(300);
+  release();
+  await holding;
+  return Promise.all(running);
+}
+
+for (const how of ['each leaving', 'each demoted by another Admin'] as const) {
+  test(`two Owners, ${how}, at once, leave one`, postgresOnly('SQLite runs one writer at a time'), async () => {
+    const w = await world();
+    const other = await w.twin();
+    assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner' })).ok);
+    for (const admin of [ADA, CAROL]) assert.ok((await w.vault.admit({ actor: ROOT, principal: admin, role: 'admin' })).ok);
+    const outcomes: { ok: boolean; refusal?: { code: string } }[] = await headHeldWhile<{ ok: boolean; refusal?: { code: string } }>(() => how === 'each leaving'
+      ? [w.vault.remove({ actor: ROOT, principal: ROOT }), other.remove({ actor: BOB, principal: BOB })]
+      : [w.vault.admit({ actor: ADA, principal: ROOT, role: 'admin' }), other.admit({ actor: CAROL, principal: BOB, role: 'admin' })]);
+    assert.deepEqual(outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal!.code)).sort(), ['last_owner', 'ok']);
+    assert.equal((await store.instanceOwners(db.owner)).length, 1);
+    assert.equal((await w.vault.verifyLog({})).ok, true);
+  });
+}
+
+test('the bootstrap takes back an instance whose only Owner fails the vault\'s check, an Owner of one project notwithstanding', async () => {
+  const w = await world({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] });
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner', scope: { projects: { only: [w.project] }, environments: 'all' } })).ok);
+  assert.equal((await w.vault.access(SAM)).status, 'unknown', 'root owns the instance');
+  // Root's row changed around the vault: it owns nothing, and Bob owns one project only.
+  const { vaultMembers } = tablesOf(db.owner);
+  await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, ROOT));
+  // Root is named: their next request starts them over, as removing them would, and makes them its Owner.
+  const root = await w.vault.access(ROOT);
+  assert.deepEqual([root.status, root.role, root.generation], ['active', 'owner', 8]);
+  assert.deepEqual((await ownership(w)).slice(-2), [['member.remove', ROOT, 'allow', null], ['member.restore', ROOT, 'allow', 'bootstrap']]);
+  assert.equal((await w.vault.access(SAM)).status, 'unknown', 'root owns it again');
+  assert.equal((await w.vault.verifyLog({})).ok, true);
+});
+
+/** A root admin's row as 0.5 gave them one the first time anyone asked about them: a Member, `rootAdmin: true`. */
+async function rootRowOf05(principal: string): Promise<void> {
+  const metadata = JSON.stringify({ role: 'member', rootAdmin: true });
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: 'system:vault', action: 'member.add', decision: 'allow', subjectPrincipal: principal, metadata }]));
+  const at = appended.occurredAt;
+  await db.owner.transaction((tx) => store.insertMember(tx, {
+    principal, status: 'active', role: 'member', scope: EVERYWHERE, generation: 0, createdAt: at, createdBy: 'system:vault',
+    statusChangedAt: at, statusChangedBy: 'system:vault', accessSeq: appended.seqStart, mac: Buffer.alloc(32),
+  }));
+  await reseal(principal);
+}
+
+test('a vault of 0.6 turns the root admins of 0.5 into Owners once, and from then on the list only bootstraps', async () => {
+  await places(db.owner);
+  // 0.5 named root and Sam root admins; root signed in, Sam never did.
+  await rootRowOf05(ROOT);
+  const upgraded = await namingOwners('root@acme.example', 'sam@acme.example');
+  // Its first call, whatever it is, converts them both.
+  assert.equal((await upgraded.access(ADA)).status, 'unknown');
+  for (const principal of [ROOT, SAM]) {
+    const access = await upgraded.access(principal);
+    assert.deepEqual([access.status, access.role, access.scope], ['active', 'owner', EVERYWHERE], principal);
+  }
+  const log = (await store.vaultPage(db.owner, undefined, 50)).map(entryView).reverse();
+  assert.deepEqual(log.map((entry) => [entry.action, entry.actor, entry.subject, entry.detail.reason ?? null]), [
+    ['member.add', 'system:vault', ROOT, null],
+    ['member.role', 'system:vault', ROOT, 'root-admin'],
+    ['member.add', 'system:vault', SAM, 'root-admin'],
+    ['root-admins.convert', 'system:vault', null, null],
+  ]);
+  assert.deepEqual(log.at(-1)!.detail, { owners: [ROOT, SAM] });
+  // Once: root takes Sam's role away, and no vault started later gives it back.
+  assert.ok((await upgraded.admit({ actor: ROOT, principal: SAM, role: 'developer' })).ok);
+  const later = await namingOwners('root@acme.example', 'sam@acme.example');
+  assert.equal((await later.access(SAM)).role, 'developer');
+  assert.equal((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').length, 1);
+  assert.equal((await later.verifyLog({})).ok, true, 'the log replays to every row');
+});
+
+test('a conversion entry forged in the vault\'s name stops nothing, and is reported', async () => {
+  await places(db.owner);
+  await rootRowOf05(ROOT);
+  await forgeEntries(1, { action: 'root-admins.convert', metadata: JSON.stringify({ owners: [] }) });
+  const upgraded = await namingOwners('root@acme.example');
+  assert.equal((await upgraded.access(ROOT)).role, 'owner');
+  const reports = (await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'vault.tampered').map(entryView);
+  assert.deepEqual(reports.map((entry) => entry.code), ['forged_entry']);
+});

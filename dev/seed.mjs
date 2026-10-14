@@ -16,7 +16,7 @@ import {
 const local = loadLocalSeedConfig(process.env);
 const API = local.apiUrl;
 const IDP = local.idpUrl;
-const ADMIN = local.rootAdmin;
+const ADMIN = local.owner;
 
 const pg = (await import('pg')).default;
 const pool = new pg.Pool({

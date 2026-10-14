@@ -29,17 +29,11 @@ type PrincipalType = DirectoryPrincipal['principalType'];
 export const memberOf = (principal: Pick<DirectoryPrincipal, 'principalType' | 'principalId'>) =>
   memberRef(principal.principalType, principal.principalId);
 
-export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
-  'root-admin': 'Root admin',
-  ...Object.fromEntries(Object.entries(INSTANCE_ROLES).map(([role, { name }]) => [role, name])),
-} as Record<DirectoryPrincipal['instanceRole'], string>;
-
 /** A new person's role: a Member, everywhere. */
 const MEMBER: RoleVars = { role: 'member', scope: EVERYWHERE };
 
 /** The role a principal holds, as the role field edits it. */
-const roleOf = (principal: DirectoryPrincipal): RoleVars =>
-  principal.instanceRole === 'root-admin' ? MEMBER : { role: principal.instanceRole, scope: principal.scope ?? EVERYWHERE };
+const roleOf = (principal: DirectoryPrincipal): RoleVars => ({ role: principal.instanceRole, scope: principal.scope ?? EVERYWHERE });
 
 /** What each kind of principal is called in the interface. */
 export const KIND: Record<PrincipalType, string> = {
@@ -279,8 +273,7 @@ function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
 
 /**
  * A user's instance role. Service accounts have none worth showing: every one is a
- * plain member. A root admin's role comes from the deployment, so its tag says
- * so on hover or tap instead of offering a menu that could not work.
+ * plain member.
  */
 export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
   if (principal.tampered === true) {
@@ -300,26 +293,10 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
       </Toggletip>
     );
   }
-  if (principal.isRootAdmin) {
-    return (
-      <Toggletip
-        label={
-          <>
-            Set by <code>rootAdmins</code> in the vault's configuration, not here.
-          </>
-        }
-      >
-        <button type="button" className="tag tag-violet tag-button">
-          <Lock size={11} />
-          Root admin
-        </button>
-      </Toggletip>
-    );
-  }
   return (
     <>
       <span className={`tag${principal.instanceRole === 'member' ? '' : ' tag-violet'}`}>
-        {ROLE_LABEL[principal.instanceRole]}
+        {INSTANCE_ROLES[principal.instanceRole].name}
       </span>
       {principal.instanceRole !== 'member' && principal.scope !== null && !unscoped(principal.scope) && (
         <span className="role-scope">{scopeInWords(principal.scope)}</span>
@@ -330,8 +307,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
 
 /**
  * Change role and Remove, behind one menu, for those who run the instance;
- * Remove, for a service account you manage. Root admins get none: the
- * deployment's configuration owns them. Nobody changes their own role.
+ * Remove, for a service account you manage. Nobody changes their own role.
  */
 export function PrincipalActions({
   principal,
@@ -354,7 +330,7 @@ export function PrincipalActions({
 
   const self = me?.type === principal.principalType && me.id === principal.principalId;
   const yours = principal.principalType === 'service' && principal.managed === true;
-  if (principal.isRootAdmin || !(capabilities.runsInstance || yours)) return null;
+  if (!(capabilities.runsInstance || yours)) return null;
 
   return (
     <>

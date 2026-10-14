@@ -164,7 +164,7 @@ test('each call opens one connection at most: on Cloudflare, a call that opened 
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
-    // A fresh isolate's first calls settle its keys and give the root admin a row: the most queries a call makes.
+    // A fresh isolate's first calls settle its keys and make root the bootstrap Owner: the most queries a call makes.
     const calls: [string, ...unknown[]][] = [
       ['access', ROOT],
       ['access', 'user:ada@acme.example'],
@@ -210,10 +210,12 @@ test('through the entrypoint, the credential a CI run came in on is copied into 
   const credentialId = randomUUID();
   const vault = await freshVault(VAULT_URL);
   try {
+    // Root signs in first: the bootstrap makes them the Owner.
+    assert.ok((await vault.call('access', ROOT)).ok);
     assert.ok((await vault.call('wrap', { principal: ROOT, credentialId, items: [{ secret, key: randomBytes(32).toString('base64') }] })).ok);
     assert.ok((await vault.call('admit', { actor: ROOT, principal: 'token:ci-deploy', credentialId })).ok);
     const { auditLog } = tablesOf(db.owner);
-    // The root admin's own row, which the vault writes on its first call, is its own: only what the calls asked for counts.
+    // Root's own row, which their bootstrap wrote, is its own: only what the calls asked for counts.
     const entries = (await db.owner.select({ action: auditLog.action, subject: auditLog.subjectPrincipal, metadata: auditLog.metadata }).from(auditLog)
       .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, ['key.wrap', 'member.add'])))).filter((entry) => entry.subject !== ROOT);
     assert.deepEqual(entries.map((entry) => [entry.action, (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId]).sort(), [

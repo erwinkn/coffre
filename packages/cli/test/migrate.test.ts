@@ -115,7 +115,7 @@ test('migrate says what the vault will make of each grant on every project of 0.
     '  service:deploy: maintainer on every project → maintainer on market; not projects made later; loses access-manager on market (keeps maintainer)',
     '  service:ci: viewer on dev in every project → viewer on market/dev; not projects made later',
     '  service:old: viewer on every project → left as it is: the vault reported their row tampered with (if the vault finds that report forged, it makes: viewer on billing; not projects made later)',
-    "A root admin's stay as they are while they are one, and so do those of a member whose row the vault finds tampered with: migrate holds no key to check a row, nor whether a report is the vault's own.",
+    "Those of a member whose row the vault finds tampered with stay as they are: migrate holds no key to check a row, nor whether a report is the vault's own.",
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   ].join('\n'));

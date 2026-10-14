@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 // The restore drill's steps at the API, run by restore-drill.sh against a
-// local stack, as the root admin through the dev IdP:
+// local stack, as its Owner through the dev IdP:
 //
 //   prepare     before the backup: a canary, a grant, a removal whose
 //               session is kept, a token, and checkpoints. Prints what the
 //               checks after need, as JSON.
 //   check       after the restore, with the same keys: everything is back.
-//   wrong-kek   after the restore, with another KEK: reads and writes are
-//               refused, the vault's entries stop verifying, saying why,
-//               and readiness goes red.
+//   wrong-kek   after the restore, with another KEK: nobody signs in, reads
+//               and writes answer 503, and readiness goes red.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -96,25 +95,27 @@ async function check(before) {
 }
 
 async function wrongKek(before) {
-    const admin = await signIn(ADMIN);
-    const response = await send(admin, 'POST', '/api/reveals', { path: CANARY });
+    // The vault seals every member's row under keys that come from its KEK: under another, it can check
+    // nobody's, the Owner's included, so every request it is asked about is an outage, never a verdict.
+    assert.equal(await trySignIn(ADMIN), null, 'signed in under the wrong KEK');
+    say(`${ADMIN} cannot sign in: the vault can say of nobody who they are`);
+    const asToken = (method, path, body) => fetch(`${API}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${before.token}`, 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const response = await asToken('POST', '/api/reveals', { path: CANARY });
     const answer = await response.text();
     assert.equal(response.status, 503, answer);
-    assert.equal(JSON.parse(answer).reason, 'wrong_kek');
     assert.ok(!answer.includes(before.canary), 'a value opened under the wrong KEK');
-    say(`revealing ${CANARY} answers ${response.status}: ${answer}`);
-    const write = await send(admin, 'PATCH', '/api/secrets/market/dev', { DRILL_WRONG: 'never stored' });
+    say(`revealing ${CANARY} with the drill's token answers ${response.status}: ${answer}`);
+    const write = await asToken('PATCH', '/api/secrets/market/dev', { DRILL_WRONG: 'never stored' });
     assert.equal(write.status, 503, 'a value was written under the wrong KEK');
     say(`writing answers ${write.status} too: nothing is wrapped under the wrong KEK`);
 
-    // The vault's own keys come from its KEK, so its entries stop verifying too, and the answer says why.
-    const verification = await call(admin, 'GET', '/api/audit/verification');
-    assert.ok(!verification.ok && verification.author === 'vault', `the log verified under the wrong KEK: ${JSON.stringify(verification)}`);
-    assert.match(verification.reason, /another vault key or signing key/);
     await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
     const ready = await (await fetch(`${API}/readyz`)).json();
     assert.equal(ready.checkpointed, false, 'the vault checkpointed under the wrong KEK');
-    say(`verification fails at entry ${verification.failedAtSeq}: ${verification.reason}`);
     say(`and /readyz turns red: ${JSON.stringify(ready)}`);
 }
 

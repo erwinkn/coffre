@@ -5,7 +5,7 @@ import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns } from '@coffre/db/log';
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
  * Every query the vault makes, and the only code in it that holds them.
@@ -108,6 +108,21 @@ export async function member(db: Queryable, principal: string): Promise<Member |
 export async function allMembers(db: Queryable): Promise<Member[]> {
   const { vaultMembers } = tablesOf(db);
   return ((await db.select(memberColumns(db)).from(vaultMembers).orderBy(asc(vaultMembers.principal))) as StoredMember[]).map(memberOf);
+}
+
+/**
+ * The rows that say their member is an active Owner of the whole instance
+ * (`ownsInstance` in @coffre/core/access), as stored: a row changed around
+ * the vault says so too, which the caller checks.
+ */
+export async function instanceOwners(db: Queryable): Promise<Member[]> {
+  const { vaultMembers } = tablesOf(db);
+  const rows = await db
+    .select(memberColumns(db))
+    .from(vaultMembers)
+    .where(and(eq(vaultMembers.status, 'active'), eq(vaultMembers.role, 'owner'), isNull(vaultMembers.scope)))
+    .orderBy(asc(vaultMembers.principal));
+  return (rows as StoredMember[]).map(memberOf);
 }
 
 /**
@@ -479,6 +494,22 @@ export async function newestVaultEntries(db: Queryable, action: string, limit: n
       ),
     )
     .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
+/**
+ * The first `member.add` entries in the vault's name that gave a root admin
+ * of 0.5 their row (`{ "rootAdmin": true }`): an instance that ran 0.5 with
+ * one who signed in.
+ */
+export async function rootAdminRows(db: Queryable, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'member.add'), eq(auditLog.decision, 'allow'), like(auditLog.metadata, '%"rootAdmin":true%')))
+    .orderBy(asc(auditLog.seq))
     .limit(limit);
   return stored(rows);
 }

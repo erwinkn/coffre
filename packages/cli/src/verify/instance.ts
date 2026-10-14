@@ -1,7 +1,7 @@
 // `coffre verify instance`: an instance checked from outside. First as
 // anyone on the network sees it; then with a bearer token that reads one
 // canary. The token is the operator's, from CI, with its canary; or, with
-// this CLI signed in as an owner or a root admin, one the run issues itself:
+// this CLI signed in as an admin or owner of the whole instance, one the run issues itself:
 // it finds or makes its own place, writes a fresh canary, runs the token's
 // checks, then verifies the whole audit log as the owner. However it ends,
 // the credential it issued is revoked. The session is the one `coffre login`
@@ -172,7 +172,7 @@ export async function ownerChecks(report: Checks, origin: string, api: CoffreCli
   }
 }
 
-/** The session's owner, or a root admin: anyone else is stopped before anything is made. */
+/** The session's admin or owner of the whole instance: anyone else is stopped before anything is made. */
 async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: string; value: string }> {
   let me;
   try {
@@ -185,9 +185,9 @@ async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: st
   }
   const who = me.principal.id;
   if (!me.runsInstance) {
-    throw new Failure(`${who} is not an admin or owner of all of ${origin}, nor a root admin: nothing was made. Sign in as one, or with a bearer token, \`coffre login ${origin} --token\`, and name its --canary`);
+    throw new Failure(`${who} is not an admin or owner of all of ${origin}: nothing was made. Sign in as one, or with a bearer token, \`coffre login ${origin} --token\`, and name its --canary`);
   }
-  return { detail: `${who}, ${me.instanceRole === 'root-admin' ? 'a root admin' : `an ${me.instanceRole}`}, with this CLI's session`, value: who };
+  return { detail: `${who}, an ${me.instanceRole}, with this CLI's session`, value: who };
 }
 
 /** Make what is missing of the run's place, and the service's two grants; then a fresh canary, and a fresh credential. */

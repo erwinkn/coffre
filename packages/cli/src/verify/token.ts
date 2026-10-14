@@ -177,7 +177,7 @@ async function tokenVerification(api: CoffreClient): Promise<string> {
     verified = await api.audit.verify();
   } catch (error) {
     if (error instanceof CoffreError && error.status === 403) {
-      throw new Skip('verification is for owners and root admins, which this token is not: not checked');
+      throw new Skip('verification is for auditors, admins and owners of the whole instance, which this token is not: not checked');
     }
     throw error;
   }

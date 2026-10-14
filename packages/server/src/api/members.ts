@@ -37,7 +37,7 @@ import {
   type PlaceRow,
   type StoredGrant,
 } from '../db/queries.ts';
-import { canAnywhere, instanceRoleOf, placeOf } from './caller.ts';
+import { canAnywhere, placeOf } from './caller.ts';
 import { audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
@@ -63,10 +63,10 @@ export type Member = {
   principalType: 'user' | 'service';
   principalId: string;
   /** `member` for every service account. */
-  instanceRole: InstanceRole | 'root-admin';
+  instanceRole: InstanceRole;
   /**
    * Where their instance role applies, projects by slug; everywhere for a
-   * member or a root admin. Null unless the caller runs the instance: a
+   * member. Null unless the caller runs the instance: a
    * scope names projects the caller may not see.
    */
   scope: Scope | null;
@@ -78,7 +78,6 @@ export type Member = {
    * shown. Every one, for those who run the instance; never a person.
    */
   managed: boolean;
-  isRootAdmin: boolean;
   /**
    * The vault found their record changed around it, and refuses them: they
    * hold nothing until an owner removes them, which starts them over. A
@@ -125,7 +124,6 @@ export type OffboardingReport = {
   status: 'active' | 'removed' | 'tampered';
   instanceRole: Member['instanceRole'];
   scope: Scope;
-  isRootAdmin: boolean;
   removedAt: string | null;
   removedBy: string | null;
   /** What still lets them in. All zero once removed. */
@@ -217,9 +215,8 @@ function roleReaches(role: InstanceRole, scope: Scope, project: PlaceRow, enviro
 /** Someone in the directory, as the rows and the vault's findings say. */
 type Listed = {
   member: MemberRef;
-  /** Null for a missing row, or a root admin the vault has not met yet. */
+  /** Null for a missing row. */
   row: MemberRow | null;
-  isRootAdmin: boolean;
   status: 'active' | 'removed' | 'tampered';
   /** What they hold as stored: nothing unless active. */
   grants: StoredGrant[];
@@ -227,35 +224,29 @@ type Listed = {
 
 /**
  * Everyone in the directory, or one member, read from the rows rather than
- * asked of the vault: a list is a display, not a decision. The root admins
- * are the vault's configuration, so it says who they are, rows or not.
+ * asked of the vault: a list is a display, not a decision.
  */
 async function directory(ctx: ApiContext, now: Date, member?: MemberRef): Promise<Listed[]> {
-  const [rows, missing, { rootAdmins }] = await Promise.all([
+  const [rows, missing] = await Promise.all([
     loadMembers(ctx.db, ctx.chainKey, member === undefined ? {} : { member }, now),
     missingMembers(ctx.db, member),
-    ctx.vault.about(),
   ]);
   const byPrincipal = new Map(rows.map((row) => [formatMember(row), row]));
-  const roots = new Set(rootAdmins);
-  const wanted = member === undefined ? null : formatMember(member);
-  const principals = new Set([...byPrincipal.keys(), ...missing, ...rootAdmins.filter((root) => wanted === null || root === wanted)]);
+  const principals = new Set([...byPrincipal.keys(), ...missing]);
   return [...principals].sort().map((principal) => {
     const row = byPrincipal.get(principal) ?? null;
-    const isRootAdmin = roots.has(principal);
-    const status = isRootAdmin ? 'active' : row === null || row.tampered ? 'tampered' : row.status;
-    return { member: parseGrantee(principal) as MemberRef, row, isRootAdmin, status, grants: status === 'active' ? row?.grants ?? [] : [] };
+    const status = row === null || row.tampered ? 'tampered' : row.status;
+    return { member: parseGrantee(principal) as MemberRef, row, status, grants: status === 'active' ? row?.grants ?? [] : [] };
   });
 }
 
-function instanceRole(listed: Listed): Member['instanceRole'] {
-  if (listed.isRootAdmin) return 'root-admin';
+function instanceRole(listed: Listed): InstanceRole {
   return listed.status === 'active' && listed.member.type === 'user' ? listed.row?.role ?? 'member' : 'member';
 }
 
 /** Where their instance role applies, as stored: everywhere for anyone without one. */
 function scopeOf(listed: Listed): Scope {
-  return instanceRole(listed) === 'member' || listed.isRootAdmin ? EVERYWHERE : listed.row?.scope ?? EVERYWHERE;
+  return instanceRole(listed) === 'member' ? EVERYWHERE : listed.row?.scope ?? EVERYWHERE;
 }
 
 /** By project, then environment, with the project-wide grant after its environments. */
@@ -283,7 +274,7 @@ export async function listMembers(
   query: { path?: Path },
 ): Promise<{ members: Member[]; removed: RemovedMember[] }> {
   const { caller } = ctx;
-  const administrator = caller.isRootAdmin || administers(caller.role);
+  const administrator = administers(caller.role);
   const [all, known, setting] = await Promise.all([
     directory(ctx, new Date()),
     places(ctx.db),
@@ -317,7 +308,7 @@ export async function listMembers(
       .sort(byPlace);
     const role = instanceRole(listed);
     const scope = scopeOf(listed);
-    const byRole = target !== undefined && managesPath && role !== 'root-admin' && roleReaches(role, scope, target, path?.environment);
+    const byRole = target !== undefined && managesPath && roleReaches(role, scope, target, path?.environment);
     if (!everyone && visible.length === 0 && !byRole && !(managed && path === undefined)) continue;
     const ref = listed.member;
     const member = formatMember(ref);
@@ -329,7 +320,6 @@ export async function listMembers(
       scope: runsInstance(caller) ? scopeView(scope, known) : null,
       reachesByRole: byRole,
       managed,
-      isRootAdmin: listed.isRootAdmin,
       tampered: listed.status === 'tampered',
       grants: visible.map((grant) => ({
         id: `${member}/${grant.project}${grant.environment === null ? '' : `/${grant.environment}`}`,
@@ -472,7 +462,6 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     status,
     instanceRole: instanceRole(listed),
     scope: scopeView(scopeOf(listed), known),
-    isRootAdmin: listed.isRootAdmin,
     // When and by whom, as the vault wrote it: the removal is its decision.
     removedAt: status === 'removed' ? row!.statusChangedAt.toISOString() : null,
     removedBy: status === 'removed' ? parseGrantee(row!.statusChangedBy).id : null,
@@ -501,28 +490,18 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
 
 /**
  * Who reads each of these environments, by a grant or their instance role,
- * as members: those a reference held there lets read its source. Root
- * admins read everything, and are not listed.
+ * as members: those a reference held there lets read its source.
  */
 export async function readersAt(ctx: ApiContext, places: readonly { projectId: string; environmentId: string; environmentSlug: string }[]): Promise<string[][]> {
   if (places.length === 0) return [];
   const all = await directory(ctx, new Date());
   return places.map((place) => all
-    .filter((listed) => listed.status === 'active' && !listed.isRootAdmin && allows(
-      { isRootAdmin: false, role: instanceRole(listed) as InstanceRole, scope: scopeOf(listed), grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })) },
+    .filter((listed) => listed.status === 'active' && allows(
+      { role: instanceRole(listed), scope: scopeOf(listed), grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })) },
       'secret.read',
       place,
     ))
     .map((listed) => formatMember(listed.member)));
-}
-
-function rootAdminRefusal(ctx: ApiContext, action: string, member: MemberRef): Refusal {
-  return new Refusal(
-    conflict("root admins are set by the vault's COFFRE_ROOT_ADMINS"),
-    denied(ctx, action, 'configured_root_admin', {
-      metadata: { principalType: member.type, principalId: member.id },
-    }),
-  );
 }
 
 /** One member's access, as a member page shows it: their instance role and scope, and the grants the caller sees. */
@@ -531,10 +510,9 @@ export type MemberAccess = {
   principalType: 'user' | 'service';
   principalId: string;
   status: 'active' | 'removed' | 'tampered';
-  instanceRole: InstanceRole | 'root-admin';
-  /** Projects by slug; everywhere for a member or a root admin. Null unless the caller runs the instance, as in `Member`. */
+  instanceRole: InstanceRole;
+  /** Projects by slug; everywhere for a member. Null unless the caller runs the instance, as in `Member`. */
   scope: Scope | null;
-  isRootAdmin: boolean;
   /** A service account the caller manages, as in `Member`. */
   managed: boolean;
   /** Their live grants the caller manages: all of them, for those who run the instance or manage the account. None unless active. */
@@ -550,17 +528,15 @@ export type MemberAccess = {
  */
 export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<MemberAccess> {
   const { caller } = ctx;
-  const administrator = caller.isRootAdmin || administers(caller.role);
+  const administrator = administers(caller.role);
   const principal = formatMember(member);
   // A service account's manager is weighed by its grants: the setting, read only for one.
   const asked = member.type === 'service' && !runsInstance(caller) && caller.principal.type === 'user';
-  const [stored, { rootAdmins }, setting] = await Promise.all([
+  const [stored, setting] = await Promise.all([
     readMemberAccess(ctx.db, principal, new Date()),
-    ctx.vault.about(),
     asked ? serviceSettingFor(ctx.vault, caller) : null,
   ]);
-  const isRootAdmin = rootAdmins.includes(principal);
-  const status = isRootAdmin ? 'active' : stored.member === null ? null : stored.member.tampered ? 'tampered' : stored.member.status;
+  const status = stored.member === null ? null : stored.member.tampered ? 'tampered' : stored.member.status;
   // A grant on a place that is gone names nothing anyone can reach.
   const live = stored.grants.filter((grant) => !isTombstone(grant.projectSlug) && (grant.environmentSlug === null || !isTombstone(grant.environmentSlug)));
   const placeOfGrant = (grant: (typeof live)[number]): Place => grant.environmentId === null
@@ -574,7 +550,7 @@ export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<
     throw forbidden('only admins, owners, members with grant.manage on a project, and a service account\'s managers can see what someone holds');
   }
   if (status === null) throw notFound('no such member');
-  const role: InstanceRole = status === 'active' && member.type === 'user' && !isRootAdmin ? stored.member!.role : 'member';
+  const role: InstanceRole = status === 'active' && member.type === 'user' ? stored.member!.role : 'member';
   const scope = role === 'member' ? EVERYWHERE : stored.member!.scope;
   // A scope names projects by id: by slug here, those still there, as `scopeView` names them.
   const named = (ids: string[]) => ids.flatMap((id) => stored.projectSlugs.get(id) ?? []).filter((slug) => !isTombstone(slug)).sort();
@@ -602,9 +578,8 @@ export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<
     principalType: member.type,
     principalId: member.id,
     status,
-    instanceRole: isRootAdmin ? 'root-admin' : role,
+    instanceRole: role,
     scope: runsInstance(caller) ? shown : null,
-    isRootAdmin,
     managed,
     grants,
   };
@@ -640,7 +615,6 @@ export async function putMember(
         denied(ctx, 'member.add', 'not_service_manager', { metadata: fields }),
       );
     }
-    if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.add', member);
     if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
     if (member.type === 'service' && input.role !== undefined && input.role !== 'member') {
       throw new Refusal(
@@ -710,7 +684,6 @@ export async function removeMember(
     } else if (!(await managedAccount(ctx, ctx.caller, member.id)).managed) {
       throw notManager(ctx, 'member.remove', fields, 'remove it');
     }
-    if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.remove', member);
     // The vault logs the removal, and one `access.revoke` per grant it took, so each project's log shows it.
     const result = await ctx.vault.remove({
       actor: formatMember(ctx.caller.principal),

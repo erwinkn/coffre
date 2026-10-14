@@ -1,4 +1,4 @@
-import { administers, makesProjects, type InstanceRole } from '@coffre/core/access';
+import { administers, makesProjects } from '@coffre/core/access';
 
 import type { Me, Permission, ProjectSummary } from '../shared/models';
 
@@ -10,12 +10,12 @@ import type { Me, Permission, ProjectSummary } from '../shared/models';
  * live outside one resource page.
  */
 export type UiCapabilities = {
-  /** Admins and owners, scoped or not, and root admins: the Users and Service accounts pages. */
+  /** Admins and owners, scoped or not: the Users and Service accounts pages. */
   canManageGrants: boolean;
   /**
-   * Admins and owners whose scope narrows nothing, and root admins: adding
-   * and removing people and service accounts, instance roles, tokens and
-   * trust bindings, offboarding reports, the instance's keys.
+   * Admins and owners whose scope narrows nothing: adding and removing
+   * people and service accounts, instance roles, tokens and trust bindings,
+   * offboarding reports, the instance's keys.
    */
   runsInstance: boolean;
   /**
@@ -42,20 +42,19 @@ export function deriveUiCapabilities(
 ): UiCapabilities {
   if (me === null) return NONE;
 
-  const isRootAdmin = me.instanceRole === 'root-admin';
-  const role: InstanceRole = me.instanceRole === 'root-admin' ? 'owner' : me.instanceRole;
+  const role = me.instanceRole;
 
   return {
     // Users and Service accounts list the instance's directory, for those
     // who manage access across projects. Project access managers keep their
     // grant controls on each project page.
-    canManageGrants: isRootAdmin || administers(role),
+    canManageGrants: administers(role),
     runsInstance: me.runsInstance,
     setsUpServices: me.setsUpServices,
     canReadAudit: me.canReadAudit,
     // A new project is one no `only` list names: as the server decides,
     // from the role and the scope, projects by slug.
-    canCreateProject: makesProjects({ isRootAdmin, role, scope: me.scope, grants: [] }),
+    canCreateProject: makesProjects({ role, scope: me.scope, grants: [] }),
   };
 }
 

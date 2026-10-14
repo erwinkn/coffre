@@ -263,7 +263,7 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
     lines.push(`  ${shownMember(principal)}: ${was} → ${then}`);
   }
   lines.push(
-    "A root admin's stay as they are while they are one, and so do those of a member whose row the vault finds tampered with: migrate holds no key to check a row, nor whether a report is the vault's own.",
+    "Those of a member whose row the vault finds tampered with stay as they are: migrate holds no key to check a row, nor whether a report is the vault's own.",
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   );

@@ -71,7 +71,7 @@ coffre verify keys
 
 It asks for the vault key, then the app key, without showing either, and
 checks each against the current instance on your machine: neither is sent
-anywhere. Enter alone skips one. It needs an owner or a root admin.
+anywhere. Enter alone skips one. It needs an Admin or Owner of the whole instance.
 
 ```
 Checking your keys against https://secrets.example.com
@@ -111,7 +111,7 @@ export default vault((env: Env) => ({
     keyArn: env.KMS_KEY_ARN, // arn:aws:kms:eu-west-3:123456789012:key/…
     credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },
   }),
-  rootAdmins: env.ROOT_ADMINS.split(','),
+  bootstrapOwners: env.BOOTSTRAP_OWNERS.split(','),
   signingKey: env.SIGNING_KEY, // required: see below
 }));
 ```

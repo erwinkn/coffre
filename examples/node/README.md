@@ -32,7 +32,7 @@ chmod 600 .env vault.env
 
 Fill in `PUBLIC_URL`, a GitHub App whose callback is
 `<PUBLIC_URL>/auth/callback/github`, with read-only access to email
-addresses, or an OAuth app with that callback, and `ROOT_ADMINS`. Keep each env file
+addresses, or an OAuth app with that callback, and `BOOTSTRAP_OWNERS`. Keep each env file
 readable only by its process's user.
 
 ## 2. The database and keys
@@ -86,7 +86,7 @@ pnpm vault    # first: the server connects to its socket
 pnpm start
 ```
 
-Then sign in at `PUBLIC_URL` as a root admin, and from a terminal:
+Then sign in at `PUBLIC_URL` as the Owner, the first time, and from a terminal:
 
 ```sh
 coffre login https://secrets.example.com

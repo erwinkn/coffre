@@ -12,7 +12,7 @@ type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; 
 export const Vault = vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE as never),
   kek: { id: 'vault-workers-test', key: env.VAULT_KEY },
-  rootAdmins: ['root@acme.example'],
+  bootstrapOwners: ['root@acme.example'],
 }));
 
 export default {

@@ -13,7 +13,8 @@ import { auditLog } from './db/tables.ts';
 import { withLogUnlocked } from './db/engine.ts';
 
 const db = await openTestDatabase();
-const vault = testVault(['root@example.com']);
+// A log nobody has signed in to: the vault's only entries are its checkpoints.
+const vault = testVault([]);
 const chainKey = Buffer.alloc(32, 1);
 after(() => db.close());
 beforeEach(() => resetDatabase(db.owner));

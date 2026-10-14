@@ -33,7 +33,7 @@ beforeEach(() => emptyDatabase(db.owner));
 
 const config = (): ResolvedVaultConfig => ({
   keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-  rootAdmins: ['root@acme.example'],
+  bootstrapOwners: ['root@acme.example'],
   signingKeys: [randomBytes(32)],
   bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
 });
@@ -41,6 +41,8 @@ const config = (): ResolvedVaultConfig => ({
 /** market/prod/DATABASE_URL, a value; billing/prod, where references are held; and the three people. */
 async function world() {
   const vault: LocalVault = await openLocalVault(db.vault, config());
+  // Root signs in first, and the bootstrap makes them the Owner.
+  await vault.access(ROOT);
   const market = await places(db.owner);
   const billing = await newProject(db.owner);
   const billingProd = await newEnvironment(db.owner, billing);

@@ -69,6 +69,8 @@ async function forgeVaultEntry(writer: typeof db.owner): Promise<void> {
 }
 
 test('an entry in the vault\'s name that the vault did not write fails verification', async () => {
+  // The Owner signed in before it, as the instance's first sign-in: the bootstrap's entry is the vault's.
+  assert.equal((await root.me()).instanceRole, 'owner');
   await write(1);
   // As the database's owner, whom row-level security does not stop: only
   // the vault's MAC tells, and only the vault holds its key.
@@ -77,8 +79,8 @@ test('an entry in the vault\'s name that the vault did not write fails verificat
   await write(1);
   assert.deepEqual(await root.audit.verify(), {
     ok: false,
-    through: 0,
-    failedAtSeq: 1,
+    through: 1,
+    failedAtSeq: 2,
     author: 'vault',
     reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`,
   });

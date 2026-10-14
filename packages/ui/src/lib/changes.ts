@@ -154,7 +154,6 @@ export function invite(client: CoffreClient): Change<Directory, DirectoryPrincip
         principalId: vars.principalId,
         instanceRole: vars.principalType === 'user' ? vars.role : 'member',
         scope: vars.principalType === 'user' ? vars.scope : EVERYWHERE,
-        isRootAdmin: false,
       },
     ],
     affects: () => affects.admission(),

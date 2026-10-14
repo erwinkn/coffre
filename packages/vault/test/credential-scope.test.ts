@@ -31,10 +31,12 @@ beforeEach(() => emptyDatabase(db.owner));
 test('every call that takes a credential scope decides on it: within it a call goes through, past it the account holds nothing, and a malformed one fails the call', async () => {
   const vault = await openLocalVault(db.vault, {
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    rootAdmins: ['root@acme.example'],
+    bootstrapOwners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
   });
+  // Root signs in first, and the bootstrap makes them the Owner.
+  await vault.access(ROOT);
   const market = await places(db.owner);
   const billing = await newProject(db.owner);
   const billingProd = await newEnvironment(db.owner, billing);
