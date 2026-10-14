@@ -1394,18 +1394,22 @@ class VaultService implements Vault {
    * it finds is a hint, never a report: its reads can pair a row with
    * grants another decision committed between them. Then one decision,
    * under their row and the log's head, reads again, and reports: two named
-   * people signing in at once make one Owner. Whether it made them one.
+   * people signing in at once make one Owner. Whether it decided, so that
+   * their row may have changed since `access` read it: made an Owner by it,
+   * or by another request of theirs in the meantime.
    */
   async #bootstrap(principal: string): Promise<boolean> {
     if ((await this.#anOwner(this.#db, [])) !== null) {
       this.#prepared.owned = true;
       return false;
     }
-    const made = await this.#decideNow([principal], async (d) => {
+    const decided = await this.#decideNow([principal], async (d) => {
       await lockLogHead(d.tx);
-      return { made: (await this.#anOwner(d.tx, d.reports)) === null && (await this.#makeOwner(d, principal, 'bootstrap')) };
+      if ((await this.#anOwner(d.tx, d.reports)) === null) await this.#makeOwner(d, principal, 'bootstrap');
+      return {};
     });
-    return made.ok && made.made;
+    if (decided.ok) this.#prepared.owned = true;
+    return decided.ok;
   }
 
   /**

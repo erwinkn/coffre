@@ -327,7 +327,8 @@ the vault reads again under the person's row and the log's head (`Bootstrap`
 in the model, `BootstrapOnlyWithoutOwner`). At any other time, the list
 does nothing. That covers a new instance and recovery alike: an instance
 whose every Owner is gone, or whose Owners' rows fail the check, takes the
-first named person to sign in, even one an Owner removed: the list is a
+first named person to sign in after a deploy (a process that has seen an
+Owner does not look again), even one an Owner removed: the list is a
 standing way in, to keep to people one would trust as Owner. An Owner who
 exists but cannot sign in any more is not recovered by this; that is a
 command of its own, not built yet (`coffre recover owner`). Owners are
@@ -343,8 +344,9 @@ does so only on an instance whose vault of 0.5 gave a root admin a row (its
 `member.add` with `rootAdmin: true`, under the vault's MAC): a new instance
 has none, and writes nothing. A `root-admins.convert` entry under the
 vault's MAC records it, naming whom it made Owners, and from then on the
-list only bootstraps; one forged in the vault's name is passed over and
-reported, and converts again. No migration: the rows are 0.5's, `role`
+list only bootstraps. One forged in the vault's name is passed over and
+reported, and stops no conversion; more forged than the vault reads back
+(1024) hide whether it converted, and it converts nobody. No migration: the rows are 0.5's, `role`
 `owner` and a null `scope`, sealed as 0.5 seals them, so 0.5 reads them
 during the rollout and after a rollback, when it holds the configured
 emails root admins again anyway.

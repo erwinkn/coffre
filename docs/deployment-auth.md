@@ -202,8 +202,8 @@ Owner left: change the list to an email you control, deploy, and sign in.
 
 So the list is a standing way in, not a record of who was first. If every
 Owner's row stops passing the vault's check, as whoever can write to the
-database can make it, the next person it names to sign in takes the
-instance over, even one an Owner removed since. Keep it to people you
+database can make it, the next person it names to sign in after a
+deploy takes the instance over, even one an Owner removed since. Keep it to people you
 would trust as Owner, and take people off it when they leave.
 
 It does not help an Owner who exists but can no longer sign in, having
