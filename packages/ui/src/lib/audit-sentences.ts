@@ -330,8 +330,8 @@ const TEMPLATES: Record<string, Template> = {
     what: () => ['root admins'],
     then: ({ entry }) => {
       const owners = Array.isArray(entry.metadata.owners) ? entry.metadata.owners.flatMap((owner) => text(owner) ?? []) : [];
-      // It names those it changed: none, when every one it was told of owned the instance already.
-      if (owners.length === 0) return [': each was an Owner already'];
+      // It names those it changed, maybe none: each owned the instance already, or the log never admitted them.
+      if (owners.length === 0) return [': none was made an Owner'];
       return [', making Owners of ', ...owners.flatMap((member, i): Part[] => [...(i === 0 ? [] : [', ']), { member }])];
     },
   },

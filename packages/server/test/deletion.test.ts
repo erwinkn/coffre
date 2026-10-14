@@ -301,7 +301,7 @@ const unwrapAs = (principal: string, secretVersionId: string) =>
   deps.vault.unwrap({ principal, purpose: 'reveal', requestId: 'r', operationId: crypto.randomUUID(), items: [{ secretVersionId }] });
 
 /**
- * The root admin's client, whose vault runs `meanwhile` once, after its first
+ * The Owner's client, whose vault runs `meanwhile` once, after its first
  * revocation: something another owner does between a deletion's vault calls
  * and its transaction.
  */
@@ -378,7 +378,7 @@ test('a project restored while it is being deleted stays, unerased, and the dele
 });
 
 /**
- * The root admin's client, whose first transaction begins only once
+ * The Owner's client, whose first transaction begins only once
  * `meanwhile` has run: a request whose path the router resolved before
  * another owner's change committed.
  */

@@ -573,7 +573,7 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   const nobody = '22222222-2222-4222-8222-222222222222';
   assert.equal((await revoke(a.token, nobody)).status, 404);
   assert.equal((await revoke(a.token, b.id)).status, 200);
-  // The root admin, signed in as a person, revokes run C's.
+  // The Owner, signed in as a person, revokes run C's.
   await runtime.signin!.revokeCredential(await contextFor(deps, ROOT), c.id);
 
   const revocations = (await appEntries('token.revoke')).map(({ actor, decision, metadata }) => ({

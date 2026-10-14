@@ -32,8 +32,8 @@ instance: a member like any other, in People, changed by the same rules.
   recovered by editing the list, as a root admin was: the instance still
   has its Owner. Keep two Owners until `coffre recover owner` exists.
 - **A wrong vault key is an outage.** A vault given the wrong key checks
-  no member's row, the Owner's included, so every request answers 503 and
-  nobody signs in, with the reason in the app's log, where before root
+  no member's row, the Owner's included, so every member's request answers
+  503 and nobody signs in, with the reason in the app's log, where before root
   admins got through to a `wrong_kek` answer and everyone else was refused
   as tampered ([restore.md](docs/restore.md#if-the-vault-key-is-wrong)).
 - The API's `isRootAdmin` and the `root-admin` instance role are gone, as
@@ -45,12 +45,16 @@ instance: a member like any other, in People, changed by the same rules.
 **Upgrading from 0.5.** Nothing to migrate, and nothing to change first:
 
 1. **`coffre update`**, then **`coffre migrate`**, which applies nothing.
-2. **Deploy.** The vault's first call makes every email its configuration
-   names (`rootAdmins`, `ROOT_ADMINS`) an Owner of the whole instance,
-   once, as `system:vault`: a member row for one who never signed in too,
-   so nobody loses what they held. A `root-admins.convert` entry records
-   it, after which the list only bootstraps. Someone you took off the list
-   before upgrading is not made an Owner.
+2. **Deploy.** On an instance where a root admin ever signed in, the
+   vault's first call makes every email its configuration names
+   (`rootAdmins`, `ROOT_ADMINS`) an Owner of the whole instance, once, as
+   `system:vault`: a member row for one who never signed in too, so nobody
+   loses what they held. A `root-admins.convert` entry records it, after
+   which the list only bootstraps. Someone you took off the list before
+   upgrading is not made an Owner. Where no root admin ever signed in, the
+   first listed person to sign in becomes the Owner, as on a new instance.
+   The vault reads 0.5's entries by its keys, so keep any vault key it
+   replaced in `previousKeks`, as always.
 3. **Check Users**, where your root admins are now Owners: demote those
    who should not be, keeping one, and make Owners of anyone else who
    should run coffre.
@@ -61,7 +65,9 @@ instance: a member like any other, in People, changed by the same rules.
    whichever name your vault reads.
 
 Rolling back to 0.5 leaves the new Owners Owners, and makes the listed
-emails root admins again.
+emails root admins again, as long as the vault's code still passes them as
+`rootAdmins`: 0.5 refuses to start without it. Roll back the rename of
+step 4 with it.
 
 **The CLI picks the instance by directory.** With several instances, a
 company's and your own, `coffre login <url>` pins the directory it ran in

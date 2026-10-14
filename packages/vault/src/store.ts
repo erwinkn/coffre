@@ -1,4 +1,4 @@
-import { EVERYWHERE, type InstanceRole, type Scope } from '@coffre/core/access';
+import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
@@ -113,16 +113,17 @@ export async function allMembers(db: Queryable): Promise<Member[]> {
 /**
  * The rows that say their member is an active Owner of the whole instance
  * (`ownsInstance` in @coffre/core/access), as stored: a row changed around
- * the vault says so too, which the caller checks.
+ * the vault says so too, which the caller checks. The scope is read as the
+ * row's MAC reads it, parsed: any way of writing everywhere is everywhere.
  */
 export async function instanceOwners(db: Queryable): Promise<Member[]> {
   const { vaultMembers } = tablesOf(db);
   const rows = await db
     .select(memberColumns(db))
     .from(vaultMembers)
-    .where(and(eq(vaultMembers.status, 'active'), eq(vaultMembers.role, 'owner'), isNull(vaultMembers.scope)))
+    .where(and(eq(vaultMembers.status, 'active'), eq(vaultMembers.role, 'owner')))
     .orderBy(asc(vaultMembers.principal));
-  return (rows as StoredMember[]).map(memberOf);
+  return (rows as StoredMember[]).map(memberOf).filter(ownsInstance);
 }
 
 /**

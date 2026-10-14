@@ -141,6 +141,13 @@ export type PreparedVault = {
    * when it started replaced.
    */
   converted: boolean;
+  /**
+   * Whether this process has seen an Owner of the whole instance. The last
+   * one stays, so from then on the bootstrap need not look: recovering an
+   * instance whose Owners' rows all fail their check takes a deploy, whose
+   * processes look again (`#bootstrap`).
+   */
+  owned: boolean;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -155,6 +162,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     kekChecked: false,
     wrongKek: null,
     converted: false,
+    owned: false,
   };
 }
 
@@ -1389,7 +1397,10 @@ class VaultService implements Vault {
    * people signing in at once make one Owner. Whether it made them one.
    */
   async #bootstrap(principal: string): Promise<boolean> {
-    if ((await this.#anOwner(this.#db, [])) !== null) return false;
+    if ((await this.#anOwner(this.#db, [])) !== null) {
+      this.#prepared.owned = true;
+      return false;
+    }
     const made = await this.#decideNow([principal], async (d) => {
       await lockLogHead(d.tx);
       return { made: (await this.#anOwner(d.tx, d.reports)) === null && (await this.#makeOwner(d, principal, 'bootstrap')) };
@@ -1408,7 +1419,7 @@ class VaultService implements Vault {
     if ((await this.#anOwner(d.tx, d.reports, principal)) !== null) return;
     throw refused('last_owner', actor === principal
       ? "you're the last Owner of the whole instance: make someone else an Owner first"
-      : `${shownMember(principal)} is the last Owner of the whole instance: make someone else an Owner first`);
+      : `${principal.slice('user:'.length)} is the last Owner of the whole instance: make someone else an Owner first`);
   }
 
   /**
@@ -1499,7 +1510,8 @@ class VaultService implements Vault {
   async access(principal: string): Promise<Access> {
     const superseded = await this.#settled();
     const access = await this.#read(principal, superseded);
-    if (superseded !== null || !this.#bootstrapOwner(principal) || (access.status === 'active' && ownsInstance(access))) return access;
+    if (access.status === 'active' && ownsInstance(access)) this.#prepared.owned = true;
+    if (superseded !== null || !this.#bootstrapOwner(principal) || this.#prepared.owned) return access;
     return (await this.#bootstrap(principal)) ? this.#read(principal, superseded) : access;
   }
 

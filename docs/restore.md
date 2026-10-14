@@ -196,8 +196,8 @@ the wrong escrowed key, holds none of the keys the vault's entries were written 
 the vault sees at its first call. It then writes nothing at all, and
 refuses every key operation and every change of access. It cannot check
 anyone's member row either, since it sealed them under the same keys, the
-Owner's included: it says of nobody who they are, so nobody signs in, and
-every request answers
+Owner's included: it says of no member who they are, so nobody signs in,
+and every request from a member's session or token answers
 
 ```
 HTTP 503  {"error":"unavailable","message":"coffre cannot check who you are right now"}

@@ -1,6 +1,6 @@
 // GET /audit/keys: what `coffre verify keys` holds an escrowed key to, on
 // the operator's machine. Public check material, and nothing more, for
-// owners and root admins alone.
+// admins and owners of the whole instance alone.
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -18,7 +18,7 @@ after(async () => {
   await db.close();
 });
 
-test("a root admin reads the app key's id, the vault key now, and its check, which opens only under that key", async () => {
+test("an Owner reads the app key's id, the vault key now, and its check, which opens only under that key", async () => {
   const keys = await root.audit.keys();
   assert.deepEqual(keys.app, { keyId: appLogKeyId(deps.chainKey) });
   assert.deepEqual(keys.vault.current, { vaultId: 'test-kek-1', provider: 'local' });

@@ -442,7 +442,7 @@ naming the provider and key id, and the next checkpoint is refused, so
 next call asks again. With a local vault key, the vault knows sooner: its keys
 come from the vault key, so a wrong one holds none of those its entries were
 written under: the vault writes nothing at all, and can check no member's
-row, so every request answers 503.
+row, so every member's request answers 503.
 [restore.md](restore.md#if-the-vault-key-is-wrong) shows what an operator sees.
 
 The vault owns everything that decides access: the vault key,

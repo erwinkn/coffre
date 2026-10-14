@@ -253,7 +253,7 @@ test('the vault making an Owner says why: a bootstrap, or a root admin of 0.5, o
     said(entry({ action: 'root-admins.convert', ...vault, metadata: { owners: ['user:root@acme.example', 'user:sam@acme.example'] } })),
     'ended root admins, making Owners of root@acme.example, sam@acme.example',
   );
-  assert.equal(said(entry({ action: 'root-admins.convert', ...vault, metadata: { owners: [] } })), 'ended root admins: each was an Owner already');
+  assert.equal(said(entry({ action: 'root-admins.convert', ...vault, metadata: { owners: [] } })), 'ended root admins: none was made an Owner');
   assert.equal(
     said(entry({ action: 'member.remove', author: 'vault', subject: 'user:root@acme.example', decision: 'deny', reason: 'last_owner' })),
     'tried to remove root@acme.example: they are the last Owner of the whole instance',

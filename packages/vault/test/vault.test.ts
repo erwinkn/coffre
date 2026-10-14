@@ -1383,7 +1383,7 @@ test('the vault appends only as itself, and writes none of the app\'s rows', pos
   await assert.rejects(db.vault.update(projects).set({ name: 'renamed' }), refusedBy(/permission denied/));
 });
 
-/** A vault whose log holds `n` wraps and an admission, as the root admin made them. */
+/** A vault whose log holds `n` wraps and an admission, as the Owner made them. */
 async function longLog(n: number) {
   const w = await world();
   const items = await Promise.all(
@@ -2527,7 +2527,7 @@ test('the last Owner of the whole instance is not demoted, narrowed or removed, 
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'admin' })).ok);
   const last = (outcome: { ok: boolean; refusal?: { code: string; message: string } }) => !outcome.ok && outcome.refusal;
-  const theirs = { code: 'last_owner', message: 'user:root@acme.example is the last Owner of the whole instance: make someone else an Owner first' };
+  const theirs = { code: 'last_owner', message: 'root@acme.example is the last Owner of the whole instance: make someone else an Owner first' };
   assert.deepEqual(last(await w.vault.admit({ actor: ADA, principal: ROOT, role: 'admin' })), theirs);
   assert.deepEqual(last(await w.vault.admit({ actor: ADA, principal: ROOT, role: 'owner', scope: { projects: { only: [w.project] }, environments: 'all' } })), theirs);
   assert.deepEqual(last(await w.vault.remove({ actor: ADA, principal: ROOT })), theirs);
@@ -2595,12 +2595,40 @@ test('the bootstrap takes back an instance whose only Owner fails the vault\'s c
   // Root's row changed around the vault: it owns nothing, and Bob owns one project only.
   const { vaultMembers } = tablesOf(db.owner);
   await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, ROOT));
-  // Root is named: their next request starts them over, as removing them would, and makes them its Owner.
-  const root = await w.vault.access(ROOT);
+  // A process that has seen an Owner does not look again: the last one stays, but for this.
+  assert.equal((await w.vault.access(ROOT)).status, 'tampered');
+  // Deployed again, root, named, signing in, is started over, as removing them would, and made its Owner.
+  const deployed = await namingOwners('root@acme.example', 'sam@acme.example');
+  const root = await deployed.access(ROOT);
   assert.deepEqual([root.status, root.role, root.generation], ['active', 'owner', 8]);
-  assert.deepEqual((await ownership(w)).slice(-2), [['member.remove', ROOT, 'allow', null], ['member.restore', ROOT, 'allow', 'bootstrap']]);
-  assert.equal((await w.vault.access(SAM)).status, 'unknown', 'root owns it again');
-  assert.equal((await w.vault.verifyLog({})).ok, true);
+  assert.deepEqual((await ownership(w)).filter(([, , outcome]) => outcome === 'allow').slice(-2), [['member.remove', ROOT, 'allow', null], ['member.restore', ROOT, 'allow', 'bootstrap']]);
+  assert.equal((await deployed.access(SAM)).status, 'unknown', 'root owns it again');
+  assert.equal((await deployed.verifyLog({})).ok, true);
+});
+
+test('an Owner\'s scope written another way around the vault is still everywhere: the list makes no second Owner', async () => {
+  // The column says everywhere as JSON, not null: the row's MAC reads it parsed, and holds.
+  await world({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] });
+  const { vaultMembers } = tablesOf(db.owner);
+  await db.owner.update(vaultMembers).set({ scope: JSON.stringify(EVERYWHERE) }).where(eq(vaultMembers.principal, ROOT));
+  // Sam signs in first, in a process that has seen no Owner yet.
+  const deployed = await namingOwners('root@acme.example', 'sam@acme.example');
+  assert.equal((await deployed.access(SAM)).status, 'unknown', 'root owns the instance');
+  assert.deepEqual(await deployed.access(ROOT).then(({ status, role, scope }) => [status, role, scope]), ['active', 'owner', EVERYWHERE]);
+});
+
+test('the bootstrap brings back a named person an Owner removed, once no Owner is left', async () => {
+  const w = await world({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] });
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: SAM })).ok);
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: SAM })).ok);
+  // While root owns the instance, Sam stays removed.
+  assert.equal((await (await namingOwners('root@acme.example', 'sam@acme.example')).access(SAM)).status, 'removed');
+  // Root's row fails the check: the list is a standing way in, which brings Sam back, as an Owner.
+  const { vaultMembers } = tablesOf(db.owner);
+  await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, ROOT));
+  const sam = await (await namingOwners('root@acme.example', 'sam@acme.example')).access(SAM);
+  assert.deepEqual([sam.status, sam.role, sam.generation], ['active', 'owner', 1]);
+  assert.deepEqual((await ownership(w)).at(-1), ['member.restore', SAM, 'allow', 'bootstrap']);
 });
 
 /** A root admin's row as 0.5 gave them one the first time anyone asked about them: a Member, `rootAdmin: true`. */

@@ -187,7 +187,7 @@ async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: st
   if (!me.runsInstance) {
     throw new Failure(`${who} is not an admin or owner of all of ${origin}: nothing was made. Sign in as one, or with a bearer token, \`coffre login ${origin} --token\`, and name its --canary`);
   }
-  return { detail: `${who}, an ${me.instanceRole}, with this CLI's session`, value: who };
+  return { detail: `${who}, ${/^[aeiou]/.test(me.instanceRole) ? 'an' : 'a'} ${me.instanceRole}, with this CLI's session`, value: who };
 }
 
 /** Make what is missing of the run's place, and the service's two grants; then a fresh canary, and a fresh credential. */

@@ -70,7 +70,7 @@ async function auditCount(): Promise<number> {
   return row.n;
 }
 
-test('root admins and instance owners create projects without implicit secret grants', async () => {
+test('Owners create projects without implicit secret grants', async () => {
   await root.members.add(OWNER, { role: 'admin' });
   assert.deepEqual(await root.projects.create('market', { name: 'Market' }), {
     project: { slug: 'market', name: 'Market', archivedAt: null },
@@ -362,7 +362,7 @@ test('two owners adding the same member at once both succeed, and one of them cr
     .from(auditLog)
     .where(and(eq(auditLog.action, 'member.add'), eq(auditLog.decision, 'allow')))
     .orderBy(asc(auditLog.seq));
-  // The root admin's own row, made on first use; LEAD, READER, CI, OWNER; then the new member once.
+  // The Owner's own row, the bootstrap's; LEAD, READER, CI, OWNER; then the new member once.
   assert.deepEqual(creates.map(({ subject }) => subject), [
     'user:admin@acme.example', LEAD, READER, CI, OWNER, 'user:new@acme.example',
   ]);

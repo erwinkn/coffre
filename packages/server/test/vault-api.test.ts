@@ -67,7 +67,7 @@ beforeEach(async () => {
 });
 
 /**
- * The API with a permission bug: it believes `id` is a root admin, so every
+ * The API with a permission bug: it believes `id` is an Owner of the whole instance, so every
  * check the app makes passes. Only the vault stands between them and a key.
  */
 function buggyClientFor(on: FixtureDeps, id: string): CoffreClient {
