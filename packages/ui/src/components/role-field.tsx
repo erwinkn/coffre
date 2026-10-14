@@ -16,7 +16,7 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
   return (
     <>
       <label className="field">
-        <span className="label">Instance role</span>
+        <span className="label">Role</span>
         <select
           className="select"
           value={role}
@@ -29,8 +29,7 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
           ))}
         </select>
         <span className="hint">
-          {INSTANCE_ROLES[role].description}
-          {role === 'member' ? '' : ' Project grants add to it.'}
+          Default permissions: {INSTANCE_ROLES[role].description} Project grants add more.
         </span>
       </label>
       {role !== 'member' && <ScopeField scope={scope} onChange={(next) => onChange({ role, scope: next })} />}

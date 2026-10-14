@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+**The add-person dialog says what it asks.** Its field is "Email", not
+"Cloudflare Access email", whichever way people sign in, and its description
+of the role is gone: the role field under it already says what each role
+holds. "Instance role" is "Role" in every label, and each role's hint
+reads "Default permissions: …" ("None" for a Member), then "Project grants
+add more."
+
+**A row waiting on the server no longer spills over its neighbours.** In the
+Users, Service accounts, grants and secrets tables, "Saving…" and
+"Removing…" stood in for the row's menu in a column that fits only the
+menu, and ran into the role column. Now the spinner stands there alone, the
+words stay for screen readers and as its tooltip.
+
 ## 0.5.1 (2026-10-11)
 
 **`coffre update` moves a deployment with the new release's pages.** The
