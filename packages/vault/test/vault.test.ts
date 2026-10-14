@@ -2751,8 +2751,8 @@ function pausedReadAbout(database: Database, principal: string) {
   return { database: wrapped, arm: () => void (armed = true), reached, release };
 }
 
-for (const shared of [false, true]) {
-  test(`a person's request that read them before another request of theirs bootstrapped them answers them an Owner (${shared ? 'one process' : 'two processes'})`, { timeout: 10_000 }, async () => {
+for (const [shared, joined] of [[false, false], [true, false], [false, true]] as const) {
+  test(`a person's request that read them before another request of theirs bootstrapped them answers them an Owner (${shared ? 'one process' : 'two processes'}${joined ? ', another Owner made since' : ''})`, { timeout: 10_000 }, async () => {
     await places(db.owner);
     const config = configure({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] });
     const prepared = await prepareVault(config);
@@ -2766,6 +2766,8 @@ for (const shared of [false, true]) {
     const pending = first.access(ROOT);
     await slow.reached;
     assert.equal((await other.access(ROOT)).role, 'owner');
+    // Ada, made an Owner since, comes first among the Owners the quick check finds.
+    if (joined) assert.ok((await other.admit({ actor: ROOT, principal: ADA, role: 'owner' })).ok);
     slow.release();
     const answer = await pending;
     assert.deepEqual([answer.status, answer.role], ['active', 'owner']);

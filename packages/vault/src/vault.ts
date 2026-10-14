@@ -1395,15 +1395,14 @@ class VaultService implements Vault {
    * grants another decision committed between them. Then one decision,
    * under their row and the log's head, reads again, and reports: two named
    * people signing in at once make one Owner. Whether their row may have
-   * changed since `access` read it: they own the instance now, made an Owner
-   * by this decision or by another request of theirs meanwhile, or the
+   * changed since `access` read it: an Owner found, who may have been made by
+   * another request of theirs meanwhile and since joined by others, or the
    * decision ran. Only an Owner found or made is kept as seen (`owned`).
    */
   async #bootstrap(principal: string): Promise<boolean> {
-    const found = await this.#anOwner(this.#db, []);
-    if (found !== null) {
+    if ((await this.#anOwner(this.#db, [])) !== null) {
       this.#prepared.owned = true;
-      return found === principal;
+      return true;
     }
     const decided = await this.#decideNow([principal], async (d) => {
       await lockLogHead(d.tx);
