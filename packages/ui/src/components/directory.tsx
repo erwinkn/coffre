@@ -90,7 +90,7 @@ export function DirectoryTable({
                     <th className="col-role">
                       <span className="th">
                         <ShieldCheck size={14} />
-                        Instance role
+                        Role
                       </span>
                     </th>
                   ) : (
@@ -138,7 +138,7 @@ export function DirectoryTable({
                           />
                         </td>
                         {users ? (
-                          <td className="col-role" data-label="Instance role">
+                          <td className="col-role" data-label="Role">
                             <InstanceRole principal={principal} />
                           </td>
                         ) : (
@@ -494,7 +494,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
         title={`Add a ${kind}`}
         description={
           principalType === 'user'
-            ? 'Their instance role reaches every project in its scope. Grant more afterwards, from their page or a project\'s.'
+            ? undefined
             : 'This gives the service account no project access. Grant it afterwards, from its page or a project\'s.'
         }
       >
@@ -509,7 +509,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
         >
           <label className="field">
             <span className="label">
-              {principalType === 'user' ? 'Cloudflare Access email' : 'Service account name'}
+              {principalType === 'user' ? 'Email' : 'Service account name'}
             </span>
             <input
               className="input input-mono"

@@ -100,7 +100,14 @@ export interface Vault {
    * checkpoints verify under, by the key id each checkpoint names (the one
    * it signs with now, and those of the KEKs it replaced).
    */
-  about(): Promise<{ checkpointKeys: Record<string, CheckpointKey> }>;
+  about(): Promise<{
+    checkpointKeys: Record<string, CheckpointKey>;
+    /**
+     * @deprecated Always empty: an app of 0.5, deployed after this vault,
+     * lists and checks root admins here until it is. Gone in 0.7.
+     */
+    rootAdmins: [];
+  }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
    * under now, and each one's check, as the vault wrote it. None of it is

@@ -2134,13 +2134,15 @@ class VaultService implements Vault {
     });
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey> }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: [] }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
     const until = Number(since ?? 0n);
     return {
       checkpointKeys: Object.fromEntries(signers.map(({ keyId, publicKey }, i) => [keyId, { publicKey, until: i === 0 ? null : until }])),
+      // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
+      rootAdmins: [],
     };
   }
 

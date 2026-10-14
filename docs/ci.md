@@ -140,6 +140,10 @@ With the CLI:
   ```sh
   coffre --url https://secrets.acme.example --service api-deploy run market/prod -- ./deploy
   ```
+
+  In a repository whose `coffre.json` names the instance (the README's
+  CLI section), `--url` can go: the ID token is asked for the URL the
+  file names, and only that instance takes it.
 - **GitLab**: declare an ID token for your instance, and pipe it to
   `coffre login --service --id-token`, which trades it for the credential
   and saves it as the session the commands after it use, for its five

@@ -420,7 +420,7 @@ and membership generations. The interface:
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
-| `about` | the public keys checkpoints verify under: what only its configuration says |
+| `about` | the public keys checkpoints verify under: what only its configuration says; and `rootAdmins`, always empty, for an app of 0.5 during a deploy, until 0.7 |
 | `verifyLog` | check the vault's MACs over the prefix the app verified (asked with no head, the whole chain too), every checkpoint, and replay members and grants |
 
 Every argument and result is plain data, and a refusal is a value, not a

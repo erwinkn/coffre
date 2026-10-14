@@ -58,7 +58,7 @@ export const SECTIONS = [
   {
     title: 'Session',
     entries: [
-      { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in, and make <url> the current instance'] },
+      { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in; use <url> in this directory and below,', 'and by default'] },
       { command: 'login', usage: ['login <url> --token'], about: ["a CI run's sign-in: a bearer token, asked for or piped in"] },
       { command: 'login', usage: ['login <url> --access-client-id <id>'], about: ['the same, behind Cloudflare Access: its secret asked for'] },
       {
@@ -68,7 +68,7 @@ export const SECTIONS = [
       },
       { command: 'logout', usage: ['logout [<url>]'] },
       { command: 'whoami', usage: ['whoami [--json]'] },
-      { command: 'use', usage: ['use [<url>]'], about: ['list instances, or switch the current one'] },
+      { command: 'use', usage: ['use [<url>]'], about: ['list instances, or switch the default one'] },
       { command: 'sessions', usage: ['sessions [--json]'], about: ["where you are signed in, this CLI's session among them"] },
       { command: 'sessions revoke', usage: ['sessions revoke <id> [--apply]'], about: ['signs that session out'] },
       { command: 'apps', usage: ['apps [--json]'], about: ['the MCP clients you connected, such as Claude'] },
@@ -261,7 +261,9 @@ export type Command = (typeof SECTIONS)[number]['entries'][number]['command'];
 export const ENTRIES: readonly Entry[] = SECTIONS.flatMap(({ entries }): readonly Entry[] => entries);
 
 const SESSION_FLAGS = `  Session flags, before the command: coffre [flags] <command>, for that command alone
-    --url <url>                     which instance to talk to; else the current one
+    --url <url>                     which instance to talk to; else the one this directory is pinned
+                                    to, by a login in it or above it, or its repository's coffre.json
+                                    names, { "url": "https://…" }, whichever is nearer; else the default
     --service <name>                the service account a CI run signs in as, by OIDC: its ID token,
                                     which a trust binding accepts (coffre trust); on GitHub Actions, with
                                     \`permissions: id-token: write\`, nothing else

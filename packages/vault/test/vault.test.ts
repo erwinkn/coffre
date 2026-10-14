@@ -2499,6 +2499,19 @@ test('the bootstrap makes the first one the list names to sign in an Owner, and 
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
+test('an app of 0.5, running beside this vault during a deploy, still finds the root admins it lists: none', async () => {
+  const w = await world();
+  // What 0.5's members list, admit and remove do with the field (server api/members.ts of 0.5).
+  const rootAdmins = (await w.vault.about()).rootAdmins as string[];
+  assert.ok(Array.isArray(rootAdmins) && rootAdmins.length === 0);
+  assert.equal(new Set(rootAdmins).has(ROOT), false);
+  assert.deepEqual(rootAdmins.filter((root) => root === ROOT), []);
+  assert.equal(rootAdmins.includes(ROOT), false, 'so 0.5 adds and removes root like anyone, and the vault decides');
+  // Its other half, `access`, still holds what 0.5 reads: root's role, everywhere, and no `isRootAdmin`, which reads as false.
+  const root = (await w.vault.access(ROOT)) as { role: string; scope: unknown; isRootAdmin?: boolean };
+  assert.deepEqual([root.role, root.scope, root.isRootAdmin ?? false], ['owner', EVERYWHERE, false]);
+});
+
 test('two people the list names, signing in at once, make one Owner', postgresOnly('SQLite runs one writer at a time'), async () => {
   const first = await namingOwners('root@acme.example', 'sam@acme.example');
   const second = await openLocalVault(await db.connect(), configure({ bootstrapOwners: ['root@acme.example', 'sam@acme.example'] }));

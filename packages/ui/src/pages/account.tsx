@@ -86,7 +86,7 @@ export function AccountProfilePage() {
           </Fact>
           <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>
           {principal.type === 'user' && (
-            <Fact label="Instance role">
+            <Fact label="Role">
               <InstanceRole
                 principal={{
                   principalType: 'user',

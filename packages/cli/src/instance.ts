@@ -3,7 +3,7 @@
  *
  * One person often has several instances (a company's and their own), so
  * sessions are kept per origin in one file, and `coffre login <url>` makes
- * that origin the current one:
+ * that origin the default one:
  *
  *   {
  *     "version": 2,
@@ -18,10 +18,18 @@
  * bearer token (`--token`), an Access service token's secret
  * (`--access-client-id`), or the credential its ID token buys
  * (`--service`); each saved as the instance's session. The session flags
- * pick another instance than the current one, `--url`, or sign one command
- * in as a service by its ID token, `--service` (`flags.ts`).
+ * pick another instance than the one a command would use, `--url`, or sign
+ * one command in as a service by its ID token, `--service` (`flags.ts`).
+ *
+ * `coffre login <url>` also pins the directory it ran in to that origin,
+ * for it and every directory below, in a file of its own beside the
+ * sessions (`Pins`). A repository can name its instance for everyone who
+ * clones it, in a `coffre.json` it commits (`parseRepoFile`). A command uses
+ * `--url`, else the nearest pinned directory or `coffre.json` above where it
+ * runs, a pin before a file in the same directory, else the default.
  */
 
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { apiMember, type AuthInfo } from '@coffre/client';
 
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
@@ -80,6 +88,36 @@ export type SessionFlags = {
   authMode?: string;
 };
 
+/**
+ * Which instance each pinned directory uses, by its real path, in
+ * `~/.coffre/directories.json`:
+ *
+ *   {
+ *     "version": 1,
+ *     "directories": { "/home/ada/Code/acme": "https://coffre.acme.example" }
+ *   }
+ *
+ * Not in the credentials file: a CLI from before pins rewrites that one in
+ * the shape it knows, which would drop them unseen, and leaves this one
+ * alone. It holds no secret.
+ */
+export type Pins = { version: 1; directories: Record<string, string> };
+
+/** The pin that applies in a directory: its own, or its nearest pinned parent's. */
+export type Pin = { directory: string; origin: string };
+
+/**
+ * What names the instance where a command runs: a pinned directory, or a
+ * directory's `coffre.json`, whichever is nearer.
+ */
+export type Local = { origin: string; by: 'pin' | 'file'; directory: string };
+
+/** Which instance a command means, and why: `--url`, the directory's pin or `coffre.json`, or the default. */
+export type Choice = { origin: string; by: 'url' } | { origin: string; by: 'default' } | Local;
+
+/** The file a repository names its instance in. */
+export const REPO_FILE = 'coffre.json';
+
 const MODES: readonly AuthMode[] = ['signin', 'cloudflare'];
 const KINDS: readonly SessionKind[] = ['token', 'access', 'run'];
 
@@ -114,6 +152,125 @@ export function parseStore(text: string): Store {
       ? candidate.current
       : null;
   return { version: 2, current, instances };
+}
+
+export function emptyPins(): Pins {
+  return { version: 1, directories: {} };
+}
+
+/**
+ * Read the pins file. Unlike the sessions, one this CLI cannot read is an
+ * error, not an empty file: that would send a pinned directory's commands
+ * to the default instance.
+ */
+export function parsePins(text: string): Pins {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error('it is not JSON');
+  }
+  const candidate = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Pins>;
+  if (candidate.version !== 1 || typeof candidate.directories !== 'object' || candidate.directories === null || Array.isArray(candidate.directories)) {
+    throw new Error('this CLI does not know its shape: a later coffre wrote it, perhaps');
+  }
+  const directories: Record<string, string> = {};
+  for (const [directory, origin] of Object.entries(candidate.directories)) {
+    if (!isAbsolute(directory) || typeof origin !== 'string') throw new Error(`it pins ${JSON.stringify(directory)} to ${JSON.stringify(origin)}`);
+    directories[directory] = instanceOrigin(origin);
+  }
+  return { version: 1, directories };
+}
+
+/** Whether `directory` is `ancestor` or below it. */
+export function within(directory: string, ancestor: string): boolean {
+  const path = relative(ancestor, directory);
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+/** The pin that applies in `directory`, a real path: the longest pinned one it is in. */
+export function pinFor(pins: Pins, directory: string): Pin | null {
+  let found: Pin | null = null;
+  for (const [pinned, origin] of Object.entries(pins.directories)) {
+    if (within(directory, pinned) && (found === null || pinned.length > found.directory.length)) found = { directory: pinned, origin };
+  }
+  return found;
+}
+
+/** Pin `directory` to `origin`. */
+export function withPin(pins: Pins, directory: string, origin: string): Pins {
+  return { version: 1, directories: { ...pins.directories, [directory]: origin } };
+}
+
+/** Every pin to `origin` taken out, and the directories they pinned. */
+export function withoutPins(pins: Pins, origin: string): { pins: Pins; unpinned: string[] } {
+  const kept = Object.entries(pins.directories).filter(([, pinned]) => pinned !== origin);
+  const unpinned = Object.entries(pins.directories).filter(([, pinned]) => pinned === origin).map(([directory]) => directory);
+  return { pins: { version: 1, directories: Object.fromEntries(kept) }, unpinned };
+}
+
+/**
+ * The origin a repository's `coffre.json` names, committed beside its code
+ * so that a clone uses its instance with no `--url` and no pin:
+ *
+ *   { "url": "https://coffre.acme.example" }
+ *
+ * Only that: a file anyone can commit picks where the CLI goes, never what
+ * it carries, which stays that instance's own session. So it holds no
+ * credential and nothing else, and its URL is an origin as written.
+ */
+export function parseRepoFile(text: string): string {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error('it is not JSON');
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('expected { "url": "https://…" }');
+  const others = Object.keys(raw).filter((key) => key !== 'url');
+  if (others.length > 0) throw new Error(`it holds only "url", never a credential or anything else: not ${others.map((key) => JSON.stringify(key)).join(', ')}`);
+  const { url } = raw as { url?: unknown };
+  if (typeof url !== 'string') throw new Error('expected { "url": "https://…" }');
+  const origin = instanceOrigin(url);
+  if (origin !== url) throw new Error(`"url" is an origin, written as one: ${JSON.stringify(origin)}, not ${JSON.stringify(url)}`);
+  return origin;
+}
+
+/**
+ * What names the instance in `directory`, a real path: walking up from it,
+ * the first directory pinned or holding a `coffre.json`, the pin first.
+ * Your home and the directories above it hold no project's `coffre.json`,
+ * as a login there pins nothing. `read` gives a file's text, or null if
+ * there is none; a file there that cannot be read or used is an error,
+ * never a reason to look further up.
+ */
+export function localFor(pins: Pins, directory: string, home: string, read: (path: string) => string | null): Local | null {
+  const pin = pinFor(pins, directory);
+  for (let at = directory; !within(home, at) && !(pin !== null && within(pin.directory, at)); at = dirname(at)) {
+    const path = join(at, REPO_FILE);
+    const text = read(path);
+    if (text !== null) {
+      try {
+        return { origin: parseRepoFile(text), by: 'file', directory: at };
+      } catch (error) {
+        throw new Error(`cannot use ${path}: ${(error as Error).message}`);
+      }
+    }
+    if (dirname(at) === at) break;
+  }
+  return pin === null ? null : { ...pin, by: 'pin' };
+}
+
+/**
+ * The instance a command means: `--url`, else the pin or `coffre.json` that
+ * applies where it runs, else the default. That instance is the one, signed
+ * in there or not: never another one's session in its place.
+ */
+export function choose(flags: SessionFlags, store: Store, local: Local | null): Choice {
+  if (flags.url !== undefined) return { origin: instanceOrigin(flags.url), by: 'url' };
+  if (local !== null) return { ...local, origin: instanceOrigin(local.origin) };
+  if (store.current !== null) return { origin: instanceOrigin(store.current), by: 'default' };
+  throw new Error('not signed in anywhere yet: run `coffre login <url>`');
 }
 
 export function parseMode(raw: string | undefined): AuthMode | undefined {
@@ -203,13 +360,10 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
  * is given: `readSession` refused an empty one, which falling back to the
  * saved session would have taken for none.
  */
-export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new Date()): Target {
+export function resolveTarget(flags: SessionFlags, store: Store, local: Local | null = null, now: Date = new Date()): Target {
   const explicitMode = parseMode(flags.authMode);
-  const requested = flags.url ?? store.current;
-  if (!requested) {
-    throw new Error('not signed in anywhere yet: run `coffre login <url>`');
-  }
-  const origin = instanceOrigin(requested);
+  const choice = choose(flags, store, local);
+  const { origin } = choice;
 
   if (flags.service !== undefined) {
     if (explicitMode === 'cloudflare') {
@@ -224,7 +378,11 @@ export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new
   const stored = store.instances[origin];
   const mode: AuthMode = explicitMode ?? stored?.mode ?? 'signin';
   const relogin = `run \`coffre login ${origin}\``;
-  if (stored === undefined || stored.mode !== mode) throw new Error(`not signed in to ${origin}: ${relogin}`);
+  if (stored === undefined || stored.mode !== mode) {
+    // A clone's first command: where the instance came from, so that a URL the repository chose is not taken for one you did.
+    const named = choice.by === 'file' ? `, which ${join(choice.directory, REPO_FILE)} names` : '';
+    throw new Error(`not signed in to ${origin}${named}: ${relogin}`);
+  }
   const by = stored.kind ?? 'person';
   if (mode === 'cloudflare') {
     if (by !== 'access') return { origin, mode, by, credential: { kind: 'cloudflared' } };

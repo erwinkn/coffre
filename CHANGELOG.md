@@ -29,7 +29,9 @@ instance: a member like any other, in People, changed by the same rules.
   admins got through to a `wrong_kek` answer and everyone else was refused
   as tampered ([restore.md](docs/restore.md#if-the-vault-key-is-wrong)).
 - The API's `isRootAdmin` and the `root-admin` instance role are gone, as
-  is the vault's `root_admin` refusal, and `about()` no longer lists them.
+  is the vault's `root_admin` refusal. The vault's `about()` answers
+  `rootAdmins: []` until 0.7, so a 0.5 app deployed after it keeps listing,
+  adding and removing members meanwhile.
   Settings no longer lists root admins; Users does, as Owners.
 
 **Upgrading from 0.5.** Nothing to migrate, and nothing to change first:
@@ -52,6 +54,59 @@ instance: a member like any other, in People, changed by the same rules.
 
 Rolling back to 0.5 leaves the new Owners Owners, and makes the listed
 emails root admins again.
+
+**The CLI picks the instance by directory.** With several instances, a
+company's and your own, `coffre login <url>` pins the directory it ran in
+to that instance, for it and every directory below, as well as making it
+the default. A command then uses `--url`, else the nearest pinned
+directory's instance, else the default, so `~/Code/acme` talks to
+secrets.acme.example and `~/Code/mine` to your own, without `--url` or
+another login. `coffre whoami` says why: "on https://secrets.acme.example
+(pinned at ~/Code/acme)", or "(the default)"; `coffre use` lists the
+directories pinned to each instance and stars the one used here. A
+directory pinned to an instance you are not signed in to says to sign in
+there, and never uses the default's session instead, nor does a command
+that cannot tell which pin applies (a pins file it cannot read, or reached
+through a symbolic link, or a directory removed since): it stops, and
+`--url` names the instance. `coffre login` with a session the instance
+still knows keeps it and only pins (`coffre logout` first for a new one;
+only the instance saying it does not know the session starts a new
+login), and one in your home directory sets the default only. `coffre
+logout` unpins the instance's directories. The pins live in
+`~/.coffre/directories.json`, beside the sessions rather than in their
+file, so a CLI before this one, which rewrites the sessions' file in the
+shape it knows, keeps every session and never drops a pin; it ignores
+them and uses the default everywhere.
+
+**A repository names its instance in `coffre.json`.** Commit
+`{ "url": "https://secrets.acme.example" }` as `coffre.json`, and every
+clone uses that instance below it with no `--url` and no pin: a command
+uses `--url`, else the nearest pin or `coffre.json` above the directory,
+your own pin first in the same one, else the default. The file picks the
+URL only. Commands still send that instance's own session, so a fresh
+clone's first one says `not signed in to https://secrets.acme.example,
+which /home/ada/Code/acme/coffre.json names`, and `coffre login`, with no URL,
+signs in there after saying which file named it, pinning nothing.
+`whoami` and `use` say `named by ~/Code/acme/coffre.json`. A CI run's
+`--service` needs no `--url` there either: its ID token is asked for that
+URL, which no other instance takes. A secret handed to `coffre login`
+(`--token`, `--access-client-id`, `--id-token`) still goes only to a URL
+you name. A `coffre.json` that is a link, holds anything but `"url"`, or
+names something other than an origin stops the commands below it, with
+its path. One in your home directory or above it is ignored.
+
+**The add-person dialog says what it asks.** Its field is "Email", not
+"Cloudflare Access email", whichever way people sign in, and its description
+of the role is gone: the role field under it already says what each role
+holds. "Instance role" is "Role" in every label, and each role's hint
+reads "Default permissions: …" ("None" for a Member), then "Project grants
+add more."
+
+**A row waiting on the server no longer spills over its neighbours.** In the
+Users, Service accounts, grants and secrets tables, "Saving…" and
+"Removing…" stood in for the row's menu in a column that fits only the
+menu, and ran into the role column. Now the spinner stands there alone, the
+words stay for screen readers and as its tooltip.
 
 ## 0.5.1 (2026-10-11)
 
