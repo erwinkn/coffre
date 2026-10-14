@@ -18,11 +18,25 @@ through a symbolic link, or a directory removed since): it stops, and
 `--url` names the instance. `coffre login` with a session the instance
 still knows keeps it and only pins (`coffre logout` first for a new one;
 only the instance saying it does not know the session starts a new
-login), and one in your home directory sets the default only. `coffre logout` unpins the instance's directories. The pins live in
+login), and one in your home directory sets the default only. `coffre
+logout` unpins the instance's directories. The pins live in
 `~/.coffre/directories.json`, beside the sessions rather than in their
 file, so a CLI before this one, which rewrites the sessions' file in the
 shape it knows, keeps every session and never drops a pin; it ignores
 them and uses the default everywhere.
+
+**The add-person dialog says what it asks.** Its field is "Email", not
+"Cloudflare Access email", whichever way people sign in, and its description
+of the role is gone: the role field under it already says what each role
+holds. "Instance role" is "Role" in every label, and each role's hint
+reads "Default permissions: …" ("None" for a Member), then "Project grants
+add more."
+
+**A row waiting on the server no longer spills over its neighbours.** In the
+Users, Service accounts, grants and secrets tables, "Saving…" and
+"Removing…" stood in for the row's menu in a column that fits only the
+menu, and ran into the role column. Now the spinner stands there alone, the
+words stay for screen readers and as its tooltip.
 
 ## 0.5.1 (2026-10-11)
 

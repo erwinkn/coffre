@@ -618,7 +618,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     name: 'admit_member',
     needs: 'services',
     title: 'Admit a member, or set their role',
-    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. A person who holds access may add a service account, where the instance lets them. ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
+    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. A person who holds access may add a service account, where the instance lets them. A role's default permissions, before any project grant adds more: ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
     scope: 'manage-access',
     idempotent: true,
     destructive: false,
