@@ -1997,7 +1997,16 @@ a.crumb-link:hover {
 
 /* Those action columns fit their button, not the "Removing…" that briefly
    stands in for it, stacked rows included: the spinner stays and the words go
-   to screen readers and the tooltip. */
+   to screen readers and the tooltip. The spinner sits where the menu's icon
+   does, a button wide (an icon and its padding), so the row does not jump
+   when it settles. */
+.grants .col-actions .row-pending,
+.directory .col-actions .row-pending,
+.secrets .col-actions .row-pending {
+  justify-content: center;
+  width: 2rem;
+}
+
 .grants .col-actions .row-pending-words,
 .directory .col-actions .row-pending-words,
 .secrets .col-actions .row-pending-words {
