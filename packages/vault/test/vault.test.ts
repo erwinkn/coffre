@@ -2831,6 +2831,40 @@ test('a root admin a vault of 0.5 let in after the conversion, then removed by a
   assert.deepEqual((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').map((entry) => entry.metadata), ['{"owners":[]}', '{"owners":[]}']);
 });
 
+test('a conversion that 0.5 keeps outrunning is left to the next call, which finishes it', async () => {
+  await places(db.owner);
+  const first = await namingOwners(...NAMED);
+  assert.equal((await first.access(ROOT)).role, 'owner');
+  assert.equal((await first.access(ADA)).status, 'unknown');
+  await rootRowOf05(CAROL);
+  // A process whose every decision finds another root admin let in by 0.5 since its read, while armed.
+  const prepared = await prepareVault(configure({ bootstrapOwners: NAMED }));
+  let late = 0;
+  let armed = true;
+  const busy = new Proxy(db.vault, {
+    get(target, property) {
+      if (property === 'transaction') {
+        return async (...args: Parameters<Database['transaction']>) => {
+          if (armed) await rootRowOf05(`user:late-${(late += 1)}@acme.example`);
+          return target.transaction(...args);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  const vault = openVault(busy, prepared);
+  assert.equal((await vault.access(ADA)).status, 'unknown');
+  assert.equal(late, 3, 'three decisions, each outrun');
+  assert.equal(prepared.converted, false);
+  assert.equal((await store.member(db.owner, CAROL))?.role, 'member');
+  // Quiet again: the next call converts Carol, and only the list's.
+  armed = false;
+  assert.equal((await vault.access(CAROL)).role, 'owner');
+  assert.equal(prepared.converted, true);
+  assert.equal((await store.member(db.owner, 'user:late-1@acme.example'))?.role, 'member');
+});
+
 test('a root admin of 0.5 still holding grants on every project gets what `coffre migrate` says, then becomes an Owner', async () => {
   await places(db.owner);
   const other = await laterProject();

@@ -608,14 +608,14 @@ class VaultService implements Vault {
    * (`#convertRootAdmins`): after, so that what their grants become is
    * what `coffre migrate` says, by the same rule over the same rows
    * (`everyProjectConversion`), which cannot tell who the configuration
-   * names.
+   * names. Until that finishes, each call converts again what is left, a
+   * few reads once nothing is.
    */
   async #convert(): Promise<void> {
     for (const principal of await store.everyProjectHolders(this.#db)) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
-    await this.#convertRootAdmins();
-    this.#prepared.converted = true;
+    this.#prepared.converted = await this.#convertRootAdmins();
   }
 
   /**
@@ -635,10 +635,10 @@ class VaultService implements Vault {
    * entry says so: never the whole list again, which would make an Owner of
    * someone demoted or removed since. One decision, under the rows of
    * those it makes Owners and then the log's head, which reads again
-   * whether another process did it first. Entries forged in its name say nothing
-   * either way, and are reported.
+   * whether another process did it first. Entries forged in its name say
+   * nothing either way, and are reported. Whether it is done.
    */
-  async #convertRootAdmins(): Promise<void> {
+  async #convertRootAdmins(): Promise<boolean> {
     const reports: NewEntry[] = [];
     let due = await rootAdminsToConvert(this.#db, this.#check(reports, null));
     // Not `#record`, which would settle the vault, and so convert, again.
@@ -664,6 +664,8 @@ class VaultService implements Vault {
       });
       due = decided.ok ? decided.due : null;
     }
+    // Still due after three: 0.5 kept letting root admins in between the reads. The next call tries again.
+    return due === null;
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
