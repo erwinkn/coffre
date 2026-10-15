@@ -124,7 +124,7 @@ coffre sessions                             # where you are signed in; sessions 
 coffre identities                           # the accounts you sign in with
 
 coffre list     market/dev
-coffre get      market/dev/DATABASE_URL
+coffre get      market/dev/DATABASE_URL     # the value; piped, exactly its bytes, no newline added (a terminal gets one)
 coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it piped in
 coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a reference: billing reads market's, live
 coffre references market/prod               # what reads it through references; references break ends one

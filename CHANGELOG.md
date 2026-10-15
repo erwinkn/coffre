@@ -122,6 +122,16 @@ Users, Service accounts, grants and secrets tables, "Saving…" and
 menu, and ran into the role column. Now the spinner stands there alone, the
 words stay for screen readers and as its tooltip.
 
+**`coffre get` no longer adds a newline when piped.** It printed the value
+and a newline whatever stdout was, so `coffre get app/prod/KEY | wc -c`
+counted one byte more than the value, and a secret copied that way into
+another store (`… | scw secret version create … data=@-`) held a trailing
+newline too. Now, with stdout a pipe or a file, it writes exactly the
+value's bytes, newlines the value holds included, as `printf %s` would; in a
+terminal it still ends the line. If you stripped the newline yourself
+(`$(coffre get …)` already does), nothing changes; if you relied on it
+(`coffre get … >> file`), add it back with `echo`.
+
 ## 0.5.1 (2026-10-11)
 
 **`coffre update` moves a deployment with the new release's pages.** The

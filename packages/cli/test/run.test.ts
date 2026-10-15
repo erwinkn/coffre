@@ -9,6 +9,7 @@ import test from 'node:test';
 
 import { clash, environmentPaths } from '../src/environments.ts';
 import { signedInWithToken } from './fakes.ts';
+import { inTerminal, ptySkip } from './pty.ts';
 
 const TOKEN = `coffre_cli_${'s'.repeat(43)}`;
 
@@ -43,7 +44,7 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     const listing = /^\/api\/secrets\/([^/]+)\/([^/]+)$/.exec(req.url ?? '');
     const path = listing === null ? (JSON.parse(body || '{}') as { path?: string }).path : `${listing[1]}/${listing[2]}`;
     requests.push(`${listing === null ? 'reveal' : 'list'} ${path}`);
-    const environment = path === undefined ? undefined : environments[path];
+    const environment = path === undefined ? undefined : environments[path.split('/').slice(0, 2).join('/')];
     if (environment === undefined) return send(404, { error: 'not_found', message: 'unknown project or environment' });
     if (environment.refused !== undefined) return send(environment.refused, { error: 'forbidden', message: 'you do not have permission to do that' });
     if (listing !== null) {
@@ -59,11 +60,16 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
   assert.ok(address && typeof address !== 'string');
   signedInWithToken(home, `http://127.0.0.1:${address.port}`, TOKEN);
 
+  const environment = () => {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && key !== 'GITHUB_ENV'));
+    return Object.assign(env, { COFFRE_STATE_DIR: home, HOME: home });
+  };
+
   return {
     requests,
+    environment,
     async coffre(args: string[]) {
-      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && key !== 'GITHUB_ENV'));
-      Object.assign(env, { COFFRE_STATE_DIR: home, HOME: home });
+      const env = environment();
       const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
       let stdout = '';
       let stderr = '';
@@ -172,4 +178,22 @@ test('export of several environments prints their union, and refuses a clash as 
   assert.equal(clashing.code, 1);
   assert.equal(clashing.stdout, '');
   assert.equal(clashing.stderr, 'coffre: deploy/prod and www/prod both define A: a key comes from one environment only. Nothing was read\n');
+});
+
+test('get piped writes the value byte for byte: no newline of its own, and the newlines it holds kept', async (t) => {
+  const values = { PLAIN: 'k'.repeat(64), ENDS: 'ends with a newline\n', INSIDE: '-----BEGIN KEY-----\nline\r\nline\n-----END KEY-----', EMPTY: '', UNICODE: 'é→✓' };
+  const coffre = await instance(t, { 'app/prod': { values } });
+  for (const [key, value] of Object.entries(values)) {
+    const get = await coffre.coffre(['get', `app/prod/${key}`]);
+    assert.equal(get.code, 0, get.stderr);
+    assert.equal(Buffer.from(get.stdout).toString('hex'), Buffer.from(value).toString('hex'), key);
+  }
+});
+
+test('get in a terminal ends its line, so the prompt comes back on one of its own', { skip: ptySkip }, async (t) => {
+  const coffre = await instance(t, { 'app/prod': { values: { PLAIN: 'visible-value' } } });
+  const { output, code } = await inTerminal(['get', 'app/prod/PLAIN'], coffre.environment(), async () => {});
+  assert.equal(code, 0, output);
+  // The terminal turns the newline into CR LF.
+  assert.equal(output, 'visible-value\r\n');
 });
