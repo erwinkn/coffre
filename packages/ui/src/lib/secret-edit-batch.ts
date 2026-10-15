@@ -1,9 +1,18 @@
-export type SecretDraft = { id: number; key: string; value: string };
+/**
+ * A second secret a row writes with its own value, in the same patch: a
+ * generated key pair's public key, beside its private key. It is part of
+ * the row's edit, so saving, undoing or retrying the row takes both.
+ */
+export type Companion = { key: string; value: string };
+
+export type SecretDraft = { id: number; key: string; value: string; companion?: Companion };
 
 export type SecretChange = {
   key: string;
   value: string | null;
   archived: boolean;
+  /** Only beside a new value. */
+  companion?: Companion;
 };
 
 type ActiveSecret = { key: string };
@@ -26,51 +35,25 @@ export function secretChangeFor(
   return Object.hasOwn(changes, key) ? changes[key] : undefined;
 }
 
-/** A row of the secrets table: a saved key's, by its name, or a new one's, by its draft's id. */
-export type SecretRowRef = `key:${string}` | `draft:${number}`;
-
-/**
- * Generated key pairs still pending: the row holding the private key, and
- * the draft holding its public key.
- */
-export type KeyPairs = Readonly<Partial<Record<SecretRowRef, number>>>;
-
-/**
- * What one row's own Save sends: its edit, and the other half of its key
- * pair while that is pending too. Saved alone, a new private key would
- * stand beside the old public key, a pair that does not match.
- */
-export function rowBatch(
-  row: SecretRowRef,
-  drafts: readonly SecretDraft[],
-  changes: Readonly<Record<string, SecretChange>>,
-  pairs: KeyPairs,
-): { drafts: SecretDraft[]; changes: Record<string, SecretChange> } {
-  const publicDraft = pairs[row];
-  const partner: SecretRowRef | undefined =
-    publicDraft !== undefined
-      ? `draft:${publicDraft}`
-      : (Object.keys(pairs) as SecretRowRef[]).find((each) => row === `draft:${pairs[each]}`);
-  const batch: { drafts: SecretDraft[]; changes: Record<string, SecretChange> } = { drafts: [], changes: {} };
-  for (const each of partner === undefined ? [row] : [row, partner]) {
-    if (each.startsWith('draft:')) {
-      const draft = drafts.find((one) => `draft:${one.id}` === each);
-      if (draft !== undefined) batch.drafts.push(draft);
-    } else {
-      const key = each.slice('key:'.length);
-      const change = secretChangeFor(changes, key);
-      if (change !== undefined) batch.changes[key] = change;
-    }
-  }
-  return batch;
-}
-
 export type SecretEditBatchResult = {
   applied: number;
   drafts: SecretDraft[];
   changes: Record<string, SecretChange>;
   error: unknown | null;
 };
+
+/** The companions a save writes: those of new rows, and of value edits that are not archives. */
+export function companionsOf(
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+): Companion[] {
+  return [
+    ...drafts.flatMap((draft) => (draft.companion === undefined ? [] : [draft.companion])),
+    ...Object.values(changes).flatMap((change) =>
+      change.archived || change.value === null || change.companion === undefined ? [] : [change.companion],
+    ),
+  ];
+}
 
 /** Return true when one save would give two pending edits the same target. */
 export function hasSecretEditConflict(
@@ -83,7 +66,8 @@ export function hasSecretEditConflict(
     .map((entry) => secretChangeFor(changes, entry.key)?.key.trim() ?? entry.key);
   if (new Set(finalActiveKeys).size !== finalActiveKeys.length) return true;
 
-  const draftKeys = drafts.map((draft) => draft.key.trim());
+  // A companion writes its key as a new row does.
+  const draftKeys = [...drafts, ...companionsOf(drafts, changes)].map((draft) => draft.key.trim());
   if (new Set(draftKeys).size !== draftKeys.length) return true;
 
   const valueEditTargets = new Set(
@@ -145,11 +129,11 @@ export async function applySecretEditBatch({
         await operations.rename(sourceKey, key);
         delete remainingChanges[sourceKey];
         applied += 1;
-        if (change.value !== null) remainingChanges[key] = { key, value: change.value, archived: false };
+        if (change.value !== null) remainingChanges[key] = { ...change, key };
       }
       if (change.value !== null) patch[key] = change.value;
     }
-    for (const draft of drafts) patch[draft.key.trim()] = draft.value;
+    for (const draft of [...drafts, ...companionsOf(drafts, changes)]) patch[draft.key.trim()] = draft.value;
 
     const written = Object.keys(patch).length;
     if (written > 0) await operations.write({ ...patch });
@@ -174,7 +158,9 @@ function planEdits(
       .filter((entry) => secretChangeFor(changes, entry.key)?.archived)
       .map((entry) => entry.key),
   );
-  const restoredByDraft = drafts.find((draft) => archivedKeys.has(draft.key.trim()));
+  const restoredByDraft = [...drafts, ...companionsOf(drafts, changes)].find((draft) =>
+    archivedKeys.has(draft.key.trim()),
+  );
   if (restoredByDraft) {
     return new Error(
       `${restoredByDraft.key.trim()}: cannot archive and write the same key in one save`,

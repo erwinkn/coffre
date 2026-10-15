@@ -14,21 +14,17 @@ import {
   type Generated,
   type Recipe,
 } from '../lib/generate';
+import type { Companion } from '../lib/secret-edit-batch';
 import { secretKeyProblem } from '../lib/validation';
 import { Eye, EyeOff, Shuffle } from './icons';
 import { MaskedInput } from './masked';
 import { ErrorLine, Modal } from './ui';
 
 /**
- * What Use hands the row: its value, and for a key pair its name and the
- * public key, a second secret beside it.
+ * What Use hands the row: its value, its name as the dialog left it (only a
+ * new row's can change), and for a key pair the public key it saves with it.
  */
-export type GeneratedUse = {
-  value: string;
-  /** The row's name as the dialog left it; only a new row's can change. */
-  name: string;
-  publicKey?: { name: string; value: string };
-};
+export type GeneratedUse = { value: string; name: string; companion?: Companion };
 
 type Kind = Recipe['kind'];
 
@@ -50,7 +46,7 @@ export function GenerateValue({
   onOpenChange,
   name,
   renamable,
-  publicName,
+  companion,
   onUse,
 }: {
   open: boolean;
@@ -59,8 +55,8 @@ export function GenerateValue({
   name: string;
   /** A new row's name can be set here; a saved secret's is renamed in its row. */
   renamable: boolean;
-  /** The row a pair generated here before put its public key in, which a new pair replaces. */
-  publicName?: string;
+  /** The public key of a pair generated here before, which a new pair replaces. */
+  companion: Companion | undefined;
   onUse: (use: GeneratedUse) => void;
 }) {
   return (
@@ -68,7 +64,7 @@ export function GenerateValue({
       <GenerateForm
         name={name}
         renamable={renamable}
-        publicName={publicName}
+        publicName={companion?.key}
         onCancel={() => onOpenChange(false)}
         onUse={(use) => {
           onUse(use);
@@ -94,7 +90,8 @@ function GenerateForm({
 }) {
   const id = useId();
   // Each kind keeps its own choices, so trying another and coming back finds them as left.
-  const [kind, setKind] = useState<Kind>(DEFAULT_RECIPE.kind);
+  // A row that already holds a generated pair opens on Key pair, to make another.
+  const [kind, setKind] = useState<Kind>(pendingPublicName === undefined ? DEFAULT_RECIPE.kind : 'pair');
   const [encoding, setEncoding] = useState<Encoding>('base62');
   const [bytes, setBytes] = useState(32);
   // What the number field shows while a length is being typed, "" or "3" on the way to "300".
@@ -142,7 +139,7 @@ function GenerateForm({
         ? {
             value: generated.value,
             name: privateName.trim(),
-            publicKey: { name: publicKey.trim(), value: generated.publicKey },
+            companion: { key: publicKey.trim(), value: generated.publicKey },
           }
         : { value: generated.value, name },
     );
@@ -270,10 +267,7 @@ function GenerateForm({
             describedBy={`${id}-names`}
           />
           <p className="hint" id={`${id}-names`}>
-            {nameProblem ??
-              (pendingPublicName === undefined
-                ? 'The public key goes in a new row. Saving either row saves both.'
-                : 'The public key replaces the one in its row. Saving either row saves both.')}
+            {nameProblem ?? 'The public key is saved with this row, as a secret of its own.'}
           </p>
         </>
       ) : (

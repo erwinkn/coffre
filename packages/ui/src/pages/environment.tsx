@@ -22,13 +22,12 @@ import type {
 } from '../shared/models';
 import { canRevealSecrets } from '../lib/capabilities';
 import {
+  companionsOf,
   hasSecretEditConflict,
-  rowBatch,
   secretChangeFor,
-  type KeyPairs,
+  type Companion,
   type SecretChange,
   type SecretDraft,
-  type SecretRowRef,
 } from '../lib/secret-edit-batch';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { secretKeyProblem } from '../lib/validation';
@@ -163,7 +162,6 @@ function EnvironmentLedger({
     .map((one) => `${each.slug}/${one.slug}`));
   const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
-  const [pairs, setPairs] = useState<KeyPairs>({});
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
   // Rows opened for editing that may not have changed yet. A row with a
   // pending change is in edit mode whether or not it is listed here.
@@ -203,6 +201,7 @@ function EnvironmentLedger({
     );
   const archived = keys.filter((entry) => entry.archived);
   const existing = new Set(keys.map((entry) => entry.key));
+  const versionOf = (key: string) => keys.find((entry) => entry.key === key.trim())?.version ?? null;
 
   const changedEntries = active.filter(
     (entry) => secretChangeFor(changes, entry.key) !== undefined,
@@ -216,6 +215,7 @@ function EnvironmentLedger({
       const change = secretChangeFor(changes, entry.key);
       return change === undefined || change.archived ? [] : [change.key.trim()];
     }),
+    ...companionsOf(drafts, changes).map((companion) => companion.key.trim()),
   ];
   const unnamed = pendingNames.some((name) => name === '');
   const invalid = pendingNames.some((name) => name !== '' && secretKeyProblem(name) !== null);
@@ -240,49 +240,19 @@ function EnvironmentLedger({
   }
 
   /**
-   * One row's own Save: its change goes, with the other half of its key
-   * pair if it has one, and any other row's stays pending. A row opened and
-   * left as it was just closes.
+   * One row's own Save: its change alone goes, and any other row's stays
+   * pending. A row opened and left as it was just closes.
    */
-  function saveAlone(row: SecretRowRef) {
-    if (row.startsWith('key:')) {
-      const key = row.slice('key:'.length);
-      dropChange(key);
-      if (secretChangeFor(changes, key) === undefined) return;
-    }
-    const batch = rowBatch(row, drafts, changes, pairs);
-    for (const key of Object.keys(batch.changes)) dropChange(key);
-    const sent = new Set(batch.drafts.map((draft) => draft.id));
-    setDrafts((rows) => rows.filter((each) => !sent.has(each.id)));
-    sendAlone({ active, ...batch });
+  function saveRow(key: string) {
+    const change = secretChangeFor(changes, key);
+    dropChange(key);
+    if (change === undefined) return;
+    sendAlone({ active, drafts: [], changes: { [key]: change } });
   }
 
-  function aloneReady(row: SecretRowRef): boolean {
-    if (row.startsWith('key:') && secretChangeFor(changes, row.slice('key:'.length)) === undefined) return true;
-    const batch = rowBatch(row, drafts, changes, pairs);
-    return readyAlone(batch.drafts, batch.changes);
-  }
-
-  /**
-   * A generated key pair's public key, in the draft beside its private key's
-   * row: the one a pair generated there before made, or a new one. A value
-   * that is no key pair unties the two, and the draft stays as it is.
-   */
-  function placePublicKey(row: SecretRowRef, publicKey: { key: string; value: string } | null) {
-    const id = pairs[row];
-    if (publicKey === null) {
-      setPairs(({ [row]: _, ...rest }) => rest);
-    } else if (id !== undefined && drafts.some((draft) => draft.id === id)) {
-      setDrafts((rows) => rows.map((each) => (each.id === id ? { ...each, ...publicKey } : each)));
-    } else {
-      const next = nextDraftId.current++;
-      setDrafts((rows) => [...rows, { id: next, ...publicKey }]);
-      setPairs((current) => ({ ...current, [row]: next }));
-    }
-  }
-
-  function publicNameOf(row: SecretRowRef): string | undefined {
-    return drafts.find((draft) => draft.id === pairs[row])?.key;
+  function saveDraft(draft: SecretDraft) {
+    setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
+    sendAlone({ active, drafts: [draft], changes: {} });
   }
 
   /** Whether one row's change could go alone: named, well named, and clashing with nothing. */
@@ -290,6 +260,7 @@ function EnvironmentLedger({
     const names = [
       ...drafts.map((row) => row.key.trim()),
       ...Object.values(changes).flatMap((change) => (change.archived ? [] : [change.key.trim()])),
+      ...companionsOf(drafts, changes).map((companion) => companion.key.trim()),
     ];
     return (
       (drafts.length > 0 || Object.keys(changes).length > 0) &&
@@ -330,7 +301,6 @@ function EnvironmentLedger({
 
   function discardAll() {
     setDrafts([]);
-    setPairs({});
     setChanges({});
     setEditing(new Set());
     setSaveError(null);
@@ -398,20 +368,22 @@ function EnvironmentLedger({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [pendingCount]);
 
+  const withCompanion = (what: string, companion: Companion | undefined) =>
+    companion === undefined ? what : `${what}, with ${companion.key.trim()}`;
   const pending: Pending[] = [
     ...drafts.map((draft) => ({
       key: draft.key.trim() || 'unnamed',
-      what: existing.has(draft.key.trim()) ? 'new version' : 'added',
+      what: withCompanion(existing.has(draft.key.trim()) ? 'new version' : 'added', draft.companion),
     })),
     ...changedEntries.map((entry) => {
       const change = secretChangeFor(changes, entry.key)!;
       if (change.archived) return { key: entry.key, what: 'archived' };
       const renamed = change.key.trim() !== entry.key;
       if (renamed && change.value !== null) {
-        return { key: entry.key, what: `→ ${change.key.trim()}, new value` };
+        return { key: entry.key, what: withCompanion(`→ ${change.key.trim()}, new value`, change.companion) };
       }
       if (renamed) return { key: entry.key, what: `→ ${change.key.trim()}` };
-      return { key: entry.key, what: 'new value' };
+      return { key: entry.key, what: withCompanion('new value', change.companion) };
     }),
   ];
 
@@ -553,10 +525,11 @@ function EnvironmentLedger({
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
                       onUndo={() => dropChange(entry.key)}
-                      onSave={() => saveAlone(`key:${entry.key}`)}
-                      publicName={publicNameOf(`key:${entry.key}`)}
-                      onPublicKey={(publicKey) => placePublicKey(`key:${entry.key}`, publicKey)}
-                      saveReady={aloneReady(`key:${entry.key}`)}
+                      onSave={() => saveRow(entry.key)}
+                      versionOf={versionOf}
+                      saveReady={
+                        change === undefined || readyAlone([], { [entry.key]: change })
+                      }
                       onMarkArchive={() => {
                         setEditing((current) => {
                           const next = new Set(current);
@@ -585,9 +558,7 @@ function EnvironmentLedger({
                   <DraftRow
                     key={draft.id}
                     draft={draft}
-                    existingVersion={
-                      keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
-                    }
+                    existingVersion={versionOf(draft.key)}
                     disabled={false}
                     onChange={(patch) =>
                       setDrafts((rows) =>
@@ -595,10 +566,9 @@ function EnvironmentLedger({
                       )
                     }
                     onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
-                    onSave={() => saveAlone(`draft:${draft.id}`)}
-                    publicName={publicNameOf(`draft:${draft.id}`)}
-                    onPublicKey={(publicKey) => placePublicKey(`draft:${draft.id}`, publicKey)}
-                    saveReady={aloneReady(`draft:${draft.id}`)}
+                    onSave={() => saveDraft(draft)}
+                    versionOf={versionOf}
+                    saveReady={readyAlone([draft], {})}
                   />
                 ))}
               </tbody>
@@ -755,8 +725,8 @@ function ValueField({
   generate: {
     name: string;
     renamable: boolean;
-    /** The public key's row, when a pair generated here before is still pending. */
-    publicName?: string;
+    /** The public key a pair generated here before writes with the row. */
+    companion: Companion | undefined;
     onUse: (use: GeneratedUse) => void;
   };
 }) {
@@ -813,10 +783,30 @@ function ValueField({
         onOpenChange={setGenerating}
         name={generate.name}
         renamable={generate.renamable}
-        publicName={generate.publicName}
+        companion={generate.companion}
         onUse={generate.onUse}
       />
     </div>
+  );
+}
+
+/** Under a row's value: the public key that saves with it, and the version it makes. */
+function CompanionNote({
+  companion,
+  versionOf,
+}: {
+  companion: Companion | undefined;
+  versionOf: (key: string) => number | null;
+}) {
+  if (companion === undefined) return null;
+  const version = versionOf(companion.key);
+  return (
+    <span className="edit-note">
+      <span>
+        Saves its public key as <span className="mono">{companion.key.trim()}</span>
+        {version === null ? ', a new secret' : `, v${version} → v${version + 1}`}
+      </span>
+    </span>
   );
 }
 
@@ -853,8 +843,7 @@ function SecretRow({
   onPatch,
   onUndo,
   onSave,
-  publicName,
-  onPublicKey,
+  versionOf,
   saveReady,
   onMarkArchive,
 }: {
@@ -883,10 +872,8 @@ function SecretRow({
   onUndo: () => void;
   /** This row's change alone, saved now. */
   onSave: () => void;
-  /** The name of the row holding the public key of a pair generated here, while pending. */
-  publicName: string | undefined;
-  /** A generated value's public key, if it was a key pair, for the row beside this one. */
-  onPublicKey: (publicKey: { key: string; value: string } | null) => void;
+  /** The current version of a key in this environment, for a companion's note. */
+  versionOf: (key: string) => number | null;
   saveReady: boolean;
   onMarkArchive: () => void;
 }) {
@@ -1055,21 +1042,20 @@ function SecretRow({
                     placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
                     disabled={disabled}
                     autoFocus={!focusName}
+                    // A value typed over a generated private key no longer matches its public key.
                     onChange={(value) =>
-                      onPatch({ value: value === (editBase?.value ?? '') ? null : value })
+                      onPatch({ value: value === (editBase?.value ?? '') ? null : value, companion: undefined })
                     }
                     onEscape={onUndo}
                     generate={{
                       // A pending rename is the name it saves under.
                       name: change.key,
                       renamable: false,
-                      publicName,
-                      onUse: ({ value, publicKey }) => {
-                        onPatch({ value: value === (editBase?.value ?? '') ? null : value });
-                        onPublicKey(publicKey === undefined ? null : { key: publicKey.name, value: publicKey.value });
-                      },
+                      companion: change.companion,
+                      onUse: ({ value, companion }) => onPatch({ value, companion }),
                     }}
                   />
+                  <CompanionNote companion={change.companion} versionOf={versionOf} />
                   {reference !== null && reference.state === 'live' && (
                     <span className="edit-note">
                       Saving a value stops following <span className="mono">{reference.source}</span>
@@ -1385,8 +1371,7 @@ function DraftRow({
   onChange,
   onRemove,
   onSave,
-  publicName,
-  onPublicKey,
+  versionOf,
   saveReady,
 }: {
   draft: SecretDraft;
@@ -1396,10 +1381,8 @@ function DraftRow({
   onRemove: () => void;
   /** This new secret alone, saved now. */
   onSave: () => void;
-  /** The name of the row holding the public key of a pair generated here, while pending. */
-  publicName: string | undefined;
-  /** A generated value's public key, if it was a key pair, for the row beside this one. */
-  onPublicKey: (publicKey: { key: string; value: string } | null) => void;
+  /** The current version of a key in this environment, for a companion's note. */
+  versionOf: (key: string) => number | null;
   saveReady: boolean;
 }) {
   const [touched, setTouched] = useState(false);
@@ -1449,18 +1432,17 @@ function DraftRow({
                 value={draft.value}
                 placeholder="Value"
                 disabled={disabled}
-                onChange={(value) => onChange({ value })}
+                // A value typed over a generated private key no longer matches its public key.
+                onChange={(value) => onChange({ value, companion: undefined })}
                 onEscape={onRemove}
                 generate={{
                   name: draft.key,
                   renamable: true,
-                  publicName,
-                  onUse: ({ value, name, publicKey }) => {
-                    onChange({ key: name, value });
-                    onPublicKey(publicKey === undefined ? null : { key: publicKey.name, value: publicKey.value });
-                  },
+                  companion: draft.companion,
+                  onUse: ({ value, name, companion }) => onChange({ key: name, value, companion }),
                 }}
               />
+              <CompanionNote companion={draft.companion} versionOf={versionOf} />
             </div>
           </div>
           <div className="acts value-acts">

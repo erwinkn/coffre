@@ -6,7 +6,7 @@ import { failureMessage, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
-import { applySecretEditBatch, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
+import { applySecretEditBatch, companionsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
 
 /**
@@ -471,6 +471,8 @@ export function saveSecrets(
       const change = vars.changes[entry.key];
       return change === undefined ? [] : [{ entry, change }];
     });
+  // A key pair's public key lands as a new row would, beside its private key.
+  const written = (vars: SaveSecretsVars) => [...vars.drafts, ...companionsOf(vars.drafts, vars.changes)];
   return {
     list: secretsList(place),
     label: (vars) => {
@@ -478,7 +480,7 @@ export function saveSecrets(
       return named.length === 1 ? named[0]! : `${named.length} changes`;
     },
     targets: (vars) => [
-      ...vars.drafts.map((draft) => saving(draft.key.trim())),
+      ...written(vars).map((draft) => saving(draft.key.trim())),
       ...edits(vars).flatMap(({ entry, change }) =>
         change.archived
           ? [removing(entry.key)]
@@ -507,7 +509,7 @@ export function saveSecrets(
         const key = change.key.trim();
         return change.value === null ? { ...entry, key } : bumped(entry, key);
       });
-      for (const draft of vars.drafts) {
+      for (const draft of written(vars)) {
         const key = draft.key.trim();
         const existing = next.find((entry) => entry.key === key);
         next = existing === undefined ? [bumped(undefined, key), ...next] : next.map((entry) => (entry.key === key ? bumped(entry, key) : entry));

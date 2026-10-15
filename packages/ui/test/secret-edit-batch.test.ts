@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   applySecretEditBatch,
+  companionsOf,
   hasSecretEditConflict,
-  rowBatch,
   type SecretChange,
   type SecretDraft,
 } from '../src/lib/secret-edit-batch.ts';
@@ -223,36 +223,76 @@ test('archive and rewrite of one key fails before any mutation', async () => {
   assert.match(String(result.error), /cannot archive and write/);
 });
 
-test("a row's own save takes the other half of its generated key pair", () => {
-  const drafts: SecretDraft[] = [
-    { id: 1, key: 'JWT_PRIVATE_KEY', value: 'private' },
-    { id: 2, key: 'JWT_PUBLIC_KEY', value: 'public' },
-    { id: 3, key: 'OTHER', value: 'other' },
-  ];
-  const changes = { SIGNING_KEY: change('SIGNING_KEY', 'private'), C: change('C', 'c') };
-  const pairs = { 'draft:1': 2, 'key:SIGNING_KEY': 4 } as const;
-  const both = { drafts: drafts.slice(0, 2), changes: {} };
-  assert.deepEqual(rowBatch('draft:1', drafts, changes, pairs), both);
-  assert.deepEqual(rowBatch('draft:2', drafts, changes, pairs), { ...both, drafts: [drafts[1], drafts[0]] });
-
-  // A saved key rotated to a new pair: its value edit and the public key's draft.
-  const rotated = [...drafts, { id: 4, key: 'SIGNING_KEY_PUBLIC', value: 'public' }];
-  assert.deepEqual(rowBatch('key:SIGNING_KEY', rotated, changes, pairs), {
-    drafts: [rotated[3]],
-    changes: { SIGNING_KEY: changes.SIGNING_KEY },
+test("a row's companion is written in the same patch as the row", async () => {
+  const writes: Record<string, string | null>[] = [];
+  const result = await applySecretEditBatch({
+    active,
+    drafts: [{ id: 1, key: 'JWT_PRIVATE_KEY', value: 'private', companion: { key: 'JWT_PUBLIC_KEY', value: 'public' } }],
+    changes: { A: { ...change('A', 'a-private'), companion: { key: 'A_PUBLIC', value: 'a-public' } } },
+    operations: {
+      rename: async () => assert.fail('nothing is renamed'),
+      write: async (patch) => {
+        writes.push(patch);
+      },
+    },
   });
-  assert.deepEqual(rowBatch('draft:4', rotated, changes, pairs), {
-    drafts: [rotated[3]],
-    changes: { SIGNING_KEY: changes.SIGNING_KEY },
+  assert.equal(result.error, null);
+  assert.deepEqual(writes, [
+    { A: 'a-private', JWT_PRIVATE_KEY: 'private', JWT_PUBLIC_KEY: 'public', A_PUBLIC: 'a-public' },
+  ]);
+});
+
+test('a companion stays with its row when the patch after a rename fails', async () => {
+  const companion = { key: 'SIGNING_PUBLIC_KEY', value: 'public' };
+  const result = await applySecretEditBatch({
+    active,
+    drafts: [],
+    changes: { A: { ...change('SIGNING_PRIVATE_KEY', 'private'), companion } },
+    operations: {
+      rename: async () => {},
+      write: async () => {
+        throw new Error('refused');
+      },
+    },
+  });
+  // The rename is done; the retry writes the value and its companion together.
+  assert.deepEqual(result.changes, {
+    SIGNING_PRIVATE_KEY: { ...change('SIGNING_PRIVATE_KEY', 'private'), companion },
   });
 });
 
-test('a row outside any pair, or whose other half is gone, saves alone', () => {
-  const drafts: SecretDraft[] = [{ id: 1, key: 'JWT_PRIVATE_KEY', value: 'private' }];
-  const changes = { C: change('C', 'c') };
-  // The public key's row was removed: draft 2 is no longer there.
-  const pairs = { 'draft:1': 2 } as const;
-  assert.deepEqual(rowBatch('draft:1', drafts, changes, pairs), { drafts, changes: {} });
-  assert.deepEqual(rowBatch('key:C', drafts, changes, pairs), { drafts: [], changes });
-  assert.deepEqual(rowBatch('key:A', drafts, changes, pairs), { drafts: [], changes: {} });
+test("an archive writes no companion, and a companion's name clashes like a new row's", () => {
+  const companion = { key: 'A_PUBLIC', value: 'public' };
+  assert.deepEqual(companionsOf([], { A: { key: 'A', value: null, archived: true, companion } }), []);
+  assert.deepEqual(companionsOf([], { A: { ...change('A', 'private'), companion } }), [companion]);
+
+  // Two rows' companions, or a companion and a new row, on one name.
+  assert.equal(
+    hasSecretEditConflict(active, [{ id: 1, key: 'A_PUBLIC', value: 'x' }], { A: { ...change('A', 'private'), companion } }),
+    true,
+  );
+  // A row renamed onto its own companion's name.
+  assert.equal(
+    hasSecretEditConflict(active, [], { A: { ...change('A_PUBLIC', 'private'), companion } }),
+    true,
+  );
+  // A companion onto a key being archived.
+  assert.equal(
+    hasSecretEditConflict(active, [{ id: 1, key: 'N', value: 'x', companion: { key: 'B', value: 'y' } }], {
+      B: { key: 'B', value: null, archived: true },
+    }),
+    true,
+  );
+  assert.equal(hasSecretEditConflict(active, [], { A: { ...change('A', 'private'), companion } }), false);
+});
+
+test('a companion named __proto__ is a key like any other', async () => {
+  const writes: Record<string, string | null>[] = [];
+  await applySecretEditBatch({
+    active,
+    drafts: [{ id: 1, key: 'PRIVATE', value: 'private', companion: { key: '__proto__', value: 'public' } }],
+    changes: {},
+    operations: { rename: async () => {}, write: async (patch) => void writes.push(patch) },
+  });
+  assert.deepEqual(Object.keys(writes[0]!), ['PRIVATE', '__proto__']);
 });

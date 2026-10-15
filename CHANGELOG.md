@@ -134,11 +134,12 @@ value. It makes:
   bits it holds: 32 bytes are 43 characters of base62, 256 bits.
 - **an AES-GCM key**, 256 or 128 bits: the raw key, base64.
 - **a key pair**, ECDSA or ECDH on P-521, P-384 or P-256: the private key
-  (PKCS #8, base64) goes in the row, and the public key (the raw point,
-  base64) in a new row beside it, named after the first (`JWT_PRIVATE_KEY`
-  gives `JWT_PUBLIC_KEY`). Either row's own Save takes the other with it,
-  so a rotated private key never lands beside the old public key, and
-  generating another pair there replaces the public key's row.
+  (PKCS #8, base64) is the row's value, and the public key (the raw point,
+  base64) is saved with it, under a name of its own that follows the
+  first (`JWT_PRIVATE_KEY` gives `JWT_PUBLIC_KEY`). The public key is part
+  of the row's edit, as the row says under its value: the row saves, or
+  is cancelled, whole, in one write, so a new private key never lands
+  beside the old public key. Typing over the value drops the public key.
 
 **`coffre get` no longer adds a newline when piped.** It printed the value
 and a newline whatever stdout was, so `coffre get app/prod/KEY | wc -c`
