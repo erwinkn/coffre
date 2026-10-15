@@ -228,6 +228,10 @@ ActiveOwners == {m \in owners : status[m] = "active"}
 \* Whether an Owner other than m would be left (vault.ts, #anOwner).
 AnotherOwner(m) == ActiveOwners \ {m} # {}
 
+\* Whether `actor` may unmake an Owner: an Owner of the whole instance, read
+\* under their row's lock as the rest of the check is (vault.ts, OWNERS_ONLY).
+ChangesOwners(actor) == status[actor] = "active" /\ actor \in owners
+
 -----------------------------------------------------------------------------
 (* Processes *)
 
@@ -794,9 +798,10 @@ SigninCommit(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Removing a member (vault vault.ts, remove): one decision under both     *)
-(* rows; their grants go and their generation moves on. Removing an Owner, *)
-(* themselves included, leaves another, or is refused (#keepAnOwner): the  *)
-(* code counts the others under the head, which the commit step holds.     *)
+(* rows; their grants go and their generation moves on. Only an Owner      *)
+(* removes an Owner, themselves included, and leaves another, or is        *)
+(* refused (#keepAnOwner): the code counts the others under the head,      *)
+(* which the commit step holds.                                            *)
 (***************************************************************************)
 
 RemoveLock(p) == pc[p] = "remove.lock" /\ LockNext(p, "remove.check")
@@ -807,7 +812,10 @@ KeepsAnOwnerUnderHead(m) == ~LastOwnerCheckUnderHead \/ m \notin owners \/ Anoth
 
 RemoveCheck(p) ==
     /\ pc[p] = "remove.check"
-    /\ IF MayManage(op[p].actor) /\ status[op[p].who] = "active" /\ KeepsAnOwnerUnderRows(op[p].who)
+    /\ IF /\ MayManage(op[p].actor)
+          /\ status[op[p].who] = "active"
+          /\ (op[p].who \notin owners \/ ChangesOwners(op[p].actor))
+          /\ KeepsAnOwnerUnderRows(op[p].who)
          THEN Read(p, "remove.head", l[p])
          ELSE Refuse(p)
 
@@ -830,8 +838,8 @@ RemoveCommit(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Taking someone's Owner role away (vault vault.ts, admit with another    *)
-(* role, or a narrower scope): one decision under both rows, and nobody    *)
-(* changes their own. It leaves another Owner, or is refused.              *)
+(* role, or a narrower scope): one decision under both rows, by an Owner,  *)
+(* their own included. It leaves another Owner, or is refused.             *)
 (***************************************************************************)
 
 DemoteLock(p) == pc[p] = "demote.lock" /\ LockNext(p, "demote.check")
@@ -839,7 +847,7 @@ DemoteLock(p) == pc[p] = "demote.lock" /\ LockNext(p, "demote.check")
 DemoteCheck(p) ==
     LET m == op[p].who IN
     /\ pc[p] = "demote.check"
-    /\ IF MayManage(op[p].actor) /\ op[p].actor # m /\ status[m] = "active" /\ m \in owners /\ KeepsAnOwnerUnderRows(m)
+    /\ IF ChangesOwners(op[p].actor) /\ status[m] = "active" /\ m \in owners /\ KeepsAnOwnerUnderRows(m)
          THEN Read(p, "demote.head", l[p])
          ELSE Refuse(p)
 

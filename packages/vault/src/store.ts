@@ -48,7 +48,8 @@ export type Place = Pick<GrantRow, 'projectId' | 'environmentId' | 'environmentS
 
 /** A grant as stored, which `@coffre/db/grants` reads and writes. */
 export type { GrantRow };
-export { accessEntriesAbout, insertGrant } from '@coffre/db/grants';
+export { accessEntriesAbout, insertGrant, liveProjects } from '@coffre/db/grants';
+export { newestVaultEntries } from '@coffre/db/log';
 
 /**
  * On Postgres, fail a lock wait in this transaction after `ms`, rather than
@@ -274,19 +275,6 @@ export async function places(
   };
 }
 
-/** Every project not deleted, with its environments not deleted: what a grant on every project of 0.4 reached. */
-export async function liveProjects(db: Queryable): Promise<{ id: string; environments: { id: string; slug: string }[] }[]> {
-  const { projects, environments } = tablesOf(db);
-  const [found, inside] = await Promise.all([
-    db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).orderBy(asc(projects.id)),
-    db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, deleted: truth(tombstone(environments.slug)) }).from(environments).orderBy(asc(environments.id)),
-  ]);
-  return found.filter((project) => !project.deleted).map((project) => ({
-    id: project.id,
-    environments: inside.filter((environment) => environment.projectId === project.id && !environment.deleted).map(({ id, slug }) => ({ id, slug })),
-  }));
-}
-
 /** Who holds a grant on every project of 0.4, lapsed or not, which the vault replaces (`#convert`). */
 export async function everyProjectHolders(db: Queryable): Promise<string[]> {
   const { vaultGrants } = tablesOf(db);
@@ -478,47 +466,6 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];
-}
-
-/** Up to `limit` of the vault's allowed entries of `action` before `before` (the newest when undefined), newest first. */
-export async function newestVaultEntries(db: Queryable, action: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.action, action),
-        eq(auditLog.decision, 'allow'),
-        before === undefined ? undefined : lt(auditLog.seq, before),
-      ),
-    )
-    .orderBy(desc(auditLog.seq))
-    .limit(limit);
-  return stored(rows);
-}
-
-/**
- * The first `member.add` entries in the vault's name that gave a root admin
- * of 0.5 their row (`{ "rootAdmin": true }`): an instance that ran 0.5 with
- * one who signed in.
- */
-export async function rootAdminRows(db: Queryable, limit: number): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(and(
-      eq(auditLog.author, 'vault'),
-      eq(auditLog.action, 'member.add'),
-      eq(auditLog.actor, 'system:vault'),
-      eq(auditLog.decision, 'allow'),
-      like(auditLog.metadata, '%"rootAdmin":true%'),
-    ))
-    .orderBy(asc(auditLog.seq))
-    .limit(limit);
-  return stored(rows);
 }
 
 /** The vault's newest allowed access entry about each member who has one. */

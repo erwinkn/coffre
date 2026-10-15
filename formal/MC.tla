@@ -142,10 +142,11 @@ ReferencingBudget == [p \in ReferencingProcs |-> IF p = "admin" THEN 3 ELSE 1]
 ReferencingGrants == {[who |-> "olga", at |-> "*"]}
 
 -----------------------------------------------------------------------------
-(* The last Owner: two Owners each leave, or take the other's role, while an
-   Admin of the whole instance demotes or removes either. Each removes or
-   demotes a different Owner under different rows, so only the head puts
-   one after the other: one of them must find no Owner left, and refuse. *)
+(* The last Owner: two Owners each leave, step down, or take the other's
+   role, while an Admin of the whole instance, who is no Owner, tries to
+   demote or remove either. Each leaving or stepping down locks only their
+   own row, so only the head puts one after the other: one of them must find
+   no Owner left, and refuse. *)
 
 OwnersMembers == {"ada", "olga", "omar"}
 OwnersRank == [m \in OwnersMembers |-> AllRanks[m]]
@@ -153,8 +154,8 @@ OwnersOwners == {"olga", "omar"}
 OwnersAdmins == {"ada"}
 OwnersProcs == {"olga", "omar", "ada"}
 OwnersOps == [p \in OwnersProcs |->
-    CASE p = "olga" -> {Op("remove", "olga", "olga", None), Op("demote", "olga", "omar", None)}
-      [] p = "omar" -> {Op("remove", "omar", "omar", None), Op("demote", "omar", "olga", None)}
+    CASE p = "olga" -> {Op("remove", "olga", "olga", None), Op("demote", "olga", "olga", None), Op("demote", "olga", "omar", None)}
+      [] p = "omar" -> {Op("remove", "omar", "omar", None), Op("demote", "omar", "omar", None), Op("demote", "omar", "olga", None)}
       [] p = "ada" -> {Op("demote", "ada", "olga", None), Op("demote", "ada", "omar", None),
                        Op("remove", "ada", "omar", None)}]
 OwnersBudget == [p \in OwnersProcs |-> 1]
@@ -162,8 +163,9 @@ OwnersGrants == {}
 
 -----------------------------------------------------------------------------
 (* The bootstrap: two people the configuration names sign in at once on an
-   instance nobody owns, while an Admin demotes or removes one of them, or
-   one leaves. One becomes the Owner; the other finds them, and does not. *)
+   instance nobody owns, while one leaves or steps down, and an Admin, no
+   Owner, tries to demote or remove one of them. One becomes the Owner; the
+   other finds them, and does not. *)
 
 BootstrapMembers == {"ada", "root", "sam"}
 BootstrapRank == [m \in BootstrapMembers |-> AllRanks[m]]
@@ -171,7 +173,7 @@ BootstrapOwners == {}
 BootstrapAdmins == {"ada"}
 BootstrapProcs == {"root", "sam", "ada"}
 BootstrapOps == [p \in BootstrapProcs |->
-    CASE p = "root" -> {Op("bootstrap", None, "root", None), Op("remove", "root", "root", None)}
+    CASE p = "root" -> {Op("bootstrap", None, "root", None), Op("remove", "root", "root", None), Op("demote", "root", "root", None)}
       [] p = "sam" -> {Op("bootstrap", None, "sam", None)}
       [] p = "ada" -> {Op("demote", "ada", "root", None), Op("remove", "ada", "sam", None)}]
 BootstrapBudget == [p \in BootstrapProcs |-> IF p = "root" THEN 2 ELSE 1]

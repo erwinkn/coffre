@@ -131,8 +131,9 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
 /**
  * Instance roles: a Developer scoped to dev reads and writes the dev of a
  * project made after it, and no prod; an Admin scoped to one environment
- * grants there and nowhere else, and sets no role, its own or anyone's;
- * and no grant is on every project. The reader is a member again as it
+ * grants there and nowhere else, and sets no role, its own or anyone's; an
+ * Admin of the whole instance changes no Owner's; and no grant is on every
+ * project. The reader is a member again as it
  * ends, its service removed, its project archived.
  */
 export async function instanceRoles(deployment: Deployment, { admin, reader }: People, canaries: Canaries): Promise<string> {
@@ -168,9 +169,17 @@ export async function instanceRoles(deployment: Deployment, { admin, reader }: P
   await refused('a scoped admin promoted someone', reader.api.members.add(scoped, { role: 'member' }));
   await refused('a scoped admin made a project', reader.api.projects.create(`${PROJECT}-scoped`, { name: 'Scoped' }));
   await refused('a scoped admin read a value no grant of its gives', reader.api.secrets.reveal(PROD));
-  // Nor does an admin of the whole instance set its own.
+  // Nor does an admin of the whole instance set its own, nor make, change or remove an Owner: only an Owner does.
   await admin.api.members.add(reader.member, { role: 'admin' });
   await refused('an admin made itself an owner', reader.api.members.add(reader.member, { role: 'owner' }));
+  for (const [what, call] of [
+    ['an admin demoted the Owner', () => reader.api.members.add(admin.member, { role: 'admin' })],
+    ['an admin removed the Owner', () => reader.api.members.remove(admin.member)],
+  ] as const) {
+    // Not that the Owner is the last, which an Owner hears too: that only an Owner may.
+    const refusal = await refused(what, call());
+    expect(refusal.status === 403 && refusal.reason === 'not_allowed', `${what}, or was refused for another reason`, refusal);
+  }
 
   // As it was: a member, with its viewer on dev; the service and the project gone.
   await admin.api.members.add(reader.member, { role: 'member' });
@@ -178,7 +187,7 @@ export async function instanceRoles(deployment: Deployment, { admin, reader }: P
   await admin.api.projects.update(later, { archived: true });
   const me = await reader.api.me();
   expect(me.instanceRole === 'member' && me.environments.length === 1, 'the reader is not back as it was', me);
-  return 'a Developer scoped to dev reaches a dev made later and no prod; a scoped admin grants only inside its scope and sets no role; no grant is on every project';
+  return 'a Developer scoped to dev reaches a dev made later and no prod; a scoped admin grants only inside its scope and sets no role; an admin demotes and removes no Owner; no grant is on every project';
 }
 
 /** Reading more values at once than the vault allows in its window is refused. */

@@ -175,6 +175,7 @@ test('a signed-out shell exposes no privileged affordances', () => {
   assert.deepEqual(deriveUiCapabilities(null, []), {
     canManageGrants: false,
     runsInstance: false,
+    ownsInstance: false,
     setsUpServices: false,
     canReadAudit: false,
     canCreateProject: false,

@@ -10,6 +10,7 @@ import {
   managesService,
   mayManageAccess,
   normalScope,
+  ownsInstance,
   ROLES,
   runsInstance,
   type Filter,
@@ -592,8 +593,9 @@ export type FilterInput = 'all' | { only: string[] } | { except: string[] };
  * Add a member, bring back a removed one, or set a person's instance role
  * and its scope (left out, everywhere). Adding someone who is already a
  * member as they are changes nothing. Those who run the instance do it,
- * never about themselves; a service account, any person who sets one up
- * too (`setsUpServices`). The vault decides and keeps who is in, in the
+ * never about themselves; an Owner, scoped or not, only an Owner of the
+ * whole instance, who may step down too; a service account, any person who
+ * sets one up too (`setsUpServices`). The vault decides and keeps who is in, in the
  * member row their sessions and tokens hang off.
  *
  *   { "role": "developer", "scope": { "projects": "all", "environments": { "only": ["dev"] } } }
@@ -624,7 +626,8 @@ export async function putMember(
     }
     const known = await places(ctx.db);
     const scope = input.role === undefined ? undefined : scopeIds(input.scope ?? {}, known);
-    const self = formatMember(ctx.caller.principal) === principal;
+    // An Owner of the whole instance may step down: nothing they could ask for is more than they hold. The vault keeps the last one.
+    const self = formatMember(ctx.caller.principal) === principal && !ownsInstance(ctx.caller);
     if (self && input.role !== undefined && (input.role !== ctx.caller.role || JSON.stringify(scope) !== JSON.stringify(ctx.caller.scope))) {
       throw new Refusal(
         conflict('nobody changes their own instance role: ask another admin'),

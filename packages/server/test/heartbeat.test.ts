@@ -63,20 +63,23 @@ test('a beat is an app entry, and the vault checkpoints it in an entry of its ow
 test('each checkpoint extends the last, and nothing new signs nothing new', async () => {
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  // Beat, checkpoint, beat, checkpoint: the second covers the first and the second beat.
-  assert.equal((await latestCheckpoint(db.owner))?.seq, 2);
+  // Beat, checkpoint, beat, the vault's word that it had no root admins to
+  // convert (its first call over a log with an entry of its own), checkpoint:
+  // the second covers the first, the second beat and that word.
+  assert.equal((await latestCheckpoint(db.owner))?.seq, 3);
 
   const again = await vault.checkpoint();
   assert.ok(again.ok);
-  assert.equal(again.checkpoint.seq, 2);
-  assert.equal((await entries()).length, 4);
+  assert.equal(again.checkpoint.seq, 3);
+  assert.equal((await entries()).length, 5);
 });
 
 test('a rewritten entry is never signed over, and readiness goes red', async () => {
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  // Someone with the database rewrites the beat the last checkpoint signed.
-  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 2n)));
+  // Someone with the database rewrites the entry the last checkpoint signed.
+  const signed = (await latestCheckpoint(db.owner))!.seq;
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, BigInt(signed))));
 
   let warned: unknown = null;
   const written = await writeAuditHeartbeat(db.runtime, chainKey, vault, {
@@ -86,7 +89,7 @@ test('a rewritten entry is never signed over, and readiness goes red', async () 
   });
   assert.equal(written, false);
   assert.deepEqual(warned, { code: 'log_broken' });
-  assert.equal((await latestCheckpoint(db.owner))?.seq, 2);
+  assert.equal((await latestCheckpoint(db.owner))?.seq, signed);
   // The refusal is in the log too.
   const [refused] = (await entries()).filter((row) => row.decision === 'deny');
   assert.equal(refused.action, 'audit.checkpoint');

@@ -77,10 +77,11 @@ test('an entry in the vault\'s name that the vault did not write fails verificat
   await forgeVaultEntry(db.owner);
   // An honest append takes the forged head as its predecessor.
   await write(1);
+  // The bootstrap, the vault's word that it had no root admins to convert, the app's entry; then the forged one.
   assert.deepEqual(await root.audit.verify(), {
     ok: false,
-    through: 1,
-    failedAtSeq: 2,
+    through: 2,
+    failedAtSeq: 3,
     author: 'vault',
     reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`,
   });

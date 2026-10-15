@@ -466,9 +466,10 @@ test('the bootstrap Owner needs no invitation, and is not removed while they are
   assert.deepEqual(row, { createdBy: 'system:vault', role: 'owner', scope: null });
   assert.equal((await signin.verify(first.credential.token)).id, ROOT);
 
-  for (const actor of [ROOT, LEAD]) {
+  // Not by themselves, the last Owner; nor by anyone else, who is no Owner.
+  for (const [actor, code] of [[ROOT, 'last_owner'], [LEAD, 'not_allowed']]) {
     const removed = await deps.vault.remove({ actor: `user:${actor}`, principal: member(ROOT) });
-    assert.equal(removed.ok || removed.refusal.code, 'last_owner', actor);
+    assert.equal(removed.ok || removed.refusal.code, code, actor);
   }
   const again = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.equal((await signin.verify(again.credential.token)).id, ROOT);
