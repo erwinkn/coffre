@@ -811,8 +811,9 @@ async function get(args: string[]): Promise<void> {
 
   const { values } = await client().secrets.reveal(`${project}/${environment}/${key}`);
 
-  // Bare value on stdout so it composes: coffre get x/y/Z | pbcopy
-  process.stdout.write(`${values[key]}\n`);
+  // The value's own bytes when stdout is no terminal, so it composes: coffre get x/y/Z | pbcopy
+  // A terminal gets its newline, to leave the prompt on a line of its own.
+  process.stdout.write(process.stdout.isTTY ? `${values[key]}\n` : values[key]!);
 }
 
 async function list(args: string[]): Promise<void> {
