@@ -128,9 +128,10 @@ counted one byte more than the value, and a secret copied that way into
 another store (`… | scw secret version create … data=@-`) held a trailing
 newline too. Now, with stdout a pipe or a file, it writes exactly the
 value's bytes, newlines the value holds included, as `printf %s` would; in a
-terminal it still ends the line. If you stripped the newline yourself
-(`$(coffre get …)` already does), nothing changes; if you relied on it
-(`coffre get … >> file`), add it back with `echo`.
+terminal it still ends the line. `$(coffre get …)` strips trailing
+newlines itself, so it is unchanged. A script that removed the added
+newline (`| head -c -1`) now cuts the value's last byte: drop that step. One that relied on it (`coffre get … >> file`) adds it back with
+`echo`.
 
 ## 0.5.1 (2026-10-11)
 
