@@ -2831,14 +2831,30 @@ test('a root admin a vault of 0.5 let in after the conversion, then removed by a
   assert.deepEqual((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').map((entry) => entry.metadata), ['{"owners":[]}', '{"owners":[]}']);
 });
 
+test('after the conversion, a listed root admin 0.5 lets in is converted however many others it let in before', async () => {
+  await places(db.owner);
+  const first = await namingOwners(...NAMED);
+  assert.equal((await first.access(ROOT)).role, 'owner');
+  assert.equal((await first.access(ADA)).status, 'unknown');
+  // More root admins than the vault reads back, none the list names now; then Carol, whom it does.
+  const others = Array.from({ length: 1025 }, (_, i) => ({
+    actor: 'system:vault', action: 'member.add', decision: 'allow' as const, subjectPrincipal: `user:other-${i}@acme.example`,
+    metadata: JSON.stringify({ role: 'member', rootAdmin: true }),
+  }));
+  await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, others));
+  await rootRowOf05(CAROL);
+  assert.equal((await (await namingOwners(...NAMED)).access(CAROL)).role, 'owner');
+});
+
 test('a conversion that 0.5 keeps outrunning is left to the next call, which finishes it', async () => {
   await places(db.owner);
   const first = await namingOwners(...NAMED);
   assert.equal((await first.access(ROOT)).role, 'owner');
   assert.equal((await first.access(ADA)).status, 'unknown');
   await rootRowOf05(CAROL);
-  // A process whose every decision finds another root admin let in by 0.5 since its read, while armed.
-  const prepared = await prepareVault(configure({ bootstrapOwners: NAMED }));
+  // A process whose every decision finds another root admin the list names let in by 0.5 since its read, while armed.
+  const LATE = [1, 2, 3].map((n) => `late-${n}@acme.example`);
+  const prepared = await prepareVault(configure({ bootstrapOwners: [...NAMED, ...LATE] }));
   let late = 0;
   let armed = true;
   const busy = new Proxy(db.vault, {
@@ -2858,11 +2874,11 @@ test('a conversion that 0.5 keeps outrunning is left to the next call, which fin
   assert.equal(late, 3, 'three decisions, each outrun');
   assert.equal(prepared.converted, false);
   assert.equal((await store.member(db.owner, CAROL))?.role, 'member');
-  // Quiet again: the next call converts Carol, and only the list's.
+  // Quiet again: the next call converts Carol, and those let in meanwhile.
   armed = false;
   assert.equal((await vault.access(CAROL)).role, 'owner');
   assert.equal(prepared.converted, true);
-  assert.equal((await store.member(db.owner, 'user:late-1@acme.example'))?.role, 'member');
+  for (const email of LATE) assert.equal((await store.member(db.owner, `user:${email}`))?.role, 'owner', email);
 });
 
 test('a root admin of 0.5 still holding grants on every project gets what `coffre migrate` says, then becomes an Owner', async () => {

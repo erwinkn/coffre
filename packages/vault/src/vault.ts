@@ -640,7 +640,8 @@ class VaultService implements Vault {
    */
   async #convertRootAdmins(): Promise<boolean> {
     const reports: NewEntry[] = [];
-    let due = await rootAdminsToConvert(this.#db, this.#check(reports, null));
+    const listed = this.#config.bootstrapOwners.map((email) => `user:${email}`);
+    let due = await rootAdminsToConvert(this.#db, this.#check(reports, null), listed);
     // Not `#record`, which would settle the vault, and so convert, again.
     if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
     this.#reported(reports);
@@ -649,11 +650,10 @@ class VaultService implements Vault {
     for (let attempt = 1; due !== null && attempt <= 3; attempt += 1) {
       const asked = due;
       // Those the configuration names, all of them or, after an entry of its own, those 0.5 gave a row since.
-      const listed = this.#config.bootstrapOwners.map((email) => `user:${email}`);
-      const principals = asked.whole ? (asked.rooted.length > 0 ? listed : []) : listed.filter((principal) => asked.rooted.includes(principal));
+      const principals = asked.whole ? (asked.rooted.length > 0 ? listed : []) : asked.rooted;
       const decided = await this.#decideNow(principals, async (d) => {
         await lockLogHead(d.tx);
-        const now = await rootAdminsToConvert(d.tx, this.#check(d.reports, null));
+        const now = await rootAdminsToConvert(d.tx, this.#check(d.reports, null), listed);
         if (JSON.stringify(now) !== JSON.stringify(asked)) return { due: now };
         const owners: string[] = [];
         for (const principal of principals) {

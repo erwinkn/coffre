@@ -392,8 +392,11 @@ listed person a vault of 0.5 gives a root admin's row after it, still
 serving during the first deploy or rolled back to, becomes an Owner, at the
 next process's first call, with another entry naming them; and only while
 that row's entry is still the newest about them, so one an Owner removed or
-changed meanwhile stays as they left them. 0.5 held them root admins, and
-everyone else stays as 0.6 left them:
+changed meanwhile stays as they left them. It reads only rows about people
+the configuration names, which 0.5 gives one each at most, so it passes
+over none; with more than 1024 in its name there, it would convert nobody
+and write nothing. 0.5 held them root admins, and everyone else stays as
+0.6 left them:
 
 | Listed, on an instance that ran 0.6, then 0.5, then 0.6 again | After |
 |---|---|

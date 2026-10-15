@@ -151,17 +151,26 @@ export const ROOT_ADMINS_CONVERT = 'root-admins.convert';
  * during its first deploy or rolled back to, and nobody has changed since,
  * the row's entry their newest: 0.5 held them root admins, while everyone
  * else stays as 0.6 left them, someone demoted or removed meanwhile
- * included. The vault makes Owners only of those its configuration names.
- * Null when there is nothing to do, and when LOOK_BACK forged in its name
- * hide whether one does. The vault checks with its MACs; `coffre migrate`,
- * holding no key, takes every entry in its name for its own, so a forged
- * one can make it say less than the vault will do.
+ * included. Those only of the people `named` (by default, anyone): the
+ * vault's configuration, whose people 0.5 gives one such row each at most.
+ * Null when there is nothing to do, and when LOOK_BACK in its name hide
+ * whether one does: then the vault converts nobody and writes nothing,
+ * since an entry saying it did would pass over those it did not read. The
+ * vault checks with its MACs; `coffre migrate`, holding no key, takes every
+ * entry in its name for its own, so a forged one can make it say less than
+ * the vault will do.
  */
-export async function rootAdminsToConvert(db: Queryable, check: Authenticity): Promise<{ whole: boolean; rooted: string[] } | null> {
+export async function rootAdminsToConvert(
+  db: Queryable,
+  check: Authenticity,
+  named?: readonly string[],
+): Promise<{ whole: boolean; rooted: string[] } | null> {
   const converted = await newestAuthentic((before) => newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
   if (converted === 'unreached') return null;
   const after = typeof converted === 'string' ? undefined : converted.seq;
+  if (after !== undefined && named?.length === 0) return null;
   const { auditLog } = tablesOf(db);
+  const limit = LOOK_BACK.page * LOOK_BACK.pages;
   const rows = (await db
     .select(entryColumns(db))
     .from(auditLog)
@@ -172,16 +181,17 @@ export async function rootAdminsToConvert(db: Queryable, check: Authenticity): P
       eq(auditLog.decision, 'allow'),
       like(auditLog.metadata, '%"rootAdmin":true%'),
       after === undefined ? undefined : gt(auditLog.seq, after),
+      after === undefined || named === undefined ? undefined : inArray(auditLog.subjectPrincipal, [...named]),
     ))
     .orderBy(asc(auditLog.seq))
-    .limit(LOOK_BACK.page * LOOK_BACK.pages)) as StoredEntry[];
+    .limit(limit)) as StoredEntry[];
   const rooted: StoredEntry[] = [];
   for (const entry of rows) {
     if (check.authentic(entry)) rooted.push(entry);
     else check.forged(entry);
   }
   if (after === undefined) return { whole: true, rooted: [...new Set(rooted.map((entry) => entry.subjectPrincipal!))] };
-  if (rooted.length === 0) return null;
+  if (rooted.length === 0 || rows.length === limit) return null;
   const untouched: string[] = [];
   for (const entry of rooted) {
     const newest = await newestAccess(db, entry.subjectPrincipal!, check);
