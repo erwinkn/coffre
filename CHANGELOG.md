@@ -130,8 +130,8 @@ newline too. Now, with stdout a pipe or a file, it writes exactly the
 value's bytes, newlines the value holds included, as `printf %s` would; in a
 terminal it still ends the line. `$(coffre get …)` strips trailing
 newlines itself, so it is unchanged. A script that removed the added
-newline (`| head -c -1`) now cuts the value's last byte: drop that step. One that relied on it (`coffre get … >> file`) adds it back with
-`echo`.
+newline (`| head -c -1`) now cuts the value's last byte: drop that step.
+One that relied on it (`coffre get … >> file`) adds it back with `echo`.
 
 ## 0.5.1 (2026-10-11)
 
