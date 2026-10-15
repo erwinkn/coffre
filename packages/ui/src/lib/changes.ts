@@ -472,7 +472,7 @@ export function saveSecrets(
       return change === undefined ? [] : [{ entry, change }];
     });
   // A key pair's public key lands as a new row would, beside its private key.
-  const written = (vars: SaveSecretsVars) => [...vars.drafts, ...companionsOf(vars.drafts, vars.changes)];
+  const written = (vars: SaveSecretsVars) => [...vars.drafts, ...companionsOf(vars.active, vars.drafts, vars.changes)];
   return {
     list: secretsList(place),
     label: (vars) => {

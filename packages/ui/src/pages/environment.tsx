@@ -30,6 +30,7 @@ import {
   type SecretDraft,
 } from '../lib/secret-edit-batch';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
+import { inDialog } from '../lib/shortcuts';
 import { secretKeyProblem } from '../lib/validation';
 import {
   breakAfterUnderscores,
@@ -215,7 +216,7 @@ function EnvironmentLedger({
       const change = secretChangeFor(changes, entry.key);
       return change === undefined || change.archived ? [] : [change.key.trim()];
     }),
-    ...companionsOf(drafts, changes).map((companion) => companion.key.trim()),
+    ...companionsOf(active, drafts, changes).map((companion) => companion.key.trim()),
   ];
   const unnamed = pendingNames.some((name) => name === '');
   const invalid = pendingNames.some((name) => name !== '' && secretKeyProblem(name) !== null);
@@ -260,7 +261,7 @@ function EnvironmentLedger({
     const names = [
       ...drafts.map((row) => row.key.trim()),
       ...Object.values(changes).flatMap((change) => (change.archived ? [] : [change.key.trim()])),
-      ...companionsOf(drafts, changes).map((companion) => companion.key.trim()),
+      ...companionsOf(active, drafts, changes).map((companion) => companion.key.trim()),
     ];
     return (
       (drafts.length > 0 || Object.keys(changes).length > 0) &&
@@ -353,13 +354,14 @@ function EnvironmentLedger({
     );
   }
 
-  // Cmd/Ctrl+Enter saves from anywhere on the page while edits are pending.
+  // Cmd/Ctrl+Enter saves from anywhere on the page while edits are pending,
+  // but for an open dialog, such as Generate's.
   const saveRef = useRef(saveChanges);
   saveRef.current = saveChanges;
   useEffect(() => {
     if (pendingCount === 0) return;
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !inDialog(event.target)) {
         event.preventDefault();
         saveRef.current();
       }

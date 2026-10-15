@@ -263,8 +263,8 @@ test('a companion stays with its row when the patch after a rename fails', async
 
 test("an archive writes no companion, and a companion's name clashes like a new row's", () => {
   const companion = { key: 'A_PUBLIC', value: 'public' };
-  assert.deepEqual(companionsOf([], { A: { key: 'A', value: null, archived: true, companion } }), []);
-  assert.deepEqual(companionsOf([], { A: { ...change('A', 'private'), companion } }), [companion]);
+  assert.deepEqual(companionsOf(active, [], { A: { key: 'A', value: null, archived: true, companion } }), []);
+  assert.deepEqual(companionsOf(active, [], { A: { ...change('A', 'private'), companion } }), [companion]);
 
   // Two rows' companions, or a companion and a new row, on one name.
   assert.equal(
@@ -295,4 +295,21 @@ test('a companion named __proto__ is a key like any other', async () => {
     operations: { rename: async () => {}, write: async (patch) => void writes.push(patch) },
   });
   assert.deepEqual(Object.keys(writes[0]!), ['PRIVATE', '__proto__']);
+});
+
+test("an edit whose key left the list on a refresh writes no companion either", async () => {
+  // JWT_PRIVATE_KEY was edited here, then renamed or archived elsewhere: the
+  // list read back no longer has it, and the edit is skipped, public key too.
+  const companion = { key: 'JWT_PUBLIC_KEY', value: 'public' };
+  const changes = { JWT_PRIVATE_KEY: { ...change('JWT_PRIVATE_KEY', 'private'), companion } };
+  const drafts = [{ id: 1, key: 'OTHER', value: 'other' }];
+  assert.deepEqual(companionsOf(active, drafts, changes), []);
+  const writes: Record<string, string | null>[] = [];
+  await applySecretEditBatch({
+    active,
+    drafts,
+    changes,
+    operations: { rename: async () => {}, write: async (patch) => void writes.push(patch) },
+  });
+  assert.deepEqual(writes, [{ OTHER: 'other' }]);
 });

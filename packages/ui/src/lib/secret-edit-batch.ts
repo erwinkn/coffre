@@ -42,16 +42,24 @@ export type SecretEditBatchResult = {
   error: unknown | null;
 };
 
-/** The companions a save writes: those of new rows, and of value edits that are not archives. */
+/**
+ * The companions a save writes: those of new rows, and of value edits to keys
+ * still listed. An edit whose key went from the list (renamed or archived
+ * elsewhere, then refreshed) writes nothing, its companion included.
+ */
 export function companionsOf(
+  active: readonly ActiveSecret[],
   drafts: readonly SecretDraft[],
   changes: Readonly<Record<string, SecretChange>>,
 ): Companion[] {
   return [
     ...drafts.flatMap((draft) => (draft.companion === undefined ? [] : [draft.companion])),
-    ...Object.values(changes).flatMap((change) =>
-      change.archived || change.value === null || change.companion === undefined ? [] : [change.companion],
-    ),
+    ...active.flatMap((entry) => {
+      const change = secretChangeFor(changes, entry.key);
+      return change === undefined || change.archived || change.value === null || change.companion === undefined
+        ? []
+        : [change.companion];
+    }),
   ];
 }
 
@@ -67,7 +75,7 @@ export function hasSecretEditConflict(
   if (new Set(finalActiveKeys).size !== finalActiveKeys.length) return true;
 
   // A companion writes its key as a new row does.
-  const draftKeys = [...drafts, ...companionsOf(drafts, changes)].map((draft) => draft.key.trim());
+  const draftKeys = [...drafts, ...companionsOf(active, drafts, changes)].map((draft) => draft.key.trim());
   if (new Set(draftKeys).size !== draftKeys.length) return true;
 
   const valueEditTargets = new Set(
@@ -133,7 +141,7 @@ export async function applySecretEditBatch({
       }
       if (change.value !== null) patch[key] = change.value;
     }
-    for (const draft of [...drafts, ...companionsOf(drafts, changes)]) patch[draft.key.trim()] = draft.value;
+    for (const draft of [...drafts, ...companionsOf(active, drafts, changes)]) patch[draft.key.trim()] = draft.value;
 
     const written = Object.keys(patch).length;
     if (written > 0) await operations.write({ ...patch });
@@ -158,7 +166,7 @@ function planEdits(
       .filter((entry) => secretChangeFor(changes, entry.key)?.archived)
       .map((entry) => entry.key),
   );
-  const restoredByDraft = [...drafts, ...companionsOf(drafts, changes)].find((draft) =>
+  const restoredByDraft = [...drafts, ...companionsOf(active, drafts, changes)].find((draft) =>
     archivedKeys.has(draft.key.trim()),
   );
   if (restoredByDraft) {
