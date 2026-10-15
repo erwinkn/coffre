@@ -136,8 +136,9 @@ value. It makes:
 - **a key pair**, ECDSA or ECDH on P-521, P-384 or P-256: the private key
   (PKCS #8, base64) goes in the row, and the public key (the raw point,
   base64) in a new row beside it, named after the first (`JWT_PRIVATE_KEY`
-  gives `JWT_PUBLIC_KEY`). Saving the two together writes them in one
-  transaction, as every save of several rows does.
+  gives `JWT_PUBLIC_KEY`). Either row's own Save takes the other with it,
+  so a rotated private key never lands beside the old public key, and
+  generating another pair there replaces the public key's row.
 
 **`coffre get` no longer adds a newline when piped.** It printed the value
 and a newline whatever stdout was, so `coffre get app/prod/KEY | wc -c`

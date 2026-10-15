@@ -26,6 +26,45 @@ export function secretChangeFor(
   return Object.hasOwn(changes, key) ? changes[key] : undefined;
 }
 
+/** A row of the secrets table: a saved key's, by its name, or a new one's, by its draft's id. */
+export type SecretRowRef = `key:${string}` | `draft:${number}`;
+
+/**
+ * Generated key pairs still pending: the row holding the private key, and
+ * the draft holding its public key.
+ */
+export type KeyPairs = Readonly<Partial<Record<SecretRowRef, number>>>;
+
+/**
+ * What one row's own Save sends: its edit, and the other half of its key
+ * pair while that is pending too. Saved alone, a new private key would
+ * stand beside the old public key, a pair that does not match.
+ */
+export function rowBatch(
+  row: SecretRowRef,
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+  pairs: KeyPairs,
+): { drafts: SecretDraft[]; changes: Record<string, SecretChange> } {
+  const publicDraft = pairs[row];
+  const partner: SecretRowRef | undefined =
+    publicDraft !== undefined
+      ? `draft:${publicDraft}`
+      : (Object.keys(pairs) as SecretRowRef[]).find((each) => row === `draft:${pairs[each]}`);
+  const batch: { drafts: SecretDraft[]; changes: Record<string, SecretChange> } = { drafts: [], changes: {} };
+  for (const each of partner === undefined ? [row] : [row, partner]) {
+    if (each.startsWith('draft:')) {
+      const draft = drafts.find((one) => `draft:${one.id}` === each);
+      if (draft !== undefined) batch.drafts.push(draft);
+    } else {
+      const key = each.slice('key:'.length);
+      const change = secretChangeFor(changes, key);
+      if (change !== undefined) batch.changes[key] = change;
+    }
+  }
+  return batch;
+}
+
 export type SecretEditBatchResult = {
   applied: number;
   drafts: SecretDraft[];

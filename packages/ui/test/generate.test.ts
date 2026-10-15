@@ -119,8 +119,11 @@ test('a key pair is its private key in PKCS #8 and its public key raw, both base
       const signature = await crypto.subtle.sign(signing, privateKey, data);
       assert.ok(await crypto.subtle.verify(signing, imported, signature, data), `${curve} verifies`);
     } else {
-      const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: imported }, privateKey, 128);
-      assert.equal(bits.byteLength, 16);
+      // The two halves agree on a secret with a peer only if they belong together.
+      const peer = await crypto.subtle.generateKey(params, false, ['deriveBits']);
+      const ours = await crypto.subtle.deriveBits({ name: 'ECDH', public: peer.publicKey }, privateKey, 128);
+      const theirs = await crypto.subtle.deriveBits({ name: 'ECDH', public: imported }, peer.privateKey, 128);
+      assert.deepEqual(Buffer.from(ours), Buffer.from(theirs), `${curve} agrees`);
     }
   }
 });

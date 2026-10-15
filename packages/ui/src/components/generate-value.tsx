@@ -50,6 +50,7 @@ export function GenerateValue({
   onOpenChange,
   name,
   renamable,
+  publicName,
   onUse,
 }: {
   open: boolean;
@@ -58,6 +59,8 @@ export function GenerateValue({
   name: string;
   /** A new row's name can be set here; a saved secret's is renamed in its row. */
   renamable: boolean;
+  /** The row a pair generated here before put its public key in, which a new pair replaces. */
+  publicName?: string;
   onUse: (use: GeneratedUse) => void;
 }) {
   return (
@@ -65,6 +68,7 @@ export function GenerateValue({
       <GenerateForm
         name={name}
         renamable={renamable}
+        publicName={publicName}
         onCancel={() => onOpenChange(false)}
         onUse={(use) => {
           onUse(use);
@@ -78,11 +82,13 @@ export function GenerateValue({
 function GenerateForm({
   name,
   renamable,
+  publicName: pendingPublicName,
   onCancel,
   onUse,
 }: {
   name: string;
   renamable: boolean;
+  publicName?: string;
   onCancel: () => void;
   onUse: (use: GeneratedUse) => void;
 }) {
@@ -99,8 +105,8 @@ function GenerateForm({
   const [generated, setGenerated] = useState<Generated | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [privateName, setPrivateName] = useState(name);
-  // Follows the private key's name until it is typed in.
-  const [publicName, setPublicName] = useState<string | null>(null);
+  // Follows the private key's name until it is typed in, or the row it replaces names it.
+  const [publicName, setPublicName] = useState<string | null>(pendingPublicName ?? null);
 
   const recipe: Recipe =
     kind === 'random'
@@ -264,7 +270,10 @@ function GenerateForm({
             describedBy={`${id}-names`}
           />
           <p className="hint" id={`${id}-names`}>
-            {nameProblem ?? 'The public key is added as a new row. Save the two together.'}
+            {nameProblem ??
+              (pendingPublicName === undefined
+                ? 'The public key goes in a new row. Saving either row saves both.'
+                : 'The public key replaces the one in its row. Saving either row saves both.')}
           </p>
         </>
       ) : (

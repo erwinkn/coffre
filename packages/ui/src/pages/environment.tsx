@@ -23,9 +23,12 @@ import type {
 import { canRevealSecrets } from '../lib/capabilities';
 import {
   hasSecretEditConflict,
+  rowBatch,
   secretChangeFor,
+  type KeyPairs,
   type SecretChange,
   type SecretDraft,
+  type SecretRowRef,
 } from '../lib/secret-edit-batch';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { secretKeyProblem } from '../lib/validation';
@@ -160,6 +163,7 @@ function EnvironmentLedger({
     .map((one) => `${each.slug}/${one.slug}`));
   const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
+  const [pairs, setPairs] = useState<KeyPairs>({});
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
   // Rows opened for editing that may not have changed yet. A row with a
   // pending change is in edit mode whether or not it is listed here.
@@ -236,19 +240,49 @@ function EnvironmentLedger({
   }
 
   /**
-   * One row's own Save: its change alone goes, and any other row's stays
-   * pending. A row opened and left as it was just closes.
+   * One row's own Save: its change goes, with the other half of its key
+   * pair if it has one, and any other row's stays pending. A row opened and
+   * left as it was just closes.
    */
-  function saveRow(key: string) {
-    const change = secretChangeFor(changes, key);
-    dropChange(key);
-    if (change === undefined) return;
-    sendAlone({ active, drafts: [], changes: { [key]: change } });
+  function saveAlone(row: SecretRowRef) {
+    if (row.startsWith('key:')) {
+      const key = row.slice('key:'.length);
+      dropChange(key);
+      if (secretChangeFor(changes, key) === undefined) return;
+    }
+    const batch = rowBatch(row, drafts, changes, pairs);
+    for (const key of Object.keys(batch.changes)) dropChange(key);
+    const sent = new Set(batch.drafts.map((draft) => draft.id));
+    setDrafts((rows) => rows.filter((each) => !sent.has(each.id)));
+    sendAlone({ active, ...batch });
   }
 
-  function saveDraft(draft: SecretDraft) {
-    setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
-    sendAlone({ active, drafts: [draft], changes: {} });
+  function aloneReady(row: SecretRowRef): boolean {
+    if (row.startsWith('key:') && secretChangeFor(changes, row.slice('key:'.length)) === undefined) return true;
+    const batch = rowBatch(row, drafts, changes, pairs);
+    return readyAlone(batch.drafts, batch.changes);
+  }
+
+  /**
+   * A generated key pair's public key, in the draft beside its private key's
+   * row: the one a pair generated there before made, or a new one. A value
+   * that is no key pair unties the two, and the draft stays as it is.
+   */
+  function placePublicKey(row: SecretRowRef, publicKey: { key: string; value: string } | null) {
+    const id = pairs[row];
+    if (publicKey === null) {
+      setPairs(({ [row]: _, ...rest }) => rest);
+    } else if (id !== undefined && drafts.some((draft) => draft.id === id)) {
+      setDrafts((rows) => rows.map((each) => (each.id === id ? { ...each, ...publicKey } : each)));
+    } else {
+      const next = nextDraftId.current++;
+      setDrafts((rows) => [...rows, { id: next, ...publicKey }]);
+      setPairs((current) => ({ ...current, [row]: next }));
+    }
+  }
+
+  function publicNameOf(row: SecretRowRef): string | undefined {
+    return drafts.find((draft) => draft.id === pairs[row])?.key;
   }
 
   /** Whether one row's change could go alone: named, well named, and clashing with nothing. */
@@ -289,13 +323,14 @@ function EnvironmentLedger({
     });
   }
 
-  function addDraft({ key = '', value = '' }: { key?: string; value?: string } = {}) {
+  function addDraft(key = '') {
     // New rows go last, by the button that made them, in the order they were added.
-    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value }]);
+    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value: '' }]);
   }
 
   function discardAll() {
     setDrafts([]);
+    setPairs({});
     setChanges({});
     setEditing(new Set());
     setSaveError(null);
@@ -439,7 +474,7 @@ function EnvironmentLedger({
         project={project}
         environment={environment}
         canWrite={canWrite}
-        onAdd={(key) => addDraft({ key })}
+        onAdd={addDraft}
       />
 
       {refile.error !== null && <ErrorLine error={refile.error} />}
@@ -518,11 +553,10 @@ function EnvironmentLedger({
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
                       onUndo={() => dropChange(entry.key)}
-                      onSave={() => saveRow(entry.key)}
-                      onAddDraft={addDraft}
-                      saveReady={
-                        change === undefined || readyAlone([], { [entry.key]: change })
-                      }
+                      onSave={() => saveAlone(`key:${entry.key}`)}
+                      publicName={publicNameOf(`key:${entry.key}`)}
+                      onPublicKey={(publicKey) => placePublicKey(`key:${entry.key}`, publicKey)}
+                      saveReady={aloneReady(`key:${entry.key}`)}
                       onMarkArchive={() => {
                         setEditing((current) => {
                           const next = new Set(current);
@@ -561,9 +595,10 @@ function EnvironmentLedger({
                       )
                     }
                     onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
-                    onSave={() => saveDraft(draft)}
-                    onAddDraft={addDraft}
-                    saveReady={readyAlone([draft], {})}
+                    onSave={() => saveAlone(`draft:${draft.id}`)}
+                    publicName={publicNameOf(`draft:${draft.id}`)}
+                    onPublicKey={(publicKey) => placePublicKey(`draft:${draft.id}`, publicKey)}
+                    saveReady={aloneReady(`draft:${draft.id}`)}
                   />
                 ))}
               </tbody>
@@ -717,7 +752,13 @@ function ValueField({
   autoFocus?: boolean;
   onEscape?: () => void;
   /** The row Generate fills: its name, whether that can change, and what Use does. */
-  generate: { name: string; renamable: boolean; onUse: (use: GeneratedUse) => void };
+  generate: {
+    name: string;
+    renamable: boolean;
+    /** The public key's row, when a pair generated here before is still pending. */
+    publicName?: string;
+    onUse: (use: GeneratedUse) => void;
+  };
 }) {
   const [shown, setShown] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -772,6 +813,7 @@ function ValueField({
         onOpenChange={setGenerating}
         name={generate.name}
         renamable={generate.renamable}
+        publicName={generate.publicName}
         onUse={generate.onUse}
       />
     </div>
@@ -811,7 +853,8 @@ function SecretRow({
   onPatch,
   onUndo,
   onSave,
-  onAddDraft,
+  publicName,
+  onPublicKey,
   saveReady,
   onMarkArchive,
 }: {
@@ -840,8 +883,10 @@ function SecretRow({
   onUndo: () => void;
   /** This row's change alone, saved now. */
   onSave: () => void;
-  /** A new row beside this one: a generated key pair's public key. */
-  onAddDraft: (draft: { key: string; value: string }) => void;
+  /** The name of the row holding the public key of a pair generated here, while pending. */
+  publicName: string | undefined;
+  /** A generated value's public key, if it was a key pair, for the row beside this one. */
+  onPublicKey: (publicKey: { key: string; value: string } | null) => void;
   saveReady: boolean;
   onMarkArchive: () => void;
 }) {
@@ -1015,11 +1060,13 @@ function SecretRow({
                     }
                     onEscape={onUndo}
                     generate={{
-                      name: entry.key,
+                      // A pending rename is the name it saves under.
+                      name: change.key,
                       renamable: false,
+                      publicName,
                       onUse: ({ value, publicKey }) => {
                         onPatch({ value: value === (editBase?.value ?? '') ? null : value });
-                        if (publicKey !== undefined) onAddDraft({ key: publicKey.name, value: publicKey.value });
+                        onPublicKey(publicKey === undefined ? null : { key: publicKey.name, value: publicKey.value });
                       },
                     }}
                   />
@@ -1338,7 +1385,8 @@ function DraftRow({
   onChange,
   onRemove,
   onSave,
-  onAddDraft,
+  publicName,
+  onPublicKey,
   saveReady,
 }: {
   draft: SecretDraft;
@@ -1348,8 +1396,10 @@ function DraftRow({
   onRemove: () => void;
   /** This new secret alone, saved now. */
   onSave: () => void;
-  /** Another new row: a generated key pair's public key. */
-  onAddDraft: (draft: { key: string; value: string }) => void;
+  /** The name of the row holding the public key of a pair generated here, while pending. */
+  publicName: string | undefined;
+  /** A generated value's public key, if it was a key pair, for the row beside this one. */
+  onPublicKey: (publicKey: { key: string; value: string } | null) => void;
   saveReady: boolean;
 }) {
   const [touched, setTouched] = useState(false);
@@ -1404,9 +1454,10 @@ function DraftRow({
                 generate={{
                   name: draft.key,
                   renamable: true,
+                  publicName,
                   onUse: ({ value, name, publicKey }) => {
                     onChange({ key: name, value });
-                    if (publicKey !== undefined) onAddDraft({ key: publicKey.name, value: publicKey.value });
+                    onPublicKey(publicKey === undefined ? null : { key: publicKey.name, value: publicKey.value });
                   },
                 }}
               />

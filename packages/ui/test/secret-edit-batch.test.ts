@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   applySecretEditBatch,
   hasSecretEditConflict,
+  rowBatch,
   type SecretChange,
   type SecretDraft,
 } from '../src/lib/secret-edit-batch.ts';
@@ -220,4 +221,38 @@ test('archive and rewrite of one key fails before any mutation', async () => {
 
   assert.equal(attempted, false);
   assert.match(String(result.error), /cannot archive and write/);
+});
+
+test("a row's own save takes the other half of its generated key pair", () => {
+  const drafts: SecretDraft[] = [
+    { id: 1, key: 'JWT_PRIVATE_KEY', value: 'private' },
+    { id: 2, key: 'JWT_PUBLIC_KEY', value: 'public' },
+    { id: 3, key: 'OTHER', value: 'other' },
+  ];
+  const changes = { SIGNING_KEY: change('SIGNING_KEY', 'private'), C: change('C', 'c') };
+  const pairs = { 'draft:1': 2, 'key:SIGNING_KEY': 4 } as const;
+  const both = { drafts: drafts.slice(0, 2), changes: {} };
+  assert.deepEqual(rowBatch('draft:1', drafts, changes, pairs), both);
+  assert.deepEqual(rowBatch('draft:2', drafts, changes, pairs), { ...both, drafts: [drafts[1], drafts[0]] });
+
+  // A saved key rotated to a new pair: its value edit and the public key's draft.
+  const rotated = [...drafts, { id: 4, key: 'SIGNING_KEY_PUBLIC', value: 'public' }];
+  assert.deepEqual(rowBatch('key:SIGNING_KEY', rotated, changes, pairs), {
+    drafts: [rotated[3]],
+    changes: { SIGNING_KEY: changes.SIGNING_KEY },
+  });
+  assert.deepEqual(rowBatch('draft:4', rotated, changes, pairs), {
+    drafts: [rotated[3]],
+    changes: { SIGNING_KEY: changes.SIGNING_KEY },
+  });
+});
+
+test('a row outside any pair, or whose other half is gone, saves alone', () => {
+  const drafts: SecretDraft[] = [{ id: 1, key: 'JWT_PRIVATE_KEY', value: 'private' }];
+  const changes = { C: change('C', 'c') };
+  // The public key's row was removed: draft 2 is no longer there.
+  const pairs = { 'draft:1': 2 } as const;
+  assert.deepEqual(rowBatch('draft:1', drafts, changes, pairs), { drafts, changes: {} });
+  assert.deepEqual(rowBatch('key:C', drafts, changes, pairs), { drafts: [], changes });
+  assert.deepEqual(rowBatch('key:A', drafts, changes, pairs), { drafts: [], changes: {} });
 });
