@@ -21,6 +21,12 @@ export type ResolvedVaultConfig = {
    */
   bootstrapOwners: readonly string[];
   /**
+   * Who the vault makes an Owner of the whole instance, though it has one,
+   * and until when, in ms since the epoch: `recoverOwner`. Null when the
+   * configuration names nobody.
+   */
+  recoverOwner: { email: string; until: number } | null;
+  /**
    * The seeds of the vault's own keys, which MAC its log entries, seal member
    * rows and sign checkpoints: the first signs; every one verifies what it
    * signed, so a rotation leaves earlier records verifying.
@@ -44,6 +50,7 @@ export type Kek = { id: string; key: string } | KekProvider;
  *     previousKeks: [{ id: 'vault-2025-01-10-k7q2xm', key: env.OLD_VAULT_KEY }],
  *     bootstrapOwners: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
+ *     recoverOwner: { email: 'omar@acme.example', until: '2026-10-20' }, // only while every Owner is locked out
  *   }
  */
 export type VaultConfig = {
@@ -63,6 +70,14 @@ export type VaultConfig = {
   signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
+  /**
+   * The way back in when the instance has Owners but none of them can sign
+   * in any more: until `until`, an ISO 8601 date or time at most a week
+   * ahead, each vault process makes `email` an Owner of the whole instance
+   * at its first call, if they are not one, logged as the vault's
+   * (`reason: 'recovery'`). Take it out once they are in.
+   */
+  recoverOwner?: { email: string; until: string };
 } & BootstrapOwners;
 
 /**
@@ -131,6 +146,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     bootstrapOwners: checkBootstrapOwners(config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
+    recoverOwner: config.recoverOwner === undefined ? null : checkRecoverOwner(config.recoverOwner, Date.now()),
   };
 }
 
@@ -163,6 +179,26 @@ function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes
     throw new Error('bulkLimit needs a whole count of at least 1 and a window above 0 minutes');
   }
   return { count, windowMs: windowMinutes * 60_000 };
+}
+
+/** How far ahead a recovery may end: long enough to deploy and sign in, too short to forget it is there. */
+export const RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * The recovery as the vault applies it, refused when `until` is more than
+ * a week after `now`: left in place, a recovery makes its person an Owner
+ * again at each new process, after an Owner demoted them too, so it ends by
+ * itself. One already over is kept, and does nothing.
+ */
+export function checkRecoverOwner({ email, until }: { email: string; until: string }, now: number): { email: string; until: number } {
+  const trimmed = typeof email === 'string' ? email.trim() : '';
+  if (!isHumanEmail(trimmed)) throw new Error(`recoverOwner.email must be a person's email; got "${String(email)}"`);
+  const end = typeof until === 'string' && /^\d{4}-\d{2}-\d{2}/.test(until) ? Date.parse(until) : Number.NaN;
+  if (Number.isNaN(end)) throw new Error(`recoverOwner.until must be an ISO 8601 date or time, such as 2026-10-20 or 2026-10-20T18:00:00Z; got "${String(until)}"`);
+  if (end > now + RECOVERY_WINDOW_MS) {
+    throw new Error(`recoverOwner.until must be at most a week ahead, so that a recovery left in place ends by itself; got ${until}`);
+  }
+  return { email: trimmed.toLowerCase(), until: end };
 }
 
 function isHumanEmail(value: string): boolean {

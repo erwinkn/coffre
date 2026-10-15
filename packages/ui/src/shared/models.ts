@@ -4,6 +4,7 @@ import type {
   Member,
   OffboardingReport,
   ProjectSummary as ApiProjectSummary,
+  Recovered,
   RemovedMember,
   SecretKey as ApiSecretKey,
   SecretVersion as ApiSecretVersion,
@@ -55,5 +56,7 @@ export type ImportPlanEntry = { key: string; action: ImportAction; version: numb
 /** What someone can still reach and what they have seen. */
 export type PrincipalReport = OffboardingReport;
 export type RemovedPrincipal = RemovedMember;
+/** Someone the deployment's operator made an Owner by recovery, and when. */
+export type RecoveredOwner = Recovered;
 
 export type ImportProblem = { line: number; key?: string; reason: string };

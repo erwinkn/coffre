@@ -209,7 +209,8 @@ would trust as Owner, and take people off it when they leave.
 
 It does not help an Owner who exists but can no longer sign in, having
 lost their GitHub account for one: the instance still has its Owner. Keep
-a second Owner for that.
+a second Owner for that, and if none of them can sign in, recover one
+([When no Owner can sign in](#when-no-owner-can-sign-in)).
 
 The instance keeps an Owner from then on. The last Owner of the whole
 instance cannot be demoted, narrowed to a scope, or removed, by anyone,
@@ -228,6 +229,54 @@ Before 0.6 the list was `rootAdmins` (`ROOT_ADMINS`), people who held
 everything and were in no member row. 0.6 reads that name too, for one
 release, and turns those root admins into Owners once ("Upgrading from 0.5"
 in the [release notes](../CHANGELOG.md)).
+
+## When no Owner can sign in
+
+The instance has Owners, and none of them can sign in any more: they
+left, or lost the account they signed in with. The list above does
+nothing, since there is an Owner. Name someone in the vault's
+configuration instead, `recoverOwner`, with a date it ends by
+(`vault/src/worker.ts`, or `src/vault.ts` on Node):
+
+```ts
+bootstrapOwners: env.BOOTSTRAP_OWNERS.split(',').map((email) => email.trim()),
+recoverOwner: { email: 'omar@acme.example', until: '2026-10-20' },
+```
+
+Then deploy the vault as you always do (on Node, restart it). The first
+call of each new vault process or Worker isolate, whatever it is, makes
+Omar an Owner of the whole instance: admitted, brought back if an Owner
+removed him, or given the role, his grants kept. The vault writes it as
+its own, `system:vault` with `reason: 'recovery'`, under its MAC; the
+audit log says "made omar@acme.example an Owner, was Admin: recovered by
+the deployment's operator, not by an Owner". For a month after, Users
+tells everyone who runs the instance the same, so an Owner who did not
+expect it notices.
+
+Omar signs in, removes or demotes the Owners who can no longer sign in,
+and you take `recoverOwner` out and deploy again. Until then, each new
+process makes him an Owner again if someone demoted him; at `until` it
+stops by itself. `until` is an ISO 8601 date or time at most a week ahead
+(a date is its midnight, UTC), and the vault refuses to start with one
+further out, so that a recovery left in the code is no standing way in.
+One already past does nothing.
+
+**Who can do this.** Only whoever changes the vault's code and
+configuration, and they could already do anything without it:
+
+| Who | Recovers an Owner? | What they hold already |
+|---|---|---|
+| Whoever deploys the vault: its Worker's Cloudflare account, or the Node host | yes | the vault key and the vault's database login, in its configuration: every value, and a vault of their own writing that does whatever they want |
+| The database's owner, or the app's or the vault's login, writing rows | no: a member row or a log entry they write carries no valid MAC, so the vault refuses that member, and the Users notice, which reads the log without the key, would show a recovery that made nobody an Owner | with the vault key, every value and the vault's records too ([keys.md](keys.md)) |
+| A signed-in Admin, or anyone else | no: no API, CLI or MCP call names a recovery | what their role holds |
+| Someone with the vault key alone | no: it has to reach a deployed vault's configuration | every value, with a copy of the database |
+
+So it is no new way in: it asks the vault to decide, under its own locks
+and keys, what its operator could make it do anyway. A command run
+against the database instead would need the same two things, the vault
+key to seal the row and the entry and the database's owner to write them,
+and would decide outside the vault. This works the same on Workers and on
+Node, and with a key in AWS KMS, whose vault holds `signingKey`.
 
 ## Local development
 

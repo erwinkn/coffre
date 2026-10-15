@@ -756,6 +756,29 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
   return rows.map(shown);
 }
 
+/**
+ * Whom the vault made an Owner by recovery (`recoverOwner`), since `since`,
+ * newest first: its allowed entries in its own name with `reason:
+ * 'recovery'`. Read without the vault's key, as the lists read the rows:
+ * one written around it says only that someone could write the log.
+ */
+export async function recoveries(db: Queryable, since: Date): Promise<{ member: string; at: string }[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select({ subject: auditLog.subjectPrincipal, occurredAt: auditLog.occurredAt })
+    .from(auditLog)
+    .where(and(
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.actor, 'system:vault'),
+      inArray(auditLog.action, ['member.add', 'member.restore', 'member.role']),
+      eq(auditLog.decision, 'allow'),
+      gte(auditLog.occurredAt, since.getTime()),
+      like(auditLog.metadata, '%"reason":"recovery"%'),
+    ))
+    .orderBy(desc(auditLog.seq));
+  return rows.flatMap((row) => (row.subject === null ? [] : [{ member: row.subject, at: new Date(row.occurredAt).toISOString() }]));
+}
+
 /** The person an account at a provider is bound to, if it is. */
 export async function findIdentity(
   db: Queryable,

@@ -46,6 +46,7 @@ const NAMED = {
   ListedReference: 'api/references.ts',
   ProjectSummary: 'api/projects.ts',
   ReferenceView: 'api/references.ts',
+  Recovered: 'api/members.ts',
   RemovedMember: 'api/members.ts',
   SecretKey: 'api/secrets.ts',
   SecretVersion: 'api/secrets.ts',

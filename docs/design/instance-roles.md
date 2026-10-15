@@ -331,11 +331,34 @@ first named person to sign in to a fresh vault process or Worker isolate
 (one that has seen an Owner does not look again; a deploy starts fresh
 ones), even one an Owner removed: the list is a
 standing way in, to keep to people one would trust as Owner. An Owner who
-exists but cannot sign in any more is not recovered by this; that is a
-command of its own, not built yet (`coffre recover owner`). Owners are
-made and unmade by whoever runs the instance, an Admin of all of it
+exists but cannot sign in any more is not recovered by this: whoever
+deploys the vault names someone in its `recoverOwner` instead, and each new
+process makes them an Owner, though the instance has one, until its end
+date, at most a week out (`reason: 'recovery'`; "Recovering an Owner",
+below). Owners are made and unmade by whoever runs the instance, an Admin of all of it
 included, as any role is: 0.5's root admins were beyond an Admin's reach,
 and the Owners they become are not.
+
+**Recovering an Owner.** Written on 2026-10-15. The bootstrap needs an
+instance with no Owner; one whose Owners all left, or lost the accounts
+they sign in with, still has them. `recoverOwner: { email, until }` in the
+vault's configuration names who takes over. At its first call
+(`#convert`, beside the root admins' conversion), each vault process
+makes them an Owner of the whole instance unless they are one, under
+their row and the log's head, as the bootstrap does (`#makeOwner`,
+`reason: 'recovery'`). It needs no record that it ran: one that finds
+them an Owner writes nothing, and one after an Owner demoted them makes
+them one again, until `until`. That is why `until` is at most a week
+ahead, checked when the vault starts: a recovery left in the code ends by
+itself, and is no standing way in. The authority is the vault's
+configuration, which only whoever deploys the vault changes, and they hold
+its key and its database login already; a row or an entry written around
+it carries no MAC, and makes nobody an Owner. Users tells those who run
+the instance whom a recovery made an Owner in the last month (`GET
+/api/members`, `recovered`), read from the log without the key, as the
+lists read the rows: one forged there shows a recovery that made nobody
+an Owner. [deployment-auth.md](../deployment-auth.md#when-no-owner-can-sign-in)
+says what an operator does.
 
 **Upgrading from 0.5.** The first call of a 0.6 vault makes every email
 the configuration names an Owner of the whole instance, once, as

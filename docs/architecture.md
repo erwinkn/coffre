@@ -132,7 +132,7 @@ one package is seen by the others without a build. Builds leave it off.
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey }`
 and, for the vault, `{ database, kek, previousKeks?, bootstrapOwners,
-signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
+signingKey?, bulkLimit?, recoverOwner? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
 `signingKey` is required only with a vault key a key service holds.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
@@ -491,7 +491,7 @@ them, which starts them over.
 
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
-| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `bootstrapOwners`, `bulkLimit`; `signingKey` with a KMS key |
+| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `bootstrapOwners`, `bulkLimit`; `signingKey` with a KMS key; `recoverOwner` while no Owner can sign in |
 | Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 

@@ -137,8 +137,8 @@ export type PreparedVault = {
   wrongKek: string | null;
   /**
    * Whether this process has made its upgrades (`#convert`): the root
-   * admins of 0.5 Owners, and the grants on every project of 0.4 there were
-   * when it started replaced.
+   * admins of 0.5 Owners, the person a recovery names one, and the grants on
+   * every project of 0.4 there were when it started replaced.
    */
   converted: boolean;
   /**
@@ -608,6 +608,7 @@ class VaultService implements Vault {
    */
   async #convert(): Promise<void> {
     await this.#convertRootAdmins();
+    await this.#recoverOwner();
     for (const principal of await store.everyProjectHolders(this.#db)) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
@@ -644,6 +645,26 @@ class VaultService implements Vault {
         if (await this.#makeOwner(d, principal, 'root-admin')) owners.push(principal);
       }
       d.log.push({ actor: VAULT_ACTOR, action: ROOT_ADMINS_CONVERT, decision: 'allow', metadata: JSON.stringify({ owners }) });
+    });
+  }
+
+  /**
+   * Make the person `recoverOwner` names an Owner of the whole instance,
+   * though it has Owners, until its `until`: the way back in once none of
+   * them can sign in, which the bootstrap leaves alone. Once per process,
+   * before its first call, as `system:vault`, `reason: 'recovery'`; nothing
+   * when they are one already, so a recovery left in place makes them one
+   * again only after someone demoted them, until it ends. Only whoever
+   * deploys the vault sets it, and they hold its keys already. Under their
+   * row and the log's head, as the bootstrap.
+   */
+  async #recoverOwner(): Promise<void> {
+    const recovery = this.#config.recoverOwner;
+    if (recovery === null || (await this.#now(this.#db)) >= recovery.until) return;
+    const principal = `user:${recovery.email}`;
+    await this.#decideNow([principal], async (d) => {
+      await lockLogHead(d.tx);
+      await this.#makeOwner(d, principal, 'recovery');
     });
   }
 
@@ -1433,7 +1454,7 @@ class VaultService implements Vault {
    * first, as removing them would; one the log never admitted, whose row was
    * written around the vault, is left as it is. Whether it made them one.
    */
-  async #makeOwner(d: Decision, principal: string, reason: 'bootstrap' | 'root-admin'): Promise<boolean> {
+  async #makeOwner(d: Decision, principal: string, reason: 'bootstrap' | 'root-admin' | 'recovery'): Promise<boolean> {
     const row = d.members.get(principal);
     const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
     if (subject.status === 'active' && ownsInstance(subject.live)) return false;

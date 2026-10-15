@@ -32,6 +32,7 @@ import {
   members as loadMembers,
   missingMembers,
   places,
+  recoveries,
   updateAuth,
   type MemberRow,
   type PlaceRow,
@@ -147,6 +148,17 @@ export type OffboardingReport = {
 
 /** What lets a member in, counted: what removing them revokes. */
 export type WaysIn = { grants: number; sessions: number; tokens: number; identities: number; apps: number };
+
+/**
+ * A person the deployment's operator made an Owner of the whole instance
+ * through the vault's configuration (`recoverOwner`), not an Owner: `at`,
+ * when. Those who run the instance see each for a month, to notice one
+ * they did not expect.
+ */
+export type Recovered = { member: string; at: string };
+
+/** How long a recovery is shown to those who run the instance. */
+const RECOVERIES_SHOWN_MS = 30 * 24 * 60 * 60_000;
 
 /** Someone no longer a member, and how many of their report's values are left. */
 export type RemovedMember = {
@@ -272,7 +284,7 @@ function byPlace(a: PlacedGrant, b: PlacedGrant): number {
 export async function listMembers(
   ctx: ApiContext,
   query: { path?: Path },
-): Promise<{ members: Member[]; removed: RemovedMember[] }> {
+): Promise<{ members: Member[]; removed: RemovedMember[]; recovered: Recovered[] }> {
   const { caller } = ctx;
   const administrator = administers(caller.role);
   const [all, known, setting] = await Promise.all([
@@ -334,14 +346,19 @@ export async function listMembers(
   }
   members.sort((a, b) => a.principalType.localeCompare(b.principalType) || a.principalId.localeCompare(b.principalId));
   // Those removed are the instance's to see: their reports name what they saw anywhere.
-  if (!everyone || !runsInstance(caller)) return { members, removed: [] };
+  if (!everyone || !runsInstance(caller)) return { members, removed: [], recovered: [] };
 
   // Everyone removed, so their reports stay reachable: removal ends access,
   // not the work of rotating what they saw.
   const removed = all.filter((listed) => listed.status === 'removed').map((listed) => listed.member);
-  const exposed = exposure(removed, removed.length === 0 ? [] : await memberActivity(ctx.db, removed.map((m) => m.id)));
+  const [activity, recovered] = await Promise.all([
+    removed.length === 0 ? [] : memberActivity(ctx.db, removed.map((m) => m.id)),
+    recoveries(ctx.db, new Date(Date.now() - RECOVERIES_SHOWN_MS)),
+  ]);
+  const exposed = exposure(removed, activity);
   return {
     members,
+    recovered,
     removed: removed.map((member) => ({
       principalType: member.type,
       principalId: member.id,
