@@ -122,6 +122,23 @@ Users, Service accounts, grants and secrets tables, "Saving…" and
 menu, and ran into the role column. Now the spinner stands there alone, the
 words stay for screen readers and as its tooltip.
 
+**Generate a secret's value in the browser.** A new secret's value field,
+and an edited one's, has a Generate button. It opens a dialog that makes the
+value with Web Crypto, in the page, and Use puts it in the field as if typed:
+nothing is sent until the row is saved, through the same write as any other
+value. It makes:
+
+- **a random value**, 1 to 256 bytes of entropy (32 by default), as letters
+  and digits (base62, each character drawn uniformly), hex, base64 or base64
+  URL (unpadded). The dialog says how many characters that is and how many
+  bits it holds: 32 bytes are 43 characters of base62, 256 bits.
+- **an AES-GCM key**, 256 or 128 bits: the raw key, base64.
+- **a key pair**, ECDSA or ECDH on P-521, P-384 or P-256: the private key
+  (PKCS #8, base64) goes in the row, and the public key (the raw point,
+  base64) in a new row beside it, named after the first (`JWT_PRIVATE_KEY`
+  gives `JWT_PUBLIC_KEY`). Saving the two together writes them in one
+  transaction, as every save of several rows does.
+
 **`coffre get` no longer adds a newline when piped.** It printed the value
 and a newline whatever stdout was, so `coffre get app/prod/KEY | wc -c`
 counted one byte more than the value, and a secret copied that way into

@@ -1,12 +1,6 @@
 import { byFolder, CoffreError, foldersOf, planImport, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import {
-  useEffect,
-  useRef,
-  useState,
-  type InputHTMLAttributes,
-  type TextareaHTMLAttributes,
-} from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -51,6 +45,8 @@ import {
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
+import { GenerateValue, type GeneratedUse } from '../components/generate-value';
+import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
 import { ArchiveBlocked, archiveBlockers, LentReferences, MakeReference, ReferenceValue } from '../components/references';
@@ -64,6 +60,7 @@ import {
   ArrowRight,
   EyeOff,
   Folder,
+  Generate,
   Hash,
   History,
   Key,
@@ -292,9 +289,9 @@ function EnvironmentLedger({
     });
   }
 
-  function addDraft() {
+  function addDraft({ key = '', value = '' }: { key?: string; value?: string } = {}) {
     // New rows go last, by the button that made them, in the order they were added.
-    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key: '', value: '' }]);
+    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value }]);
   }
 
   function discardAll() {
@@ -442,7 +439,7 @@ function EnvironmentLedger({
         project={project}
         environment={environment}
         canWrite={canWrite}
-        onAdd={(key) => setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value: '' }])}
+        onAdd={(key) => addDraft({ key })}
       />
 
       {refile.error !== null && <ErrorLine error={refile.error} />}
@@ -522,6 +519,7 @@ function EnvironmentLedger({
                       onPatch={(patch) => patchChange(entry, patch)}
                       onUndo={() => dropChange(entry.key)}
                       onSave={() => saveRow(entry.key)}
+                      onAddDraft={addDraft}
                       saveReady={
                         change === undefined || readyAlone([], { [entry.key]: change })
                       }
@@ -564,6 +562,7 @@ function EnvironmentLedger({
                     }
                     onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
                     onSave={() => saveDraft(draft)}
+                    onAddDraft={addDraft}
                     saveReady={readyAlone([draft], {})}
                   />
                 ))}
@@ -575,7 +574,7 @@ function EnvironmentLedger({
 
       {canWrite && (
         <div className="table-actions">
-          <button className="btn btn-primary" onClick={addDraft}>
+          <button className="btn btn-primary" onClick={() => addDraft()}>
             <Plus size={14} />
             New secret
           </button>
@@ -695,65 +694,6 @@ function EnvironmentName({ project, environment }: { project: string; environmen
 /* Rows                                                                        */
 /* -------------------------------------------------------------------------- */
 
-/**
- * A text field whose contents are masked until asked, for secret values.
- *
- * Where the browser supports it, the mask is CSS on a text input rather than
- * `type="password"`: password fields invite password managers to offer to
- * save or fill them, and a secret being typed into coffre is neither.
- */
-function MaskedInput({
-  masked,
-  className = '',
-  ...props
-}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { masked: boolean }) {
-  const cssMask = useCssMask();
-  return (
-    <input
-      {...props}
-      type={masked && !cssMask ? 'password' : 'text'}
-      className={`${className}${masked && cssMask ? ' is-masked' : ''}`}
-      autoComplete="off"
-      spellCheck={false}
-      data-1p-ignore
-      data-lpignore="true"
-      data-bwignore
-    />
-  );
-}
-
-function useCssMask(): boolean {
-  const [cssMask, setCssMask] = useState(false);
-  useEffect(() => {
-    setCssMask(typeof CSS !== 'undefined' && CSS.supports('-webkit-text-security', 'disc'));
-  }, []);
-  return cssMask;
-}
-
-/**
- * MaskedInput for a value with line breaks, which a text input would drop.
- * Without the CSS mask there is no password textarea, so masked text is
- * drawn transparent instead.
- */
-function MaskedTextarea({
-  masked,
-  className = '',
-  ...props
-}: TextareaHTMLAttributes<HTMLTextAreaElement> & { masked: boolean }) {
-  const cssMask = useCssMask();
-  return (
-    <textarea
-      {...props}
-      className={`${className}${masked ? (cssMask ? ' is-masked' : ' is-masked-fallback') : ''}`}
-      autoComplete="off"
-      spellCheck={false}
-      data-1p-ignore
-      data-lpignore="true"
-      data-bwignore
-    />
-  );
-}
-
 const lineCount = (text: string) => text.split('\n').length;
 
 function ValueField({
@@ -765,6 +705,7 @@ function ValueField({
   disabled,
   autoFocus,
   onEscape,
+  generate,
 }: {
   label: string;
   value: string;
@@ -775,8 +716,11 @@ function ValueField({
   disabled: boolean;
   autoFocus?: boolean;
   onEscape?: () => void;
+  /** The row Generate fills: its name, whether that can change, and what Use does. */
+  generate: { name: string; renamable: boolean; onUse: (use: GeneratedUse) => void };
 }) {
   const [shown, setShown] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const field = {
     className: 'input input-mono',
     masked: !shown,
@@ -791,7 +735,7 @@ function ValueField({
     },
   };
   return (
-    <div className="input-group">
+    <div className="input-group has-generate">
       {/* A value with line breaks opens one line tall, as tall as the row it
           replaces, and grows only by the lines typed into it. */}
       {start.includes('\n') ? (
@@ -803,6 +747,17 @@ function ValueField({
       ) : (
         <MaskedInput {...field} />
       )}
+      <Tip label="Generate a value">
+        <button
+          type="button"
+          className="btn btn-quiet btn-sm btn-icon input-addon input-addon-generate"
+          aria-label={`Generate a value for ${generate.name.trim() === '' ? 'the new secret' : generate.name.trim()}`}
+          disabled={disabled}
+          onClick={() => setGenerating(true)}
+        >
+          <Generate size={14} />
+        </button>
+      </Tip>
       <button
         type="button"
         className="btn btn-quiet btn-sm btn-icon input-addon"
@@ -812,6 +767,13 @@ function ValueField({
       >
         {shown ? <EyeOff size={14} /> : <Eye size={14} />}
       </button>
+      <GenerateValue
+        open={generating}
+        onOpenChange={setGenerating}
+        name={generate.name}
+        renamable={generate.renamable}
+        onUse={generate.onUse}
+      />
     </div>
   );
 }
@@ -849,6 +811,7 @@ function SecretRow({
   onPatch,
   onUndo,
   onSave,
+  onAddDraft,
   saveReady,
   onMarkArchive,
 }: {
@@ -877,6 +840,8 @@ function SecretRow({
   onUndo: () => void;
   /** This row's change alone, saved now. */
   onSave: () => void;
+  /** A new row beside this one: a generated key pair's public key. */
+  onAddDraft: (draft: { key: string; value: string }) => void;
   saveReady: boolean;
   onMarkArchive: () => void;
 }) {
@@ -1049,6 +1014,14 @@ function SecretRow({
                       onPatch({ value: value === (editBase?.value ?? '') ? null : value })
                     }
                     onEscape={onUndo}
+                    generate={{
+                      name: entry.key,
+                      renamable: false,
+                      onUse: ({ value, publicKey }) => {
+                        onPatch({ value: value === (editBase?.value ?? '') ? null : value });
+                        if (publicKey !== undefined) onAddDraft({ key: publicKey.name, value: publicKey.value });
+                      },
+                    }}
                   />
                   {reference !== null && reference.state === 'live' && (
                     <span className="edit-note">
@@ -1365,6 +1338,7 @@ function DraftRow({
   onChange,
   onRemove,
   onSave,
+  onAddDraft,
   saveReady,
 }: {
   draft: SecretDraft;
@@ -1374,6 +1348,8 @@ function DraftRow({
   onRemove: () => void;
   /** This new secret alone, saved now. */
   onSave: () => void;
+  /** Another new row: a generated key pair's public key. */
+  onAddDraft: (draft: { key: string; value: string }) => void;
   saveReady: boolean;
 }) {
   const [touched, setTouched] = useState(false);
@@ -1425,6 +1401,14 @@ function DraftRow({
                 disabled={disabled}
                 onChange={(value) => onChange({ value })}
                 onEscape={onRemove}
+                generate={{
+                  name: draft.key,
+                  renamable: true,
+                  onUse: ({ value, name, publicKey }) => {
+                    onChange({ key: name, value });
+                    if (publicKey !== undefined) onAddDraft({ key: publicKey.name, value: publicKey.value });
+                  },
+                }}
               />
             </div>
           </div>
