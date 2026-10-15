@@ -387,7 +387,25 @@ its first call once its log holds an entry of the vault's (an empty log
 stays empty until someone acts): otherwise, rolled back to 0.5, which gives
 each listed person who signs in a row of its own, and forward again, it
 would make the whole list Owners then, someone an Owner demoted since
-included. One forged in the vault's name is passed over and
+included. After the entry, the whole list is never converted again. Only a
+listed person a vault of 0.5 gives a root admin's row after it, still
+serving during the first deploy or rolled back to, becomes an Owner, at the
+next process's first call, with another entry naming them; and only while
+that row's entry is still the newest about them, so one an Owner removed or
+changed meanwhile stays as they left them. 0.5 held them root admins, and
+everyone else stays as 0.6 left them:
+
+| Listed, on an instance that ran 0.6, then 0.5, then 0.6 again | After |
+|---|---|
+| Sam, made a Developer on 0.6 | a Developer |
+| Carol, first signed in on 0.5, during the rollback | an Owner |
+| Carol, the same, removed by an Owner on 0.6 before the next process | removed |
+| Dan, who never signed in | nothing: the list bootstraps only an instance with no Owner |
+
+The same holds for a first deploy with 0.5 still serving: an instance
+whose root admins had not signed in when 0.6 first ran converts only those
+who sign in to 0.5 after it, as one where nobody had would bootstrap the
+first to sign in. One forged in the vault's name is passed over and
 reported, and stops no conversion; as many forged in a row as the vault
 reads back (1024) hide whether it converted, and it converts nobody. No
 migration: the rows are 0.5's, `role` `owner` and a null `scope`, sealed as 0.5 seals them, so 0.5 reads them

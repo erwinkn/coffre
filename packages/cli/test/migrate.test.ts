@@ -168,8 +168,15 @@ test('migrate says which accounts hold nothing, whose tokens and bindings would 
 
 test('migrate says the root admins of 0.5 become Owners, after the grants on every project, and nothing once they have', () => {
   assert.equal(describeRootAdmins(null), '');
-  assert.equal(describeRootAdmins([]), '');
-  assert.equal(describeRootAdmins(['user:root@acme.example', 'user:sam@acme.example']), [
+  assert.equal(describeRootAdmins({ whole: true, rooted: [] }), '');
+  assert.equal(describeRootAdmins({ whole: false, rooted: ['user:carol@acme.example'] }), [
+    '',
+    'A vault of 0.5 let these root admins in after this version made its Owners. When it next runs, the vault',
+    'makes each its bootstrapOwners still names an Owner of the whole instance, and nobody else on the list:',
+    '  user:carol@acme.example',
+    '',
+  ].join('\n'));
+  assert.equal(describeRootAdmins({ whole: true, rooted: ['user:root@acme.example', 'user:sam@acme.example'] }), [
     '',
     'Root admins are gone in this version. When it first runs, after any conversion above, the vault makes',
     "everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:",
@@ -185,7 +192,7 @@ test('migrate says the root admins of 0.5 become Owners, after the grants on eve
       paths: {},
       reported: false,
     }],
-    rootAdmins: ['user:root@acme.example'],
+    rootAdmins: { whole: true, rooted: ['user:root@acme.example'] },
     unsealed: [],
     holding: new Set(),
   });

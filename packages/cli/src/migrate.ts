@@ -159,8 +159,8 @@ async function migrateDeployment(
 /** What this version does to 0.4's and 0.5's rows when it first runs, which the database says: what `coffre migrate` shows. */
 export type FirstRun = {
   everyProject: EveryProjectPreview[];
-  /** The root admins of 0.5 who signed in, whom the vault makes Owners after converting those grants; null once it has. */
-  rootAdmins: string[] | null;
+  /** The root admins of 0.5 the vault makes Owners after converting those grants (`rootAdminsToConvert`); null once it has. */
+  rootAdmins: { whole: boolean; rooted: string[] } | null;
   unsealed: Unsealed[];
   /** The members who hold a live grant on a project or an environment now. */
   holding: ReadonlySet<string>;
@@ -202,21 +202,25 @@ export function describeFirstRun({ everyProject, rootAdmins, unsealed, holding }
  * The root admins of 0.5, whom the vault makes Owners of the whole
  * instance when this version first runs, after the grants above: everyone
  * its configuration names, of whom the database knows only those who
- * signed in. Nothing on an instance that had none, or once it has.
+ * signed in; or, once it has, those a vault of 0.5 let in since, still
+ * serving or rolled back to. Nothing on an instance that had none.
  *
  *   Root admins are gone in this version. When it first runs, after any conversion above, the vault makes
  *   everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:
  *     user:root@acme.example
  */
-export function describeRootAdmins(rootAdmins: readonly string[] | null): string {
-  if (rootAdmins === null || rootAdmins.length === 0) return '';
-  return [
-    '',
-    'Root admins are gone in this version. When it first runs, after any conversion above, the vault makes',
-    "everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:",
-    ...rootAdmins.map((principal) => `  ${shownMember(principal)}`),
-    '',
-  ].join('\n');
+export function describeRootAdmins(rootAdmins: FirstRun['rootAdmins']): string {
+  if (rootAdmins === null || rootAdmins.rooted.length === 0) return '';
+  const head = rootAdmins.whole
+    ? [
+        'Root admins are gone in this version. When it first runs, after any conversion above, the vault makes',
+        "everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:",
+      ]
+    : [
+        'A vault of 0.5 let these root admins in after this version made its Owners. When it next runs, the vault',
+        'makes each its bootstrapOwners still names an Owner of the whole instance, and nobody else on the list:',
+      ];
+  return ['', ...head, ...rootAdmins.rooted.map((principal) => `  ${shownMember(principal)}`), ''].join('\n');
 }
 
 /**

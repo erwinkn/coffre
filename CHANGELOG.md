@@ -57,8 +57,10 @@ instance: a member like any other, in People, changed by the same rules.
    which the list only bootstraps. Someone you took off the list before
    upgrading is not made an Owner. Where no root admin ever signed in, the
    entry names nobody, and the first listed person to sign in becomes the
-   Owner, as on a new instance, which writes the entry too: rolled back to
-   0.5 and forward again, neither converts anyone. A root admin who still
+   Owner, as on a new instance, which writes the entry too. After the
+   entry the list is never converted again: rolled back to 0.5 and forward,
+   or during the deploy, only a listed person 0.5 let in after it, and
+   nobody has changed since, becomes an Owner. A root admin who still
    held grants on every project of 0.4 has them converted as anyone's
    first, then becomes an Owner: `coffre migrate` lists both.
    The vault reads 0.5's entries by its keys, so keep any vault key it

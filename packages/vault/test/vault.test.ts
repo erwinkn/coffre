@@ -2773,10 +2773,13 @@ test('a vault of 0.6 turns the root admins of 0.5 into Owners once, and from the
   assert.equal((await later.verifyLog({})).ok, true, 'the log replays to every row');
 });
 
-test('a new instance says it had no root admins to convert: rolled back to 0.5 and forward again, it converts nobody', async () => {
+/** The list a deployment that ran 0.5 names, as root admins then and bootstrap Owners now. */
+const NAMED = ['root@acme.example', 'sam@acme.example', 'carol@acme.example', 'dan@acme.example'];
+
+test('a new instance says it had no root admins to convert: rolled back to 0.5 and forward again, the list is not converted again', async () => {
   await places(db.owner);
-  const named = ['root@acme.example', 'sam@acme.example', 'carol@acme.example'];
-  const first = await namingOwners(...named);
+  const DAN = 'user:dan@acme.example';
+  const first = await namingOwners(...NAMED);
   // Root, signing in first, is the bootstrap's; the vault's next call says nobody was a root admin.
   assert.equal((await first.access(ROOT)).role, 'owner');
   assert.ok((await first.admit({ actor: ROOT, principal: SAM, role: 'developer' })).ok);
@@ -2784,12 +2787,48 @@ test('a new instance says it had no root admins to convert: rolled back to 0.5 a
   assert.deepEqual(marked.map((entry) => entry.metadata), ['{"owners":[]}']);
   // Rolled back, 0.5 holds the list root admins, and gives Carol, who signs in, a row of its own.
   await rootRowOf05(CAROL);
-  // Forward again: nobody is made an Owner by the list, Sam's role stays as root set it, and Carol's as 0.5 left it.
-  const again = await namingOwners(...named);
+  // Forward again: Sam's role stays as root set it, and Dan, who never signed in, stays out.
+  // Carol, whom 0.5 let in as a root admin, stays one, an Owner.
+  const again = await namingOwners(...NAMED);
   assert.equal((await again.access(SAM)).role, 'developer');
-  assert.equal((await again.access(CAROL)).role, 'member');
-  assert.deepEqual((await store.instanceOwners(db.owner)).map((row) => row.principal), [ROOT]);
-  assert.equal((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').length, 1);
+  assert.equal((await again.access(DAN)).status, 'unknown');
+  assert.equal((await again.access(CAROL)).role, 'owner');
+  assert.deepEqual((await store.instanceOwners(db.owner)).map((row) => row.principal).sort(), [CAROL, ROOT].sort());
+  const converted = (await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').map((entry) => entry.metadata);
+  assert.deepEqual(converted, [`{"owners":["${CAROL}"]}`, '{"owners":[]}']);
+  assert.equal((await again.verifyLog({})).ok, true);
+});
+
+test('during the first deploy, a root admin a vault of 0.5 lets in after 0.6 said it had none to convert becomes an Owner', async () => {
+  await places(db.owner);
+  // An instance of 0.5 whose log has entries of the vault's, Ada's admission, but no root admin signed in yet.
+  await rowOf05(ADA, { role: 'member' }, 'user:someone@acme.example');
+  const upgraded = await namingOwners('root@acme.example', 'sam@acme.example');
+  assert.equal((await upgraded.access(ADA)).status, 'active');
+  assert.deepEqual((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').map((entry) => entry.metadata), ['{"owners":[]}']);
+  // A vault of 0.5, still serving, lets root in: a row of its own.
+  await rootRowOf05(ROOT);
+  // The next 0.6 process makes root an Owner, as 0.5 held them; Sam, who never signed in, is the list's to bootstrap, as on any instance whose root admins never had.
+  const next = await namingOwners('root@acme.example', 'sam@acme.example');
+  const root = await next.access(ROOT);
+  assert.deepEqual([root.role, root.scope], ['owner', EVERYWHERE]);
+  const [made] = (await store.vaultPage(db.owner, undefined, 50)).map(entryView).filter((entry) => entry.action === 'member.role' && entry.subject === ROOT);
+  assert.equal(made?.detail.reason, 'root-admin');
+  assert.equal((await next.access(SAM)).status, 'unknown');
+});
+
+test('a root admin a vault of 0.5 let in after the conversion, then removed by an Owner, stays removed', async () => {
+  await places(db.owner);
+  const first = await namingOwners(...NAMED);
+  assert.equal((await first.access(ROOT)).role, 'owner');
+  // Its next call says nobody was a root admin.
+  assert.equal((await first.access(ADA)).status, 'unknown');
+  // 0.5, still serving, lets Carol in; this process converted before, and root removes her.
+  await rootRowOf05(CAROL);
+  assert.ok((await first.remove({ actor: ROOT, principal: CAROL })).ok);
+  const next = await namingOwners(...NAMED);
+  assert.equal((await next.access(CAROL)).status, 'removed');
+  assert.deepEqual((await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'root-admins.convert').map((entry) => entry.metadata), ['{"owners":[]}', '{"owners":[]}']);
 });
 
 test('a root admin of 0.5 still holding grants on every project gets what `coffre migrate` says, then becomes an Owner', async () => {
@@ -2800,7 +2839,7 @@ test('a root admin of 0.5 still holding grants on every project gets what `coffr
   await everyProjectGrant(ROOT, null, 'maintainer');
   await rootRowOf05(SAM);
   const [preview] = await everyProjectPreview(db.owner, Date.now());
-  assert.deepEqual(await rootAdminsToConvert(db.owner, { authentic: () => true, forged: () => {} }), [SAM]);
+  assert.deepEqual(await rootAdminsToConvert(db.owner, { authentic: () => true, forged: () => {} }), { whole: true, rooted: [SAM] });
   assert.deepEqual([preview!.principal, preview!.conversion.role, preview!.conversion.grants.map((grant) => [grant.projectId, grant.role]).sort()], [
     ROOT, 'developer', [[other.project, 'maintainer'], [(await store.liveProjects(db.owner)).find((project) => project.id !== other.project)!.id, 'maintainer']].sort(),
   ]);

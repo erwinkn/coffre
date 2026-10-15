@@ -628,27 +628,33 @@ class VaultService implements Vault {
    * under the vault's MAC says it is done, with whom it made Owners, so from
    * then on the list only bootstraps (`#bootstrap`). An instance with no
    * root admins to convert, a new one above all, writes the entry too,
-   * naming nobody, once its log holds an entry of the vault's: rolled back
-   * to 0.5, which gives the list's people rows, and forward again, it
-   * converts nobody then either. One decision, under
-   * every listed row and then the log's head, which reads again whether
-   * another process did it first. Entries forged in its name say nothing
+   * naming nobody, once its log holds an entry of the vault's. From then
+   * on, only those a vault of 0.5 gives a root admin's row after the entry,
+   * still serving during this release's first deploy or rolled back to,
+   * become Owners, each while nobody has changed them since, and another
+   * entry says so: never the whole list again, which would make an Owner of
+   * someone demoted or removed since. One decision, under the rows of
+   * those it makes Owners and then the log's head, which reads again
+   * whether another process did it first. Entries forged in its name say nothing
    * either way, and are reported.
    */
   async #convertRootAdmins(): Promise<void> {
     const reports: NewEntry[] = [];
-    let due = await this.#rootAdminsToConvert(this.#db, reports);
+    let due = await rootAdminsToConvert(this.#db, this.#check(reports, null));
     // Not `#record`, which would settle the vault, and so convert, again.
     if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
     this.#reported(reports);
-    // Twice at most: a 0.5 vault still serving may give a root admin a row
-    // between the reads, which takes the listed rows' locks; nothing takes one away.
-    while (due !== null) {
-      const principals = due ? this.#config.bootstrapOwners.map((email) => `user:${email}`) : [];
+    // Read again under the rows and the head: a 0.5 vault still serving may
+    // give a root admin a row between the reads, which takes other locks.
+    for (let attempt = 1; due !== null && attempt <= 3; attempt += 1) {
+      const asked = due;
+      // Those the configuration names, all of them or, after an entry of its own, those 0.5 gave a row since.
+      const listed = this.#config.bootstrapOwners.map((email) => `user:${email}`);
+      const principals = asked.whole ? (asked.rooted.length > 0 ? listed : []) : listed.filter((principal) => asked.rooted.includes(principal));
       const decided = await this.#decideNow(principals, async (d) => {
         await lockLogHead(d.tx);
-        const now = await this.#rootAdminsToConvert(d.tx, d.reports);
-        if (now !== due) return { due: now };
+        const now = await rootAdminsToConvert(d.tx, this.#check(d.reports, null));
+        if (JSON.stringify(now) !== JSON.stringify(asked)) return { due: now };
         const owners: string[] = [];
         for (const principal of principals) {
           if (await this.#makeOwner(d, principal, 'root-admin')) owners.push(principal);
@@ -658,17 +664,6 @@ class VaultService implements Vault {
       });
       due = decided.ok ? decided.due : null;
     }
-  }
-
-  /**
-   * Whether this instance had root admins the vault has not turned into
-   * Owners yet: an entry of its own gave one a row, and none says it
-   * converted them. Null once one does, and when too many forged ones hide
-   * whether one does: then it converts nobody, and writes nothing.
-   */
-  async #rootAdminsToConvert(db: Queryable, reports: NewEntry[]): Promise<boolean | null> {
-    const rooted = await rootAdminsToConvert(db, this.#check(reports, null));
-    return rooted === null ? null : rooted.length > 0;
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {

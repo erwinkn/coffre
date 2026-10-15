@@ -142,17 +142,25 @@ export const ROOT_ADMINS_CONVERT = 'root-admins.convert';
 
 /**
  * Whom the vault still turns from root admins of 0.5 into Owners of the
- * whole instance, by `check`, when this version first runs: null once an
- * entry of its own says it did (`ROOT_ADMINS_CONVERT`), or when LOOK_BACK
- * forged in its name hide whether one does; otherwise those an entry of its
- * own gave a row as a root admin (`{ "rootAdmin": true }`), none on an
- * instance that had no root admin who signed in. The vault checks with its
- * MACs; `coffre migrate`, holding no key, takes every entry in its name for
- * its own, so a forged one can make it say less than the vault will do.
+ * whole instance, by `check`. Before any entry of its own says it did
+ * (`ROOT_ADMINS_CONVERT`): `whole`, everyone its configuration names, if
+ * an entry of its own gave one a row as a root admin (`{ "rootAdmin": true
+ * }`), `rooted` those it did; none on an instance that had no root admin
+ * who signed in, which then only says so. After one, `rooted` is those a
+ * vault of 0.5 gave such a row since, still serving beside this version
+ * during its first deploy or rolled back to, and nobody has changed since,
+ * the row's entry their newest: 0.5 held them root admins, while everyone
+ * else stays as 0.6 left them, someone demoted or removed meanwhile
+ * included. The vault makes Owners only of those its configuration names.
+ * Null when there is nothing to do, and when LOOK_BACK forged in its name
+ * hide whether one does. The vault checks with its MACs; `coffre migrate`,
+ * holding no key, takes every entry in its name for its own, so a forged
+ * one can make it say less than the vault will do.
  */
-export async function rootAdminsToConvert(db: Queryable, check: Authenticity): Promise<string[] | null> {
+export async function rootAdminsToConvert(db: Queryable, check: Authenticity): Promise<{ whole: boolean; rooted: string[] } | null> {
   const converted = await newestAuthentic((before) => newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
-  if (converted !== 'none' && converted !== 'forged') return null;
+  if (converted === 'unreached') return null;
+  const after = typeof converted === 'string' ? undefined : converted.seq;
   const { auditLog } = tablesOf(db);
   const rows = (await db
     .select(entryColumns(db))
@@ -163,12 +171,23 @@ export async function rootAdminsToConvert(db: Queryable, check: Authenticity): P
       eq(auditLog.actor, 'system:vault'),
       eq(auditLog.decision, 'allow'),
       like(auditLog.metadata, '%"rootAdmin":true%'),
+      after === undefined ? undefined : gt(auditLog.seq, after),
     ))
     .orderBy(asc(auditLog.seq))
-    .limit(LOOK_BACK.page)) as StoredEntry[];
-  const rooted = rows.filter((entry) => check.authentic(entry));
-  for (const entry of rows) if (!rooted.includes(entry)) check.forged(entry);
-  return [...new Set(rooted.map((entry) => entry.subjectPrincipal!))];
+    .limit(LOOK_BACK.page * LOOK_BACK.pages)) as StoredEntry[];
+  const rooted: StoredEntry[] = [];
+  for (const entry of rows) {
+    if (check.authentic(entry)) rooted.push(entry);
+    else check.forged(entry);
+  }
+  if (after === undefined) return { whole: true, rooted: [...new Set(rooted.map((entry) => entry.subjectPrincipal!))] };
+  if (rooted.length === 0) return null;
+  const untouched: string[] = [];
+  for (const entry of rooted) {
+    const newest = await newestAccess(db, entry.subjectPrincipal!, check);
+    if (typeof newest !== 'string' && newest.seq === entry.seq) untouched.push(entry.subjectPrincipal!);
+  }
+  return { whole: false, rooted: [...new Set(untouched)] };
 }
 
 /** What the vault does, when this version first runs, to one member's grants on every project of 0.4. */
