@@ -214,9 +214,10 @@ a second Owner for that.
 The instance keeps an Owner from then on. The last Owner of the whole
 instance cannot be demoted, narrowed to a scope, or removed, by anyone,
 themselves included: "you're the last Owner of the whole instance: make
-someone else an Owner first". Make another Owner before you leave. Any
-Admin or Owner of the whole instance makes and unmakes Owners, but for
-the last, and nobody changes their own role.
+someone else an Owner first". Make another Owner before you leave. Only
+an Owner of the whole instance makes someone an Owner, or changes or
+removes one; an Admin does neither. Nobody changes their own role but an
+Owner of the whole instance, who may step down, unless they are the last.
 
 Every other identity must also be an active member, which the vault
 decides. Signing in, with a provider or through Access, authenticates the

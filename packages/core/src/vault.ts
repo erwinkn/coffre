@@ -71,7 +71,11 @@ export interface Vault {
    * an earlier one are dead.
    */
   admit(input: AdmitInput): Promise<Outcome<{ created: boolean; role: InstanceRole; scope: Scope; generation: number }>>;
-  /** Remove a member: revoke every grant and refuse them until admitted again, from `generation` on. */
+  /**
+   * Remove a member: revoke every grant and refuse them until admitted
+   * again, from `generation` on. An Owner, only an Owner of the whole
+   * instance removes, and never the last.
+   */
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>>;
   /**
    * The instance's settings, as the vault's newest `settings.change` entry
@@ -334,9 +338,10 @@ export type AdmitInput = Correlation & Through & {
   /**
    * A person's instance role, and where it applies (everywhere, left out).
    * Left out, an existing member keeps theirs and a new one is a `member`.
-   * Changing it takes someone who runs the instance, about someone else,
-   * and never leaves the instance without an Owner of all of it
-   * (`last_owner`).
+   * Changing it takes someone who runs the instance, about someone else;
+   * making someone an Owner, or changing an Owner's, an Owner of the whole
+   * instance, who may change their own too. It never leaves the instance
+   * without an Owner of all of it (`last_owner`).
    */
   role?: InstanceRole;
   scope?: Scope;

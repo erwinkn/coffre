@@ -10,7 +10,7 @@ import pg from 'pg';
 
 import { managedObjects, migrateDatabase, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
-import { describeEveryProject, describeFirstRun, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
+import { describeEveryProject, describeFirstRun, describeRootAdmins, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { asSuperuser, database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -157,12 +157,47 @@ test('migrate says which accounts hold nothing, whose tokens and bindings would 
       // Reported tampered with: left as it is, which no scope reaches.
       { principal: 'token:old', before: [{ place: '*', role: 'viewer', expiresAt: null }], conversion: conversion(1), paths: { p: 'market' }, reported: true },
     ] as never,
+    rootAdmins: null,
     unsealed,
     holding: new Set(['user:ada@acme.example']),
   }).split('\n');
   assert.ok(said.includes('  service:ci-web: 1 token'));
   assert.ok(said.includes('  service:idle: 1 token and 1 trust binding, which will reach nothing: grant the account before you deploy, or reissue them after'));
   assert.ok(said.includes('  service:old: 1 token, which will reach nothing: grant the account before you deploy, or reissue it after'));
+});
+
+test('migrate says the root admins of 0.5 become Owners, after the grants on every project, and nothing once they have', () => {
+  assert.equal(describeRootAdmins(null), '');
+  assert.equal(describeRootAdmins({ whole: true, rooted: [] }), '');
+  assert.equal(describeRootAdmins({ whole: false, rooted: ['user:carol@acme.example'] }), [
+    '',
+    'A vault of 0.5 let these root admins in after this version made its Owners. When it next runs, the vault',
+    'makes each its bootstrapOwners still names an Owner of the whole instance, and nobody else on the list:',
+    '  user:carol@acme.example',
+    '',
+  ].join('\n'));
+  assert.equal(describeRootAdmins({ whole: true, rooted: ['user:root@acme.example', 'user:sam@acme.example'] }), [
+    '',
+    'Root admins are gone in this version. When it first runs, after any conversion above, the vault makes',
+    "everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:",
+    '  user:root@acme.example',
+    '  user:sam@acme.example',
+    '',
+  ].join('\n'));
+  const said = describeFirstRun({
+    everyProject: [{
+      principal: 'user:root@acme.example',
+      before: [{ place: '*', role: 'developer', expiresAt: null }],
+      conversion: { role: 'developer', scope: { projects: 'all', environments: 'all' }, grants: [], narrowed: [] },
+      paths: {},
+      reported: false,
+    }],
+    rootAdmins: { whole: true, rooted: ['user:root@acme.example'] },
+    unsealed: [],
+    holding: new Set(),
+  });
+  // What their grants become comes first, as the vault does it: then they are made Owners.
+  assert.ok(said.indexOf('→ Developer') < said.indexOf('Root admins are gone'), said);
 });
 
 test("a migration's refusal is its own sentence, not the SQL around it", () => {

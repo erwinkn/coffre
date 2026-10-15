@@ -7,17 +7,18 @@ import {
   normalScope,
   unscoped,
   type Conversion,
+  type ConversionInput,
   type InstanceRole,
   type Role,
   type Scope,
 } from '@coffre/core/access';
 import type { StoredEntry } from '@coffre/core/audit';
-import { isTombstone } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
-import { and, desc, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { tablesOf, type Queryable } from './database.ts';
-import { entryColumns, LOOK_BACK, newestAuthentic, type Authenticity, type Newest } from './log.ts';
+import { tombstone, truth } from './dialect.ts';
+import { entryColumns, LOOK_BACK, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `vault_grants` holds it: on a project (`environmentId`
@@ -93,6 +94,112 @@ export function roleColumns(role: InstanceRole, scope: Scope): StoredRole {
   return { owner: administers(role), role, scope: role === 'member' || unscoped(normal) ? null : JSON.stringify(normal) };
 }
 
+/** Every project not deleted, with its environments not deleted: what a grant on every project of 0.4 reached. */
+export async function liveProjects(db: Queryable): Promise<ConversionInput['projects']> {
+  const { projects, environments } = tablesOf(db);
+  const [found, inside] = await Promise.all([
+    db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).orderBy(asc(projects.id)),
+    db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, deleted: truth(tombstone(environments.slug)) }).from(environments).orderBy(asc(environments.id)),
+  ]);
+  return found.filter((project) => !project.deleted).map((project) => ({
+    id: project.id,
+    environments: inside.filter((environment) => environment.projectId === project.id && !environment.deleted).map(({ id, slug }) => ({ id, slug })),
+  }));
+}
+
+/**
+ * What the vault makes of a member's grants on every project of 0.4
+ * (`convertEveryProjectGrants`), from their instance role and their grants
+ * as stored, those live at `at`: the vault as it converts them, under their
+ * row's lock, and `coffre migrate` before, from the rows as they are. The
+ * role is the one their row holds: the vault converts these before it makes
+ * the root admins of 0.5 Owners.
+ */
+export function everyProjectConversion(
+  principal: string,
+  role: InstanceRole,
+  grants: readonly GrantRow[],
+  at: number,
+  projects: ConversionInput['projects'],
+): Conversion {
+  const person = principal.startsWith('user:');
+  const live = grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > at);
+  return convertEveryProjectGrants({
+    person,
+    role: person ? role : 'member',
+    everyProject: live
+      .filter((grant) => grant.projectId === null && grant.environmentId === null)
+      .map((grant) => ({ environmentSlug: grant.environmentSlug, role: grant.role as Role, expiresAt: grant.expiresAt })),
+    grants: live
+      .filter((grant) => grant.projectId !== null)
+      .map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role as Role, expiresAt: grant.expiresAt })),
+    projects,
+  });
+}
+
+/** The action of the vault's entry that says it turned the root admins of 0.5 into Owners, once. */
+export const ROOT_ADMINS_CONVERT = 'root-admins.convert';
+
+/**
+ * Whom the vault still turns from root admins of 0.5 into Owners of the
+ * whole instance, by `check`. Before any entry of its own says it did
+ * (`ROOT_ADMINS_CONVERT`): `whole`, everyone its configuration names, if
+ * an entry of its own gave one a row as a root admin (`{ "rootAdmin": true
+ * }`), `rooted` those it did; none on an instance that had no root admin
+ * who signed in, which then only says so. After one, `rooted` is those a
+ * vault of 0.5 gave such a row since, still serving beside this version
+ * during its first deploy or rolled back to, and nobody has changed since,
+ * the row's entry their newest: 0.5 held them root admins, while everyone
+ * else stays as 0.6 left them, someone demoted or removed meanwhile
+ * included. Those only of the people `named` (by default, anyone): the
+ * vault's configuration, whose people 0.5 gives one such row each at most.
+ * Null when there is nothing to do, and when LOOK_BACK in its name hide
+ * whether one does: then the vault converts nobody and writes nothing,
+ * since an entry saying it did would pass over those it did not read. The
+ * vault checks with its MACs; `coffre migrate`, holding no key, takes every
+ * entry in its name for its own, so a forged one can make it say less than
+ * the vault will do.
+ */
+export async function rootAdminsToConvert(
+  db: Queryable,
+  check: Authenticity,
+  named?: readonly string[],
+): Promise<{ whole: boolean; rooted: string[] } | null> {
+  const converted = await newestAuthentic((before) => newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
+  if (converted === 'unreached') return null;
+  const after = typeof converted === 'string' ? undefined : converted.seq;
+  if (after !== undefined && named?.length === 0) return null;
+  const { auditLog } = tablesOf(db);
+  const limit = LOOK_BACK.page * LOOK_BACK.pages;
+  const rows = (await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.action, 'member.add'),
+      eq(auditLog.actor, 'system:vault'),
+      eq(auditLog.decision, 'allow'),
+      like(auditLog.metadata, '%"rootAdmin":true%'),
+      after === undefined ? undefined : gt(auditLog.seq, after),
+      after === undefined || named === undefined ? undefined : inArray(auditLog.subjectPrincipal, [...named]),
+    ))
+    .orderBy(asc(auditLog.seq))
+    .limit(limit)) as StoredEntry[];
+  const rooted: StoredEntry[] = [];
+  for (const entry of rows) {
+    if (check.authentic(entry)) rooted.push(entry);
+    else check.forged(entry);
+  }
+  if (after === undefined) return { whole: true, rooted: [...new Set(rooted.map((entry) => entry.subjectPrincipal!))] };
+  if (rooted.length === 0 || rows.length === limit) return null;
+  const untouched: string[] = [];
+  for (const entry of rooted) {
+    const newest = await newestAccess(db, entry.subjectPrincipal!, check);
+    if (typeof newest !== 'string' && newest.seq === entry.seq) untouched.push(entry.subjectPrincipal!);
+  }
+  return { whole: false, rooted: [...new Set(untouched)] };
+}
+
 /** What the vault does, when this version first runs, to one member's grants on every project of 0.4. */
 export type EveryProjectPreview = {
   principal: string;
@@ -124,22 +231,19 @@ export type EveryProjectPreview = {
  */
 export async function everyProjectPreview(db: Queryable, at: number): Promise<EveryProjectPreview[]> {
   const { vaultMembers, projects, environments } = tablesOf(db);
-  const held = (await readGrants(db, { liveAt: at })).filter((grant) => grant.projectId === null && grant.environmentId === null);
+  const grants = await readGrants(db, { liveAt: at });
+  const held = grants.filter((grant) => grant.projectId === null && grant.environmentId === null);
   if (held.length === 0) return [];
   const holders = [...new Set(held.map((grant) => grant.principal))].sort();
-  const [members, grants, places, inside, tampered] = await Promise.all([
+  const [members, places, inside, live, tampered] = await Promise.all([
     db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope }).from(vaultMembers),
-    readGrants(db, { liveAt: at }),
     db.select({ id: projects.id, slug: projects.slug }).from(projects),
     db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug }).from(environments),
+    liveProjects(db),
     // The vault's own rule (`reportStands`), over every entry in its name, for everyone in two queries.
     tamperedMembers(db),
   ]);
-  // A deleted place keeps its row under a tombstone's slug, its own or its project's: no grant reaches it.
-  const live = places.filter((project) => !isTombstone(project.slug)).map((project) => ({
-    id: project.id,
-    environments: inside.filter((environment) => environment.projectId === project.id && !isTombstone(environment.slug)).map(({ id, slug }) => ({ id, slug })),
-  }));
+  // A deleted place keeps its row under a tombstone's slug, its own or its project's, named as it was.
   const paths = Object.fromEntries(places.flatMap((project) => [
     [project.id, project.slug],
     ...inside.filter((environment) => environment.projectId === project.id).map((environment) => [environment.id, `${project.slug}/${environment.slug}`]),
@@ -151,15 +255,7 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
     return [{
       principal,
       before: theirs.map((grant) => ({ place: grant.environmentSlug === null ? '*' : `*/${grant.environmentSlug}`, role: grant.role, expiresAt: grant.expiresAt })),
-      conversion: convertEveryProjectGrants({
-        person: principal.startsWith('user:'),
-        role: principal.startsWith('user:') ? storedRole(member).role : 'member',
-        everyProject: theirs.map((grant) => ({ environmentSlug: grant.environmentSlug, role: grant.role as Role, expiresAt: grant.expiresAt })),
-        grants: grants
-          .filter((grant) => grant.principal === principal && grant.projectId !== null)
-          .map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role as Role, expiresAt: grant.expiresAt })),
-        projects: live,
-      }),
+      conversion: everyProjectConversion(principal, storedRole(member).role, grants.filter((grant) => grant.principal === principal), at, live),
       paths,
       reported: tampered.has(principal),
     }];

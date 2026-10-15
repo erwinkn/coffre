@@ -307,7 +307,9 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
 
 /**
  * Change role and Remove, behind one menu, for those who run the instance;
- * Remove, for a service account you manage. Nobody changes their own role.
+ * Remove, for a service account you manage. Nobody changes their own role
+ * but an Owner of the whole instance, who alone changes or removes an
+ * Owner: to anyone else, an Owner's row says so instead.
  */
 export function PrincipalActions({
   principal,
@@ -331,6 +333,15 @@ export function PrincipalActions({
   const self = me?.type === principal.principalType && me.id === principal.principalId;
   const yours = principal.principalType === 'service' && principal.managed === true;
   if (!(capabilities.runsInstance || yours)) return null;
+  if (principal.instanceRole === 'owner' && !capabilities.ownsInstance) {
+    return (
+      <Toggletip label="Only an Owner of the whole instance changes or removes an Owner." align="end">
+        <button type="button" className={trigger} aria-label={`Why ${principal.principalId} can't be changed`}>
+          <Lock size={14} />
+        </button>
+      </Toggletip>
+    );
+  }
 
   return (
     <>
@@ -343,7 +354,7 @@ export function PrincipalActions({
           {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
         </Menu.Trigger>
         <MenuPopup align="end">
-          {principal.principalType === 'user' && !self && capabilities.runsInstance && (
+          {principal.principalType === 'user' && (!self || capabilities.ownsInstance) && capabilities.runsInstance && (
             <>
               <Menu.Item
                 className="menu-item"

@@ -179,16 +179,33 @@ test('a service account holds project grants only, and no grant is on every proj
 });
 
 test('the last Owner of the whole instance stays one: 409, saying what to do first, until another is', async () => {
-  const last = { status: 409, reason: 'last_owner' };
-  await assert.rejects(root.members.remove(`user:${ROOT}`), { ...last, message: "you're the last Owner of the whole instance: make someone else an Owner first" });
-  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), { ...last, message: `${ROOT} is the last Owner of the whole instance: make someone else an Owner first` });
-  await assert.rejects(boss.members.remove(`user:${ROOT}`), last);
+  const last = { status: 409, reason: 'last_owner', message: "you're the last Owner of the whole instance: make someone else an Owner first" };
+  await assert.rejects(root.members.remove(`user:${ROOT}`), last);
+  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'admin' }), last);
   // An Owner of one project owns no instance.
   await root.members.add(ADA, { role: 'owner', scope: { projects: { only: ['market'] } } });
-  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), last);
-  // Another Owner of all of it, and an Admin may take root's away.
+  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'admin' }), last);
+  // Another Owner of all of it, and root may step down.
   await root.members.add(ADA, { role: 'owner' });
-  assert.equal((await boss.members.add(`user:${ROOT}`, { role: 'admin' })).instanceRole, 'admin');
+  assert.equal((await root.members.add(`user:${ROOT}`, { role: 'admin' })).instanceRole, 'admin');
+  await assert.rejects(ada.members.remove(ADA), last);
+});
+
+test('only an Owner of the whole instance makes or unmakes an Owner: an Admin of all of it is refused, 403', async () => {
+  const refused = { status: 403, reason: 'not_allowed' };
+  await assert.rejects(boss.members.add(ADA, { role: 'owner' }), refused);
+  await assert.rejects(boss.members.add(ADA, { role: 'owner', scope: { projects: { only: ['market'] } } }), refused);
+  await assert.rejects(boss.members.add('user:new@acme.example', { role: 'owner' }), refused);
+  await assert.rejects(boss.members.add(`user:${ROOT}`, { role: 'admin' }), refused);
+  await assert.rejects(boss.members.remove(`user:${ROOT}`), refused);
+  await root.members.add(LEAD, { role: 'owner', scope: { projects: { only: ['billing'] } } });
+  await assert.rejects(boss.members.add(LEAD, { role: 'developer' }), refused);
+  await assert.rejects(boss.members.remove(LEAD), refused);
+  // Root makes one, and the new Owner unmakes another, as any Owner of the whole instance may.
+  await root.members.add(ADA, { role: 'owner' });
+  assert.equal((await ada.members.add(LEAD, { role: 'developer' })).instanceRole, 'developer');
+  assert.equal((await boss.members.add(LEAD, { role: 'auditor' })).instanceRole, 'auditor', 'anyone else\'s role is still an Admin\'s to set');
+  assert.equal((await root.members.access(`user:${ROOT}`)).instanceRole, 'owner');
 });
 
 test("a project's access list shows who reaches it by their instance role, with no grant", async () => {

@@ -1,4 +1,4 @@
-import { administers, makesProjects } from '@coffre/core/access';
+import { administers, makesProjects, ownsInstance } from '@coffre/core/access';
 
 import type { Me, Permission, ProjectSummary } from '../shared/models';
 
@@ -19,6 +19,11 @@ export type UiCapabilities = {
    */
   runsInstance: boolean;
   /**
+   * Owners whose scope narrows nothing: they alone make someone an Owner,
+   * and change or remove one, their own role included.
+   */
+  ownsInstance: boolean;
+  /**
    * Who sets up service accounts: those who run the instance, and a person
    * who holds access somewhere the instance's setting takes in. The Service
    * accounts page lists them the ones they manage.
@@ -31,6 +36,7 @@ export type UiCapabilities = {
 const NONE: UiCapabilities = {
   canManageGrants: false,
   runsInstance: false,
+  ownsInstance: false,
   setsUpServices: false,
   canReadAudit: false,
   canCreateProject: false,
@@ -50,6 +56,7 @@ export function deriveUiCapabilities(
     // grant controls on each project page.
     canManageGrants: administers(role),
     runsInstance: me.runsInstance,
+    ownsInstance: ownsInstance({ role, scope: me.scope }),
     setsUpServices: me.setsUpServices,
     canReadAudit: me.canReadAudit,
     // A new project is one no `only` list names: as the server decides,
