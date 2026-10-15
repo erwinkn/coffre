@@ -656,7 +656,9 @@ class VaultService implements Vault {
    * when they are one already, so a recovery left in place makes them one
    * again only after someone demoted them, until it ends. Only whoever
    * deploys the vault sets it, and they hold its keys already. Under their
-   * row and the log's head, as the bootstrap.
+   * row and the log's head, as the bootstrap, where the clock is read
+   * again: a decision kept waiting for the locks past `until` makes nobody
+   * an Owner.
    */
   async #recoverOwner(): Promise<void> {
     const recovery = this.#config.recoverOwner;
@@ -664,6 +666,7 @@ class VaultService implements Vault {
     const principal = `user:${recovery.email}`;
     await this.#decideNow([principal], async (d) => {
       await lockLogHead(d.tx);
+      if ((await this.#now(d.tx)) >= recovery.until) return;
       await this.#makeOwner(d, principal, 'recovery');
     });
   }

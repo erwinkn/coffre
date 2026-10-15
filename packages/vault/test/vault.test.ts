@@ -2754,6 +2754,32 @@ test('a recovery makes the person it names an Owner of the whole instance though
   assert.equal((await deployed.verifyLog({})).ok, true, 'the log replays to every row');
 });
 
+test('a recovery kept waiting for the log\'s head past its until makes nobody an Owner', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  const until = Date.now() + 60 * 60_000;
+  const deployed = await recovering(w, 'omar@acme.example', until);
+  const holder = await db.connect();
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let locked = () => {};
+  const isLocked = new Promise<void>((resolve) => (locked = resolve));
+  const holding = holder.transaction(async (tx) => {
+    await lockLogHead(tx);
+    locked();
+    await held;
+  });
+  await isLocked;
+  // Its first call checks the clock, then waits on the head, which a database writer could hold this long.
+  const asked = deployed.access(ADA);
+  await sleep(300);
+  w.clock.offset = until - Date.now() + 1;
+  release();
+  await holding;
+  assert.equal((await asked).status, 'unknown');
+  assert.equal(await store.member(db.owner, OMAR), undefined, 'over by the time it held the locks');
+  assert.deepEqual((await ownership(w)).filter(([, , , reason]) => reason === 'recovery'), []);
+});
+
 test('a recovery admits a person the instance never had, and brings back one an Owner removed', async () => {
   const w = await world();
   const until = Date.now() + 60 * 60_000;
