@@ -977,8 +977,13 @@ function SecretRow({
     if (!editing) setBase(null);
   }, [editing]);
 
+  // A copy retried while its first read is still out starts a second one; only the
+  // latest may speak for the row, so an old failure cannot sit under a newer success.
+  const latestRead = useRef(0);
   async function readValue({ show = true } = {}): Promise<string | null> {
     if (shown !== null) return shown.value;
+    const read = ++latestRead.current;
+    const latest = () => read === latestRead.current;
     setRevealing(true);
     // Cleared as the read starts, not as it ends: a copy refused meanwhile has its say.
     setError(null);
@@ -988,14 +993,16 @@ function SecretRow({
       if (show) setReveal({ value, version: readVersion, at: Date.now() });
       return value;
     } catch (failure) {
-      setError(
-        failure instanceof CoffreError
-          ? failureMessage(failure)
-          : 'The request could not be sent. Nothing was read.',
-      );
+      if (latest()) {
+        setError(
+          failure instanceof CoffreError
+            ? failureMessage(failure)
+            : 'The request could not be sent. Nothing was read.',
+        );
+      }
       return null;
     } finally {
-      setRevealing(false);
+      if (latest()) setRevealing(false);
     }
   }
 
