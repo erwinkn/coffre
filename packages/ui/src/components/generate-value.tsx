@@ -260,7 +260,7 @@ function GenerateForm({
           />
           <NamedValue
             label="Public key"
-            format="raw, base64"
+            format="SPKI, base64"
             name={publicKey}
             onName={setPublicName}
             value={generated?.publicKey ?? null}

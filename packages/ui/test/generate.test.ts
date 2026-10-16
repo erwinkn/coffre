@@ -98,21 +98,22 @@ test('an AES-GCM key is the raw key, base64, of its size, and imports back', asy
   }
 });
 
-test('a key pair is its private key in PKCS #8 and its public key raw, both base64, which work together', async () => {
-  // The uncompressed point: one byte, then x and y at the curve's size.
-  const rawLength = { 'P-256': 65, 'P-384': 97, 'P-521': 133 };
+test('a key pair is its private key in PKCS #8 and its public key in SPKI, both base64, which work together', async () => {
+  // A DER SubjectPublicKeyInfo: the uncompressed point (one byte, then x and y at the
+  // curve's size) behind a header that names the algorithm and the curve.
+  const spkiLength = { 'P-256': 91, 'P-384': 120, 'P-521': 158 };
   for (const { algorithm, curve } of PAIRS) {
     const { value, publicKey } = await generate({ kind: 'pair', algorithm, curve });
     assert.ok(publicKey !== undefined);
-    const raw = Buffer.from(publicKey, 'base64');
-    assert.equal(raw.length, rawLength[curve], `${algorithm} ${curve}`);
-    assert.equal(raw[0], 0x04);
+    const spki = Buffer.from(publicKey, 'base64');
+    assert.equal(spki.length, spkiLength[curve], `${algorithm} ${curve}`);
+    assert.equal(spki[0], 0x30);
 
     const params = { name: algorithm, namedCurve: curve };
     const privateUsages: KeyUsage[] = algorithm === 'ECDSA' ? ['sign'] : ['deriveBits'];
     const privateKey = await crypto.subtle.importKey('pkcs8', Buffer.from(value, 'base64'), params, false, privateUsages);
     const publicUsages: KeyUsage[] = algorithm === 'ECDSA' ? ['verify'] : [];
-    const imported = await crypto.subtle.importKey('raw', raw, params, false, publicUsages);
+    const imported = await crypto.subtle.importKey('spki', spki, params, false, publicUsages);
     if (algorithm === 'ECDSA') {
       const signing = { name: 'ECDSA', hash: 'SHA-256' };
       const data = new TextEncoder().encode('coffre');

@@ -116,7 +116,7 @@ export async function generate(recipe: Recipe): Promise<Generated> {
       );
       return {
         value: toBase64(await subtle().exportKey('pkcs8', pair.privateKey)),
-        publicKey: toBase64(await subtle().exportKey('raw', pair.publicKey)),
+        publicKey: toBase64(await subtle().exportKey('spki', pair.publicKey)),
       };
     }
   }

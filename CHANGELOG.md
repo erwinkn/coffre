@@ -134,8 +134,8 @@ value. It makes:
   bits it holds: 32 bytes are 43 characters of base62, 256 bits.
 - **an AES-GCM key**, 256 or 128 bits: the raw key, base64.
 - **a key pair**, ECDSA or ECDH on P-521, P-384 or P-256: the private key
-  (PKCS #8, base64) is the row's value, and the public key (the raw point,
-  base64) is saved with it, under a name of its own that follows the
+  (PKCS #8, base64) is the row's value, and the public key
+  (SPKI, base64, as the private key is PKCS #8) is saved with it, under a name of its own that follows the
   first (`JWT_PRIVATE_KEY` gives `JWT_PUBLIC_KEY`). The public key is part
   of the row's edit, as the row says under its value: the row saves, or
   is cancelled, whole, in one write, so a new private key never lands
