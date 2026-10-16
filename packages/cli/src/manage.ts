@@ -23,6 +23,9 @@ const STDIO: Io = { out: process.stdout, err: process.stderr };
 /** A command used wrongly: the CLI says why, then the command's usage, and exits 2. */
 export class UsageError extends Error {}
 
+/** A check that ran and failed, `missing --check`: the CLI says why and exits 1, once what the command printed is out. */
+export class CheckFailed extends Error {}
+
 type Options = NonNullable<Parameters<typeof parseArgs>[0]>['options'];
 
 /** Strict options and positionals, each positional named: too few or too many is a usage error. */
@@ -309,7 +312,7 @@ export async function missing(connect: () => CoffreClient, args: string[], io: I
   // What the gate says once the list is out: on stderr, with exit 1, so a CI step stops on it.
   const incomplete = () => {
     const count = result.missing.length;
-    return new Error(`${path} lacks ${count === 1 ? 'a key' : `${count} keys`} its sibling environments have: ${hint}`);
+    return new CheckFailed(`${path} lacks ${count === 1 ? 'a key' : `${count} keys`} its sibling environments have: ${hint}`);
   };
   if (values.json) {
     asJson(io, values.dismissed ? result.dismissed : result.missing);

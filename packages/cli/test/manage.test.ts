@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +11,7 @@ import { byFolder, createClient, CoffreError } from '@coffre/client';
 import { EVERYWHERE } from '@coffre/core/access';
 
 import * as manage from '../src/manage.ts';
+import { signedInWithToken } from './fakes.ts';
 
 type Call = { method: string; path: string; body: unknown };
 
@@ -322,7 +326,7 @@ test('missing --check is a gate: it lists what is missing and fails, passes when
   let listing = { missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }], dismissed: [] as unknown[] };
   const { connect, written, io } = fixture(() => listing);
   await assert.rejects(manage.missing(connect, ['market/dev', '--check'], io), (error: Error) =>
-    !(error instanceof manage.UsageError) && /^market\/dev lacks a key its sibling environments have: `coffre set market\/dev\/<KEY>` adds one/.test(error.message));
+    error instanceof manage.CheckFailed && /^market\/dev lacks a key its sibling environments have: `coffre set market\/dev\/<KEY>` adds one/.test(error.message));
   assert.match(written.out, /^SENTRY_DSN\s+in prod, staging\n$/, 'the key, and the advice once, in the error');
   written.out = '';
   await assert.rejects(manage.missing(connect, ['market/dev', '--check', '--json'], io), /lacks a key/);
@@ -333,6 +337,36 @@ test('missing --check is a gate: it lists what is missing and fails, passes when
   await manage.missing(connect, ['market/dev', '--check'], io);
   assert.equal(written.out, 'market/dev has every key of its sibling environments, but 1 dismissed: --dismissed lists them\n');
   await assert.rejects(manage.missing(connect, ['market/dev', '--check', '--dismissed'], io), manage.UsageError);
+});
+
+test('the CLI exits 1 on missing --check only once all it printed is out, through a pipe too', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'coffre-missing-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  // Far past a pipe's buffer: exiting at once would cut the JSON short.
+  const missing = Array.from({ length: 2000 }, (_, i) => ({ key: `KEY_${String(i).padStart(4, '0')}`, in: ['prod', 'staging'], folder: null }));
+  const server = createServer((req, res) => {
+    assert.equal(req.url, '/api/projects/market/dev/missing');
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ missing, dismissed: [] }));
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  signedInWithToken(directory, `http://127.0.0.1:${address.port}`, 'coffre_svc_test');
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), HOME: directory, COFFRE_STATE_DIR: directory };
+  for (const json of [true, false]) {
+    const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'missing', 'market/dev', '--check', ...(json ? ['--json'] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
+    child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1, stderr);
+    assert.match(stderr, /^coffre: market\/dev lacks 2000 keys its sibling environments have: /);
+    if (json) assert.deepEqual(JSON.parse(stdout), missing);
+    else assert.equal(stdout.split('\n').length, missing.length + 1);
+  }
 });
 
 test('lists group by folder: the unfiled first, then each folder by name, each in its own order', () => {
