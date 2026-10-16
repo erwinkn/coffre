@@ -34,16 +34,21 @@ export type ResolvedVaultConfig = {
 };
 
 /**
- * A key the vault mints where it would read a value: whoever reads
- * `at` gets a fresh credential from `from`, which holds its root.
+ * Keys the vault mints where it would read values: whoever reads `at`
+ * gets a fresh credential from `from`, which holds its root, each of its
+ * fields under the key `keys` names it by.
  *
- *   { at: 'infra/ci', key: 'GITHUB_TOKEN', from: release.tokens({ account: 'acme', repositories: ['infra'], permissions: { contents: 'write' } }) }
+ *   { at: 'infra/ci', from: release.tokens({ account: 'acme', repositories: ['infra'], permissions: { contents: 'write' } }),
+ *     keys: { token: 'GITHUB_TOKEN' } }
+ *   { at: 'web/prod', from: assets.credentials({ bucket: 'web-assets', scope: 'object-read-write', ttlSeconds: 900 }),
+ *     keys: { accessKeyId: 'R2_ACCESS_KEY_ID', secretAccessKey: 'R2_SECRET_ACCESS_KEY', sessionToken: 'R2_SESSION_TOKEN' } }
  */
 export type MintedKey = {
   /** `project/environment`, by slug. */
   at: string;
-  key: string;
   from: Minter;
+  /** Every field the minter mints, each to the key it is read as. */
+  keys: Readonly<Record<string, string>>;
 };
 
 /**
@@ -243,14 +248,22 @@ export function checkOwners(emails: readonly string[]): string[] {
 function checkMinted(minted: readonly MintedKey[]): MintedKey[] {
   const seen = new Set<string>();
   return minted.map((entry) => {
-    const { at, key, from } = entry;
+    const { at, keys, from } = entry;
     if (typeof at !== 'string' || !/^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(at)) {
       throw new Error(`a minted key's place (minted[].at) must be project/environment, by slug; got "${String(at)}"`);
     }
-    if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`minted key ${at}/${String(key)} must be a variable's name`);
-    if (seen.has(`${at}/${key}`)) throw new Error(`${at}/${key} is minted twice`);
-    seen.add(`${at}/${key}`);
-    if (typeof from?.mint !== 'function' || typeof from.provider !== 'string') throw new Error(`minted key ${at}/${key} needs a minter, such as githubApp(…).tokens(…)`);
-    return { at, key, from };
+    if (typeof from?.mint !== 'function' || typeof from.provider !== 'string' || !Array.isArray(from.fields)) {
+      throw new Error(`what ${at} mints needs a minter, such as githubApp(…).tokens(…)`);
+    }
+    const named = Object.keys(keys ?? {}).sort();
+    if (named.join() !== [...from.fields].sort().join()) {
+      throw new Error(`what ${at} mints from ${from.provider} names its keys (minted[].keys) for exactly ${from.fields.join(', ')}`);
+    }
+    for (const key of Object.values(keys)) {
+      if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`minted key ${at}/${String(key)} must be a variable's name`);
+      if (seen.has(`${at}/${key}`)) throw new Error(`${at}/${key} is minted twice`);
+      seen.add(`${at}/${key}`);
+    }
+    return { at, keys: { ...keys }, from };
   });
 }

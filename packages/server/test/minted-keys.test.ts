@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, sign as signWith, type KeyObject } fro
 
 import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
 import { github, githubApp, signin, type BindingClaims } from '@coffre/core/identity';
+import { r2 } from '@coffre/core/mint';
 import type { Database } from '@coffre/db';
 import { asc, eq } from 'drizzle-orm';
 
@@ -72,6 +73,8 @@ let vault: TestVault;
 let deps: FixtureDeps;
 let runtime: CoffreRuntime;
 const ui = {} as Pages;
+/** Run while `infra/hook` mints, between the vault's decision and its outcome. */
+let duringMint: (() => Promise<void>) | undefined;
 
 before(async () => {
   db = await openTestDatabase();
@@ -83,7 +86,23 @@ before(async () => {
   idp.githubApp.permissions = { ...idp.githubApp.permissions, contents: 'write' };
   const release = githubApp({ appId: idp.githubApp.appId, privateKey: idp.githubApp.privateKey, apiUrl: idp.githubApp.options.apiUrl });
   vault = testVault([ROOT], {
-    minted: [{ at: 'infra/ci', key: 'GITHUB_TOKEN', from: release.tokens({ account: 'acme', repositories: ['infra'], permissions: { contents: 'write' } }) }],
+    minted: [
+      { at: 'infra/ci', keys: { token: 'GITHUB_TOKEN' }, from: release.tokens({ account: 'acme', repositories: ['infra'], permissions: { contents: 'write' } }) },
+      {
+        at: 'infra/assets',
+        keys: { accessKeyId: 'R2_ACCESS_KEY_ID', secretAccessKey: 'R2_SECRET_ACCESS_KEY', sessionToken: 'R2_SESSION_TOKEN' },
+        from: r2({ accountId: 'a'.repeat(32), accessKeyId: 'parent-key-id', secretAccessKey: 'b'.repeat(64) })
+          .credentials({ bucket: 'web-assets', scope: 'object-read-write', prefixes: ['releases/'], ttlSeconds: 900 }),
+      },
+      {
+        at: 'infra/hook',
+        keys: { value: 'HOOKED' },
+        from: { provider: 'test', fields: ['value'], scope: {}, mint: async () => {
+          await duringMint?.();
+          return { values: { value: 'hooked' }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
+        } },
+      },
+    ],
   });
 });
 
@@ -111,9 +130,12 @@ beforeEach(async () => {
   await root.projects.create('infra', { name: 'Infra' });
   await root.environments.create('infra/ci', { name: 'CI' });
   await root.environments.create('infra/dev', { name: 'Dev' });
+  await root.environments.create('infra/assets', { name: 'Assets' });
+  await root.environments.create('infra/hook', { name: 'Hook' });
+  duringMint = undefined;
   await root.secrets.set('infra/ci', { NPM_TOKEN: 'npm_stored' });
   await root.secrets.set('infra/dev', { NPM_TOKEN: 'npm_dev' });
-  await root.access.set(MEMBER, { 'infra/ci': 'viewer', 'infra/dev': 'viewer' });
+  await root.access.set(MEMBER, { 'infra/ci': 'viewer', 'infra/dev': 'viewer', 'infra/assets': 'viewer', 'infra/hook': 'viewer' });
   const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: RELEASE, label: 'release', replaces: [] }, { dryRun: false });
   assert.ok('binding' in made);
 });
@@ -181,7 +203,7 @@ test('a run that reads infra/ci gets GITHUB_TOKEN freshly minted, for acme/infra
     assert.equal(typeof outcome.metadata.expiresAt, 'string');
   }
   const token = first.values.GITHUB_TOKEN!;
-  assert.equal(outcomes[0]!.metadata.fingerprint, createHash('sha256').update(token).digest('hex').slice(0, 16), 'a token found in a log leads back to its mint');
+  assert.deepEqual(outcomes[0]!.metadata.fingerprints, { GITHUB_TOKEN: createHash('sha256').update(token).digest('hex').slice(0, 16) }, 'a token found in a log leads back to its mint');
   const everything = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog);
   assert.ok(everything.every((row) => !row.metadata.includes(token) && !row.metadata.includes(second.values.GITHUB_TOKEN!)), 'no entry holds a token');
 
@@ -192,6 +214,19 @@ test('a run that reads infra/ci gets GITHUB_TOKEN freshly minted, for acme/infra
   // The vault's own log, the new entries in it, still verifies whole, and signs.
   assert.deepEqual((await deps.vault.verifyLog({})).ok, true);
   assert.equal((await deps.vault.checkpoint()).ok, true);
+});
+
+test('one mint, several keys: R2 credentials are three, signed in the vault, logged once, each fingerprinted', async () => {
+  const issued = idp.githubApp.tokensIssued;
+  const { status, values } = await reveal(await signIn(), 'infra/assets');
+  assert.equal(status, 200);
+  assert.deepEqual(Object.keys(values).sort(), ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_SESSION_TOKEN']);
+  assert.equal(values.R2_ACCESS_KEY_ID, 'parent-key-id');
+  assert.equal(idp.githubApp.tokensIssued, issued, 'no GitHub, and no network');
+  const [outcome] = await logged('credential.minted');
+  assert.equal(outcome!.metadata.provider, 'r2');
+  assert.deepEqual(outcome!.metadata.keys, ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_SESSION_TOKEN']);
+  assert.deepEqual(Object.keys(outcome!.metadata.fingerprints as object).sort(), ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_SESSION_TOKEN']);
 });
 
 test('one key alone mints too; a person reads it as they would a value', async () => {
@@ -209,6 +244,20 @@ test('no read, no mint: a run whose service lost infra/ci is refused before GitH
   assert.equal((await reveal(credential, 'infra/ci')).status, 403);
   assert.equal(idp.githubApp.tokensIssued, issued);
   assert.equal((await logged('credential.mint')).length, 0, "the app's own check refuses first");
+});
+
+test('a service that loses its grant while its credential is minted gets none of it: the outcome says withheld', async () => {
+  const credential = await signIn();
+  duringMint = async () => {
+    await clientFor(deps, ROOT).access.set(MEMBER, { 'infra/hook': null });
+  };
+  const { status } = await reveal(credential, 'infra/hook');
+  assert.equal(status, 403);
+  const [intent] = await logged('credential.mint');
+  const [outcome] = await logged('credential.minted');
+  assert.equal(intent!.decision, 'allow');
+  assert.equal(outcome!.decision, 'deny');
+  assert.equal(outcome!.code, 'withheld');
 });
 
 test('GitHub down: the whole read fails, 503, and the log shows the intent and why it came to nothing', async () => {

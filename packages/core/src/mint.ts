@@ -7,7 +7,7 @@
  *   const release = githubApp({ appId: env.RELEASE_APP_ID, privateKey: env.RELEASE_APP_KEY });
  *   vault(env => ({
  *     kek, owners,
- *     minted: [{ at: 'infra/ci', key: 'GITHUB_TOKEN',
+ *     minted: [{ at: 'infra/ci', keys: { token: 'GITHUB_TOKEN' },
  *                from: release.tokens({ account: 'acme', repositories: ['infra'], permissions: { contents: 'write' } }) }],
  *   }))
  *
@@ -19,6 +19,8 @@
 export interface Minter {
   /** What kind of credential: `github-app`, `r2`. */
   readonly provider: string;
+  /** What each mint holds, which the deployment names keys for: `token`; `accessKeyId`, `secretAccessKey`, `sessionToken`. */
+  readonly fields: readonly string[];
   /**
    * What it mints, none of it secret, as the log records it with each
    * mint and the pages show it: `{ app: '1001', account: 'acme',
@@ -30,7 +32,8 @@ export interface Minter {
 }
 
 export type Minted = {
-  value: string;
+  /** One value each of the minter's `fields`. */
+  values: Record<string, string>;
   /** ISO 8601. */
   expiresAt: string;
   /** What the provider says it granted, when it says: logged beside the scope asked for. */
@@ -44,3 +47,5 @@ export class MintUnavailable extends Error {
     this.name = 'MintUnavailable';
   }
 }
+
+export { r2, type R2Options, type R2Scope } from './r2.ts';

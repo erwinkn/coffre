@@ -148,6 +148,7 @@ export class GitHubApp {
     const fixed = { account, repositories: [...repositories].sort(), permissions: Object.fromEntries(asked.sort(([a], [b]) => a.localeCompare(b))) };
     return {
       provider: 'github-app',
+      fields: ['token'],
       scope: { app: this.appId, ...fixed },
       mint: (signal) => this.#mint(fixed, signal),
     };
@@ -172,7 +173,7 @@ export class GitHubApp {
       const granted = Array.isArray(answer.repositories)
         ? { repositories: answer.repositories.flatMap((each) => (typeof record(each).name === 'string' ? [record(each).name] : [])) }
         : {};
-      return { value: answer.token, expiresAt: new Date(expiresAt).toISOString(), granted: { permissions: answer.permissions ?? null, ...granted } };
+      return { values: { token: answer.token }, expiresAt: new Date(expiresAt).toISOString(), granted: { permissions: answer.permissions ?? null, ...granted } };
     } catch (error) {
       if (error instanceof GitHubAppUnavailable) throw new MintUnavailable(error.message, { cause: error });
       throw error;

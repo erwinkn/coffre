@@ -1157,7 +1157,7 @@ class VaultService implements Vault {
     const place = await store.environmentPath(this.#db, input.environmentId);
     if (place === undefined || place.projectId !== input.projectId) return { ok: true, minted: [] };
     const path = `${place.project}/${place.environment}`;
-    const keys = configured.filter((each) => each.at === path && (input.key == null || each.key === input.key));
+    const keys = configured.filter((each) => each.at === path && (input.key == null || Object.values(each.keys).includes(input.key)));
     if (keys.length === 0) return { ok: true, minted: [] };
 
     const intent = randomUUID();
@@ -1172,7 +1172,8 @@ class VaultService implements Vault {
       operationId: input.operationId ?? null,
       requestId: input.requestId ?? null,
       metadata: JSON.stringify({
-        subject: `${path}/${keys[item]!.key}`,
+        subject: path,
+        keys: Object.values(keys[item]!.keys),
         provider: keys[item]!.from.provider,
         scope: keys[item]!.from.scope,
         purpose: input.purpose,
@@ -1214,11 +1215,15 @@ class VaultService implements Vault {
       const minted = results.map((result) => (result as PromiseFulfilledResult<Minted>).value);
       d.log.push(...minted.map((each, i) => outcome(i, 'allow', null, {
         // Enough to tell, from a credential found in a log, which mint it was; not enough to use it.
-        fingerprint: createHash('sha256').update(each.value).digest('hex').slice(0, 16),
+        fingerprints: Object.fromEntries(Object.entries(keys[i]!.keys).map(([field, key]) => [key, fingerprint(each.values[field]!)])),
         expiresAt: each.expiresAt,
         ...(each.granted === undefined ? {} : { granted: each.granted }),
       })));
-      return { minted: minted.map((each, i) => ({ key: keys[i]!.key, value: each.value, expiresAt: each.expiresAt, provider: keys[i]!.from.provider })) };
+      return {
+        minted: minted.flatMap((each, i) => Object.entries(keys[i]!.keys)
+          .filter(([, key]) => input.key == null || key === input.key)
+          .map(([field, key]) => ({ key, value: each.values[field]!, expiresAt: each.expiresAt, provider: keys[i]!.from.provider }))),
+      };
     });
   }
 
@@ -2433,6 +2438,11 @@ const ACCESS = new Set<string>(ACCESS_ACTIONS);
 
 /** Checkpoint signatures checked at once, in a full verification. */
 const SIGNATURES_AT_ONCE = 256;
+
+/** The first 16 hex digits of a credential's SHA-256: which mint it came from, and nothing to use. */
+function fingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
 
 /** How long all of one call's mints may take together; GitHub's own deadline is 10 seconds a request. */
 const MINT_BUDGET_MS = 15_000;
