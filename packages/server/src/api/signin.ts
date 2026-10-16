@@ -448,8 +448,8 @@ export class SigninService {
 
   /**
    * The member that one of these verified emails names, as the vault knows
-   * them: asking makes one the vault's configuration names an Owner, while
-   * the instance has none (`bootstrapOwners`). The provider's primary address is tried first.
+   * them: asking makes one the vault's configuration names an Owner, if
+   * they are not one yet (`owners`). The provider's primary address is tried first.
    * Principal ids are lowercase, and so are the emails a verified profile
    * carries.
    */
