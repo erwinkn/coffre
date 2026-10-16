@@ -363,6 +363,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@coffre/conformance':
+        specifier: workspace:*
+        version: link:../conformance
       '@coffre/vault':
         specifier: workspace:*
         version: link:../vault

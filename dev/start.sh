@@ -37,6 +37,16 @@ export COFFRE_STATE_DIR="$state_dir"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 
+# The dev IdP's GitHub App's private key, PKCS #1 as GitHub downloads one:
+# made once, local, and handed to the dev IdP and to the app.
+github_app_key="$state_dir/github-app.pem"
+if [ ! -f "$github_app_key" ]; then
+    mkdir -p "$state_dir"
+    node -e 'process.stdout.write(require("node:crypto").generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" }))' >"$github_app_key"
+fi
+COFFRE_DEV_GITHUB_APP_KEY="$(cat "$github_app_key")"
+export COFFRE_DEV_GITHUB_APP_KEY
+
 log() { printf '\n==> %s\n' "$1"; }
 
 # Fail early and legibly if a previous run is still holding a port. Otherwise

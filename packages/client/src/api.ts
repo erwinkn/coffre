@@ -1121,6 +1121,25 @@ export type Api = {
       };
     };
   };
+  "GET /workloads/repositories": {
+    input: undefined;
+    output: {
+      app: {
+        name: string;
+        installUrl: string;
+      };
+      installations: string[];
+      repositories: {
+        github: string;
+        repositoryId: string;
+        ownerId: string;
+        private: boolean;
+      }[];
+      truncated: boolean;
+    } | {
+      app: null;
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {

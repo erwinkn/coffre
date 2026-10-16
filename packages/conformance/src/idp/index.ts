@@ -3,4 +3,5 @@
 // it; the dev loop and the tests use it too.
 export { DEFAULT_CLIENT, DevIdp, type DevIdpClient, type DevIdpOptions, type RegisteredClient } from './idp.ts';
 export { PERSONAS, type GitHubAccount, type GitHubAccountPatch, type Persona } from './people.ts';
+export { fakeInstallations, FakeGitHubApp, type FakeInstallation, type FakeRepository } from './github-app.ts';
 export { GITHUB_RUN, WorkloadIssuer } from './workloads.ts';

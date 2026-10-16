@@ -8,12 +8,14 @@ import {
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
   differingClaims,
+  GitHubAppUnavailable,
   GITLAB_ISSUER,
   issuedRefusal,
   MAX_BINDINGS,
   WorkloadTokenRefused,
   type BindingClaims,
   type DecodedToken,
+  type GitHubAppRepositories,
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
@@ -331,29 +333,40 @@ export class WorkloadService {
   }
 
   /**
-   * A public repository's or project's IDs, which bindings name rather than
-   * names: GitHub's API, or a GitLab's. The pages cannot ask those hosts
+   * A repository's or project's IDs, which bindings name rather than names:
+   * GitHub's API, or a GitLab's. The pages cannot ask those hosts
    * themselves, since they may connect only to coffre; the CLI asks itself.
-   * A private one is not found, and its IDs are typed in.
+   * A GitHub repository resolves through the deployment's GitHub App when it
+   * is installed there, private or not, and through the public API
+   * otherwise. A private one neither reaches is not found, and its IDs are
+   * typed in.
    */
   async lookup(ctx: Asker, input: { github?: string; gitlab?: string; gitlabUrl?: string }): Promise<WorkloadIds> {
-    // Asked of GitHub or GitLab for whoever sets up any service account; what they trust, each binding's own check decides.
-    if (!setsUp(ctx.caller, await serviceSettingFor(this.#deps.vault, ctx.caller), await places(this.#deps.db))) {
-      throw forbidden('only those who set up service accounts may trust workloads');
-    }
-    const ask = async (url: URL): Promise<Record<string, unknown>> => {
+    await this.#setsUp(ctx);
+    const ask = async (url: URL, missing: string): Promise<Record<string, unknown>> => {
       try {
         const answer = await this.#deps.transport.json(url);
         return typeof answer === 'object' && answer !== null ? (answer as Record<string, unknown>) : {};
       } catch (error) {
-        if (error instanceof FetchRefused) throw notFound(`${url.hostname} did not find it: for a private one, type its IDs`);
+        if (error instanceof FetchRefused) throw notFound(missing);
         throw error;
       }
     };
     const id = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : null);
     if (input.github !== undefined) {
       if (!GITHUB_REPOSITORY.test(input.github)) throw badRequest('a GitHub repository is <owner>/<name>');
-      const repository = await ask(new URL(`https://api.github.com/repos/${input.github}`));
+      const app = this.#deps.config.githubApp;
+      if (app !== null) {
+        const found = await unavailable(() => app.repository(input.github!));
+        if (found !== null) return { github: found.github, repositoryId: found.repositoryId, ownerId: found.ownerId };
+      }
+      const owner = input.github.split('/')[0]!;
+      const repository = await ask(
+        new URL(`https://api.github.com/repos/${input.github}`),
+        app === null
+          ? 'api.github.com did not find it: for a private one, type its IDs'
+          : `GitHub did not find it, and the GitHub App is not installed on it: install it on ${owner}, or type its IDs`,
+      );
       const [repositoryId, ownerId] = [id(repository.id), id((repository.owner as Record<string, unknown> | undefined)?.id)];
       if (repositoryId === null || ownerId === null) throw notFound(`GitHub does not know ${input.github}`);
       return { github: input.github, repositoryId, ownerId };
@@ -367,12 +380,31 @@ export class WorkloadService {
         if (error instanceof BindingInvalid) throw badRequest(error.message);
         throw error;
       }
-      const project = await ask(new URL(`${base.replace(/\/$/, '')}/api/v4/projects/${encodeURIComponent(input.gitlab)}`));
+      const url = new URL(`${base.replace(/\/$/, '')}/api/v4/projects/${encodeURIComponent(input.gitlab)}`);
+      const project = await ask(url, `${url.hostname} did not find it: for a private one, type its IDs`);
       const [projectId, namespaceId] = [id(project.id), id((project.namespace as Record<string, unknown> | undefined)?.id)];
       if (projectId === null || namespaceId === null) throw notFound(`GitLab does not know ${input.gitlab}`);
       return { gitlab: input.gitlab, projectId, namespaceId };
     }
     throw badRequest('look up a GitHub repository or a GitLab project');
+  }
+
+  /**
+   * The repositories the deployment's GitHub App is installed on, for the
+   * pages' picker; `{ app: null }` when it has none. One call to coffre,
+   * which asks GitHub for each installation (`GitHubApp.repositories`).
+   */
+  async repositories(ctx: Asker): Promise<GitHubAppRepositories | { app: null }> {
+    await this.#setsUp(ctx);
+    const app = this.#deps.config.githubApp;
+    return app === null ? { app: null } : unavailable(() => app.repositories());
+  }
+
+  /** Asked of GitHub or GitLab for whoever sets up any service account; what they trust, each binding's own check decides. */
+  async #setsUp(ctx: Asker): Promise<void> {
+    if (!setsUp(ctx.caller, await serviceSettingFor(this.#deps.vault, ctx.caller), await places(this.#deps.db))) {
+      throw forbidden('only those who set up service accounts may trust workloads');
+    }
   }
 
   /** Revoke a binding, and every credential it issued that still lives: they die with it. */
@@ -482,6 +514,16 @@ export class WorkloadService {
       }));
       return { token: credential.token, expiresAt: credential.expiresAt };
     });
+  }
+}
+
+/** GitHub not answering the app, or refusing it, as the API answers it: 503, saying which. */
+async function unavailable<T>(ask: () => Promise<T>): Promise<T> {
+  try {
+    return await ask();
+  } catch (error) {
+    if (error instanceof GitHubAppUnavailable) throw new ApiError('unavailable', `${error.message}; type its IDs meanwhile`);
+    throw error;
   }
 }
 

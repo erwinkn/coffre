@@ -353,6 +353,10 @@ export const routes = {
     }).strict(),
     run: (ctx, { input }) => workloads(ctx).lookup(ctx, input),
   }),
+  // The repositories the deployment's GitHub App is installed on, private ones too; `{ app: null }` without one.
+  ...route('GET /workloads/repositories', {
+    run: (ctx) => workloads(ctx).repositories(ctx),
+  }),
   ...route('DELETE /members/:member/bindings/:id', {
     run: (ctx, { params }) => workloads(ctx).unbind(ctx, serviceId(params.member), params.id),
   }),

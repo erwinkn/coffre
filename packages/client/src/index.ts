@@ -279,8 +279,10 @@ export function createClient(options: ClientOptions) {
       create: (member: string, input: RouteInput<'POST /members/:member/bindings'>) =>
         call('POST /members/:member/bindings', { member }, input) as Promise<{ binding: BindingView; replaced: string[] }>,
       remove: (member: string, id: string) => call('DELETE /members/:member/bindings/:id', { member, id }),
-      /** A public GitHub repository's or GitLab project's IDs, which bindings name. */
+      /** A GitHub repository's or GitLab project's IDs, which bindings name: a public one's, or one the deployment's GitHub App is installed on. */
       lookup: (input: RouteInput<'GET /workloads/lookup'>) => call('GET /workloads/lookup', {}, input),
+      /** The repositories the deployment's GitHub App is installed on, private ones too; `{ app: null }` without one. */
+      repositories: () => call('GET /workloads/repositories', {}),
     },
 
     access: {

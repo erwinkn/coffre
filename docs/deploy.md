@@ -786,7 +786,10 @@ workloads: { limits: processLimits({ perSource: 30, total: 300 }) },
 ```
 
 Then an owner trusts a workflow on a service's page, under "Trusted
-workloads", or with `coffre trust`.
+workloads", or with `coffre trust`. A GitHub App of the deployment's own,
+`workloads.githubApp`, lets the pages list the repositories it is
+installed on, private ones too, rather than have their IDs typed
+([github-app.md](github-app.md)).
 
 ## MCP clients
 
