@@ -18,8 +18,8 @@ const vault = await serveVault({
   // After a rotation, the vault keys before it, so the data keys they wrapped
   // still open and the records signed under them before it still verify:
   // previousKeks: [{ id: 'vault-2026-04-01-k7q2xm', key: env('OLD_VAULT_KEY') }],
-  // Who becomes the Owner by signing in, while the instance has none.
-  bootstrapOwners: env('BOOTSTRAP_OWNERS').split(',').map((email) => email.trim()),
+  // The Owners of the whole instance, whatever its database says: nobody demotes them while listed.
+  owners: env('OWNERS').split(',').map((email) => email.trim()),
   // The vault derives its signing key from the vault key. With a key a key
   // service holds, such as awsKms(…), it needs one of its own: signingKey: env('SIGNING_KEY').
 });

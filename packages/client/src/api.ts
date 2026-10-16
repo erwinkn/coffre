@@ -402,6 +402,7 @@ export type Api = {
         reachesByRole: boolean;
         managed: boolean;
         tampered: boolean;
+        declared: boolean;
         grants: {
           id: string;
           project: string;
@@ -438,6 +439,7 @@ export type Api = {
           except: string[];
         };
       };
+      declared: boolean;
       removedAt: string | null;
       removedBy: string | null;
       live: {
@@ -561,6 +563,7 @@ export type Api = {
             except: string[];
           };
         };
+        declared: boolean;
         removedAt: string | null;
         removedBy: string | null;
         live: {
@@ -1468,6 +1471,7 @@ export type Member = {
   reachesByRole: boolean;
   managed: boolean;
   tampered: boolean;
+  declared: boolean;
   grants: {
     id: string;
     project: string;
@@ -1547,6 +1551,7 @@ export type OffboardingReport = {
       except: string[];
     };
   };
+  declared: boolean;
   removedAt: string | null;
   removedBy: string | null;
   live: {

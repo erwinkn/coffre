@@ -134,17 +134,17 @@ export function nameProblem(name: string): string | null {
   return /^[a-z0-9]([a-z0-9-]{0,55}[a-z0-9])?$/.test(name) ? null : 'lower-case letters, digits and dashes, at most 57';
 }
 
-/** Why a list of bootstrap Owners will not do. Null when it will. */
+/** Why a list of Owners will not do. Null when it will. */
 export function adminsProblem(answer: string): string | null {
   const wrong = answer.split(',').map((email) => email.trim()).filter((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   return wrong.length === 0 ? null : `not an email: ${wrong.map((email) => email || '(empty)').join(', ')}`;
 }
 
-/** The vault's var naming its bootstrap Owners: 0.5's `ROOT_ADMINS` while a deployment's vault reads that one still. */
-type OwnersVar = 'BOOTSTRAP_OWNERS' | 'ROOT_ADMINS';
+/** The vault's var naming its Owners: an older name while a deployment's vault reads that one still, 0.5's `ROOT_ADMINS` among them. */
+type OwnersVar = 'OWNERS' | 'BOOTSTRAP_OWNERS' | 'ROOT_ADMINS';
 
 export function ownersVar(vars: Record<string, string | undefined>): OwnersVar {
-  return vars.BOOTSTRAP_OWNERS === undefined && vars.ROOT_ADMINS !== undefined ? 'ROOT_ADMINS' : 'BOOTSTRAP_OWNERS';
+  return (['OWNERS', 'BOOTSTRAP_OWNERS', 'ROOT_ADMINS'] as const).find((name) => vars[name] !== undefined) ?? 'OWNERS';
 }
 
 /**
@@ -261,7 +261,7 @@ export class Cloudflare {
   readonly #secrets: string[];
   readonly workers: Record<Component, WorkerConfig>;
   readonly address: string;
-  /** The vault's var that names them, and its value: `BOOTSTRAP_OWNERS`, or `ROOT_ADMINS` in a deployment 0.5 or earlier wrote. */
+  /** The vault's var that names them, and its value: `OWNERS`, or `ROOT_ADMINS` in a deployment 0.5 or earlier wrote. */
   readonly owners: { name: OwnersVar; value: string };
   readonly serving: Serving;
   /** The keys this run makes, for the Workers without theirs. */
@@ -421,7 +421,7 @@ export class Cloudflare {
     const admins = workers.vault.vars[name];
     const prefilled = placeholder(admins) && found.email !== null;
     const owners = (
-      await textLine(keys, out, s, 'First Owner', 'their GitHub email, or several, comma-separated: the first to sign in owns coffre', {
+      await textLine(keys, out, s, 'First Owner', 'their GitHub email, or several, comma-separated: each owns coffre', {
         initial: placeholder(admins) ? (found.email ?? '') : admins,
         // Sign-in checks the GitHub account's emails: one that is not among them leaves nobody able to sign in as the Owner.
         note: `${prefilled ? "That's your Cloudflare email. " : ''}Each must be an email on the GitHub account its owner will sign in with, or nobody can take coffre over.`,
@@ -575,7 +575,7 @@ export class Cloudflare {
     return { text: `Made coffre's GitHub App, ${app.slug}`, details: app.url === '' ? [] : [app.url] };
   }
 
-  /** The rest of each wrangler.jsonc: the address and its route, the bootstrap Owners, and the vault ID of a new vault key. */
+  /** The rest of each wrangler.jsonc: the address and its route, the Owners, and the vault ID of a new vault key. */
   write(): Outcome {
     const url = `https://${this.address}`;
     const app = this.workers.app;

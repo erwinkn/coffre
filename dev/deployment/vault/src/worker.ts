@@ -5,11 +5,11 @@ type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
   COFFRE_VAULT_KEY_ID: string;
   COFFRE_VAULT_KEY: string;
-  COFFRE_BOOTSTRAP_OWNERS: string;
+  COFFRE_OWNERS: string;
 };
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.COFFRE_VAULT_KEY_ID, key: env.COFFRE_VAULT_KEY },
-  bootstrapOwners: env.COFFRE_BOOTSTRAP_OWNERS.split(','),
+  owners: env.COFFRE_OWNERS.split(','),
 }));

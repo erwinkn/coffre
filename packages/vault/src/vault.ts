@@ -78,7 +78,7 @@ import {
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
-import { everyProjectConversion, newestAccess, reportStands, ROOT_ADMINS_CONVERT, rootAdminsToConvert } from '@coffre/db/grants';
+import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
 import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
@@ -136,18 +136,11 @@ export type PreparedVault = {
   /** Why not, once decided that they do not. */
   wrongKek: string | null;
   /**
-   * Whether this process has made its upgrades (`#convert`): the root
-   * admins of 0.5 Owners, and the grants on every project of 0.4 there were
-   * when it started replaced.
+   * Whether this process has done what it does once, at its start
+   * (`#convert`): the grants on every project of 0.4 there were replaced,
+   * then everyone the deployment names made an Owner (`#declare`).
    */
   converted: boolean;
-  /**
-   * Whether this process has seen an Owner of the whole instance. The last
-   * one stays, so from then on the bootstrap need not look: recovering an
-   * instance whose Owners' rows all fail their check takes a deploy, whose
-   * processes look again (`#bootstrap`).
-   */
-  owned: boolean;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -162,7 +155,6 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     kekChecked: false,
     wrongKek: null,
     converted: false,
-    owned: false,
   };
 }
 
@@ -192,7 +184,7 @@ const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 const PERSON = /^user:/;
 const SERVICE = /^token:/;
 
-/** Who acts for the vault itself, as when it makes a bootstrap Owner. */
+/** Who acts for the vault itself, as when it makes an Owner its deployment names. */
 const VAULT_ACTOR = 'system:vault';
 
 // A KEK's check: a known value, the size of a data key, wrapped under it in
@@ -227,6 +219,11 @@ const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, e
 
 /** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
 const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
+
+/** Why nobody demotes or removes a person the deployment names (`owners`), themselves included. */
+function declaredOwner(principal: string): string {
+  return `the deployment names ${principal.slice('user:'.length)} an Owner (owners, in the vault's configuration): take them off that list and deploy first`;
+}
 
 /** Why a person's change to a service account is refused. */
 const NOT_THEIRS = 'a person gives a service account at most what they hold, where the instance lets them set one up, and only to one whose every grant they hold';
@@ -605,68 +602,18 @@ class VaultService implements Vault {
    * genuine row put back). `reportStands` is the rule, which `coffre
    * migrate` applies too, holding no key, to every entry in the vault's
    * name: it lists and marks a member so reported, forged or not.
-   * Removing them clears both. Then the root admins of 0.5 become Owners
-   * (`#convertRootAdmins`): after, so that what their grants become is
-   * what `coffre migrate` says, by the same rule over the same rows
+   * Removing them clears both. Then everyone the deployment names becomes
+   * an Owner (`#declare`): after, so that what their grants become is what
+   * `coffre migrate` says, by the same rule over the same rows
    * (`everyProjectConversion`), which cannot tell who the configuration
-   * names. Until that finishes, each call converts again what is left, a
-   * few reads once nothing is.
+   * names. Until both finish, each call does again what is left, a few
+   * reads once nothing is.
    */
   async #convert(): Promise<void> {
     for (const principal of await store.everyProjectHolders(this.#db)) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
-    this.#prepared.converted = await this.#convertRootAdmins();
-  }
-
-  /**
-   * Turn the root admins of 0.5 into Owners of the whole instance, once, on
-   * an instance that ran 0.5 with one: its vault gave a root admin who
-   * signed in a row, in an entry of its own (`rootAdminsToConvert`). Everyone the
-   * configuration names when this release first runs becomes an Owner, as
-   * `system:vault`, each `reason: 'root-admin'`, one who never signed in
-   * too: 0.5 held them root admins already. A `root-admins.convert` entry
-   * under the vault's MAC says it is done, with whom it made Owners, so from
-   * then on the list only bootstraps (`#bootstrap`). An instance with no
-   * root admins to convert, a new one above all, writes the entry too,
-   * naming nobody, once its log holds an entry of the vault's. From then
-   * on, only those a vault of 0.5 gives a root admin's row after the entry,
-   * still serving during this release's first deploy or rolled back to,
-   * become Owners, each while nobody has changed them since, and another
-   * entry says so: never the whole list again, which would make an Owner of
-   * someone demoted or removed since. One decision, under the rows of
-   * those it makes Owners and then the log's head, which reads again
-   * whether another process did it first. Entries forged in its name say
-   * nothing either way, and are reported. Whether it is done.
-   */
-  async #convertRootAdmins(): Promise<boolean> {
-    const reports: NewEntry[] = [];
-    const listed = this.#config.bootstrapOwners.map((email) => `user:${email}`);
-    let due = await rootAdminsToConvert(this.#db, this.#check(reports, null), listed);
-    // Not `#record`, which would settle the vault, and so convert, again.
-    if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
-    this.#reported(reports);
-    // Read again under the rows and the head: a 0.5 vault still serving may
-    // give a root admin a row between the reads, which takes other locks.
-    for (let attempt = 1; due !== null && attempt <= 3; attempt += 1) {
-      const asked = due;
-      // Those the configuration names, all of them or, after an entry of its own, those 0.5 gave a row since.
-      const principals = asked.whole ? (asked.rooted.length > 0 ? listed : []) : asked.rooted;
-      const decided = await this.#decideNow(principals, async (d) => {
-        await lockLogHead(d.tx);
-        const now = await rootAdminsToConvert(d.tx, this.#check(d.reports, null), listed);
-        if (JSON.stringify(now) !== JSON.stringify(asked)) return { due: now };
-        const owners: string[] = [];
-        for (const principal of principals) {
-          if (await this.#makeOwner(d, principal, 'root-admin')) owners.push(principal);
-        }
-        d.log.push({ actor: VAULT_ACTOR, action: ROOT_ADMINS_CONVERT, decision: 'allow', metadata: JSON.stringify({ owners }) });
-        return { due: null };
-      });
-      due = decided.ok ? decided.due : null;
-    }
-    // Still due after three: 0.5 kept letting root admins in between the reads. The next call tries again.
-    return due === null;
+    this.#prepared.converted = await this.#declare(this.#config.owners.map((email) => `user:${email}`));
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
@@ -1365,9 +1312,9 @@ class VaultService implements Vault {
 
   // --- Owners of the whole instance -------------------------------------------------
 
-  /** Whether the configuration names `principal` to own the instance while nobody does (`bootstrapOwners`). */
-  #bootstrapOwner(principal: string): boolean {
-    return principal.startsWith('user:') && this.#config.bootstrapOwners.includes(principal.slice('user:'.length));
+  /** Whether the deployment names `principal` an Owner of the whole instance (`owners`). */
+  #listed(principal: string): boolean {
+    return principal.startsWith('user:') && this.#config.owners.includes(principal.slice('user:'.length));
   }
 
   /**
@@ -1386,28 +1333,33 @@ class VaultService implements Vault {
   }
 
   /**
-   * Make a person the configuration names an Owner of the whole instance,
-   * when it has none: the first one in, and the way back in once every
-   * Owner is gone. Asked at `access` about any of them who owns nothing, so
-   * an unlocked read is the quick way out, when someone else owns it. What
-   * it finds is a hint, never a report: its reads can pair a row with
-   * grants another decision committed between them. Then one decision,
-   * under their row and the log's head, reads again, and reports: two named
-   * people signing in at once make one Owner. Whether their row may have
-   * changed since `access` read it: an Owner found, who may have been made by
-   * another request of theirs meanwhile and since joined by others, or the
-   * decision ran. Only an Owner found or made is kept as seen (`owned`).
+   * Make each of `principals`, people the deployment names (`owners`), an
+   * Owner of the whole instance, whoever else is one: asked about all of
+   * them at the start of each process (`#convert`), and at `access` about
+   * one who owns nothing, which is a new instance's first sign-in, before
+   * the vault has written to its log, and the way back for someone whose
+   * row was changed around the vault since. An unlocked read of each finds
+   * who is one already, the quick way out: a hint, never a report, and
+   * never `#record`, which would settle the vault, and so convert, again;
+   * one it cannot tell, a row changing under it as another process makes
+   * them an Owner, is due. Then one decision, under the others' rows, reads
+   * again (`#makeOwner`). One whose row the log never admitted stays as it is,
+   * and is asked about again at each of their requests. Whether it ran.
    */
-  async #bootstrap(principal: string): Promise<boolean> {
-    if ((await this.#anOwner(this.#db, [])) !== null) {
-      this.#prepared.owned = true;
-      return true;
+  async #declare(principals: readonly string[]): Promise<boolean> {
+    const at = await this.#now(this.#db);
+    const due: string[] = [];
+    for (const principal of principals) {
+      const subject = await this.#standing(this.#db, principal, await store.member(this.#db, principal), at, []).catch((error: unknown) => {
+        if (error instanceof Retry) return null;
+        throw error;
+      });
+      if (!(subject?.status === 'active' && ownsInstance(subject.live))) due.push(principal);
     }
-    const decided = await this.#decideNow([principal], async (d) => {
-      await lockLogHead(d.tx);
-      return { owned: (await this.#anOwner(d.tx, d.reports)) !== null || (await this.#makeOwner(d, principal, 'bootstrap')) };
+    if (due.length === 0) return true;
+    const decided = await this.#decideNow(due, async (d) => {
+      for (const principal of due) await this.#makeOwner(d, principal, 'owners');
     });
-    if (decided.ok && decided.owned) this.#prepared.owned = true;
     return decided.ok;
   }
 
@@ -1432,7 +1384,7 @@ class VaultService implements Vault {
    * first, as removing them would; one the log never admitted, whose row was
    * written around the vault, is left as it is. Whether it made them one.
    */
-  async #makeOwner(d: Decision, principal: string, reason: 'bootstrap' | 'root-admin'): Promise<boolean> {
+  async #makeOwner(d: Decision, principal: string, reason: 'owners'): Promise<boolean> {
     const row = d.members.get(principal);
     const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
     if (subject.status === 'active' && ownsInstance(subject.live)) return false;
@@ -1502,26 +1454,19 @@ class VaultService implements Vault {
    * What `principal` holds now. Read without locks, the fast way; a row that
    * seems to fail its check is read again in one snapshot before anyone is
    * called tampered, since a change committed between two of the reads
-   * looks like one. A person the configuration names to own the instance
-   * while nobody does becomes its Owner first, if nobody does
-   * (`#bootstrap`). A vault that holds no key the log's newest entries are
-   * under, given the wrong vault key, cannot tell a row it cannot check
-   * from one changed around it: it says so, an outage, rather than call the
-   * member tampered. A row it can check still answers, so a forged entry
-   * that stops it writing leaves the Owners able to sign in and find it.
+   * looks like one. A person the deployment names (`owners`) who owns
+   * nothing becomes an Owner of the whole instance first (`#declare`). A
+   * vault that holds no key the log's newest entries are under, given the
+   * wrong vault key, cannot tell a row it cannot check from one changed
+   * around it: it says so, an outage, rather than call the member tampered.
+   * A row it can check still answers, so a forged entry that stops it
+   * writing leaves the Owners able to sign in and find it.
    */
   async access(principal: string): Promise<Access> {
     const superseded = await this.#settled();
-    const knew = this.#prepared.owned;
     const access = await this.#read(principal, superseded);
-    if (access.status === 'active' && ownsInstance(access)) {
-      this.#prepared.owned = true;
-      return access;
-    }
-    if (superseded !== null || !this.#bootstrapOwner(principal)) return access;
-    // An Owner seen since the read may be this person, made one by another request of theirs: read again, once.
-    if (this.#prepared.owned) return knew ? access : this.#read(principal, superseded);
-    return (await this.#bootstrap(principal)) ? this.#read(principal, superseded) : access;
+    if (superseded !== null || !this.#listed(principal) || (access.status === 'active' && ownsInstance(access))) return access;
+    return (await this.#declare([principal])) ? this.#read(principal, superseded) : access;
   }
 
   /** `access`, as the rows are now. */
@@ -1756,8 +1701,14 @@ class VaultService implements Vault {
       d.touched.add(principal);
       d.grants.set(principal, [...subject.stored]);
 
-      if (row === undefined || row.status === 'removed') return this.#enlist(d, acting, principal, row, wanted, input, refused);
+      if (row === undefined || row.status === 'removed') {
+        // Added or brought back, as anything but an Owner of the whole instance, one the deployment names would be a listed Member.
+        if (this.#listed(principal) && !(wanted !== undefined && ownsInstance(wanted))) throw refused('not_allowed', declaredOwner(principal));
+        return this.#enlist(d, acting, principal, row, wanted, input, refused);
+      }
       const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
+      // One the deployment names stays an Owner of the whole instance, whoever asks: the list says where to change that.
+      if (changed && this.#listed(principal) && !ownsInstance(wanted)) throw refused('not_allowed', declaredOwner(principal));
       // Read under both rows' locks: neither the actor's role nor the subject's changes before this commits.
       if (changed && (wanted.role === 'owner' || subject.live.role === 'owner') && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
       // Nobody sets their own role, but an Owner of the whole instance, who holds all there is: running the instance never lets anyone widen what they hold themselves.
@@ -1842,6 +1793,7 @@ class VaultService implements Vault {
       const holder = acting.live;
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
       const held = subject.stored;
+      if (this.#listed(principal)) throw refused('not_allowed', declaredOwner(principal));
       if (subject.status === 'tampered') {
         if (!runsInstance(holder)) throw refused('not_allowed', 'only admins and owners of the whole instance may remove a member whose record failed its check');
         return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
@@ -2200,13 +2152,14 @@ class VaultService implements Vault {
     });
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: [] }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: [] }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
     const until = Number(since ?? 0n);
     return {
       checkpointKeys: Object.fromEntries(signers.map(({ keyId, publicKey }, i) => [keyId, { publicKey, until: i === 0 ? null : until }])),
+      owners: [...this.#config.owners],
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
     };

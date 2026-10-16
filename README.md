@@ -349,9 +349,9 @@ on one environment: the API answers 409 rather than grant less than asked.
 
 **Owners of the whole instance**, the Owner role with no scope, hold every
 permission everywhere, reading secrets included, so keep them few. The
-instance always has one: the vault's `bootstrapOwners` names who becomes
-the first by signing in, and the last cannot be demoted or removed until
-there is another ([deployment-auth.md](docs/deployment-auth.md#the-first-owner)).
+instance always has one: the vault's `owners` names Owners nobody demotes
+while named, made ones as the vault starts and when they sign in, and the
+last cannot be demoted or removed until there is another ([deployment-auth.md](docs/deployment-auth.md#the-owners-the-deployment-names)).
 Only an Owner of the whole instance makes, changes or removes an Owner.
 An Admin or Owner whose scope narrows nothing **runs the instance**: adds and removes people,
 sets instance roles and the instance's settings, and manages every service

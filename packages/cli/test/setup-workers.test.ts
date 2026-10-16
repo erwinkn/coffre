@@ -265,7 +265,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   const vault = readWorker(deployment(), 'vault/wrangler.jsonc');
   assert.deepEqual([app.accountId, app.hyperdrive, app.route, app.vars.PUBLIC_URL], ['acc-acme', configs[0]!.id, ADDRESS, `https://${ADDRESS}`]);
   assert.match(app.vars.GITHUB_CLIENT_ID!, /^Iv23li/);
-  assert.deepEqual([vault.accountId, vault.hyperdrive, vault.vars.BOOTSTRAP_OWNERS, vault.vars.VAULT_KEY_ID], ['acc-acme', configs[1]!.id, 'ops@acme.test', vaultId]);
+  assert.deepEqual([vault.accountId, vault.hyperdrive, vault.vars.OWNERS, vault.vars.VAULT_KEY_ID], ['acc-acme', configs[1]!.id, 'ops@acme.test', vaultId]);
   assert.deepEqual(github.state.manifests.map((manifest) => manifest.callback_urls), [[`https://${ADDRESS}/auth/callback/github`]]);
 });
 

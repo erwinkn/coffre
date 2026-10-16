@@ -11,7 +11,7 @@ const local = {
   DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
   COFFRE_DEV_URL: 'http://127.0.0.1:3000',
   COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
-  COFFRE_BOOTSTRAP_OWNERS: 'admin@acme.example',
+  COFFRE_OWNERS: 'admin@acme.example',
 };
 
 test('seed accepts the checked-in local development targets', () => {
@@ -58,12 +58,12 @@ test('seed rejects a foreign Owner before resetting local data', () => {
     () =>
       loadLocalSeedConfig({
         ...local,
-        COFFRE_BOOTSTRAP_OWNERS: 'production.admin@example.com',
+        COFFRE_OWNERS: 'production.admin@example.com',
       }),
     /refuses non-local owner/,
   );
   assert.throws(
-    () => loadLocalSeedConfig({ ...local, COFFRE_BOOTSTRAP_OWNERS: '' }),
+    () => loadLocalSeedConfig({ ...local, COFFRE_OWNERS: '' }),
     /refuses non-local owner/,
   );
 });

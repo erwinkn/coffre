@@ -390,10 +390,10 @@ test('ordinary users cannot manage the instance directory', async () => {
   );
 });
 
-test('service accounts cannot be owners and configured roots cannot be edited', async () => {
+test('service accounts cannot be owners, and the Owner the deployment names cannot be changed', async () => {
   await assert.rejects(root.members.add('token:service', { role: 'admin' }), { status: 409 });
-  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'member' }), { status: 409 });
-  await assert.rejects(root.members.remove(`user:${ROOT}`), { status: 409 });
+  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'member' }), { status: 403, reason: 'not_allowed' });
+  await assert.rejects(root.members.remove(`user:${ROOT}`), { status: 403, reason: 'not_allowed' });
 });
 
 test('service principals receive grants by token name', async () => {

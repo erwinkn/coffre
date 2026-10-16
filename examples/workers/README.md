@@ -25,8 +25,8 @@ Worker secrets. Everything below runs from this directory.
   App whose callback is `<PUBLIC_URL>/auth/callback/github`, with read-only
   access to email addresses, as `coffre setup` makes it. An OAuth app with
   that callback works too.
-- `vault/wrangler.jsonc`: `BOOTSTRAP_OWNERS`, the email of who becomes the
-  Owner by signing in first, and `VAULT_KEY_ID`, which `coffre setup` gives you below.
+- `vault/wrangler.jsonc`: `OWNERS`, the emails of the instance's Owners, made
+  ones at every deploy, and `VAULT_KEY_ID`, which `coffre setup` gives you below.
 
 ## 2. The database and keys
 
