@@ -56,6 +56,19 @@ export interface Vault {
   endReferences(input: EndReferencesInput): Promise<Outcome<{ seqs: number[] }>>;
 
   /**
+   * Mint the keys the deployment has the vault mint in one environment
+   * (`minted` in its configuration), for `principal`, who reads that
+   * environment: each a fresh credential from a root only the vault holds.
+   * One `credential.mint` entry a key before any provider is asked, in the
+   * decision; then the providers, outside any transaction; then a
+   * `credential.minted` entry each, naming its intent, with the
+   * credential's fingerprint and expiry, never the credential. None, and
+   * no entry, where it mints none. All, or none: `unavailable` when a
+   * provider could not be asked, or refused (W108's prototype).
+   */
+  mint(input: MintInput): Promise<Outcome<{ minted: MintedValue[] }>>;
+
+  /**
    * What one principal holds right now: the app asks once per request,
    * and at sign-in for each verified email. A decision, its rows checked:
    * lists of who holds what read the rows themselves, and need not ask.
@@ -170,6 +183,8 @@ export type RefusalCode =
   | 'deleted'
   /** The reference read through was ended: broken, or replaced by a value. */
   | 'ended'
+  /** A minted key's provider could not be asked, or refused to mint: nothing was released. */
+  | 'unavailable'
   /** Not allowed to manage access, members or the log. */
   | 'not_allowed'
   /**
@@ -278,6 +293,19 @@ export type EndReferencesInput = Correlation & Through & {
   reason: 'replaced' | 'broken' | 'abandoned';
   items: Via[];
 };
+
+export type MintInput = Correlation & Through & {
+  principal: string;
+  purpose: Purpose;
+  /** The environment, by ids: the vault reads its slugs, which `minted` names it by. */
+  projectId: string;
+  environmentId: string;
+  /** One key, for a read of one; every key minted there when left out. */
+  key?: string | null;
+};
+
+/** A credential minted for a read: what to hand the reader, and when it ends (ISO 8601). */
+export type MintedValue = { key: string; value: string; expiresAt: string; provider: string };
 
 export type WrapInput = Correlation & Through & {
   principal: string;

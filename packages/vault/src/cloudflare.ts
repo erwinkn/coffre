@@ -23,6 +23,7 @@ import type {
   RewrapInput,
   SetAccessInput,
   SetSettingsInput,
+  MintInput,
   UnwrapInput,
   Vault,
   VerifyLogInput,
@@ -84,6 +85,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 
   async unwrap(input: UnwrapInput) { return this.#call((vault) => vault.unwrap(input)); }
+  async mint(input: MintInput) { return this.#call((vault) => vault.mint(input)); }
   async wrap(input: WrapInput) { return this.#call((vault) => vault.wrap(input)); }
   async rewrap(input: RewrapInput) { return this.#call((vault) => vault.rewrap(input)); }
   async reference(input: ReferenceInput) { return this.#call((vault) => vault.reference(input)); }

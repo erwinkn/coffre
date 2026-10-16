@@ -11,6 +11,8 @@ export default defineConfig({
     kek: 'src/kek/index.ts',
     // MCP's scopes and client rules, for the server and the consent page.
     mcp: 'src/mcp.ts',
+    // What the vault mints from, and each provider's minter.
+    mint: 'src/mint.ts',
     pages: 'src/pages.ts',
     schemas: 'src/schemas.ts',
     vault: 'src/vault.ts',

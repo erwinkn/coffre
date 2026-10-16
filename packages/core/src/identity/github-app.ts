@@ -27,6 +27,8 @@
  * calls each import and ask for their own.
  */
 
+import { MintUnavailable, type Minted, type Minter } from '../mint.ts';
+
 export type GitHubAppOptions = {
   /** The app's ID, on its settings page ("App ID"): a number, not its client ID. */
   appId: string | number;
@@ -44,6 +46,19 @@ export type GitHubAppOptions = {
    * the one its lookups bind to.
    */
   apiUrl?: string;
+};
+
+/**
+ * What `tokens(…)` mints: installation tokens of one account the app is
+ * installed on, for some of its repositories, with some of its permissions.
+ */
+export type InstallationTokenScope = {
+  /** The account, by login: `acme`. */
+  account: string;
+  /** Its repositories, by name, at least one: a token for every repository the app reaches is never minted. */
+  repositories: readonly string[];
+  /** As GitHub names them, each within the app's own: `{ contents: 'write' }`. */
+  permissions: Readonly<Record<string, 'read' | 'write'>>;
 };
 
 /** A repository, by the IDs a binding names: what `GET /workloads/lookup` answers. */
@@ -111,6 +126,57 @@ export class GitHubApp {
   /** Its OAuth client, for `github({ app })`; null when it was given none. */
   signinClient(): { clientId: string; clientSecret: string } | null {
     return this.clientId === null || this.#clientSecret === null ? null : { clientId: this.clientId, clientSecret: this.#clientSecret };
+  }
+
+  /**
+   * A minter of this app's installation tokens, for the vault's `minted`:
+   * each mint asks GitHub for a fresh one, an hour long, narrowed to
+   * `scope`, and keeps nothing of it. Checked here, when the deployment
+   * makes it, so a typo stops the vault from starting.
+   */
+  tokens(scope: InstallationTokenScope): Minter {
+    const { account, repositories, permissions } = scope;
+    const name = /^[A-Za-z0-9._-]{1,100}$/;
+    if (!name.test(account)) throw new Error(`tokens(…).account must be a GitHub login; got "${account}"`);
+    if (repositories.length === 0 || !repositories.every((each) => name.test(each))) {
+      throw new Error('tokens(…).repositories must name at least one repository, each by its name alone');
+    }
+    const asked = Object.entries(permissions);
+    if (asked.length === 0 || !asked.every(([key, level]) => /^[a-z_]{1,64}$/.test(key) && (level === 'read' || level === 'write'))) {
+      throw new Error('tokens(…).permissions must name at least one permission, each read or write');
+    }
+    const fixed = { account, repositories: [...repositories].sort(), permissions: Object.fromEntries(asked.sort(([a], [b]) => a.localeCompare(b))) };
+    return {
+      provider: 'github-app',
+      scope: { app: this.appId, ...fixed },
+      mint: (signal) => this.#mint(fixed, signal),
+    };
+  }
+
+  /** https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app, narrowed. */
+  async #mint(scope: InstallationTokenScope, signal: AbortSignal): Promise<Minted> {
+    try {
+      const where = `${scope.account}/${scope.repositories[0]}`;
+      const installation = record(await this.#call(`/repos/${where}/installation`, { method: 'GET', token: await this.#jwt(), missing: true, signal }));
+      if (typeof installation.id !== 'number' || (installation.suspended_at !== null && installation.suspended_at !== undefined)) {
+        throw new MintUnavailable(`the GitHub App is not installed on ${where}, or its installation is suspended`);
+      }
+      const answer = record(await this.#call(`/app/installations/${installation.id}/access_tokens`, {
+        method: 'POST',
+        token: await this.#jwt(),
+        body: { repositories: scope.repositories, permissions: scope.permissions },
+        signal,
+      }));
+      const expiresAt = typeof answer.expires_at === 'string' ? Date.parse(answer.expires_at) : NaN;
+      if (typeof answer.token !== 'string' || !Number.isFinite(expiresAt)) throw new MintUnavailable('GitHub issued no installation token');
+      const granted = Array.isArray(answer.repositories)
+        ? { repositories: answer.repositories.flatMap((each) => (typeof record(each).name === 'string' ? [record(each).name] : [])) }
+        : {};
+      return { value: answer.token, expiresAt: new Date(expiresAt).toISOString(), granted: { permissions: answer.permissions ?? null, ...granted } };
+    } catch (error) {
+      if (error instanceof GitHubAppUnavailable) throw new MintUnavailable(error.message, { cause: error });
+      throw error;
+    }
   }
 
   /** Every repository of every account the app is installed on, as many as `MAX_LISTING_REQUESTS` reach. */
@@ -241,20 +307,25 @@ export class GitHubApp {
    * any other answer than a 2xx says GitHub's status and the path, and a
    * redirect is never followed.
    */
-  async #call(path: string, request: { method: 'GET' | 'POST'; token: string; missing?: boolean; refused?: boolean; budget?: Budget }): Promise<unknown> {
+  async #call(
+    path: string,
+    request: { method: 'GET' | 'POST'; token: string; body?: unknown; signal?: AbortSignal; missing?: boolean; refused?: boolean; budget?: Budget },
+  ): Promise<unknown> {
     if (request.budget !== undefined && !spend(request.budget)) throw SPENT;
     let response: Response;
     try {
       response = await this.#fetch(`${this.apiUrl}${path}`, {
         method: request.method,
         redirect: 'manual',
-        signal: AbortSignal.timeout(DEADLINE_MS),
+        signal: request.signal === undefined ? AbortSignal.timeout(DEADLINE_MS) : AbortSignal.any([AbortSignal.timeout(DEADLINE_MS), request.signal]),
         headers: {
           accept: 'application/vnd.github+json',
           authorization: `Bearer ${request.token}`,
           'user-agent': 'coffre',
           'x-github-api-version': '2022-11-28',
+          ...(request.body === undefined ? {} : { 'content-type': 'application/json' }),
         },
+        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
       });
     } catch (cause) {
       throw new GitHubAppUnavailable('GitHub could not be reached', { cause });

@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
   allows,
@@ -58,6 +58,8 @@ import {
   type KeyChecks,
   type LogHead,
   type LogVerification,
+  type MintedValue,
+  type MintInput,
   type Outcome,
   type ReferenceInput,
   type Refusal,
@@ -83,6 +85,8 @@ import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, type Appended, 
 
 import { KeyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
+import type { Minted } from '@coffre/core/mint';
+
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, forward, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, withCause, type Anchor } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -277,6 +281,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   expired: 'the grant that covered this has expired',
   bulk_limit: 'too many secrets read in too short a time',
   bad_claim: 'the key does not belong to this secret',
+  unavailable: "a minted key's provider could not be asked, or refused",
   deleted: 'this project or environment was deleted',
   ended: 'the reference read through was ended',
   not_allowed: 'not allowed to change this',
@@ -1132,6 +1137,89 @@ class VaultService implements Vault {
   async #overBulkLimit(d: Decision, principal: string, n: number): Promise<boolean> {
     const { count, windowMs } = this.#config.bulkLimit;
     return (await store.releasesSince(d.tx, principal, d.at - windowMs)) + n > count;
+  }
+
+  // --- minted keys --------------------------------------------------------------
+
+  /**
+   * The decision and its intents commit first, so that a provider never
+   * mints what the log does not show was asked, and the provider's call,
+   * seconds at worst, holds no transaction or member lock. The outcomes
+   * commit after, each naming its intent; a vault that dies between them
+   * leaves an intent with no outcome, which reads as minted, maybe.
+   */
+  async mint(input: MintInput): Promise<Outcome<{ minted: MintedValue[] }>> {
+    const { principal } = input;
+    validateText(input.purpose);
+    const configured = this.#config.minted ?? [];
+    if (configured.length === 0) return { ok: true, minted: [] };
+    // Which keys, by the store's slugs and never the app's word: a recipe is chosen by the place the check is made on.
+    const place = await store.environmentPath(this.#db, input.environmentId);
+    if (place === undefined || place.projectId !== input.projectId) return { ok: true, minted: [] };
+    const path = `${place.project}/${place.environment}`;
+    const keys = configured.filter((each) => each.at === path && (input.key == null || each.key === input.key));
+    if (keys.length === 0) return { ok: true, minted: [] };
+
+    const intent = randomUUID();
+    const entry = (action: 'credential.mint' | 'credential.minted', item: number, decision: 'allow' | 'deny', code: string | null, detail: Record<string, unknown> = {}): NewEntry => ({
+      actor: principal,
+      action,
+      decision,
+      code,
+      projectId: input.projectId,
+      environmentId: input.environmentId,
+      secretId: null,
+      operationId: input.operationId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: JSON.stringify({
+        subject: `${path}/${keys[item]!.key}`,
+        provider: keys[item]!.from.provider,
+        scope: keys[item]!.from.scope,
+        purpose: input.purpose,
+        intent,
+        item,
+        ...detail,
+        ...traced(input),
+      }),
+    });
+    const reads = async (d: Decision): Promise<RefusalCode | null> => {
+      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
+      const environments = await store.environmentsById(d.tx, [input.environmentId]);
+      return refuses(reader, 'secret.read', placeIn(input, environments), environments.get(input.environmentId)?.deleted ?? true);
+    };
+
+    const decided = await this.#decide([principal], async (d) => {
+      const code = await reads(d);
+      if (code !== null) throw new Refused(refusal(code, MESSAGES[code]), keys.map((_, i) => entry('credential.mint', i, 'deny', code)));
+      const intents = keys.map((_, i) => entry('credential.mint', i, 'allow', null));
+      d.log.push(...intents);
+      const seqs: bigint[] = [];
+      d.after.push((seqOf) => seqs.push(...intents.map((each) => BigInt(seqOf(each)))));
+      return { seqs };
+    });
+    if (!decided.ok) return decided;
+
+    const signal = AbortSignal.timeout(MINT_BUDGET_MS);
+    const results = await Promise.allSettled(keys.map((each) => each.from.mint(signal)));
+
+    // The outcomes, each naming its intent. A member removed while their credentials were minted gets none of them.
+    const outcome = (i: number, decision: 'allow' | 'deny', code: string | null, detail: Record<string, unknown> = {}): NewEntry =>
+      ({ ...entry('credential.minted', i, decision, code, detail), relatedSeq: decided.seqs[i]! });
+    return this.#decide([principal], async (d) => {
+      const failed = results.findIndex((result) => result.status === 'rejected');
+      const code = (await reads(d)) ?? (failed === -1 ? null : 'unavailable');
+      if (code !== null) {
+        throw new Refused(refusal(code, MESSAGES[code]), results.map((result, i) => outcome(i, 'deny', result.status === 'rejected' ? 'unavailable' : 'withheld', result.status === 'rejected' ? { error: String((result.reason as Error)?.message ?? result.reason).slice(0, 256) } : {})));
+      }
+      const minted = results.map((result) => (result as PromiseFulfilledResult<Minted>).value);
+      d.log.push(...minted.map((each, i) => outcome(i, 'allow', null, {
+        // Enough to tell, from a credential found in a log, which mint it was; not enough to use it.
+        fingerprint: createHash('sha256').update(each.value).digest('hex').slice(0, 16),
+        expiresAt: each.expiresAt,
+        ...(each.granted === undefined ? {} : { granted: each.granted }),
+      })));
+      return { minted: minted.map((each, i) => ({ key: keys[i]!.key, value: each.value, expiresAt: each.expiresAt, provider: keys[i]!.from.provider })) };
+    });
   }
 
   // --- references ---------------------------------------------------------------
@@ -2345,6 +2433,9 @@ const ACCESS = new Set<string>(ACCESS_ACTIONS);
 
 /** Checkpoint signatures checked at once, in a full verification. */
 const SIGNATURES_AT_ONCE = 256;
+
+/** How long all of one call's mints may take together; GitHub's own deadline is 10 seconds a request. */
+const MINT_BUDGET_MS = 15_000;
 
 /** Settle every operation before releasing the member lock, including cancelled requests. */
 async function settle<T extends { wipe: () => void }>(

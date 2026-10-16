@@ -212,6 +212,25 @@ export async function environmentsById(
   return new Map(rows.map(({ id, ...environment }) => [id, environment]));
 }
 
+/** An environment's project and slugs, as the store has them: what the vault's `minted` names places by. */
+export async function environmentPath(
+  db: Queryable,
+  id: string,
+): Promise<{ projectId: string; project: string; environment: string; deleted: boolean } | undefined> {
+  const { environments, projects } = tablesOf(db);
+  const [row] = await db
+    .select({
+      projectId: environments.projectId,
+      project: projects.slug,
+      environment: environments.slug,
+      deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
+    })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(eq(environments.id, id));
+  return row;
+}
+
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
   const { vaultGrants } = tablesOf(tx);
   await tx.delete(vaultGrants).where(and(eq(vaultGrants.principal, principal), at(tx, place)));

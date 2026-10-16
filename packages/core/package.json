@@ -47,6 +47,11 @@
       "types": "./dist/kek.d.ts",
       "default": "./dist/kek.js"
     },
+    "./mint": {
+      "coffre:source": "./src/mint.ts",
+      "types": "./dist/mint.d.ts",
+      "default": "./dist/mint.js"
+    },
     "./mcp": {
       "coffre:source": "./src/mcp.ts",
       "types": "./dist/mcp.d.ts",

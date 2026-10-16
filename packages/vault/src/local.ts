@@ -7,6 +7,7 @@ import { openVault, prepareVault, type VaultOptions } from './vault.ts';
 /** Every call the vault answers, in the order of the `Vault` interface. */
 export const METHODS = [
   'unwrap',
+  'mint',
   'wrap',
   'rewrap',
   'reference',

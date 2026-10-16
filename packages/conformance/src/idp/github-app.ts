@@ -70,7 +70,7 @@ export class FakeGitHubApp {
    * these, not OAuth scopes: their email addresses with `emails`, and
    * organization memberships with `members`, where it is installed.
    */
-  permissions: { metadata: 'read'; emails?: 'read'; members?: 'read' } = { metadata: 'read', emails: 'read', members: 'read' };
+  permissions: { metadata: 'read'; emails?: 'read'; members?: 'read'; [other: string]: 'read' | 'write' | undefined } = { metadata: 'read', emails: 'read', members: 'read' };
   /** The installations, by account; a test edits them as it likes. */
   installations: FakeInstallation[] = fakeInstallations();
   /** How long an installation token lives: an hour, as GitHub's. */
@@ -81,7 +81,8 @@ export class FakeGitHubApp {
   down = false;
   #privateKey: string | undefined;
   #publicKey: KeyObject | null = null;
-  readonly #tokens = new Map<string, { installation: number; expiresAt: number }>();
+  /** Each live token: its installation, and the repositories it was narrowed to, by ID, when it was. */
+  readonly #tokens = new Map<string, { installation: number; expiresAt: number; repositories: number[] | null }>();
 
   constructor(origin: () => string, privateKey?: string) {
     this.#origin = origin;
@@ -136,7 +137,10 @@ export class FakeGitHubApp {
       {
         method: 'POST',
         path: new RegExp(`^${API}/app/installations/[0-9]+/access_tokens$`),
-        handler: async (req, res, url) => this.#asApp(req, res, () => this.#issue(Number(url.pathname.split('/').at(-2)))),
+        handler: async (req, res, url) => {
+          const body = await readJson(req);
+          return this.#asApp(req, res, () => this.#issue(Number(url.pathname.split('/').at(-2)), body));
+        },
       },
       {
         method: 'GET',
@@ -146,15 +150,16 @@ export class FakeGitHubApp {
       {
         method: 'GET',
         path: `${API}/installation/repositories`,
-        handler: async (req, res, url) => this.#asInstallation(req, res, (installation) => [200, this.#page(installation, url)]),
+        handler: async (req, res, url) => this.#asInstallation(req, res, (installation, only) => [200, this.#page(installation, url, only)]),
       },
       {
         method: 'GET',
         path: new RegExp(`^${API}/repos/${repo}$`),
         handler: async (req, res, url) =>
-          this.#asInstallation(req, res, (installation) => {
+          this.#asInstallation(req, res, (installation, only) => {
             const name = url.pathname.split('/').slice(-2).join('/');
-            const found = installation.repositories.find((each) => `${installation.account.login}/${each.name}`.toLowerCase() === name.toLowerCase());
+            const found = installation.repositories.find((each) =>
+              `${installation.account.login}/${each.name}`.toLowerCase() === name.toLowerCase() && (only === null || only.includes(each.id)));
             return found === undefined ? notFound() : [200, this.#repository(installation, found)];
           }),
       },
@@ -177,16 +182,40 @@ export class FakeGitHubApp {
     }));
   }
 
-  /** https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app */
-  #issue(id: number): Answer {
+  /**
+   * https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app:
+   * narrowed, when the body asks, to some of the installation's
+   * repositories by name and some of the app's permissions, as GitHub does;
+   * 422 for one it does not have.
+   */
+  #issue(id: number, body: Record<string, unknown> | null): Answer {
     const installation = this.installations.find((each) => each.id === id);
     if (installation === undefined) return notFound();
     if (installation.suspended) return [403, { message: 'This installation has been suspended', documentation_url: DOCS }];
+    let repositories: FakeRepository[] | null = null;
+    if (Array.isArray(body?.repositories)) {
+      const names = body.repositories as unknown[];
+      repositories = installation.repositories.filter((each) => names.includes(each.name));
+      if (repositories.length !== names.length) return [422, { message: 'There is at least one repository that does not exist or is not accessible to the parent installation.', documentation_url: DOCS }];
+    }
+    let permissions: Record<string, string> = Object.fromEntries(Object.entries(this.permissions).filter(([, level]) => level !== undefined)) as Record<string, string>;
+    if (body?.permissions !== undefined) {
+      const asked = Object.entries(body.permissions as Record<string, string>);
+      const held = (key: string, level: string) => this.permissions[key] === 'write' || (this.permissions[key] === 'read' && level === 'read');
+      if (!asked.every(([key, level]) => held(key, level))) return [422, { message: 'The permissions requested are not granted to this installation.', documentation_url: DOCS }];
+      permissions = Object.fromEntries(asked);
+    }
     const token = `ghs_${randomBytes(18).toString('hex')}`;
     const expiresAt = Date.now() + this.tokenTtlMs;
-    this.#tokens.set(token, { installation: id, expiresAt });
+    this.#tokens.set(token, { installation: id, expiresAt, repositories: repositories?.map((each) => each.id) ?? null });
     this.tokensIssued++;
-    return [201, { token, expires_at: new Date(expiresAt).toISOString().replace(/\.\d{3}Z$/, 'Z'), permissions: this.permissions, repository_selection: 'selected' }];
+    return [201, {
+      token,
+      expires_at: new Date(expiresAt).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      permissions,
+      repository_selection: 'selected',
+      ...(repositories === null ? {} : { repositories: repositories.map((each) => this.#repository(installation, each)) }),
+    }];
   }
 
   /** https://docs.github.com/en/rest/apps/apps#get-a-repository-installation-for-the-authenticated-app */
@@ -199,13 +228,14 @@ export class FakeGitHubApp {
   }
 
   /** https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation */
-  #page(installation: FakeInstallation, url: URL): unknown {
+  #page(installation: FakeInstallation, url: URL, only: number[] | null): unknown {
     const perPage = Math.min(Number(url.searchParams.get('per_page') ?? 30), 100);
     const page = Math.max(Number(url.searchParams.get('page') ?? 1), 1);
+    const reached = only === null ? installation.repositories : installation.repositories.filter((each) => only.includes(each.id));
     return {
-      total_count: installation.repositories.length,
+      total_count: reached.length,
       repository_selection: 'selected',
-      repositories: installation.repositories.slice((page - 1) * perPage, page * perPage).map((each) => this.#repository(installation, each)),
+      repositories: reached.slice((page - 1) * perPage, page * perPage).map((each) => this.#repository(installation, each)),
     };
   }
 
@@ -237,18 +267,30 @@ export class FakeGitHubApp {
   }
 
   /** As an installation, by a token it issued that lives still. */
-  async #asInstallation(req: IncomingMessage, res: ServerResponse, answer: (installation: FakeInstallation) => Answer): Promise<void> {
+  async #asInstallation(req: IncomingMessage, res: ServerResponse, answer: (installation: FakeInstallation, only: number[] | null) => Answer): Promise<void> {
     if (this.down) return send(res, [503, { message: 'Service Unavailable' }]);
     const token = this.#tokens.get(authorizationToken(req, ['bearer', 'token']) ?? '');
     const installation = this.installations.find((each) => each.id === token?.installation);
     if (token === undefined || token.expiresAt <= Date.now() || installation === undefined || installation.suspended) {
       return send(res, [401, { message: 'Bad credentials', documentation_url: DOCS }]);
     }
-    send(res, answer(installation));
+    send(res, answer(installation, token.repositories));
   }
 }
 
 type Answer = [number, unknown];
+
+/** A JSON body, or null for none or one that does not parse. */
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown> | null> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  try {
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
 function notFound(): Answer {
   return [404, { message: 'Not Found', documentation_url: DOCS }];

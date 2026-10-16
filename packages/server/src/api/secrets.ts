@@ -733,6 +733,14 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
+    // A key the vault mints, where a value would be read (W108's prototype): the vault decides and logs it.
+    const mint = (key: string | null) =>
+      ctx.vault.mint({ ...asking(ctx, operationId), purpose: path.key === undefined ? 'run' : 'reveal', ...environment, key });
+    if (path.key !== undefined && place.secret === null) {
+      const minted = await mint(path.key);
+      if (!minted.ok) throw vaultRefused(minted.refusal);
+      if (minted.minted.length === 1) return { operationId, values: { [path.key]: minted.minted[0]!.value } };
+    }
     if (path.key !== undefined && (place.secret === null || place.secret.archivedAt !== null)) {
       throw new Refusal(
         notFound('unknown secret'),
@@ -760,7 +768,15 @@ export async function reveal(
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
     for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
-    if (rows.length === 0) {
+    if (path.key === undefined) {
+      const minted = await mint(null);
+      if (!minted.ok) throw vaultRefused(minted.refusal);
+      // A key both stored and minted is the deployment's mistake: say so, rather than pick one.
+      const both = minted.minted.filter(({ key }) => Object.hasOwn(values, key)).map(({ key }) => key);
+      if (both.length > 0) throw conflict(`${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} both stored and minted in ${formatPath(path)}`);
+      for (const { key, value } of minted.minted) values[key] = value;
+    }
+    if (rows.length === 0 && Object.keys(values).length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }

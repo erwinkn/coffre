@@ -1,6 +1,7 @@
 import { hkdfSync } from 'node:crypto';
 
 import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
+import type { Minter } from '@coffre/core/mint';
 
 /** At most `count` data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };
@@ -28,6 +29,21 @@ export type ResolvedVaultConfig = {
    */
   signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
+  /** The keys it mints, by the project and environment slugs they are minted in. */
+  minted?: readonly MintedKey[];
+};
+
+/**
+ * A key the vault mints where it would read a value: whoever reads
+ * `at` gets a fresh credential from `from`, which holds its root.
+ *
+ *   { at: 'infra/ci', key: 'GITHUB_TOKEN', from: release.tokens({ account: 'acme', repositories: ['infra'], permissions: { contents: 'write' } }) }
+ */
+export type MintedKey = {
+  /** `project/environment`, by slug. */
+  at: string;
+  key: string;
+  from: Minter;
 };
 
 /**
@@ -64,6 +80,8 @@ export type VaultConfig = {
   signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
+  /** Keys it mints rather than stores, each from a root credential only it holds; none unless set. */
+  minted?: readonly MintedKey[];
 } & Owners;
 
 /**
@@ -142,6 +160,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
+    minted: checkMinted(config.minted ?? []),
   };
 }
 
@@ -218,4 +237,20 @@ export function checkOwners(emails: readonly string[]): string[] {
     throw new Error(`owners must be human email identities; invalid: ${invalid}`);
   }
   return [...new Set(owners.map((entry) => entry.toLowerCase()))];
+}
+
+/** Each minted key named once, at a place and under a name the API could hold, with a minter. */
+function checkMinted(minted: readonly MintedKey[]): MintedKey[] {
+  const seen = new Set<string>();
+  return minted.map((entry) => {
+    const { at, key, from } = entry;
+    if (typeof at !== 'string' || !/^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(at)) {
+      throw new Error(`a minted key's place (minted[].at) must be project/environment, by slug; got "${String(at)}"`);
+    }
+    if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`minted key ${at}/${String(key)} must be a variable's name`);
+    if (seen.has(`${at}/${key}`)) throw new Error(`${at}/${key} is minted twice`);
+    seen.add(`${at}/${key}`);
+    if (typeof from?.mint !== 'function' || typeof from.provider !== 'string') throw new Error(`minted key ${at}/${key} needs a minter, such as githubApp(…).tokens(…)`);
+    return { at, key, from };
+  });
 }
