@@ -318,23 +318,45 @@ both pass, leaving none. The head puts one after the other.
 `LastOwnerCheckUnderHead`). A row that fails the vault's check counts for
 nothing.
 
-**The configuration only bootstraps.** `bootstrapOwners` (0.5's
-`rootAdmins`, still read for 0.6) names who may become one. While the
-instance has no active Owner of the whole instance, the vault, asked about
-a person it names (`access`, at their sign-in or their next request), makes
-them one: admitted, brought back or given the role, as `system:vault`,
-with `reason: 'bootstrap'`. One whose row fails its check is started over
-first, as removing them would. Two named people at once make one Owner:
-the vault reads again under the person's row and the log's head (`Bootstrap`
-in the model, `BootstrapOnlyWithoutOwner`). At any other time, the list
-does nothing. That covers a new instance and recovery alike: an instance
-whose every Owner is gone, or whose Owners' rows fail the check, takes the
-first named person to sign in to a fresh vault process or Worker isolate
-(one that has seen an Owner does not look again; a deploy starts fresh
-ones), even one an Owner removed: the list is a
-standing way in, to keep to people one would trust as Owner. An Owner who
-exists but cannot sign in any more is not recovered by this; that is a
-command of its own, not built yet (`coffre recover owner`).
+**The deployment declares its Owners** (Erwin's decision, 2026-10-16,
+standing rule R3). The vault's `owners` (`OWNERS` in a deployment `coffre
+init` writes; `bootstrapOwners` and 0.5's `rootAdmins` are read until 0.7)
+names people who are Owners of the whole instance whatever the database
+says. The vault makes each one an Owner as it starts, at the first call of
+each process or Worker isolate once its log holds an entry of its own, and
+when one who owns nothing signs in or makes a request (`access`), which is
+how a new instance's first sign-in works, before the vault has written
+anything. It admits them, brings them back, or gives them the role, as
+`system:vault`, `reason: 'owners'`, each change an entry under the vault's
+MAC like any other (`#declare`). One whose row fails its check is started
+over first, as removing them would. While named, nobody demotes, narrows
+or removes them, themselves included: the vault refuses with `not_allowed`,
+"the deployment names root@acme.example an Owner (owners, in the vault's
+configuration): take them off that list and deploy first", and Users shows
+them "Owner · set by deployment" with a lock in place of their menu
+(`about().owners`, which the members list reads).
+
+| The list, at a deploy | Sam, before | After |
+|---|---|---|
+| `[root, sam]`, a new instance | never signed in | an Owner, at the vault's first call after root's sign-in |
+| `[root, sam]` | a Developer, demoted while unlisted | an Owner, at the first call |
+| `[root, sam]` | removed | an Owner, brought back |
+| `[root]`, Sam taken off | an Owner | an Owner, now one like any other: an Owner may demote him, and he may step down |
+
+So setup and recovery are the same step. Every Owner locked out (they
+left, or lost the account they sign in with): add an email you control to
+the list, deploy, sign in. A row edited around the vault never adds anyone
+to the list, and an edited Owner's row owns nothing: their next request,
+or the next process, starts it over and makes them an Owner again. Taking
+an email off the list demotes nobody. A listed Owner holds what any Owner
+of the whole instance holds, no more: none of a root admin's exceptions. The vault takes
+their row, then the log's head its entries take; it only ever adds an
+Owner, so `OwnerStays` holds, and the model's `Declare` scenario checks
+`DeclaredStay`: someone the list names, once made an Owner, stays one. The
+list must name at least one email, so an instance always has an Owner its
+deployment can reach; the last-Owner rule above still counts for the
+Owners the list does not name, as when the one it names has a row the log
+never admitted, which the vault cannot start over.
 
 **Only Owners make Owners** (Erwin's decision, 2026-10-15, standing rule
 R1). Making someone an Owner, scoped or not, adding or bringing them back
@@ -371,49 +393,26 @@ them.
 
 A row the vault finds tampered with holds nothing, an Owner's too, so
 whoever runs the instance may start it over (remove it) as before; an
-Owner whose row fails its check owns nothing until then, and the bootstrap
-covers an instance left with none.
+Owner whose row fails its check owns nothing until then, unless the
+deployment names them, when the vault starts them over itself.
 
-**Upgrading from 0.5.** The first call of a 0.6 vault makes every email
-the configuration names an Owner of the whole instance, once, as
-`system:vault`, `reason: 'root-admin'`: 0.5 held them root admins already,
-so one who never signed in gets a row too, and nobody loses anything. It
-does so only on an instance whose vault of 0.5 gave a root admin a row (its
-`member.add` with `rootAdmin: true`, under the vault's MAC). A
-`root-admins.convert` entry under the vault's MAC records it, naming whom
-it made Owners, and from then on the list only bootstraps. An instance with
-no such row, a new one above all, writes the entry too, naming nobody, at
-its first call once its log holds an entry of the vault's (an empty log
-stays empty until someone acts): otherwise, rolled back to 0.5, which gives
-each listed person who signs in a row of its own, and forward again, it
-would make the whole list Owners then, someone an Owner demoted since
-included. After the entry, the whole list is never converted again. Only a
-listed person a vault of 0.5 gives a root admin's row after it, still
-serving during the first deploy or rolled back to, becomes an Owner, at the
-next process's first call, with another entry naming them; and only while
-that row's entry is still the newest about them, so one an Owner removed or
-changed meanwhile stays as they left them. It reads only rows about people
-the configuration names, which 0.5 gives one each at most, so it passes
-over none; with more than 1024 in its name there, it would convert nobody
-and write nothing. 0.5 held them root admins, and everyone else stays as
-0.6 left them:
+**Upgrading from 0.5.** The list keeps its emails and, until 0.7, its
+name, so the first call of a 0.6 vault makes every email 0.5 held a root
+admin an Owner of the whole instance, as `system:vault`, `reason:
+'owners'`: one who never signed in gets a row too, and nobody loses
+anything. Rolled back to 0.5 and forward again, the vault reads the list
+it is given, never a root admin's row of 0.5, so it makes nobody an Owner
+the list no longer names:
 
-| Listed, on an instance that ran 0.6, then 0.5, then 0.6 again | After |
+| On an instance that ran 0.6, then 0.5, then 0.6 again | After |
 |---|---|
-| Sam, made a Developer on 0.6 | a Developer |
-| Carol, first signed in on 0.5, during the rollback | an Owner |
-| Carol, the same, removed by an Owner on 0.6 before the next process | removed |
-| Dan, who never signed in | nothing: the list bootstraps only an instance with no Owner |
+| Sam, taken off the list and made a Developer on 0.6 | a Developer |
+| Carol, still listed | an Owner |
+| Dan, a root admin of 0.5's list only, who signed in during the rollback | the Member 0.5 made him |
 
-The same holds for a first deploy with 0.5 still serving: an instance
-whose root admins had not signed in when 0.6 first ran converts only those
-who sign in to 0.5 after it, as one where nobody had would bootstrap the
-first to sign in. One forged in the vault's name is passed over and
-reported, and stops no conversion; as many forged in a row as the vault
-reads back (1024) hide whether it converted, and it converts nobody. No
-migration: the rows are 0.5's, `role` `owner` and a null `scope`, sealed as 0.5 seals them, so 0.5 reads them
-during the rollout and after a rollback, when it holds the configured
-emails root admins again anyway.
+No migration: the rows are 0.5's, `role` `owner` and a null `scope`,
+sealed as 0.5 seals them, so 0.5 reads them during the rollout and after a
+rollback, when it holds the configured emails root admins again anyway.
 
 ## Where it lives
 
@@ -459,11 +458,10 @@ to the next. It leaves a member the vault has reported tampered with
 are started over: the vault's report in the log decides, not whether
 their row checks out now, so a genuine row put back after a report stays
 left. A root admin of 0.5 kept theirs; 0.6 converts theirs like anyone's,
-by their row's role, then makes them an Owner ("Upgrading from 0.5",
-above). That order is the one `coffre migrate` can say: it reads the same
-rows by the same function (`everyProjectConversion`), and lists the root
-admins who signed in (`rootAdminsToConvert`), but the configuration that
-names the rest is the vault's.
+by their row's role, then makes everyone the list names an Owner ("The
+deployment declares its Owners", above). That order is the one `coffre
+migrate` can say: it reads the same rows by the same function
+(`everyProjectConversion`), and cannot tell whom the configuration names.
 
 One rule says whether a report stands, `reportStands` in
 `@coffre/db/grants`: the vault applies it to its own entries, passing over

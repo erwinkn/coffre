@@ -9,7 +9,7 @@
  *   export default vault((env: Env) => ({
  *     database: postgres(env.HYPERDRIVE),
  *     kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
- *     bootstrapOwners: ['admin@acme.example'],
+ *     owners: ['admin@acme.example'],
  *   }));
  *
  * Any number of isolates run it side by side: every decision locks what it

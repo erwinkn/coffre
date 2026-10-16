@@ -111,7 +111,7 @@ export default vault((env: Env) => ({
     keyArn: env.KMS_KEY_ARN, // arn:aws:kms:eu-west-3:123456789012:key/…
     credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },
   }),
-  bootstrapOwners: env.BOOTSTRAP_OWNERS.split(','),
+  owners: env.OWNERS.split(','),
   signingKey: env.SIGNING_KEY, // required: see below
 }));
 ```

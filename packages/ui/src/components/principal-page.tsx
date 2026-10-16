@@ -119,6 +119,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
           scope: found.scope,
           tampered: found.status === 'tampered',
           managed: principalType === 'service',
+          declared: found.declared,
         }
       : yours
         ? { principalType, principalId, instanceRole: 'member' as const, scope: null, tampered: false, managed: true }

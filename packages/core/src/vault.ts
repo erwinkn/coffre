@@ -59,8 +59,8 @@ export interface Vault {
    * What one principal holds right now: the app asks once per request,
    * and at sign-in for each verified email. A decision, its rows checked:
    * lists of who holds what read the rows themselves, and need not ask.
-   * While the instance has no Owner of all of it, a person the vault's
-   * `bootstrapOwners` names becomes one here, logged (`reason: 'bootstrap'`).
+   * A person the vault's `owners` names who is no Owner of all of it
+   * becomes one here, logged (`reason: 'owners'`).
    */
   access(principal: string): Promise<Access>;
   /** Set roles at several places for one principal: all of it, or none. */
@@ -106,6 +106,12 @@ export interface Vault {
    */
   about(): Promise<{
     checkpointKeys: Record<string, CheckpointKey>;
+    /**
+     * The emails of those the deployment names Owners of the whole instance
+     * (`owners`), lowercased: the vault makes them Owners, and refuses to
+     * demote or remove them. Absent from a vault of 0.5, which names none.
+     */
+    owners?: string[];
     /**
      * @deprecated Always empty: an app of 0.5, deployed after this vault,
      * lists and checks root admins here until it is. Gone in 0.7.
@@ -341,7 +347,8 @@ export type AdmitInput = Correlation & Through & {
    * Changing it takes someone who runs the instance, about someone else;
    * making someone an Owner, or changing an Owner's, an Owner of the whole
    * instance, who may change their own too. It never leaves the instance
-   * without an Owner of all of it (`last_owner`).
+   * without an Owner of all of it (`last_owner`), nor demotes one the
+   * deployment names (`owners`; `not_allowed`).
    */
   role?: InstanceRole;
   scope?: Scope;

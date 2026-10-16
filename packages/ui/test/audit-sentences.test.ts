@@ -239,21 +239,16 @@ test("the app's missing permissions are said as the grant that was missing", () 
   );
 });
 
-test('the vault making an Owner says why: a bootstrap, or a root admin of 0.5, once', () => {
+test('the vault making an Owner says why: the deployment names them', () => {
   const vault = { author: 'vault', actorType: 'system', actorId: 'vault' } as const;
   assert.equal(
-    said(entry({ action: 'member.add', ...vault, subject: 'user:root@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, reason: 'bootstrap' } })),
-    'added root@acme.example as an Owner: no Owner was left, and the deployment names them to take over',
+    said(entry({ action: 'member.add', ...vault, subject: 'user:root@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, reason: 'owners' } })),
+    'added root@acme.example as an Owner: the deployment names them one',
   );
   assert.equal(
-    said(entry({ action: 'member.role', ...vault, subject: 'user:root@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, previousRole: 'member', reason: 'root-admin' } })),
-    'made root@acme.example an Owner, was Member: they were a root admin',
+    said(entry({ action: 'member.role', ...vault, subject: 'user:root@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, previousRole: 'member', reason: 'owners' } })),
+    'made root@acme.example an Owner, was Member: the deployment names them one',
   );
-  assert.equal(
-    said(entry({ action: 'root-admins.convert', ...vault, metadata: { owners: ['user:root@acme.example', 'user:sam@acme.example'] } })),
-    'ended root admins, making Owners of root@acme.example, sam@acme.example',
-  );
-  assert.equal(said(entry({ action: 'root-admins.convert', ...vault, metadata: { owners: [] } })), 'ended root admins: none was made an Owner');
   assert.equal(
     said(entry({ action: 'member.remove', author: 'vault', subject: 'user:root@acme.example', decision: 'deny', reason: 'last_owner' })),
     'tried to remove root@acme.example: they are the last Owner of the whole instance',

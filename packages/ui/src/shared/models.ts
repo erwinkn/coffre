@@ -45,7 +45,7 @@ export type RoleRow = {
 };
 
 export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 'instanceRole' | 'scope'> &
-  Partial<Pick<Member, 'tampered' | 'managed'>> & {
+  Partial<Pick<Member, 'tampered' | 'managed' | 'declared'>> & {
     /** Where it has access, when the list said; a member just added has none yet. */
     grants?: { project: string; environment: string | null }[];
   };

@@ -108,7 +108,7 @@ test('wrangler.jsonc is read for what setup needs, and edited in place, its comm
       { name: 'coffre', accountId: null, hyperdrive: null, route: null },
     );
     assert.ok(placeholder(before.vars.PUBLIC_URL) && placeholder(before.vars.GITHUB_CLIENT_ID));
-    assert.ok(placeholder(readWorker(dir, 'vault/wrangler.jsonc').vars.BOOTSTRAP_OWNERS));
+    assert.ok(placeholder(readWorker(dir, 'vault/wrangler.jsonc').vars.OWNERS));
 
     editWorker(dir, 'app/wrangler.jsonc', [
       { path: ['account_id'], value: 'acc-1', after: 'name' },
@@ -145,10 +145,11 @@ test('the address and the first Owner: what will do, and why not', () => {
   assert.equal(domainOf('secrets.example.org'), 'example.org');
   assert.equal(adminsProblem('a@acme.test, b@acme.test'), null);
   assert.match(adminsProblem('a@acme.test, nobody')!, /not an email: nobody/);
-  // A deployment 0.5 wrote names its first Owner ROOT_ADMINS, which its vault still reads: setup fills in that one.
+  // A deployment 0.5 wrote names its Owners ROOT_ADMINS, which its vault still reads: setup fills in that one.
+  assert.equal(ownersVar({ OWNERS: 'you@example.com' }), 'OWNERS');
   assert.equal(ownersVar({ BOOTSTRAP_OWNERS: 'you@example.com' }), 'BOOTSTRAP_OWNERS');
   assert.equal(ownersVar({ ROOT_ADMINS: 'ops@acme.test' }), 'ROOT_ADMINS');
-  assert.equal(ownersVar({}), 'BOOTSTRAP_OWNERS');
+  assert.equal(ownersVar({}), 'OWNERS');
 });
 
 // --- whose a Worker and a Hyperdrive config are ---------------------------------------------

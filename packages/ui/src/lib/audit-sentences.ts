@@ -85,9 +85,7 @@ function subject(entry: AuditEntry): Part[] {
 
 /** Why the vault made someone an Owner itself, said after it. */
 function owned(entry: AuditEntry): Part[] {
-  if (entry.metadata.reason === 'bootstrap') return [': no Owner was left, and the deployment names them to take over'];
-  if (entry.metadata.reason === 'root-admin') return [': they were a root admin'];
-  return [];
+  return entry.metadata.reason === 'owners' ? [': the deployment names them one'] : [];
 }
 
 /** An MCP client, by the name it connected under. */
@@ -321,18 +319,6 @@ const TEMPLATES: Record<string, Template> = {
         ...(entry.metadata.reason === 'every-project' ? [', for their grants on every project'] : []),
         ...owned(entry),
       ];
-    },
-  },
-  // The vault turning 0.5's root admins into Owners, once.
-  'root-admins.convert': {
-    did: 'ended',
-    tried: 'end',
-    what: () => ['root admins'],
-    then: ({ entry }) => {
-      const owners = Array.isArray(entry.metadata.owners) ? entry.metadata.owners.flatMap((owner) => text(owner) ?? []) : [];
-      // It names those it changed, maybe none: each owned the instance already, or the log never admitted them.
-      if (owners.length === 0) return [': none was made an Owner'];
-      return [', making Owners of ', ...owners.flatMap((member, i): Part[] => [...(i === 0 ? [] : [', ']), { member }])];
     },
   },
   'member.owner': {

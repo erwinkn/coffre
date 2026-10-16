@@ -16,25 +16,31 @@ instance: a member like any other, in People, changed by the same rules.
   project doesn't count. Two changes at once, each about a different
   Owner, never leave none: the vault counts under the log's head, and
   `formal/Coffre.tla` checks it.
-- **The list only bootstraps.** The vault's `bootstrapOwners`
-  (`BOOTSTRAP_OWNERS` in a deployment `coffre init` writes) names who
-  becomes an Owner by signing in while the instance has none, logged as
-  the vault's ("no Owner was left, and the deployment names them to take
-  over"). While there is one it does nothing. That is a new instance's first
-  sign-in, and the way back into one whose Owners are all gone: name an
-  email you control, deploy, sign in. Keep it to people you would trust as
-  Owner: should every Owner's row fail the vault's check, the next one it
-  names to sign in takes over.
+- **The deployment declares its Owners.** The vault's `owners` (`OWNERS`
+  in a deployment `coffre init` writes) lists people who are Owners of the
+  whole instance whatever the database says. The vault makes each one an
+  Owner who is not one yet as it starts (every deploy, Worker isolate or
+  Node restart) and when they sign in, logged as the vault's ("the
+  deployment names them one"). While listed, nobody demotes, narrows or
+  removes them, themselves included (403, "the deployment names
+  omar@acme.example an Owner (owners, in the vault's configuration): take
+  them off that list and deploy first"), and Users shows them "Owner · set
+  by deployment". Taking an email off the list demotes nobody: they stay an
+  Owner, one like any other. So setup and recovery are one step: on a new
+  instance the first listed person to sign in becomes the Owner, and the
+  rest follow at the vault's next call; when no Owner can sign in any more,
+  or someone with the database demoted one, add an email you control,
+  deploy, sign in. A row written around the vault adds nobody to the list,
+  which lives in the deployment's code. Keep it to people you would trust
+  as Owner. `bootstrapOwners` (`BOOTSTRAP_OWNERS`) and 0.5's `rootAdmins`
+  (`ROOT_ADMINS`) are read until 0.7.
 - **Only Owners make Owners.** Making someone an Owner, scoped or not,
   and changing or removing an Owner take an Owner of the whole instance:
   an Admin of all of it does neither (403, `not_allowed`), and People
   offers it no Owner to set or remove. An Owner of the whole instance may
   step down, the one role change anyone makes about themselves, unless
-  they are the last. The vault decides it under both rows' locks, so an
+  they are the last, or the deployment names them. The vault decides it under both rows' locks, so an
   Owner demoted meanwhile makes nobody an Owner.
-- **An Owner who can't sign in any more** (a lost GitHub account) is not
-  recovered by editing the list, as a root admin was: the instance still
-  has its Owner. Keep two Owners until `coffre recover owner` exists.
 - **A wrong vault key is an outage.** A vault given the wrong key checks
   no member's row, the Owner's included, so every member's request answers
   503 and nobody signs in, with the reason in the app's log, where before root
@@ -49,30 +55,25 @@ instance: a member like any other, in People, changed by the same rules.
 **Upgrading from 0.5.** Nothing to migrate, and nothing to change first:
 
 1. **`coffre update`**, then **`coffre migrate`**, which applies nothing.
-2. **Deploy.** On an instance where a root admin ever signed in, the
-   vault's first call makes every email its configuration names
-   (`rootAdmins`, `ROOT_ADMINS`) an Owner of the whole instance, once, as
+2. **Deploy.** The vault's first call makes every email its configuration
+   names (`rootAdmins`, `ROOT_ADMINS`) an Owner of the whole instance, as
    `system:vault`: a member row for one who never signed in too, so nobody
-   loses what they held. A `root-admins.convert` entry records it, after
-   which the list only bootstraps. Someone you took off the list before
-   upgrading is not made an Owner. Where no root admin ever signed in, the
-   entry names nobody, and the first listed person to sign in becomes the
-   Owner, as on a new instance, which writes the entry too. After the
-   entry the list is never converted again: rolled back to 0.5 and forward,
-   or during the deploy, only a listed person 0.5 let in after it, and
-   nobody has changed since, becomes an Owner. A root admin who still
-   held grants on every project of 0.4 has them converted as anyone's
-   first, then becomes an Owner: `coffre migrate` lists both.
-   The vault reads 0.5's entries by its keys, so keep any vault key it
-   replaced in `previousKeks`, as always.
-3. **Check Users**, where your root admins are now Owners: demote those
-   who should not be, keeping one, and make Owners of anyone else who
-   should run coffre.
+   loses what they held, and again at every start while you list them.
+   Someone you took off the list before upgrading is not made an Owner, nor
+   is anyone 0.5 let in as a root admin whom the list no longer names,
+   rolled back to 0.5 and forward included. A root admin who still held
+   grants on every project of 0.4 has them converted as anyone's first,
+   then becomes an Owner: `coffre migrate` lists the grants. The vault
+   reads 0.5's entries by its keys, so keep any vault key it replaced in
+   `previousKeks`, as always.
+3. **Check Users**, where your root admins are now Owners, set by
+   deployment: take those who should not be off the list, deploy, and
+   demote them; make Owners of anyone else who should run coffre.
 4. **Optionally, rename the setting**: `rootAdmins` and `ROOT_ADMINS` are
-   read for 0.6 only. In `vault/src/worker.ts`, `bootstrapOwners:
-   env.BOOTSTRAP_OWNERS.split(',')`, and the var in `vault/wrangler.jsonc`
-   (on Node, `src/vault.ts` and `vault.env`); `coffre setup` keeps
-   whichever name your vault reads.
+   read until 0.7. In `vault/src/worker.ts`, `owners:
+   env.OWNERS.split(',')`, and the var in `vault/wrangler.jsonc` (on Node,
+   `src/vault.ts` and `vault.env`); `coffre setup` keeps whichever name
+   your vault reads.
 
 Rolling back to 0.5 leaves the new Owners Owners, and makes the listed
 emails root admins again, as long as the vault's code still passes them as

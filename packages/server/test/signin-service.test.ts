@@ -455,10 +455,10 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
   assert.equal(await countRows(identities, eq(identities.principal, `user:${GONE}`)), 0);
 });
 
-test('the bootstrap Owner needs no invitation, and is not removed while they are the last Owner', async () => {
+test('the Owner the deployment names needs no invitation, and is not removed while named', async () => {
   const first = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.deepEqual(first.principal, { type: 'user', id: ROOT });
-  // The vault made them the instance's Owner, a member row of its own, while it had none.
+  // The vault made them the instance's Owner, a member row of its own, as its deployment names them.
   const [row] = await db.owner
     .select({ createdBy: vaultMembers.createdBy, role: vaultMembers.role, scope: vaultMembers.scope })
     .from(vaultMembers)
@@ -466,8 +466,8 @@ test('the bootstrap Owner needs no invitation, and is not removed while they are
   assert.deepEqual(row, { createdBy: 'system:vault', role: 'owner', scope: null });
   assert.equal((await signin.verify(first.credential.token)).id, ROOT);
 
-  // Not by themselves, the last Owner; nor by anyone else, who is no Owner.
-  for (const [actor, code] of [[ROOT, 'last_owner'], [LEAD, 'not_allowed']]) {
+  // Not by themselves, nor by anyone else.
+  for (const [actor, code] of [[ROOT, 'not_allowed'], [LEAD, 'not_allowed']]) {
     const removed = await deps.vault.remove({ actor: `user:${actor}`, principal: member(ROOT) });
     assert.equal(removed.ok || removed.refusal.code, code, actor);
   }
