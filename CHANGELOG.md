@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.1 (2026-10-16)
+
 - **Shift+Enter types a line break in a secret's value.** A value could only
   become multi-line by pasting one. In the value field of a new or edited
   secret, Shift+Enter now inserts a line break at the caret, over any
