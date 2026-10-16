@@ -88,9 +88,18 @@ export class GitHubApp {
     let truncated = more;
     const listed = await Promise.all(installations.map(async (installation) => {
       const repositories: GitHubRepository[] = [];
+      // Its first page reserved before any request goes out, a token too unless one is kept, so that no
+      // installation's token starves the others' pages; the rest, more pages and retries, spend what is left.
+      const first = this.#kept(installation.id) === null ? 2 : 1;
+      if (budget.left < first) {
+        truncated = true;
+        return repositories;
+      }
+      budget.left -= first;
+      const own: Budget = { left: first, then: budget };
       try {
         for (let page = 1; ; page++) {
-          const body = record(await this.#asInstallation(installation.id, `/installation/repositories?per_page=${PAGE}&page=${page}`, { budget }));
+          const body = record(await this.#asInstallation(installation.id, `/installation/repositories?per_page=${PAGE}&page=${page}`, { budget: own }));
           const items = Array.isArray(body.repositories) ? body.repositories : [];
           repositories.push(...items.flatMap((item) => repository(item) ?? []));
           const total = typeof body.total_count === 'number' ? body.total_count : 0;
@@ -142,12 +151,18 @@ export class GitHubApp {
 
   /** As the installation, with its token; once more with a fresh one should GitHub refuse the one kept (the app was reinstalled, say). */
   async #asInstallation(id: number, path: string, options: { missing?: boolean; budget?: Budget } = {}): Promise<unknown> {
-    const kept = this.#tokens.get(id);
-    const fresh = kept === undefined || kept.expiresAt - TOKEN_MARGIN_MS <= this.#now();
-    const token = fresh ? await this.#issueToken(id, options.budget) : kept.token;
+    const kept = this.#kept(id);
+    const fresh = kept === null;
+    const token = kept ?? (await this.#issueToken(id, options.budget));
     const answer = await this.#call(path, { method: 'GET', token, ...options, refused: !fresh });
     if (answer !== REFUSED) return answer;
     return this.#call(path, { method: 'GET', token: await this.#issueToken(id, options.budget), ...options });
+  }
+
+  /** The installation's token, while it has more than `TOKEN_MARGIN_MS` to live. */
+  #kept(id: number): string | null {
+    const kept = this.#tokens.get(id);
+    return kept !== undefined && kept.expiresAt - TOKEN_MARGIN_MS > this.#now() ? kept.token : null;
   }
 
   /** https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app */
@@ -181,7 +196,7 @@ export class GitHubApp {
    * redirect is never followed.
    */
   async #call(path: string, request: { method: 'GET' | 'POST'; token: string; missing?: boolean; refused?: boolean; budget?: Budget }): Promise<unknown> {
-    if (request.budget !== undefined && request.budget.left-- <= 0) throw SPENT;
+    if (request.budget !== undefined && !spend(request.budget)) throw SPENT;
     let response: Response;
     try {
       response = await this.#fetch(`${this.apiUrl}${path}`, {
@@ -215,8 +230,18 @@ export class GitHubApp {
 
 /** A kept token GitHub refused. */
 const REFUSED = Symbol('refused');
-/** A listing's requests, left to make. */
-type Budget = { left: number };
+/** A listing's requests, left to make: an installation's own reserve first, then the listing's. */
+type Budget = { left: number; then?: Budget };
+
+function spend(budget: Budget | undefined): boolean {
+  for (let at = budget; at !== undefined; at = at.then) {
+    if (at.left > 0) {
+      at.left--;
+      return true;
+    }
+  }
+  return false;
+}
 /** None left: the listing stops there, and says it is partial. */
 const SPENT = Symbol('spent');
 

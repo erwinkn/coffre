@@ -185,6 +185,23 @@ test('a listing spends its budget on every request it makes, tokens issued again
   assert.ok(again.repositories.length < 19);
 });
 
+test('with a cold cache and more installations than the budget reaches, those it reaches are listed whole, the others left out', async () => {
+  for (const count of [38, 100]) {
+    idp.githubApp.installations = Array.from({ length: count }, (_, i) => ({
+      id: 400 + i,
+      account: { login: `unit-${String(i).padStart(3, '0')}`, id: 1200 + i, type: 'Organization' as const },
+      suspended: false,
+      repositories: [{ id: 4_000_000 + i, name: 'only', private: true }],
+    }));
+    requests = [];
+    const listed = await appOf().repositories();
+    assert.ok(requests.length <= MAX_LISTING_REQUESTS, `${requests.length} requests`);
+    // The app and its installations, then a token and a page each: 19 of them.
+    assert.deepEqual([listed.repositories.length, listed.truncated], [19, true], `${count} installations`);
+    assert.equal(listed.installations.length, count);
+  }
+});
+
 test("a repository by name: its IDs when the app is installed on it, private or not; null when it is not", async () => {
   const app = appOf();
   assert.deepEqual(await app.repository('acme/infra'), { github: 'acme/infra', repositoryId: '41540', ownerId: '9919', private: true });
