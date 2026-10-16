@@ -191,3 +191,99 @@ test('no read is left unhandled when it fails after being superseded', async () 
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+test('two rows, A slow and B fast: B wins, and A shows nothing', async () => {
+  const written: string[] = [];
+  const clipboard: ClipboardLike = {
+    async writeText(text) {
+      written.push(text);
+    },
+  };
+  const copy = (text: string | Promise<string>) => copyText(text, { clipboard, item: undefined });
+  const rowA = createCopier({ copy });
+  const rowB = createCopier({ copy });
+  const seenA = watch(rowA);
+  const seenB = watch(rowB);
+  let release!: (value: string) => void;
+  const slow = new Promise<string>((resolve) => (release = resolve));
+
+  const a = rowA.run(slow);
+  assert.equal(rowA.feedback(), 'pending');
+  const b = rowB.run(Promise.resolve('B value'));
+  assert.equal(rowA.feedback(), 'idle', 'B taking over drops A\'s pending state');
+  assert.deepEqual(await b, { outcome: 'copied' });
+  release('A value');
+  assert.deepEqual(await a, { outcome: 'superseded' });
+
+  assert.deepEqual(written, ['B value']);
+  assert.equal(rowB.feedback(), 'copied');
+  assert.equal(rowA.feedback(), 'idle');
+  assert.deepEqual(seenA, ['idle', 'pending', 'idle']);
+  assert.equal(seenB.at(-1), 'copied');
+});
+
+test('the same on the ClipboardItem path', async () => {
+  const written: string[] = [];
+  class Item {
+    parts: Record<string, Promise<string>>;
+    constructor(parts: Record<string, Promise<string>>) {
+      this.parts = parts;
+    }
+  }
+  const clipboard: ClipboardLike = {
+    async writeText() {},
+    async write(items) {
+      written.push(await (items as Item[])[0].parts['text/plain']);
+    },
+  };
+  const copy = (text: string | Promise<string>) => copyText(text, { clipboard, item: Item });
+  const rowA = createCopier({ copy });
+  const rowB = createCopier({ copy });
+  let release!: (value: string) => void;
+  const a = rowA.run(new Promise<string>((resolve) => (release = resolve)));
+  const b = rowB.run(Promise.resolve('B value'));
+  await b;
+  release('A value');
+  assert.deepEqual(await a, { outcome: 'superseded' });
+  assert.deepEqual(written, ['B value']);
+});
+
+test('a row filtered out and back mid-read: the new row\'s copy beats the old one\'s late read', async () => {
+  // Filtering unmounts the row and mounts a new one, with a copier of its own.
+  const written: string[] = [];
+  const clipboard: ClipboardLike = {
+    async writeText(text) {
+      written.push(text);
+    },
+  };
+  const copy = (text: string | Promise<string>) => copyText(text, { clipboard, item: undefined });
+  const before = createCopier({ copy });
+  let release!: (value: string) => void;
+  const old = before.run(new Promise<string>((resolve) => (release = resolve)));
+  const after = createCopier({ copy }); // the remounted row
+  const fresh = after.run(Promise.resolve('NEW-v2'));
+  assert.deepEqual(await fresh, { outcome: 'copied' });
+  release('OLD-v1');
+  assert.deepEqual(await old, { outcome: 'superseded' });
+  assert.deepEqual(written, ['NEW-v2']);
+  assert.equal(after.feedback(), 'copied');
+});
+
+test('a retry on one row after another row copied: the retry owns the clipboard and the feedback', async () => {
+  const { copy, ends } = manualCopies();
+  const rowA = createCopier({ copy });
+  const rowB = createCopier({ copy });
+  const first = rowA.run('a1');
+  const other = rowB.run('b');
+  const retry = rowA.run('a2');
+  assert.equal(rowB.feedback(), 'idle');
+  assert.equal(rowA.feedback(), 'pending');
+  ends[0]();
+  ends[1]();
+  ends[2]();
+  assert.deepEqual(await first, { outcome: 'superseded' });
+  assert.deepEqual(await other, { outcome: 'superseded' });
+  assert.deepEqual(await retry, { outcome: 'copied' });
+  assert.equal(rowA.feedback(), 'copied');
+  assert.equal(rowB.feedback(), 'idle');
+});
