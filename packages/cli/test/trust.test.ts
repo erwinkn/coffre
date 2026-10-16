@@ -10,7 +10,9 @@ const SHA = 'b'.repeat(40);
 
 /** What the server's lookup would find: public repositories and projects, by name. */
 const lookup: Lookup = async (input) => {
-  if (input.github === 'acme/api') return { github: 'acme/api', repositoryId: '41532', ownerId: '9919' };
+  // GitHub spells a repository as its tokens do, whatever the case it was asked in.
+  if (input.github?.toLowerCase() === 'acme/api') return { github: 'acme/api', repositoryId: '41532', ownerId: '9919' };
+  if (input.github === 'acme') return { github: 'acme', ownerId: '9919' };
   if (input.gitlab === 'acme/api' && input.gitlabUrl === undefined) return { gitlab: 'acme/api', projectId: '345', namespaceId: '12' };
   // As the server answers, through a client that hands a 404 back to the command.
   throw new CoffreError(404, 'not_found', 'api.github.com did not find it: a private one\'s IDs are typed in');
@@ -42,6 +44,19 @@ test('a workflow of the repository, on a branch, a tag or a release, with its ID
   const given = await built({ github: 'acme/secret', workflow: 'deploy.yml', branch: 'main', 'repository-id': '7', 'owner-id': '9919' });
   assert.equal(given.claims.repository_id, '7');
   await assert.rejects(bindingFrom({ github: 'acme/secret', workflow: 'deploy.yml', branch: 'main' }, lookup), /gh api repos\/acme\/secret/);
+  // Typed in another case, the workflow is named as GitHub names it, or no run's workflow_ref would match.
+  const typed = await built({ github: 'Acme/API', workflow: 'deploy.yml', branch: 'main' });
+  assert.equal(typed.claims.workflow_ref, 'acme/api/.github/workflows/deploy.yml@refs/heads/main');
+});
+
+test('a GitHub environment narrows a binding to the jobs that run in it', async () => {
+  const deploy = await built({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', 'github-environment': 'production' });
+  assert.equal(deploy.claims.environment, 'production');
+  const reusable = await built({ github: 'acme', reusable: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', sha: SHA, branch: 'main', 'any-repository': true, 'github-environment': 'production' });
+  assert.equal(reusable.claims.environment, 'production');
+  assert.equal((await built({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main' })).claims.environment, undefined);
+  await assert.rejects(bindingFrom({ gitlab: 'acme/api', branch: 'main', 'github-environment': 'production' }, lookup), /--github-environment narrows a GitHub binding/);
+  await assert.rejects(built({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', 'github-environment': 'production ' }), /GitHub environment's name/);
 });
 
 test('a reusable workflow is pinned to its commit and its caller\'s ref; the whole organization only by its ID', async () => {
@@ -61,7 +76,15 @@ test('a reusable workflow is pinned to its commit and its caller\'s ref; the who
   assert.equal(organization.profile, 'github-reusable-organization');
   assert.equal(organization.claims.repository_id, undefined);
   await assert.rejects(bindingFrom({ github: 'acme/api', reusable: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', branch: 'main' }, lookup), /--sha <commit>/);
-  await assert.rejects(bindingFrom({ github: 'acme', reusable: 'x', sha: SHA, branch: 'main', 'any-repository': true }, lookup), /--owner-id/);
+  // The organization's ID looked up when not given, from its name or any of its repositories'.
+  for (const github of ['acme', 'acme/api']) {
+    const looked = await built({ github, reusable: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', sha: SHA, branch: 'main', 'any-repository': true });
+    assert.deepEqual([looked.profile, looked.claims.repository_owner_id], ['github-reusable-organization', '9919']);
+  }
+  await assert.rejects(
+    bindingFrom({ github: 'hidden', reusable: 'x', sha: SHA, branch: 'main', 'any-repository': true }, lookup),
+    /gh api users\/hidden --jq '"--owner-id \\\(\.id\)"'\nand add the flag it prints, --owner-id <n>, to this coffre trust/,
+  );
 });
 
 test('a GitLab project, by its namespace and project IDs, a branch or a tag, and its pipeline source', async () => {
@@ -139,6 +162,10 @@ test('a binding says, in a sentence, which CI runs it lets sign in: platform, re
   assert.equal(
     runsOf({ profile: 'github', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main', ref: 'refs/heads/main', event_name: ['push', 'pull_request'] } }),
     "GitHub Actions runs of acme/api's workflow ci.yml, on branch main or a pull request into it, by push or pull_request",
+  );
+  assert.equal(
+    runsOf({ profile: 'github', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push', environment: 'production' } }),
+    "GitHub Actions runs of acme/api's workflow deploy.yml, on branch main, by push, in environment production",
   );
   assert.equal(
     runsOf({ profile: 'github-reusable', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', ref: 'refs/tags/v2', event_name: 'release', job_workflow_ref: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', job_workflow_sha: SHA } }),

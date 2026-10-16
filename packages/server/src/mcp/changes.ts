@@ -618,7 +618,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     name: 'admit_member',
     needs: 'services',
     title: 'Admit a member, or set their role',
-    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. A person who holds access may add a service account, where the instance lets them. A role's default permissions, before any project grant adds more: ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
+    description: `Admit a person, or a service account, as a member, with no access until granted some; or set a person's instance role and where it applies. A service account may come with its first grants (access), in one step: a grant refused admits nothing. A person who holds access may add a service account, where the instance lets them. A role's default permissions, before any project grant adds more: ${INSTANCE_ROLE_NAMES.map((role) => `${role}: ${INSTANCE_ROLES[role].description.toLowerCase()}`).join(' ')} ${approved}`,
     scope: 'manage-access',
     idempotent: true,
     destructive: false,
@@ -626,27 +626,42 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       member,
       role: instanceRole.optional().describe('A person\'s instance role; left out, a new member is a member and an existing one keeps theirs'),
       scope: scopeInput.optional().describe('Where the role applies: projects and environments (by slug), each "all", { only: [...] } or { except: [...] }; left out, everywhere'),
+      access: z
+        .record(z.string().min(1).max(200), accessChange)
+        .refine((access) => Object.keys(access).length > 0 && Object.keys(access).length <= 50, 'name from 1 to 50 places')
+        .optional()
+        .describe(`A service account's first grants, as set_access takes them: each place, a project or project/environment, with its role (${ROLE_NAMES.join(', ')}; { role, until } for one that ends)`),
     }).strict(),
-    names: ({ member }) => [apiMember(member)],
+    names: ({ member, access }) => [apiMember(member), ...Object.keys(access ?? {})],
     change: {
-      summary: ({ member, role, scope }) => `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${INSTANCE_ROLES[role].name}, ${scopeInWords(fullScope(scope))}`}`,
-      check: async (ctx, { member, role, scope }) => {
+      summary: ({ member, role, scope, access }) =>
+        `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${INSTANCE_ROLES[role].name}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
+      // The grants are the API's to decide on Approve, as set_access's for a service account are.
+      check: async (ctx, { member, role, scope, access }) => {
+        if (access !== undefined && (!apiMember(member).startsWith('token:') || role !== undefined || scope !== undefined)) {
+          throw new CoffreError(400, 'bad_request', 'access comes with a service account, and no role or scope: a person is given grants once a member (set_access)');
+        }
         if (!apiMember(member).startsWith('token:') || (role ?? 'member') !== 'member' || scope !== undefined) return instanceOnly(ctx);
         if (!(await ctx.api.me()).setsUpServices) throw new CoffreError(403, 'forbidden', 'you set up no service account: the instance keeps them to admins where you hold access');
       },
-      preview: async (_api, { member, role, scope }) => [
+      replaces: async (api, { member, access }) => (access === undefined ? { details: [], state: null } : heldAt(api, member, access)),
+      preview: async (_api, { member, role, scope, access }, _viewing, replaced) => [
         { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
         role === undefined
-          ? { label: 'As', value: 'a member, with no access until granted some, or as they are' }
+          ? { label: 'As', value: access === undefined ? 'a member, with no access until granted some, or as they are' : 'a member, with this access' }
           : { label: 'As', value: `${INSTANCE_ROLES[role].name}: ${INSTANCE_ROLES[role].description}` },
         ...(role === undefined || role === 'member' ? [] : [{ label: 'Where', value: scopeInWords(fullScope(scope)) }]),
+        ...replaced,
       ],
-      apply: async (api, { member, role, scope }) => {
-        const made = await api.members.add(apiMember(member), role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) });
+      apply: async (api, { member, role, scope, access }) => {
+        const made = await api.members.add(
+          apiMember(member),
+          access !== undefined ? { access: access as RouteInput<'PATCH /access/:member'> } : role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) },
+        );
         const as = `${INSTANCE_ROLES[made.instanceRole].name}, ${scopeInWords(made.scope)}`;
         return {
-          result: { member: shownMember(made.member), instanceRole: made.instanceRole, scope: made.scope, created: made.created },
-          text: `${shownMember(made.member)} is a member${made.created ? '' : ' already'}, as ${as}.`,
+          result: { member: shownMember(made.member), instanceRole: made.instanceRole, scope: made.scope, created: made.created, ...(made.changes === undefined ? {} : { changes: made.changes }) },
+          text: `${shownMember(made.member)} is a member${made.created ? '' : ' already'}, as ${as}${made.changes === undefined ? '' : ', with its access set'}.`,
         };
       },
     },
@@ -757,7 +772,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     name: 'trust_workload',
     needs: 'services',
     title: 'Trust a CI workload',
-    description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. ${approved}`,
+    description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. A GitHub binding may name environment, a GitHub environment, to take only the jobs that run in it, under its protection rules. ${approved}`,
     scope: 'manage-access',
     idempotent: false,
     destructive: false,
@@ -768,7 +783,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         issuer: z.string().max(400).optional().describe("The issuer's URL, for a custom profile"),
         claims: z
           .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
-          .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]'),
+          .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]; environment, on GitHub, the GitHub environment the job runs in, as "production", matched whatever its case'),
         scope: credentialScope,
         label: z.string().trim().min(1).max(120).optional(),
       })

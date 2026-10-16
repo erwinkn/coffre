@@ -87,6 +87,11 @@ const secretValue = z
   .refine((value) => !value.includes('\0'), 'a value cannot contain NUL bytes');
 
 const role = z.enum(ROLE_NAMES);
+/** What one member should hold, each place by path: a role, a role until a date, or null for none. */
+const accessPatch = z.record(
+  z.string().max(200),
+  z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
+);
 /** A token's or a binding's scope, each place by path and its role: `{ "market/dev": "developer" }`. All its account holds when left out. */
 const credentialScope = z
   .record(z.string().max(200), role)
@@ -291,7 +296,13 @@ export const routes = {
     run: (ctx, { params }) => memberAccess(ctx, parseMember(params.member)),
   }),
   ...route('PUT /members/:member', {
-    input: z.object({ role: instanceRole.optional(), scope: scopeInput.optional() }).strict(),
+    input: z
+      .object({
+        role: instanceRole.optional(),
+        scope: scopeInput.optional(),
+        access: accessPatch.refine((access) => Object.keys(access).length > 0, 'name a place to grant').optional(),
+      })
+      .strict(),
     run: (ctx, { params, input }) => putMember(ctx, parseMember(params.member), input),
   }),
   ...route('DELETE /members/:member', {
@@ -369,10 +380,7 @@ export const routes = {
     run: (ctx, { input }) => putSettings(ctx, input),
   }),
   ...route('PATCH /access/:member', {
-    input: z.record(
-      z.string().max(200),
-      z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
-    ),
+    input: accessPatch,
     run: (ctx, { params, input }) => setAccess(ctx, parseGrantee(params.member), input),
   }),
 

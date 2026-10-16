@@ -15,6 +15,12 @@
  *               workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main',
  *               ref: 'refs/heads/main',
  *               event_name: ['pull_request', 'push', 'workflow_dispatch'] } }
+ *
+ * A GitHub binding may also name `environment`, the GitHub environment its
+ * job runs in, so that the environment's protection rules (its required
+ * reviewers, the branches it deploys) gate every run that signs in. GitHub
+ * changes `sub` for such a job, `repo:acme/api:environment:production`, but
+ * no GitHub binding matches `sub`: `ref` and `workflow_ref` stay as they were.
  */
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
@@ -106,6 +112,13 @@ const DIGITS = /^[1-9][0-9]{0,19}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(heads|tags)\/\S{1,200}$/;
 const WORKFLOW = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/[^@\s]+\.ya?ml@\S+$/;
+/**
+ * A GitHub environment's name, as GitHub takes one: at most 255 characters,
+ * none a control character, and no space at either end, which GitHub would
+ * not keep. GitHub documents no narrower set: `production`, `Staging EU`
+ * and `prod/eu:1` are all names.
+ */
+const ENVIRONMENT = /^(?! )[^\p{Cc}]{1,255}(?<! )$/u;
 
 /** A claim a binding names: one value, or, for what started the run, any of several. */
 export type ClaimValue = string | string[];
@@ -209,6 +222,9 @@ function checkGitHub(profile: WorkloadProfile, claims: BindingClaims): void {
     const value = claims[id];
     if (value !== undefined && !DIGITS.test(value as string)) throw new BindingInvalid(`${id} is GitHub's numeric ID, not a name`);
   }
+  if (claims.environment !== undefined && !ENVIRONMENT.test(claims.environment as string)) {
+    throw new BindingInvalid('environment is a GitHub environment\'s name: at most 255 characters, no control character, no space at either end');
+  }
   const events = claimValues(claims.event_name);
   const ref = claims.ref as string;
   if (!REF.test(ref)) throw new BindingInvalid('ref is a full ref: refs/heads/<branch> or refs/tags/<tag>');
@@ -245,17 +261,24 @@ function checkGitLab(claims: BindingClaims): void {
 /**
  * The claims of a verified token that differ from what a binding expects,
  * by name: none when it matches. A claim matches when the token carries its
- * value, or one of its values. A GitHub `pull_request` run, at
- * `refs/pull/<n>/merge`, counts as a run at the branch it merges into: its
- * `ref`, and the ref its `workflow_ref` ends in, are read as
- * `refs/heads/<base_ref>`.
+ * value, or one of its values. On GitHub's profiles, two readings:
+ *
+ * - A `pull_request` run, at `refs/pull/<n>/merge`, counts as a run at the
+ *   branch it merges into: its `ref`, and the ref its `workflow_ref` ends
+ *   in, are read as `refs/heads/<base_ref>`.
+ * - `environment` matches whatever its case: GitHub's environment names are
+ *   case-insensitive, so `Production` and `production` are one environment,
+ *   under the same protection rules.
  */
 export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>): string[] {
-  const claims = profile.startsWith('github') ? atBaseBranch(token) : token;
+  const github = profile.startsWith('github');
+  const claims = github ? atBaseBranch(token) : token;
   return Object.entries(expected)
     .filter(([name, value]) => {
       const actual = claims[name];
-      return typeof actual !== 'string' || !claimValues(value).includes(actual);
+      if (typeof actual !== 'string') return true;
+      if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
+      return !claimValues(value).includes(actual);
     })
     .map(([name]) => name);
 }
@@ -351,13 +374,18 @@ function started(input: Record<string, unknown>, one: string, many: string): Cla
   return list as string[];
 }
 
-/** A workflow of the repository, run at `ref` by any of `events`; a pull request, by the branch it merges into. */
+/**
+ * A workflow of the repository, run at `ref` by any of `events`; a pull
+ * request, by the branch it merges into. An `environment` narrows it to the
+ * jobs that run in that GitHub environment.
+ */
 export function githubWorkflow(input: {
   repository: string;
   repositoryId: string;
   ownerId: string;
   workflow: string;
   ref: string;
+  environment?: string;
 } & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
   return {
     profile: 'github',
@@ -367,14 +395,21 @@ export function githubWorkflow(input: {
       workflow_ref: workflowRef(input.repository, input.workflow, input.ref),
       ref: input.ref,
       event_name: started(input, 'event', 'events'),
+      ...inEnvironment(input.environment),
     },
   };
+}
+
+/** The `environment` claim, when one is named. */
+function inEnvironment(environment: string | undefined): BindingClaims {
+  return environment === undefined ? {} : { environment };
 }
 
 /**
  * A reusable workflow at one commit, called at `ref`: from one repository,
  * or, with `repositoryId` null, from any repository of the organization. A
- * `caller` workflow narrows it to one calling workflow.
+ * `caller` workflow narrows it to one calling workflow, and an
+ * `environment` to the jobs that run in that GitHub environment.
  */
 export function githubReusable(input: {
   repositoryId: string | null;
@@ -383,6 +418,7 @@ export function githubReusable(input: {
   called: string;
   sha: string;
   caller?: { repository: string; workflow: string };
+  environment?: string;
 } & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
   const claims: BindingClaims = {
     repository_owner_id: input.ownerId,
@@ -391,6 +427,7 @@ export function githubReusable(input: {
     event_name: started(input, 'event', 'events'),
     job_workflow_ref: input.called,
     job_workflow_sha: input.sha,
+    ...inEnvironment(input.environment),
   };
   if (input.caller !== undefined) claims.workflow_ref = workflowRef(input.caller.repository, input.caller.workflow, input.ref);
   return { profile: input.repositoryId === null ? 'github-reusable-organization' : 'github-reusable', claims };

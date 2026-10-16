@@ -39,6 +39,7 @@ import {
   Search as SearchGlyph,
   Settings as SettingsGlyph,
   ShieldCheck as ShieldCheckGlyph,
+  Shuffle as ShuffleGlyph,
   Sun as SunGlyph,
   Terminal as TerminalGlyph,
   Trash2,
@@ -47,6 +48,7 @@ import {
   User as UserGlyph,
   UserRoundCog,
   Users as UsersGlyph,
+  WandSparkles,
   X as XGlyph,
 } from 'lucide-react';
 import { markPath } from './mark';
@@ -154,6 +156,8 @@ export const Settings = lucide(SettingsGlyph);
 export const Eye = lucide(EyeGlyph);
 export const EyeOff = lucide(EyeOffGlyph);
 export const Copy = lucide(CopyGlyph);
+export const Generate = lucide(WandSparkles);
+export const Shuffle = lucide(ShuffleGlyph);
 export const Pencil = lucide(PencilGlyph);
 export const Archive = lucide(ArchiveGlyph);
 export const Trash = lucide(Trash2);

@@ -1,6 +1,7 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { CoffreError } from '@coffre/client';
 import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
 import { defineSignin, github, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
@@ -39,13 +40,14 @@ let db: { owner: Database; runtime: Database; close: () => Promise<void> };
 let deps: FixtureDeps;
 /** The project the service reads, made for it. */
 let reads: string;
-/** What each issuer's discovery answers, by URL. */
+/** What each issuer's discovery answers, by URL: a document, or a status other than 200. */
 let documents: Map<string, unknown>;
 
 const transport: WorkloadTransport = {
   json: async (url) => {
-    if (!documents.has(url.href)) throw new FetchRefused(url, 'answered 404');
-    return documents.get(url.href);
+    const answer = documents.get(url.href) ?? 404;
+    if (typeof answer === 'number') throw FetchRefused.answered(url, answer);
+    return answer;
   },
 };
 
@@ -144,8 +146,13 @@ test('the server holds every binding to its profile, from the API as from anywhe
   await assert.rejects(create({ profile: 'gitlab', issuer: GITHUB, claims: {} }), /signs only for the github profiles/);
   await assert.rejects(create({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { email: 'x' } }), /requires sub/);
   await assert.rejects(create({ profile: 'custom', issuer: 'http://idp.acme.example', claims: { sub: 'x' } }), /must use https/);
+  await assert.rejects(create({ profile: 'github', claims: { ...DEPLOY, environment: 'production ' } }), /environment is a GitHub environment's name/);
   assert.deepEqual(await live(), []);
   assert.deepEqual(await entries(), [], 'an invalid binding is a bad request, not a decision');
+  // A GitHub environment narrows it, sealed with the rest of its claims.
+  const { binding } = await bind({ ...DEPLOY, environment: 'production' });
+  assert.equal(binding.claims.environment, 'production');
+  assert.deepEqual((await live()).map((each) => each.claims), [binding.claims]);
 });
 
 test('only those who manage a service account trust workloads as it; a refusal is logged, and an unknown service is no service', async () => {
@@ -283,19 +290,32 @@ test('loopback issuers are for development: an instance off loopback refuses to 
   assert.equal(local.mode === 'signin' && local.signin.workloads?.allowLoopback, true);
 });
 
-test("an owner looks up a public repository's or project's IDs; a private one is not found, and its IDs are typed in", async () => {
-  documents.set('https://api.github.com/repos/acme/api', { id: 41532, owner: { id: 9919 } });
-  documents.set('https://gitlab.com/api/v4/projects/acme%2Fapi', { id: 345, namespace: { id: 12 } });
+test("an owner looks up a public repository's, owner's or project's IDs; a private one is not found, and its IDs are typed in", async () => {
+  documents.set('https://api.github.com/repos/acme/api', { id: 41532, full_name: 'acme/api', owner: { id: 9919 } });
+  documents.set('https://api.github.com/repos/Acme/API', { id: 41532, full_name: 'acme/api', owner: { id: 9919 } });
+  documents.set('https://api.github.com/users/ACME', { id: 9919, login: 'acme', type: 'Organization' });
+  documents.set('https://gitlab.com/api/v4/projects/acme%2Fapi', { id: 345, path_with_namespace: 'acme/api', namespace: { id: 12 } });
   documents.set('https://gitlab.acme.example/api/v4/projects/infra%2Fdeploy', { id: 7, namespace: { id: 3 } });
   const lead = as(LEAD);
   assert.deepEqual(await lead.bindings.lookup({ github: 'acme/api' }), { github: 'acme/api', repositoryId: '41532', ownerId: '9919' });
+  // As GitHub names it, which its tokens' workflow_ref spells: a name typed in another case is the same repository.
+  assert.deepEqual(await lead.bindings.lookup({ github: 'Acme/API' }), { github: 'acme/api', repositoryId: '41532', ownerId: '9919' });
+  // An owner alone, for a reusable workflow called from any of its repositories.
+  assert.deepEqual(await lead.bindings.lookup({ github: 'ACME' }), { github: 'acme', ownerId: '9919' });
+  // GitHub's hourly limit without signing in, spent: said so, not as a private repository.
+  documents.set('https://api.github.com/repos/acme/busy', 403);
+  documents.set('https://api.github.com/users/busy', 429);
+  await assert.rejects(lead.bindings.lookup({ github: 'acme/busy' }), (error: CoffreError) => error.status === 429 && /this hour's are spent/.test(error.message));
+  await assert.rejects(lead.bindings.lookup({ github: 'busy' }), (error: CoffreError) => error.status === 429);
+  documents.set('https://api.github.com/repos/acme/down', 502);
+  await assert.rejects(lead.bindings.lookup({ github: 'acme/down' }), (error: CoffreError) => error.status === 503 && /did not answer/.test(error.message));
   assert.deepEqual(await lead.bindings.lookup({ gitlab: 'acme/api' }), { gitlab: 'acme/api', projectId: '345', namespaceId: '12' });
   assert.deepEqual(
     await lead.bindings.lookup({ gitlab: 'infra/deploy', gitlabUrl: 'https://gitlab.acme.example' }),
     { gitlab: 'infra/deploy', projectId: '7', namespaceId: '3' },
   );
   await assert.rejects(lead.bindings.lookup({ github: 'acme/private' }), /api.github.com did not find it: for a private one, type its IDs/);
-  await assert.rejects(lead.bindings.lookup({ github: '../../users' }), /a GitHub repository is <owner>\/<name>/);
+  await assert.rejects(lead.bindings.lookup({ github: '../../users' }), /a GitHub repository is <owner>\/<name>, and an owner <owner>/);
   await assert.rejects(lead.bindings.lookup({ gitlab: 'acme/api', gitlabUrl: 'http://10.0.0.1' }), /must use https/);
   await assert.rejects(lead.bindings.lookup({}), /look up a GitHub repository or a GitLab project/);
   await assert.rejects(as(DEV).bindings.lookup({ github: 'acme/api' }), /only those who set up service accounts may trust workloads/);
@@ -335,6 +355,11 @@ test("with one, an owner lists the repositories it is installed on, private ones
     lead.bindings.lookup({ github: 'globex/secret' }),
     /GitHub did not find it, and the GitHub App is not installed on it: install it on globex, or type its IDs/,
   );
+  // Outside the app, GitHub's public limits still say so; an owner is looked up as without it.
+  documents.set('https://api.github.com/repos/globex/busy', 429);
+  await assert.rejects(lead.bindings.lookup({ github: 'globex/busy' }), (error: CoffreError) => error.status === 429 && /this hour's are spent/.test(error.message));
+  documents.set('https://api.github.com/users/acme', { id: 9919, login: 'acme' });
+  assert.deepEqual(await lead.bindings.lookup({ github: 'acme' }), { github: 'acme', ownerId: '9919' });
 
   // Only those who set up service accounts, as for the lookup.
   await assert.rejects(as(DEV).bindings.repositories(), /only those who set up service accounts may trust workloads/);

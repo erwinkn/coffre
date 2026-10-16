@@ -116,6 +116,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PUT /members/:member': {
     ui: [
       { does: 'Users › Add user; Service accounts › Add service account', in: 'components/directory.tsx', call: 'members.add' },
+      { does: 'a project › Service accounts › Add service account › New service account: made with its grant, in one call', in: 'pages/project-access.tsx', call: 'members.add' },
       { does: 'a user › ⋯ › Change role', in: 'components/directory.tsx', call: 'members.add' },
     ],
   },

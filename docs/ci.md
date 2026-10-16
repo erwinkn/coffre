@@ -19,7 +19,10 @@ coffre tokens issue api-deploy --output-file api-deploy.token   # or a bearer to
 ```
 
 A member is admitted before it holds anything: `coffre grant` does not make
-one, and says so. Grant before you trust or issue: each binding and token
+one, and says so. To add one and grant it at once, `coffre admit api-deploy
+--service --grant market/prod=viewer`, or on a project's Service accounts
+page, Add service account with a new name: both are one change, and a
+grant refused adds no account either. Grant before you trust or issue: each binding and token
 reaches what its account holds when it is made, or less with `--scope
 market/prod=viewer`, and nothing the account is given later. To widen one,
 make another and remove the first. With a bearer token, store it in your CI provider's secret store. The
@@ -92,6 +95,27 @@ A schedule runs on a branch, and a release at a tag (`--tag v1 --event
 release`). On GitLab, `--source push,web,schedule` does the same for the
 pipeline's source.
 
+### In a GitHub environment
+
+`--github-environment production` (in the dialog, "GitHub environment")
+takes only the workflow's jobs that run in that GitHub environment:
+
+```yaml
+jobs:
+  deploy:
+    environment: production
+    permissions: { id-token: write, contents: read }
+```
+
+```sh
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --github-environment production --apply
+```
+
+The job then signs in only once the environment's protection rules, such
+as required reviewers, let it run. Without them, naming an environment adds
+nothing: anyone who can push a workflow can name one. The name matches
+whatever its case, as GitHub's environment names do.
+
 ### CI on pull requests
 
 `--event pull_request` trusts the workflow's runs for pull requests into
@@ -121,12 +145,14 @@ for anyone's pull request, forks included, and exists to label or comment
 on them.
 
 coffre looks up a repository's or project's IDs, which a binding keeps, so
-that a name passed on to someone else trusts nothing. GitHub and GitLab
+that a name passed on to someone else trusts nothing: the dialog as you type
+the name, and `coffre trust` before it shows the binding. GitHub and GitLab
 show a private one only to those signed in to it. With a GitHub App of the
-deployment's own ([github-app.md](github-app.md)), the pages list the
-repositories it is installed on, private ones too, and coffre resolves
-their names through it. Otherwise, for a private one coffre says so and
-gives the command that gets them, whose output is the two flags to add:
+deployment's own ([github-app.md](github-app.md)), coffre resolves the names
+of the repositories it is installed on, private ones too. Otherwise, for a
+private one coffre says so and gives the command that gets them, whose
+output is the two flags to add (in the dialog, the fields under "Private
+repository? Enter IDs"):
 
 ```sh
 gh api repos/acme/website --jq '"--repository-id \(.id) --owner-id \(.owner.id)"'

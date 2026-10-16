@@ -32,7 +32,7 @@ const transport: WorkloadTransport = {
   json: async (url) => {
     fetched.push(url.href);
     if (documents.has(url.href)) return documents.get(url.href);
-    if (url.href !== CLAUDE_CODE) throw new FetchRefused(url, 'answered 404');
+    if (url.href !== CLAUDE_CODE) throw FetchRefused.answered(url, 404);
     return { client_id: CLAUDE_CODE, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback'], token_endpoint_auth_method: 'none' };
   },
 };

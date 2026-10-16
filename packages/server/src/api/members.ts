@@ -38,6 +38,7 @@ import {
   type PlaceRow,
   type StoredGrant,
 } from '../db/queries.ts';
+import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf } from './caller.ts';
 import { audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -599,14 +600,23 @@ export type FilterInput = 'all' | { only: string[] } | { except: string[] };
  * member row their sessions and tokens hang off.
  *
  *   { "role": "developer", "scope": { "projects": "all", "environments": { "only": ["dev"] } } }
+ *
+ * A service account may come with its first grants, as `PATCH
+ * /api/access/<member>` sets them, in one vault call: a grant refused adds
+ * nothing, so no account is left without the access it was made for.
+ *
+ *   { "access": { "market/prod": "viewer" } }
  */
 export async function putMember(
   ctx: ApiContext,
   member: MemberRef,
-  input: { role?: InstanceRole; scope?: { projects?: FilterInput; environments?: FilterInput } },
-): Promise<{ member: string; instanceRole: InstanceRole; scope: Scope; created: boolean }> {
+  input: { role?: InstanceRole; scope?: { projects?: FilterInput; environments?: FilterInput }; access?: Record<string, AccessValue> },
+): Promise<{ member: string; instanceRole: InstanceRole; scope: Scope; created: boolean; changes?: Record<string, AccessChange> }> {
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id, ...(input.role === undefined ? {} : { role: input.role }) };
+  if (input.access !== undefined && (member.type !== 'service' || input.role !== undefined || input.scope !== undefined)) {
+    throw badRequest('access comes with a service account, and no role: a person is given grants once a member');
+  }
   return withRefusals(ctx, async () => {
     const service = member.type === 'service' && (input.role ?? 'member') === 'member' && input.scope === undefined;
     if (!service || runsInstance(ctx.caller)) {
@@ -623,6 +633,12 @@ export async function putMember(
         conflict('service accounts hold project grants only, never an instance role'),
         denied(ctx, 'member.add', 'service_cannot_hold_role', { metadata: fields }),
       );
+    }
+    if (input.access !== undefined) {
+      const { changes, admitted } = await setAccess(ctx, member, input.access, true);
+      // Housekeeping, as below: one brought back starts a membership of its own.
+      if (admitted !== undefined) await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, admitted.generation, ctx.caller.principal.id));
+      return { member: principal, instanceRole: 'member' as const, scope: EVERYWHERE, created: admitted?.created ?? false, changes };
     }
     const known = await places(ctx.db);
     const scope = input.role === undefined ? undefined : scopeIds(input.scope ?? {}, known);

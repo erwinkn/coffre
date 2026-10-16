@@ -119,6 +119,70 @@ you name. A `coffre.json` that is a link, holds anything but `"url"`, or
 names something other than an origin stops the commands below it, with
 its path. One in your home directory or above it is ignored.
 
+**An OIDC binding can require a GitHub environment.** Name one, such as
+`production`, and only jobs that run in that environment sign in, after
+its protection rules (required reviewers, the branches it deploys) let
+them through. Set it under "GitHub environment" in the Trust dialog, with
+`coffre trust … --github-environment production`, or as the `environment`
+claim over the API and MCP. GitHub changes `sub` for such a job
+(`repo:acme/api:environment:production`), but no GitHub binding reads
+`sub`: `ref`, `workflow_ref` and `job_workflow_ref` are unchanged, so the
+plain and the reusable-workflow profiles both work with it.
+GitHub's environment names ignore case, so a binding for `production`
+also takes a job in `Production`; they are one environment, with the same
+rules. The name is checked as GitHub takes one: at most 255 characters, no
+control character, no space at either end. The binding's summary, `coffre
+trust`'s description of it and its audit entry ("…, in GitHub environment
+production, reaching …") name it. Existing bindings are unchanged and take
+jobs in any environment, or none, as before. `githubWorkflow` and
+`githubReusable` in `@coffre/core/workloads` take an optional `environment`.
+
+**The Trust dialog finds a repository's IDs itself.** Type `acme/api` and,
+once you pause or leave the field, coffre asks GitHub for its IDs. It then
+shows the repository and its owner as confirmation, spelled as GitHub
+spells them: `Acme/API` becomes `acme/api`, as the runs' `workflow_ref`
+names it. The ID fields appear only when GitHub shows nothing, behind
+"Private repository? Enter IDs", with the `gh api` command that prints
+them. For a reusable workflow called from any repository of the
+organization, the field asks for the organization, `acme`, and finds its ID
+the same way; `coffre trust --any-repository` looks it up too, instead of
+requiring `--owner-id`. Each name is asked once per page. GitHub answers
+60 lookups an hour to a server that does not sign in, which every user of a
+Workers deployment shares; once they are spent the dialog says so and
+offers the ID fields. `GET /api/workloads/lookup` takes an owner as well as
+a repository, answers with GitHub's spelling, and answers 429 when GitHub's
+limit is spent and 503 when GitHub does not answer, where it said 404 for
+both. In `@coffre/client`, `WorkloadIds` gains that answer,
+`{ github, ownerId }` with no `repositoryId`: code that read a GitHub
+answer's `repositoryId` after checking only for `github` checks
+`'repositoryId' in ids`.
+
+**Events are chosen in a combobox.** The GitHub events and GitLab pipeline
+sources a binding trusts were a row of checkboxes. Now you type to filter
+and choose with the arrows and Enter, each chosen one a chip that Backspace
+removes. `pull_request` and `workflow_run` are marked "unreviewed code" in
+the list, and the warning under the field still says what each exposes.
+
+**A project's Add service account makes a new one too.** The dialog
+lists the service accounts you could grant, and as you type a name no
+account has, offers it as a new one, last: "Create and grant access" makes
+the account with that grant, in one vault decision. A grant refused (more
+than you hold, a role only a project takes, an account someone else
+removed) makes no account either, so none is left behind holding nothing,
+and the row says why in the vault's words. Anyone who sets up service
+accounts sees the list and the new option, not only admins: a project's
+Owner picked from a list where before they typed a name.
+
+- **API.** `PUT /api/members/token:<name>` takes `{ "access": { "market/prod":
+  "viewer" } }`, the first grants as `PATCH /api/access` takes them, and
+  answers their `changes` beside `created`. A person, or `access` with a
+  `role`, is a 400. The vault's `setAccess` takes `admit`; a vault older
+  than the app refuses it (`not_a_member`) and admits nobody, so a
+  deployment whose Workers update one after the other never makes an
+  account without its grant.
+- **CLI.** `coffre admit api-deploy --service --grant market/prod=viewer`,
+  repeated or a comma list.
+- **MCP.** `admit_member` takes `access`; its approval page shows each grant.
 **A private repository's IDs, from a GitHub App of the deployment's own.**
 A trust binding names a repository by its IDs, and coffre looked up only
 a public one's: a private one's were typed, from `gh api`. Now a
@@ -149,6 +213,25 @@ Users, Service accounts, grants and secrets tables, "Saving…" and
 "Removing…" stood in for the row's menu in a column that fits only the
 menu, and ran into the role column. Now the spinner stands there alone, the
 words stay for screen readers and as its tooltip.
+
+**Generate a secret's value in the browser.** A new secret's value field,
+and an edited one's, has a Generate button. It opens a dialog that makes the
+value with Web Crypto, in the page, and Use puts it in the field as if typed:
+nothing is sent until the row is saved, through the same write as any other
+value. It makes:
+
+- **a random value**, 1 to 256 bytes of entropy (32 by default), as letters
+  and digits (base62, each character drawn uniformly), hex, base64 or base64
+  URL (unpadded). The dialog says how many characters that is and how many
+  bits it holds: 32 bytes are 43 characters of base62, 256 bits.
+- **an AES-GCM key**, 256 or 128 bits: the raw key, base64.
+- **a key pair**, ECDSA or ECDH on P-521, P-384 or P-256: the private key
+  (PKCS #8, base64) is the row's value, and the public key
+  (SPKI, base64, as the private key is PKCS #8) is saved with it, under a name of its own that follows the
+  first (`JWT_PRIVATE_KEY` gives `JWT_PUBLIC_KEY`). The public key is part
+  of the row's edit, as the row says under its value: the row saves, or
+  is cancelled, whole, in one write, so a new private key never lands
+  beside the old public key. Typing over the value drops the public key.
 
 **`coffre get` no longer adds a newline when piped.** It printed the value
 and a newline whatever stdout was, so `coffre get app/prod/KEY | wc -c`

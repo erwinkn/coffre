@@ -179,13 +179,15 @@ export const SECTIONS = [
           'admit <principal> [--service] [--role <role>]',
           '      [--projects <a,b> | --except-projects <a,b>]',
           '      [--environments <a,b> | --except-environments <a,b>]',
+          '      [--grant <project>[/<env>]=<role>,…]',
         ],
         about: [
           'a member: a person by their email, or a service account,',
           'service:<name> or --service. --role sets a person\'s',
           'instance role, member, auditor, developer, admin or owner,',
           'in every project and environment unless a scope flag',
-          'narrows it; never your own',
+          'narrows it; never your own. --grant gives a service',
+          'account its first grants with it: refused, it is not added',
         ],
       },
       {
