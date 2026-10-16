@@ -9,6 +9,7 @@ import { queries, waysFor } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
+import { setByDeployment } from './affordances';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { ConfirmDialog, EmptyState, MenuPopup, Modal, Spinner, Timestamp, Toggletip } from './ui';
 import { PrincipalLink } from './principal';
@@ -276,6 +277,7 @@ function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
  * plain member.
  */
 export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
+  const { capabilities } = useShell();
   if (principal.tampered === true) {
     return (
       <Toggletip
@@ -293,15 +295,21 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
       </Toggletip>
     );
   }
+  const name = INSTANCE_ROLES[principal.instanceRole].name;
   return (
     <>
-      <span className={`tag${principal.instanceRole === 'member' ? '' : ' tag-violet'}`}>
-        {INSTANCE_ROLES[principal.instanceRole].name}
-      </span>
+      {setByDeployment(principal, capabilities) ? (
+        <Toggletip label="Set by deployment">
+          <button type="button" className="tag tag-button" aria-label={`${name}, set by deployment`}>
+            {name}
+          </button>
+        </Toggletip>
+      ) : (
+        <span className={`tag${principal.instanceRole === 'member' ? '' : ' tag-violet'}`}>{name}</span>
+      )}
       {principal.instanceRole !== 'member' && principal.scope !== null && !unscoped(principal.scope) && (
         <span className="role-scope">{scopeInWords(principal.scope)}</span>
       )}
-      {principal.declared === true && principal.instanceRole === 'owner' && <span className="role-scope">· set by deployment</span>}
     </>
   );
 }

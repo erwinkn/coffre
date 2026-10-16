@@ -13,6 +13,7 @@ import {
   ProjectEmptyStateCopy,
   MakesProjectsOnly,
   SecretReadOnly,
+  setByDeployment,
 } from '../src/components/affordances.ts';
 
 type Persona = {
@@ -229,4 +230,13 @@ test('archived-only project states, for someone who makes no project, point to t
     archivedOnly,
     'No active projects. Your archived projects appear below.',
   );
+});
+
+test('only an Owner of the whole instance sees a deployment-declared Owner greyed out', () => {
+  const declared = { instanceRole: 'owner', declared: true };
+  assert.equal(setByDeployment(declared, { ownsInstance: true }), true);
+  assert.equal(setByDeployment(declared, { ownsInstance: false }), false);
+  assert.equal(setByDeployment({ instanceRole: 'owner' }, { ownsInstance: true }), false);
+  assert.equal(setByDeployment({ instanceRole: 'owner', declared: false }, { ownsInstance: true }), false);
+  assert.equal(setByDeployment({ instanceRole: 'admin', declared: true }, { ownsInstance: true }), false);
 });

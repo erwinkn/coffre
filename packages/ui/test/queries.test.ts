@@ -187,3 +187,19 @@ test('nobody but an owner is asked for the directory', async () => {
   assert.deepEqual(calls, []);
 });
 
+
+test('the directory keeps which Owners the deployment names, for the tag and the lock', async () => {
+  const client = {
+    members: {
+      list: async () => ({
+        members: [
+          { principalType: 'user', principalId: 'root@acme.example', instanceRole: 'owner', scope: null, declared: true, grants: [] },
+        ],
+        removed: [],
+      }),
+    },
+  } as unknown as CoffreClient;
+  const result = await queries.directory(client, true).queryFn!({} as never);
+  assert.ok(result.ok);
+  assert.equal(result.principals[0]?.declared, true);
+});
