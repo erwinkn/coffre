@@ -121,7 +121,7 @@ test('no clipboard at all is a failure, not a silent success', async () => {
   await assert.rejects(copyText('x', { clipboard: undefined, item: FakeItem }), /clipboard/i);
 });
 
-test('a read that fails after the copy already failed is not left unhandled', async () => {
+test('a read that fails after the clipboard refused is not left unhandled', async () => {
   const unhandled: unknown[] = [];
   const onUnhandled = (reason: unknown) => unhandled.push(reason);
   process.on('unhandledRejection', onUnhandled);
@@ -129,13 +129,17 @@ test('a read that fails after the copy already failed is not left unhandled', as
     const refused: ClipboardLike = { async writeText() {}, async write() { throw new DOMException('no', 'NotAllowedError'); } };
     let fail!: (reason: unknown) => void;
     const late = new Promise<string>((_, reject) => (fail = reject));
-    await assert.rejects(copyText(late, { clipboard: refused, item: FakeItem }), { name: 'NotAllowedError' });
+    const copy = copyText(late, { clipboard: refused, item: FakeItem });
+    await new Promise((resolve) => setTimeout(resolve, 5));
     fail(new ValueUnavailable());
+    await assert.rejects(copy, ValueUnavailable);
 
     let failLater!: (reason: unknown) => void;
     const later = new Promise<string>((_, reject) => (failLater = reject));
-    await assert.rejects(copyText(later, { clipboard: undefined, item: FakeItem }), /clipboard/i);
+    const none = copyText(later, { clipboard: undefined, item: FakeItem });
+    await new Promise((resolve) => setTimeout(resolve, 5));
     failLater(new ValueUnavailable());
+    await assert.rejects(none, ValueUnavailable);
 
     // Let the runtime report anything it considers unhandled.
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -143,4 +147,31 @@ test('a read that fails after the copy already failed is not left unhandled', as
   } finally {
     process.off('unhandledRejection', onUnhandled);
   }
+});
+
+test('a copy refused by the clipboard is not over until its read is', async () => {
+  const refused: ClipboardLike = { async writeText() {}, async write() { throw new DOMException('no', 'NotAllowedError'); } };
+  let release!: (value: string) => void;
+  const read = new Promise<string>((resolve) => (release = resolve));
+  let settled = false;
+  const copy = copyText(read, { clipboard: refused, item: FakeItem }).then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(settled, false, 'ended while its read was still out');
+  release('x');
+  await copy;
+  assert.equal(settled, true);
+
+  // Same when the read itself then fails: the copy reports that, once, and only then.
+  let fail!: (reason: unknown) => void;
+  const failing = new Promise<string>((_, reject) => (fail = reject));
+  let outcome: unknown = 'pending';
+  const second = copyText(failing, { clipboard: refused, item: FakeItem }).catch((failure) => (outcome = failure));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(outcome, 'pending');
+  fail(new ValueUnavailable());
+  await second;
+  assert.ok(outcome instanceof ValueUnavailable);
 });
