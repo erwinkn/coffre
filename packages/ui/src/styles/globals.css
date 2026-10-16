@@ -1441,6 +1441,12 @@ a.crumb-link:hover {
   visibility: visible;
 }
 
+/* A service account the grant makes: the last option, its name as typed. */
+.avatar-new {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
 .picker-empty {
   display: flex;
   align-items: center;

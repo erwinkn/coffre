@@ -9,7 +9,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog, projects } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance (D97,
@@ -128,6 +128,68 @@ test('a Developer of dev sets up CI for dev: the account, its grant, a token and
   const removed = await ada.members.remove(CI);
   assert.equal(removed.report, null);
   assert.equal(removed.revoked.grants, 1);
+});
+
+test('an account made with its first grant, in one call: its maker manages it, and the log shows both', async () => {
+  assert.deepEqual(await ada.members.add(CI, { access: { 'market/dev': 'developer' } }), {
+    member: CI,
+    instanceRole: 'member',
+    scope: { projects: 'all', environments: 'all' },
+    created: true,
+    changes: { 'market/dev': 'created' },
+  });
+  assert.deepEqual((await ada.members.list()).members.map((member) => [member.member, member.managed, member.grants.map((grant) => grant.id)]), [
+    [CI, true, [`${CI}/market/dev`]],
+  ]);
+  assert.equal((await ada.tokens.issue(CI, { label: 'ci', expiresInDays: 1 })).token.length > 0, true);
+  // Who runs the instance gives one an end too; one already a member is granted as it is.
+  assert.equal((await root.members.add('token:deploy', { access: { market: { role: 'viewer', until: '2999-12-31' } } })).created, true);
+  assert.deepEqual((await root.members.access('token:deploy')).grants.map((grant) => [grant.project, grant.role, grant.expiresAt?.slice(0, 10)]), [['market', 'viewer', '2999-12-31']]);
+  assert.deepEqual(await ada.members.add(CI, { access: { 'billing/dev': 'viewer' } }), {
+    member: CI, instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, created: false, changes: { 'billing/dev': 'created' },
+  });
+  assert.deepEqual((await logged('member.add', 'access.grant')).filter(([actor]) => actor === ADA), [
+    [ADA, 'member.add', 'allow', null],
+    [ADA, 'access.grant', 'allow', null],
+    [ADA, 'access.grant', 'allow', null],
+  ]);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
+test('a grant refused, by the app or the vault, leaves no account behind', async () => {
+  const made = async () => (await root.members.list()).members.filter((member) => member.principalType === 'service').map((member) => member.member);
+  // Beyond what they hold: prod, a project around their dev, a role above their own, one place of two.
+  await assert.rejects(ada.members.add('token:ci-prod', { access: { 'market/prod': 'viewer' } }), { status: 403 });
+  await assert.rejects(ada.members.add('token:ci-market', { access: { market: 'viewer' } }), { status: 403 });
+  await assert.rejects(bo.members.add('token:ci-bo', { access: { market: 'maintainer' } }), { status: 403 });
+  await assert.rejects(ada.members.add('token:ci-two', { access: { 'market/dev': 'developer', 'market/prod': 'developer' } }), { status: 403 });
+  // Who sets up nothing, a role only a project takes, a place that is not there.
+  await assert.rejects(nemo.members.add('token:ci-nemo', { access: { 'market/dev': 'viewer' } }), { status: 403 });
+  await assert.rejects(root.members.add('token:ci-owner', { access: { 'market/dev': 'owner' } }), { status: 409 });
+  await assert.rejects(root.members.add('token:ci-nowhere', { access: { 'nowhere/dev': 'viewer' } }), { status: 404 });
+  // Never a person, nor with a role; and access names a place.
+  await assert.rejects(root.members.add('user:eve@acme.example', { access: { market: 'viewer' } }), { status: 400 });
+  await assert.rejects(root.members.add(CI, { role: 'member', access: { market: 'viewer' } }), { status: 400 });
+  await assert.rejects(root.members.add(CI, { access: {} }), { status: 400 });
+  assert.deepEqual(await made(), []);
+  // The vault decides too: the app's check passed over, as a race would, it refuses and admits nobody.
+  const [market] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
+  const raced = await deps.vault.setAccess({ actor: ADA, principal: 'token:ci-raced', admit: true, changes: [{ projectId: market.id, environmentId: null, role: 'viewer', expiresAt: null }] });
+  assert.equal(raced.ok ? 'ok' : raced.refusal.code, 'not_allowed');
+  assert.deepEqual(await made(), []);
+  // Each refusal logged as what was refused: setting one up, or the grant it was made for.
+  assert.deepEqual((await logged('member.add')).filter(([, , decision]) => decision === 'deny').map(([actor, , , reason]) => [actor, reason]), [[NEMO, 'not_service_manager']]);
+  assert.ok((await logged('access.grant')).some(([actor, , decision, reason]) => actor === ADA && decision === 'deny' && reason === 'not_allowed'));
+});
+
+test('an account someone else removed is not made again with a grant, by the one who could not bring it back', async () => {
+  await bo.members.add('token:ci-gone', { access: { 'market/dev': 'viewer' } });
+  await root.members.remove('token:ci-gone');
+  await assert.rejects(bo.members.add('token:ci-gone', { access: { 'market/dev': 'viewer' } }), { status: 403 });
+  assert.equal((await root.members.access('token:ci-gone')).status, 'removed');
+  // Who runs the instance brings it back, with its grant, and its old tokens stay dead.
+  assert.deepEqual((await root.members.add('token:ci-gone', { access: { 'market/dev': 'viewer' } })).created, true);
+  assert.deepEqual((await root.members.access('token:ci-gone')).grants.map((grant) => grant.role), ['viewer']);
 });
 
 test('nobody gives a service account more than they hold: not prod, not a project, not a role above their own', async () => {

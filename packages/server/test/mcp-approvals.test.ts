@@ -706,6 +706,16 @@ test("set_access takes places as the API reads them, and no grant on every proje
   }
 });
 
+test('admit_member makes a service account with its first grant in one approval: the page shows the grant, and Approve makes both', async () => {
+  const root = await connect(ROOT, 'read manage-access');
+  const id = idOf(await callRaw(root, 'admit_member', { member: 'service:ci-new', access: { 'market/prod': 'viewer' } }));
+  const shown = (await view(id, ROOT)).body.approval;
+  assert.ok(shown.details.some((line) => line.label === 'market/prod' && line.value === 'nothing → viewer'), JSON.stringify(shown.details));
+  const decided = await decide(id, true, { shown }, ROOT);
+  assert.equal(decided.status, 200, JSON.stringify(decided.body));
+  assert.deepEqual((await clientFor(deps, ROOT).members.access('token:ci-new')).grants.map((grant) => [grant.project, grant.environment, grant.role]), [['market', 'prod', 'viewer']]);
+});
+
 test("the decision moves an approval only while it is unexpired by the database's clock as the write runs (I3)", async () => {
   const token = await connect(DEV, 'read write');
   const id = idOf(await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }));

@@ -65,6 +65,8 @@ export type GrantVars = {
   roleName: string;
   environmentSlug: string | null;
   expiresAt: string | null;
+  /** A new service account, which the grant makes in the same call: refused, neither is made. */
+  admit?: boolean;
 };
 
 /**
@@ -94,14 +96,17 @@ export function grantAccess(client: CoffreClient, project: string): Change<Grant
         ? grants.map((grant) => (grantId(grant) === id ? { ...row, id: grant.id } : grant))
         : [...grants, row];
     },
-    affects: (vars) => affects.access(project, memberRef(vars.principalType, vars.principalId)),
+    affects: (vars) => [
+      ...affects.access(project, memberRef(vars.principalType, vars.principalId)),
+      ...(vars.admit === true ? affects.admission() : []),
+    ],
     run: async (vars) => {
       const place = grantPlace(project, vars.environmentSlug);
       const role = vars.role as Role;
-      const { changes } = await client.access.set(memberRef(vars.principalType, vars.principalId), {
-        [place]: vars.expiresAt === null ? role : { role, until: vars.expiresAt },
-      });
-      return { existed: changes[place] === 'unchanged' };
+      const member = memberRef(vars.principalType, vars.principalId);
+      const access = { [place]: vars.expiresAt === null ? role : { role, until: vars.expiresAt } };
+      const { changes } = vars.admit === true ? await client.members.add(member, { access }) : await client.access.set(member, access);
+      return { existed: changes?.[place] === 'unchanged' };
     },
   };
 }

@@ -446,7 +446,7 @@ coffre's page (section 7).
 | `create_environment {environment, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
 | `reveal_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
 | `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
-| `admit_member {member, role?, scope?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m` |
+| `admit_member {member, role?, scope?, access?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m`; `access`, a service account's first grants, in the same call |
 | `offboard_member {member}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m`; the page shows its report |
 | `issue_service_token {service, label?, expiresInDays, scope?}` | manage-access | ✗ ✗ ✗ | ✓, the token is shown on the page only | `POST /members/:m/tokens`, previewed with `?dryRun=1` |
 | `revoke_service_token {service, id}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m/tokens/:id` |

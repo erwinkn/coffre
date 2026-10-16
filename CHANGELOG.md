@@ -119,6 +119,27 @@ you name. A `coffre.json` that is a link, holds anything but `"url"`, or
 names something other than an origin stops the commands below it, with
 its path. One in your home directory or above it is ignored.
 
+**A project's Add service account makes a new one too.** The dialog
+lists the service accounts you could grant, and as you type a name no
+account has, offers it as a new one, last: "Create and grant access" makes
+the account with that grant, in one vault decision. A grant refused (more
+than you hold, a role only a project takes, an account someone else
+removed) makes no account either, so none is left behind holding nothing,
+and the row says why in the vault's words. Anyone who sets up service
+accounts sees the list and the new option, not only admins: a project's
+Owner picked from a list where before they typed a name.
+
+- **API.** `PUT /api/members/token:<name>` takes `{ "access": { "market/prod":
+  "viewer" } }`, the first grants as `PATCH /api/access` takes them, and
+  answers their `changes` beside `created`. A person, or `access` with a
+  `role`, is a 400. The vault's `setAccess` takes `admit`; a vault older
+  than the app refuses it (`not_a_member`) and admits nobody, so a
+  deployment whose Workers update one after the other never makes an
+  account without its grant.
+- **CLI.** `coffre admit api-deploy --service --grant market/prod=viewer`,
+  repeated or a comma list.
+- **MCP.** `admit_member` takes `access`; its approval page shows each grant.
+
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description
 of the role is gone: the role field under it already says what each role

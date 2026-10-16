@@ -956,6 +956,48 @@ test('a person brings back a service account they removed, never one someone els
   assert.equal(code(await w.vault.admit({ actor: ROOT, principal: 'token:theirs' })), 'ok', 'who runs the instance brings back any');
 });
 
+test('a service account admitted with its first grant is one decision: a grant refused admits nobody', async () => {
+  const w = await world();
+  const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
+  const admitWith = (actor: string, principal: string, environmentId: string | null, role: string) =>
+    w.vault.setAccess({ actor, principal, admit: true, changes: [{ projectId: w.project, environmentId, role: role as 'viewer', expiresAt: null }] });
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB })).ok);
+
+  // Without `admit`, as an older vault answers it too: no member, no grant.
+  assert.equal(code(await w.vault.setAccess({ actor: ROOT, principal: 'token:plain', changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })), 'not_a_member');
+  assert.deepEqual(await admitWith(ADA, 'token:ci', w.dev, 'developer'), {
+    ok: true,
+    changes: ['created'],
+    admitted: { created: true, role: 'member', scope: EVERYWHERE, generation: 0 },
+  });
+  const access = await w.vault.access('token:ci');
+  assert.deepEqual([access.status, access.by, access.grants.map((grant) => grant.role)], ['active', ADA, ['developer']]);
+  const entries = (await vaultLog(w)).filter((entry) => entry.subject === 'token:ci');
+  assert.deepEqual(entries.map((entry) => [entry.action, entry.outcome]), [['member.add', 'allow'], ['access.grant', 'allow']]);
+
+  // Refused, whoever refuses: nothing admitted, and the refusal logged.
+  assert.equal(code(await admitWith(ADA, 'token:prod', w.prod, 'viewer')), 'not_allowed', 'prod, which she does not hold');
+  assert.equal(code(await admitWith(ADA, 'token:auditor', w.dev, 'auditor')), 'not_allowed', 'a role she does not hold');
+  assert.equal(code(await admitWith(BOB, 'token:bob', w.dev, 'viewer')), 'not_allowed', 'who holds nothing sets up nothing');
+  assert.equal(code(await admitWith(ROOT, 'token:owner', w.dev, 'owner')), 'invalid', 'a role only a project takes');
+  assert.equal(code(await admitWith(ROOT, 'user:eve@acme.example', w.dev, 'viewer')), 'invalid', 'never a person');
+  for (const principal of ['token:prod', 'token:auditor', 'token:bob', 'token:owner', 'user:eve@acme.example']) {
+    assert.equal((await w.vault.access(principal)).status, 'unknown', principal);
+  }
+  const refused = (await vaultLog(w)).filter((entry) => entry.subject === 'token:bob');
+  assert.deepEqual(refused.map((entry) => [entry.action, entry.outcome]), [['member.add', 'refuse']]);
+
+  // One already a member is granted as `setAccess` grants it, and one removed comes back as `admit` brings it.
+  assert.deepEqual(await admitWith(ADA, 'token:ci', w.dev, 'viewer'), { ok: true, changes: ['updated'] });
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: 'token:ci' })).ok);
+  assert.equal(code(await admitWith(ADA, 'token:ci', w.dev, 'viewer')), 'not_allowed', 'not one someone else removed');
+  assert.equal((await w.vault.access('token:ci')).status, 'removed');
+  const back = await admitWith(ROOT, 'token:ci', w.dev, 'viewer');
+  assert.deepEqual(back.ok && back.admitted, { created: true, role: 'member', scope: EVERYWHERE, generation: 1 });
+  assert.equal((await w.vault.checkpoint()).ok, true, 'every row seals over what the log says');
+});
+
 test('a service account whose row was deleted is refused, under forged entries about it too, and never comes back from nothing', async () => {
   const w = await world();
   const { vaultMembers } = tablesOf(db.owner);
