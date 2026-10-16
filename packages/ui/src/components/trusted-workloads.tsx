@@ -218,10 +218,11 @@ function Listing({ listing, owner }: { listing: { data?: Awaited<ReturnType<Coff
   if (listed.installations.length === 0) {
     return <p className="hint">{listed.app.name} is installed on no account yet: {install('install it')} on yours to pick its repositories here.</p>;
   }
+  // A partial list says so first: an empty one may only lack what it did not reach.
+  if (listed.truncated) return <p className="hint">Only some of {listed.app.name}'s repositories are listed: type any other by name.</p>;
   if (!owner && listed.repositories.length === 0) {
     return <p className="hint">{listed.app.name} reaches no repository yet: {install('choose some')} to pick them here.</p>;
   }
-  if (listed.truncated) return <p className="hint">Only some of {listed.app.name}'s repositories are listed: type any other by name.</p>;
   return null;
 }
 
