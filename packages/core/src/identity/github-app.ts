@@ -81,29 +81,25 @@ export class GitHubApp {
 
   /** Every repository of every account the app is installed on, as many as `MAX_LISTING_REQUESTS` reach. */
   async repositories(): Promise<GitHubAppRepositories> {
-    let left = MAX_LISTING_REQUESTS;
-    if (this.#app === null) {
-      left--;
-      this.#app = await this.#appInfo();
-    }
-    left--;
-    const { installations, more } = await this.#installations();
+    // Every request the listing makes spends from it, tokens and retries included.
+    const budget: Budget = { left: MAX_LISTING_REQUESTS };
+    this.#app ??= await this.#appInfo(budget);
+    const { installations, more } = await this.#installations(budget);
     let truncated = more;
     const listed = await Promise.all(installations.map(async (installation) => {
       const repositories: GitHubRepository[] = [];
-      for (let page = 1; ; page++) {
-        // The first page buys the installation's token too, unless one is kept.
-        const cost = page === 1 ? 2 : 1;
-        if (left < cost) {
-          truncated = true;
-          return repositories;
+      try {
+        for (let page = 1; ; page++) {
+          const body = record(await this.#asInstallation(installation.id, `/installation/repositories?per_page=${PAGE}&page=${page}`, { budget }));
+          const items = Array.isArray(body.repositories) ? body.repositories : [];
+          repositories.push(...items.flatMap((item) => repository(item) ?? []));
+          const total = typeof body.total_count === 'number' ? body.total_count : 0;
+          if (items.length < PAGE || page * PAGE >= total) return repositories;
         }
-        left -= cost;
-        const body = record(await this.#asInstallation(installation.id, `/installation/repositories?per_page=${PAGE}&page=${page}`));
-        const items = Array.isArray(body.repositories) ? body.repositories : [];
-        repositories.push(...items.flatMap((item) => repository(item) ?? []));
-        const total = typeof body.total_count === 'number' ? body.total_count : 0;
-        if (items.length < PAGE || page * PAGE >= total) return repositories;
+      } catch (error) {
+        if (error !== SPENT) throw error;
+        truncated = true;
+        return repositories;
       }
     }));
     const byId = new Map(listed.flat().map((each) => [each.repositoryId, each]));
@@ -122,15 +118,15 @@ export class GitHubApp {
     return repository(await this.#asInstallation(id, `/repos/${fullName}`, { missing: true }));
   }
 
-  async #appInfo(): Promise<GitHubAppRepositories['app']> {
-    const app = record(await this.#asApp('/app'));
+  async #appInfo(budget: Budget): Promise<GitHubAppRepositories['app']> {
+    const app = record(await this.#asApp('/app', { budget }));
     if (typeof app.name !== 'string' || typeof app.html_url !== 'string') throw new GitHubAppUnavailable('GitHub answered /app without the app');
     return { name: app.name, installUrl: `${app.html_url}/installations/new` };
   }
 
   /** The installations not suspended, of the first page: `more` when there may be others. */
-  async #installations(): Promise<{ installations: Installation[]; more: boolean }> {
-    const answer = await this.#asApp(`/app/installations?per_page=${PAGE}`);
+  async #installations(budget: Budget): Promise<{ installations: Installation[]; more: boolean }> {
+    const answer = await this.#asApp(`/app/installations?per_page=${PAGE}`, { budget });
     const items = Array.isArray(answer) ? answer : [];
     const installations = items.flatMap((item): Installation[] => {
       const { id, account, suspended_at: suspended } = record(item);
@@ -140,24 +136,24 @@ export class GitHubApp {
     return { installations: installations.sort((a, b) => a.account.localeCompare(b.account)), more: items.length >= PAGE };
   }
 
-  async #asApp(path: string, options: { missing?: boolean } = {}): Promise<unknown> {
+  async #asApp(path: string, options: { missing?: boolean; budget?: Budget } = {}): Promise<unknown> {
     return this.#call(path, { method: 'GET', token: await this.#jwt(), ...options });
   }
 
   /** As the installation, with its token; once more with a fresh one should GitHub refuse the one kept (the app was reinstalled, say). */
-  async #asInstallation(id: number, path: string, options: { missing?: boolean } = {}): Promise<unknown> {
+  async #asInstallation(id: number, path: string, options: { missing?: boolean; budget?: Budget } = {}): Promise<unknown> {
     const kept = this.#tokens.get(id);
     const fresh = kept === undefined || kept.expiresAt - TOKEN_MARGIN_MS <= this.#now();
-    const token = fresh ? await this.#issueToken(id) : kept.token;
+    const token = fresh ? await this.#issueToken(id, options.budget) : kept.token;
     const answer = await this.#call(path, { method: 'GET', token, ...options, refused: !fresh });
     if (answer !== REFUSED) return answer;
-    return this.#call(path, { method: 'GET', token: await this.#issueToken(id), ...options });
+    return this.#call(path, { method: 'GET', token: await this.#issueToken(id, options.budget), ...options });
   }
 
   /** https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app */
-  async #issueToken(id: number): Promise<string> {
+  async #issueToken(id: number, budget?: Budget): Promise<string> {
     this.#tokens.delete(id);
-    const answer = record(await this.#call(`/app/installations/${id}/access_tokens`, { method: 'POST', token: await this.#jwt() }));
+    const answer = record(await this.#call(`/app/installations/${id}/access_tokens`, { method: 'POST', token: await this.#jwt(), budget }));
     const expiresAt = typeof answer.expires_at === 'string' ? Date.parse(answer.expires_at) : NaN;
     if (typeof answer.token !== 'string' || !Number.isFinite(expiresAt)) throw new GitHubAppUnavailable('GitHub issued no installation token');
     this.#tokens.set(id, { token: answer.token, expiresAt });
@@ -178,12 +174,14 @@ export class GitHubApp {
   }
 
   /**
-   * One request. A 404 is null where `missing` allows it; a 401 is
-   * `REFUSED` where `refused` asks, for a token to be issued again; any
-   * other answer than a 2xx says GitHub's status and the path, and a
+   * One request, spent from `budget` when it has one, and thrown as
+   * `SPENT` when none is left. A 404 is null where `missing` allows it; a
+   * 401 is `REFUSED` where `refused` asks, for a token to be issued again;
+   * any other answer than a 2xx says GitHub's status and the path, and a
    * redirect is never followed.
    */
-  async #call(path: string, request: { method: 'GET' | 'POST'; token: string; missing?: boolean; refused?: boolean }): Promise<unknown> {
+  async #call(path: string, request: { method: 'GET' | 'POST'; token: string; missing?: boolean; refused?: boolean; budget?: Budget }): Promise<unknown> {
+    if (request.budget !== undefined && request.budget.left-- <= 0) throw SPENT;
     let response: Response;
     try {
       response = await this.#fetch(`${this.apiUrl}${path}`, {
@@ -217,6 +215,10 @@ export class GitHubApp {
 
 /** A kept token GitHub refused. */
 const REFUSED = Symbol('refused');
+/** A listing's requests, left to make. */
+type Budget = { left: number };
+/** None left: the listing stops there, and says it is partial. */
+const SPENT = Symbol('spent');
 
 /** The deployment's options, checked now: an ID that is a number, a key that is a PEM, an API URL. */
 export function githubAppOf(options: GitHubAppOptions, apiUrl: (value: string) => string): GitHubApp {

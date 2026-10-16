@@ -164,6 +164,27 @@ test('an installation of many repositories is listed page by page, and a listing
   assert.ok(capped.repositories.length > 0);
 });
 
+test('a listing spends its budget on every request it makes, tokens issued again and retries included', async () => {
+  idp.githubApp.installations = Array.from({ length: 19 }, (_, i) => ({
+    id: 200 + i,
+    account: { login: `team-${String(i).padStart(2, '0')}`, id: 900 + i, type: 'Organization' as const },
+    suspended: false,
+    repositories: [{ id: 3_000_000 + i, name: 'only', private: true }],
+  }));
+  const app = appOf();
+  // The app, its installations, then a token and a page for each: 40, just within.
+  const first = await app.repositories();
+  assert.equal(requests.length, MAX_LISTING_REQUESTS);
+  assert.deepEqual([first.repositories.length, first.truncated], [19, false]);
+  // Every kept token refused: each installation's page costs three, its refusal, a token and the page again.
+  idp.githubApp.revokeTokens();
+  requests = [];
+  const again = await app.repositories();
+  assert.ok(requests.length <= MAX_LISTING_REQUESTS, `${requests.length} requests after the tokens were revoked`);
+  assert.equal(again.truncated, true);
+  assert.ok(again.repositories.length < 19);
+});
+
 test("a repository by name: its IDs when the app is installed on it, private or not; null when it is not", async () => {
   const app = appOf();
   assert.deepEqual(await app.repository('acme/infra'), { github: 'acme/infra', repositoryId: '41540', ownerId: '9919', private: true });
