@@ -146,6 +146,7 @@ export async function contextFor(
     credentialId: null,
     provenance: null,
     via: null,
+    rotateAfterDays: 365,
   };
 }
 

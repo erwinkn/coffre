@@ -18,13 +18,23 @@ export type CoffreConfig = {
    * the log and fix up the chain.
    */
   auditChainKey: string;
+  /**
+   * Days a value may go unchanged before the web UI and `coffre list` flag
+   * it for rotation: 365 if left out, `null` for no flag. A rename is no
+   * change; a reference's value is its source's.
+   */
+  rotateAfterDays?: number | null;
 };
 
 export type ResolvedConfig = {
   publicUrl: string;
   auth: AuthConfig;
   auditChainKey: Buffer;
+  rotateAfterDays: number | null;
 };
+
+/** A year: what a value may go unchanged before it is flagged, unless the deployment says. */
+const ROTATE_AFTER_DAYS = 365;
 
 /** Check a deployment's configuration, failing on the first problem. */
 export function resolveConfig(config: CoffreConfig): ResolvedConfig {
@@ -34,9 +44,14 @@ export function resolveConfig(config: CoffreConfig): ResolvedConfig {
     throw new Error(`auditChainKey must be 32 bytes, base64; got ${auditChainKey.length} bytes`);
   }
   if (config.vault === undefined || config.vault === null) throw new Error('vault is required');
+  const rotateAfterDays = config.rotateAfterDays === undefined ? ROTATE_AFTER_DAYS : config.rotateAfterDays;
+  if (rotateAfterDays !== null && !(Number.isSafeInteger(rotateAfterDays) && rotateAfterDays > 0)) {
+    throw new Error(`rotateAfterDays must be a whole number of days, at least 1, or null for no flag; got ${String(rotateAfterDays)}`);
+  }
   return {
     publicUrl,
     auth: config.auth.resolve(publicUrl),
     auditChainKey,
+    rotateAfterDays,
   };
 }

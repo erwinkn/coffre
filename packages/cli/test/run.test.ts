@@ -28,8 +28,21 @@ test('a clash names each key and both environments that define it, by the pair',
   );
 });
 
-type Listed = { key: string; version: number | null; archived?: boolean; reference?: { state: string } };
-type Environment = { values: Record<string, string>; listed?: Listed[]; refused?: number };
+type Listed = {
+  key: string;
+  version: number | null;
+  archived?: boolean;
+  reference?: { state: string; source?: string; version?: number | null; createdBy?: string };
+  updatedAt?: string | null;
+  updatedBy?: string | null;
+};
+type Environment = {
+  values: Record<string, string>;
+  listed?: Listed[];
+  refused?: number;
+  /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
+  rotateAfterDays?: number | null | 'unsaid';
+};
 
 /** A coffre holding these environments, which keeps every request it is sent. */
 async function instance(t: test.TestContext, environments: Record<string, Environment>) {
@@ -49,7 +62,11 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     if (environment.refused !== undefined) return send(environment.refused, { error: 'forbidden', message: 'you do not have permission to do that' });
     if (listing !== null) {
       const keys = environment.listed ?? Object.keys(environment.values).map((key) => ({ key, version: 1 }));
-      return send(200, { permissions: ['secret.read'], keys: keys.map((key) => ({ archived: false, reference: null, folder: null, updatedAt: null, updatedBy: null, ...key })) });
+      return send(200, {
+        permissions: ['secret.read'],
+        keys: keys.map((key) => ({ archived: false, reference: null, folder: null, updatedAt: null, updatedBy: null, ...key })),
+        ...(environment.rotateAfterDays === 'unsaid' ? {} : { rotateAfterDays: environment.rotateAfterDays === undefined ? 365 : environment.rotateAfterDays }),
+      });
     }
     send(200, { operationId: 'op', values: environment.values });
   });
@@ -178,6 +195,63 @@ test('export of several environments prints their union, and refuses a clash as 
   assert.equal(clashing.code, 1);
   assert.equal(clashing.stdout, '');
   assert.equal(clashing.stderr, 'coffre: deploy/prod and www/prod both define A: a key comes from one environment only. Nothing was read\n');
+});
+
+test("list says how old each value is, a reference's its source's, flags those past the instance's rotateAfterDays, and lists only them", async (t) => {
+  // An hour into each day, so that no day boundary falls between here and the CLI's clock.
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000 - 3_600_000).toISOString();
+  const coffre = await instance(t, {
+    'deploy/prod': {
+      values: {},
+      rotateAfterDays: 90,
+      listed: [
+        { key: 'FRESH', version: 2, updatedAt: ago(0), updatedBy: 'ada@acme.example' },
+        { key: 'OLD', version: 1, updatedAt: ago(91), updatedBy: 'bo@acme.example' },
+        { key: 'SHARED', version: null, updatedAt: ago(400), reference: { state: 'live', source: 'auth/prod/SHARED', version: 4, createdBy: 'user:ada@acme.example' } },
+        { key: 'GONE', version: 3, updatedAt: ago(500), updatedBy: 'bo@acme.example', archived: true },
+        { key: 'EMPTY', version: null },
+      ],
+    },
+    'www/prod': { values: {}, rotateAfterDays: null, listed: [{ key: 'OLD', version: 1, updatedAt: ago(1000), updatedBy: 'bo@acme.example' }] },
+    'old/prod': { values: {}, rotateAfterDays: 'unsaid', listed: [{ key: 'OLD', version: 1, updatedAt: ago(1000), updatedBy: 'bo@acme.example' }] },
+  });
+
+  const all = await coffre.coffre(['list', 'deploy/prod']);
+  assert.equal(all.code, 0, all.stderr);
+  assert.equal(all.stdout, [
+    'FRESH\tv2\tada@acme.example\ttoday',
+    'OLD\tv1\tbo@acme.example\t91 days ago  (unchanged over 90 days: rotate it)',
+    'SHARED\t→ auth/prod/SHARED\tv4\tada@acme.example\t400 days ago  (unchanged over 90 days: rotate it)',
+    'GONE\tv3\tbo@acme.example\t500 days ago  (archived)',
+    'EMPTY\tv-\t-\t-',
+    '',
+  ].join('\n'));
+
+  const stale = await coffre.coffre(['list', 'deploy/prod', '--stale', '--json']);
+  assert.equal(stale.code, 0, stale.stderr);
+  assert.deepEqual((JSON.parse(stale.stdout) as Listed[]).map(({ key, updatedAt }) => [key, updatedAt !== null]), [['OLD', true], ['SHARED', true]]);
+  const older = await coffre.coffre(['list', 'deploy/prod', '--older-than', '365d']);
+  assert.equal(older.stdout.split('\n').filter(Boolean).map((line) => line.split('\t')[0]).join(' '), 'SHARED');
+
+  // An instance that flags nothing has nothing for --stale, and says how else to ask; no flag on any line.
+  const off = await coffre.coffre(['list', 'www/prod', '--stale']);
+  assert.notEqual(off.code, 0);
+  assert.match(off.stderr, /flags no value for rotation.*--older-than 90d/);
+  assert.equal((await coffre.coffre(['list', 'www/prod'])).stdout, 'OLD\tv1\tbo@acme.example\t1000 days ago\n');
+
+  // An instance before rotation ages says nothing of them: --stale would list nothing, so it refuses, and saying why.
+  const old = await coffre.coffre(['list', 'old/prod', '--stale', '--json']);
+  assert.notEqual(old.code, 0);
+  assert.equal(old.stdout, '');
+  assert.match(old.stderr, /older than rotation ages \(coffre 0\.6\).*upgrade it, or name an age, --older-than 90d/);
+  assert.equal((await coffre.coffre(['list', 'old/prod'])).stdout, 'OLD\tv1\tbo@acme.example\t1000 days ago\n');
+  assert.equal((await coffre.coffre(['list', 'old/prod', '--older-than', '90d'])).stdout, 'OLD\tv1\tbo@acme.example\t1000 days ago\n');
+
+  for (const [args, message] of [[['--older-than', '3m'], /--older-than takes days, as 90d, not "3m"/], [['--stale', '--older-than', '9d'], /--stale or --older-than, not both/]] as const) {
+    const refused = await coffre.coffre(['list', 'deploy/prod', ...args]);
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, message);
+  }
 });
 
 test('get piped writes the value byte for byte: no newline of its own, and the newlines it holds kept', async (t) => {

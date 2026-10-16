@@ -80,6 +80,32 @@ emails root admins again, as long as the vault's code still passes them as
 `rootAdmins`: 0.5 refuses to start without it. Roll back the rename of
 step 4 with it.
 
+**How old each value is, and which are due for rotation.** An
+environment's Last written column says when each value was last written
+("ada · 7mo ago", the exact time on hover), and sorts the table by it, as
+the Key column sorts by name; below 44rem the two sort controls stay, a row
+above the stacked keys, and every row shows its age. A rename, a move into a
+folder or a new reference never counts as a change: the age is the current
+version's. A reference's value is its source's, so its age is the source's
+current version's, and its source rotated is its value rotated; one that
+reads nothing (broken, its source archived or empty) has none. The row
+shows "source · 1y ago", and who made the reference on hover, where it
+showed who made it and when.
+A value unchanged for more than `rotateAfterDays` whole days gets a quiet
+Rotate tag, its age in days on hover. `createCoffre({ …, rotateAfterDays })`
+sets it for the deployment: 365 if left out, `null` for no flag, and
+anything but a whole number of days from 1 fails the deployment's start.
+There is no per-project setting: one threshold is the audit's, and
+`--older-than` asks any other. `coffre list` prints each value's age, "214
+days ago", and "(unchanged over 365 days: rotate it)" after those due;
+`coffre list market/prod --stale` lists only those, and `--older-than 90d`
+those older than any age, as text or `--json`, archived keys and keys
+without a value never among them. `GET /api/secrets/market/prod` answers
+`rotateAfterDays` beside the keys, and a reference's `updatedAt` is its
+source's current version's, where it was `null`; `updatedBy` stays `null`
+for one. `ageInDays` and `olderThan` in `@coffre/client` are the rule both
+use.
+
 **The CLI picks the instance by directory.** With several instances, a
 company's and your own, `coffre login <url>` pins the directory it ran in
 to that instance, for it and every directory below, as well as making it

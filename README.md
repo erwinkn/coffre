@@ -123,7 +123,7 @@ coffre use                                  # the instances you are signed in to
 coffre sessions                             # where you are signed in; sessions revoke <id> signs one out
 coffre identities                           # the accounts you sign in with
 
-coffre list     market/dev
+coffre list     market/dev                  # keys, who wrote each value and how long ago; --stale, those due for rotation
 coffre get      market/dev/DATABASE_URL     # the value; piped, exactly its bytes, no newline added (a terminal gets one)
 coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it piped in
 coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a reference: billing reads market's, live
@@ -459,6 +459,10 @@ both colour schemes, following the system's with a manual override.
 - **Permissions shape the page.** A control you cannot use is not drawn, so
   an access manager administers grants without ever meeting a button that
   refuses them.
+- **A value's age is in plain sight.** Each key says how long ago its value
+  was written, a reference's its source's, and the table sorts by it. Past
+  the deployment's `rotateAfterDays`, a year unless it says, a quiet tag
+  says to rotate it; `coffre list --stale` lists the same keys.
 - **The audit page reads as sentences**, one line per action ("ada ran
   market/prod: 9 secrets"), with technical steps and sign-ins hidden until
   asked for.

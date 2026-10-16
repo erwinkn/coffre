@@ -1462,7 +1462,7 @@ export async function referenceRows(
   }));
 }
 
-/** Where each secret is, by path, and whether anything of it is archived; with its current version's id. */
+/** Where each secret is, by path, and whether anything of it is archived; with its current version's id and when it was written. */
 export type SecretPlaceRow = {
   id: string;
   key: string;
@@ -1475,11 +1475,12 @@ export type SecretPlaceRow = {
   environmentArchivedAt: Date | null;
   currentVersionId: string | null;
   currentVersion: number;
+  currentVersionAt: Date | null;
 };
 
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
   if (ids.length === 0) return new Map();
-  const { secrets, environments, projects } = tablesOf(db);
+  const { secrets, secretVersions, environments, projects } = tablesOf(db);
   const rows = await db
     .select({
       id: secrets.id,
@@ -1493,10 +1494,12 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
       environmentArchivedAt: environments.archivedAt,
       currentVersionId: secrets.currentVersionId,
       currentVersion: secrets.currentVersion,
+      currentVersionAt: secretVersions.createdAt,
     })
     .from(secrets)
     .innerJoin(environments, eq(environments.id, secrets.environmentId))
     .innerJoin(projects, eq(projects.id, secrets.projectId))
+    .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
     .where(inArray(secrets.id, [...new Set(ids)]));
   return new Map(rows.map((row) => [row.id, row]));
 }

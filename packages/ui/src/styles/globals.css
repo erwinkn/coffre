@@ -1954,6 +1954,34 @@ a.crumb-link:hover {
   font-weight: 450;
 }
 
+/* A header that orders its table: the whole label is the button, and its
+   mark says which way, or, idle, shows on hover that it can. */
+.th-sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.th-sort .sort-mark {
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.th-sort .sort-mark.is-ascending {
+  transform: rotate(180deg);
+}
+
+.th-sort .sort-mark.is-idle {
+  opacity: 0;
+}
+
+.th-sort:hover .sort-mark.is-idle,
+.th-sort:focus-visible .sort-mark.is-idle {
+  opacity: 1;
+}
+
 .dt td {
   padding: 0.625rem 0.75rem;
   border-bottom: 1px solid var(--border);
@@ -2402,6 +2430,15 @@ a.crumb-link:hover {
 .written-by {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A value unchanged past the deployment's rotateAfterDays: a small tag that
+   says what to do. */
+.written-flag {
+  align-self: center;
+  height: 1.125rem;
+  padding: 0 0.35rem;
+  font-size: 0.6875rem;
 }
 
 .secret-row .mask {
@@ -4659,6 +4696,36 @@ a.env-card-name:hover {
 
   .dt.stacks td.col-hide-narrow {
     display: none;
+  }
+
+  /* A table that sorts keeps its sortable headers, a row of their own. */
+  .dt.stacks.sortable thead {
+    display: block;
+  }
+
+  .dt.stacks.sortable thead tr {
+    display: flex;
+    gap: 1.25rem;
+    padding: 0.5rem 0.875rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--subtle);
+  }
+
+  .dt.stacks.sortable thead th {
+    display: none;
+  }
+
+  .dt.stacks.sortable thead th.th-sortable {
+    display: block;
+    width: auto;
+    height: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  .dt.stacks.sortable .sort-mark.is-idle {
+    opacity: 1;
   }
 
   /* Short facts under a row's lead: each label on its value's line. */

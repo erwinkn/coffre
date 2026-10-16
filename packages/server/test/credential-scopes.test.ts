@@ -74,6 +74,7 @@ beforeEach(async () => {
     verifier: signin,
     waitUntil,
     schema: { migrated: true },
+    rotateAfterDays: 365,
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);
   ada = clientFor(deps, 'ada@acme.example');

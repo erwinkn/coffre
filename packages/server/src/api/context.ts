@@ -51,6 +51,8 @@ export type ApiContext = {
    * Its `provenance` is the connection, which the vault's entries carry.
    */
   via: McpVia | null;
+  /** Days a value may go unchanged before it is flagged for rotation (`rotateAfterDays`), or null for no flag. */
+  rotateAfterDays: number | null;
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */

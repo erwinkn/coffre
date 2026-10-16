@@ -236,6 +236,7 @@ export type Api = {
         updatedAt: string | null;
         updatedBy: string | null;
       }[];
+      rotateAfterDays: number | null;
     };
   };
   "PATCH /secrets/:project/:environment": {

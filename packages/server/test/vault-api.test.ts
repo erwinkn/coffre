@@ -170,6 +170,7 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
     schema: { migrated: true },
+    rotateAfterDays: 365,
   };
   const asOwner = (path: string, init: RequestInit = {}) => fetchApi(
     new Request(`https://coffre.test${path}`, { ...init, headers: { 'content-type': 'application/json', cookie: `__Host-coffre_session=${ROOT}`, 'sec-fetch-site': 'same-origin' } }),
@@ -211,6 +212,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
     schema: { migrated: true },
+    rotateAfterDays: 365,
   };
   const reveal = () =>
     fetchApi(

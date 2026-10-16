@@ -54,9 +54,11 @@ import {
   type Target,
 } from './instance.ts';
 import {
+  ageInDays,
   byFolder,
   CoffreError,
   createClient,
+  olderThan,
   planImport,
   apiMember,
   serviceName,
@@ -817,30 +819,60 @@ async function get(args: string[]): Promise<void> {
 }
 
 async function list(args: string[]): Promise<void> {
-  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false } }, ['<project>/<environment>']);
+  const { values, positionals } = parse(args, {
+    json: { type: 'boolean', default: false },
+    'older-than': { type: 'string' },
+    stale: { type: 'boolean', default: false },
+  }, ['<project>/<environment>']);
+  if (values.stale && values['older-than'] !== undefined) throw new UsageError('--stale or --older-than, not both');
+  const olderThanDays = values['older-than'] === undefined ? null : days(values['older-than']);
   const { project, environment } = parsePath(positionals[0]!);
   const result = await client().secrets.list(`${project}/${environment}`);
+  // An instance before 0.6 does not say: it flags nothing, and has nothing for --stale.
+  const told: number | null | undefined = result.rotateAfterDays;
+  if (values.stale && told === undefined) {
+    fail('this instance is older than rotation ages (coffre 0.6), and has no rotateAfterDays: upgrade it, or name an age, --older-than 90d');
+  }
+  const rotateAfterDays = told ?? null;
+  if (values.stale && rotateAfterDays === null) {
+    fail('this instance flags no value for rotation (its rotateAfterDays is null): name an age, --older-than 90d');
+  }
+  // Only the values older than asked: never an archived key, nor one without a value.
+  const over = values.stale ? rotateAfterDays : olderThanDays;
+  const now = Date.now();
+  const keys = over === null ? result.keys : result.keys.filter((entry) => olderThan(entry, over, now));
   if (values.json) {
-    process.stdout.write(`${JSON.stringify(result.keys, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(keys, null, 2)}\n`);
     return;
   }
 
   // Listing keys is not a read of any value, and is not logged as one.
-  for (const [folder, keys] of byFolder(result.keys)) {
+  for (const [folder, inFolder] of byFolder(keys)) {
     const indent = folder === null ? '' : '  ';
     if (folder !== null) process.stdout.write(`${folder}/\n`);
-    for (const entry of keys) {
+    for (const entry of inFolder) {
+      // How long ago its value was written, a reference's its source's; flagged past the instance's rotateAfterDays.
+      const age = ageInDays(entry, now);
+      const written = age === null ? '-' : age === 0 ? 'today' : `${age} day${age === 1 ? '' : 's'} ago`;
+      const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: rotate it)` : '';
       const archived = entry.archived ? '  (archived)' : '';
       const { reference } = entry;
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}${archived}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}\n`);
         continue;
       }
-      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}${archived}\n`);
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${due}${archived}\n`);
     }
   }
+}
+
+/** `90d`: an age in whole days, as `--older-than` takes it. */
+function days(text: string): number {
+  const match = /^(\d+)d$/.exec(text);
+  if (match === null) throw new UsageError(`--older-than takes days, as 90d, not "${text}"`);
+  return Number(match[1]);
 }
 
 async function set(args: string[]): Promise<void> {

@@ -48,6 +48,7 @@ export type {
   WorkloadIds,
 } from './api.ts';
 
+export { ageInDays, olderThan } from './age.ts';
 export { byFolder, foldersOf } from './folders.ts';
 export { apiMember, serviceName, shownMember } from './members.ts';
 export { unreachable, Unreachable } from './reach.ts';

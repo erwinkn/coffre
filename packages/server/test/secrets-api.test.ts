@@ -313,6 +313,23 @@ test('ciphertext relocated between environments cannot be decrypted', async () =
   await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 403, code: 'vault_refused', reason: 'bad_claim' });
 });
 
+test("a key's age is its current version's: a rename or a move leaves it, a write moves it; the list says when a value is due", async () => {
+  await root.secrets.set('market/dev', { OLD_KEY: 'v1' });
+  const written = new Date('2025-01-02T03:04:05.000Z');
+  // The owner backdates the version, as a value written last year.
+  await withTriggersLifted(db.owner, 'secret_versions', (owner) => owner.update(secretVersions).set({ createdAt: written }));
+  await root.secrets.rename('market/dev/OLD_KEY', 'NEW_KEY');
+  await root.secrets.update('market/dev/NEW_KEY', { folder: 'stripe' });
+  const listed = await reader.secrets.list('market/dev');
+  assert.deepEqual(listed.keys.map(({ key, updatedAt }) => [key, updatedAt]), [['NEW_KEY', written.toISOString()]]);
+  assert.equal(listed.rotateAfterDays, 365);
+
+  await root.secrets.set('market/dev', { NEW_KEY: 'v2' });
+  const [{ versions }, after] = await Promise.all([root.secrets.history('market/dev/NEW_KEY'), reader.secrets.list('market/dev')]);
+  assert.equal(after.keys[0].updatedAt, versions.find((version) => version.current)!.createdAt);
+  assert.ok(after.keys[0].updatedAt! > written.toISOString());
+});
+
 test('the audit chain verifies over a realistic mixed workload', async () => {
   await root.secrets.set('market/dev', { A: '1' });
   await reader.secrets.reveal('market/dev/A');
