@@ -36,7 +36,13 @@ type Listed = {
   updatedAt?: string | null;
   updatedBy?: string | null;
 };
-type Environment = { values: Record<string, string>; listed?: Listed[]; refused?: number; rotateAfterDays?: number | null };
+type Environment = {
+  values: Record<string, string>;
+  listed?: Listed[];
+  refused?: number;
+  /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
+  rotateAfterDays?: number | null | 'unsaid';
+};
 
 /** A coffre holding these environments, which keeps every request it is sent. */
 async function instance(t: test.TestContext, environments: Record<string, Environment>) {
@@ -59,7 +65,7 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
       return send(200, {
         permissions: ['secret.read'],
         keys: keys.map((key) => ({ archived: false, reference: null, folder: null, updatedAt: null, updatedBy: null, ...key })),
-        rotateAfterDays: environment.rotateAfterDays === undefined ? 365 : environment.rotateAfterDays,
+        ...(environment.rotateAfterDays === 'unsaid' ? {} : { rotateAfterDays: environment.rotateAfterDays === undefined ? 365 : environment.rotateAfterDays }),
       });
     }
     send(200, { operationId: 'op', values: environment.values });
@@ -207,6 +213,7 @@ test("list says how old each value is, a reference's its source's, flags those p
       ],
     },
     'www/prod': { values: {}, rotateAfterDays: null, listed: [{ key: 'OLD', version: 1, updatedAt: ago(1000), updatedBy: 'bo@acme.example' }] },
+    'old/prod': { values: {}, rotateAfterDays: 'unsaid', listed: [{ key: 'OLD', version: 1, updatedAt: ago(1000), updatedBy: 'bo@acme.example' }] },
   });
 
   const all = await coffre.coffre(['list', 'deploy/prod']);
@@ -231,6 +238,14 @@ test("list says how old each value is, a reference's its source's, flags those p
   assert.notEqual(off.code, 0);
   assert.match(off.stderr, /flags no value for rotation.*--older-than 90d/);
   assert.equal((await coffre.coffre(['list', 'www/prod'])).stdout, 'OLD\tv1\tbo@acme.example\t1000 days ago\n');
+
+  // An instance before rotation ages says nothing of them: --stale would list nothing, so it refuses, and saying why.
+  const old = await coffre.coffre(['list', 'old/prod', '--stale', '--json']);
+  assert.notEqual(old.code, 0);
+  assert.equal(old.stdout, '');
+  assert.match(old.stderr, /older than rotation ages \(coffre 0\.6\).*upgrade it, or name an age, --older-than 90d/);
+  assert.equal((await coffre.coffre(['list', 'old/prod'])).stdout, 'OLD\tv1\tbo@acme.example\t1000 days ago\n');
+  assert.equal((await coffre.coffre(['list', 'old/prod', '--older-than', '90d'])).stdout, 'OLD\tv1\tbo@acme.example\t1000 days ago\n');
 
   for (const [args, message] of [[['--older-than', '3m'], /--older-than takes days, as 90d, not "3m"/], [['--stale', '--older-than', '9d'], /--stale or --older-than, not both/]] as const) {
     const refused = await coffre.coffre(['list', 'deploy/prod', ...args]);

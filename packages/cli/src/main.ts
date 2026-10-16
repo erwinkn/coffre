@@ -828,7 +828,12 @@ async function list(args: string[]): Promise<void> {
   const olderThanDays = values['older-than'] === undefined ? null : days(values['older-than']);
   const { project, environment } = parsePath(positionals[0]!);
   const result = await client().secrets.list(`${project}/${environment}`);
-  const { rotateAfterDays } = result;
+  // An instance before 0.6 does not say: it flags nothing, and has nothing for --stale.
+  const told: number | null | undefined = result.rotateAfterDays;
+  if (values.stale && told === undefined) {
+    fail('this instance is older than rotation ages (coffre 0.6), and has no rotateAfterDays: upgrade it, or name an age, --older-than 90d');
+  }
+  const rotateAfterDays = told ?? null;
   if (values.stale && rotateAfterDays === null) {
     fail('this instance flags no value for rotation (its rotateAfterDays is null): name an age, --older-than 90d');
   }
