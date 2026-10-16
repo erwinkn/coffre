@@ -2935,11 +2935,11 @@ test('a root admin of 0.5 still holding grants on every project gets what `coffr
   assert.equal((await upgraded.verifyLog({})).ok, true);
 });
 /**
- * `database`, whose first read about `principal`'s row in the log, once
- * armed, waits after its answer arrived until released: another request
- * runs in between, as on a busy instance.
+ * `database`, whose first read about `principal` in `table` (their entries
+ * in the log, unless named), once armed, waits after its answer arrived
+ * until released: another request runs in between, as on a busy instance.
  */
-function pausedReadAbout(database: Database, principal: string) {
+function pausedReadAbout(database: Database, principal: string, table = 'audit_log') {
   let paused = () => {};
   let release = () => {};
   const reached = new Promise<void>((resolve) => (paused = resolve));
@@ -2952,7 +2952,7 @@ function pausedReadAbout(database: Database, principal: string) {
         return (resolve: (result: unknown) => void, reject: (error: unknown) => void) =>
           (value as (ok: (result: unknown) => unknown) => Promise<unknown>).call(target, async (result: unknown) => {
             const { sql, params } = (target as { toSQL(): { sql: string; params: unknown[] } }).toSQL();
-            if (armed && sql.includes('audit_log') && params.includes(principal)) {
+            if (armed && sql.includes(table) && params.includes(principal)) {
               armed = false;
               paused();
               await released;
@@ -3016,4 +3016,35 @@ test('a row the log never admitted makes nobody an Owner, and is not taken for o
   assert.equal((await vault.access(ROOT)).status, 'tampered');
   assert.equal((await (await namingOwners('root@acme.example', 'sam@acme.example')).access(ROOT)).status, 'tampered');
   assert.deepEqual((await ownership()).filter(([, subject]) => subject === ROOT), []);
+});
+
+test('a vault starting while another makes someone on its list an Owner finds them one, its quick read of their row outrun', async () => {
+  await places(db.owner);
+  assert.equal((await (await namingOwners('root@acme.example')).access(ROOT)).role, 'owner');
+  const config = configure({ owners: ['root@acme.example', 'bob@acme.example'] });
+  // Its start reads that Bob has no row, then waits while another process, deployed with the same list, admits him an Owner.
+  const slow = pausedReadAbout(db.vault, BOB, 'vault_members');
+  const starting = openVault(slow.database, await prepareVault(config));
+  slow.arm();
+  const pending = starting.access(ADA);
+  await slow.reached;
+  assert.equal((await (await openLocalVault(await db.connect(), config)).access(BOB)).role, 'owner');
+  slow.release();
+  assert.equal((await pending).status, 'unknown');
+  assert.equal((await starting.access(BOB)).role, 'owner');
+  assert.deepEqual((await ownership()).filter(([, subject]) => subject === BOB), [['member.add', BOB, 'allow', 'owners']]);
+});
+
+test('an Owner the deployment names is not brought back as anything less, as during a deploy that changed the list', async () => {
+  const w = await world();
+  // A process deployed before the list named Bob removes him; this one, which names him, is asked to bring him back a Developer, or a Member.
+  const listing = await namingOwners('root@acme.example', 'bob@acme.example');
+  assert.equal((await listing.access(BOB)).role, 'owner');
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: BOB })).ok);
+  assert.equal(outcomeOf(await listing.admit({ actor: ROOT, principal: BOB, role: 'developer' })), named('bob@acme.example'));
+  assert.equal(outcomeOf(await listing.admit({ actor: ROOT, principal: BOB })), named('bob@acme.example'));
+  assert.equal((await store.member(db.owner, BOB))?.status, 'removed');
+  // As an Owner of the whole instance, as it would itself.
+  assert.equal(outcomeOf(await listing.admit({ actor: ROOT, principal: BOB, role: 'owner' })), 'ok');
+  assert.deepEqual(await listing.access(BOB).then(({ status, role, scope }) => [status, role, scope]), ['active', 'owner', EVERYWHERE]);
 });

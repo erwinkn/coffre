@@ -1340,17 +1340,21 @@ class VaultService implements Vault {
    * the vault has written to its log, and the way back for someone whose
    * row was changed around the vault since. An unlocked read of each finds
    * who is one already, the quick way out: a hint, never a report, and
-   * never `#record`, which would settle the vault, and so convert, again.
-   * Then one decision, under the others' rows, reads again
-   * (`#makeOwner`). One whose row the log never admitted stays as it is,
+   * never `#record`, which would settle the vault, and so convert, again;
+   * one it cannot tell, a row changing under it as another process makes
+   * them an Owner, is due. Then one decision, under the others' rows, reads
+   * again (`#makeOwner`). One whose row the log never admitted stays as it is,
    * and is asked about again at each of their requests. Whether it ran.
    */
   async #declare(principals: readonly string[]): Promise<boolean> {
     const at = await this.#now(this.#db);
     const due: string[] = [];
     for (const principal of principals) {
-      const subject = await this.#standing(this.#db, principal, await store.member(this.#db, principal), at, []);
-      if (!(subject.status === 'active' && ownsInstance(subject.live))) due.push(principal);
+      const subject = await this.#standing(this.#db, principal, await store.member(this.#db, principal), at, []).catch((error: unknown) => {
+        if (error instanceof Retry) return null;
+        throw error;
+      });
+      if (!(subject?.status === 'active' && ownsInstance(subject.live))) due.push(principal);
     }
     if (due.length === 0) return true;
     const decided = await this.#decideNow(due, async (d) => {
@@ -1697,7 +1701,11 @@ class VaultService implements Vault {
       d.touched.add(principal);
       d.grants.set(principal, [...subject.stored]);
 
-      if (row === undefined || row.status === 'removed') return this.#enlist(d, acting, principal, row, wanted, input, refused);
+      if (row === undefined || row.status === 'removed') {
+        // Added or brought back, as anything but an Owner of the whole instance, one the deployment names would be a listed Member.
+        if (this.#listed(principal) && !(wanted !== undefined && ownsInstance(wanted))) throw refused('not_allowed', declaredOwner(principal));
+        return this.#enlist(d, acting, principal, row, wanted, input, refused);
+      }
       const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
       // Read under both rows' locks: neither the actor's role nor the subject's changes before this commits.
       if (changed && (wanted.role === 'owner' || subject.live.role === 'owner') && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
