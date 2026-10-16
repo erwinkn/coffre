@@ -128,8 +128,13 @@ function NewGrant({
   const kind = KIND[principalType];
   const service = principalType === 'service';
 
+  // Each opening starts afresh: the picker's filter does, and a new account is named only there.
   function close() {
     setOpen(false);
+    setPrincipalId('');
+    setAdmit(false);
+    setExpiresAt('');
+    setPermission('viewer:');
   }
 
   return (
@@ -165,10 +170,6 @@ function NewGrant({
               expiresAt: expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
               admit,
             });
-            setPrincipalId('');
-            setAdmit(false);
-            setExpiresAt('');
-            setPermission('viewer:');
             close();
           }}
         >

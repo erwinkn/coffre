@@ -637,7 +637,10 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       summary: ({ member, role, scope, access }) =>
         `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${INSTANCE_ROLES[role].name}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
       // The grants are the API's to decide on Approve, as set_access's for a service account are.
-      check: async (ctx, { member, role, scope }) => {
+      check: async (ctx, { member, role, scope, access }) => {
+        if (access !== undefined && (!apiMember(member).startsWith('token:') || role !== undefined || scope !== undefined)) {
+          throw new CoffreError(400, 'bad_request', 'access comes with a service account, and no role or scope: a person is given grants once a member (set_access)');
+        }
         if (!apiMember(member).startsWith('token:') || (role ?? 'member') !== 'member' || scope !== undefined) return instanceOnly(ctx);
         if (!(await ctx.api.me()).setsUpServices) throw new CoffreError(403, 'forbidden', 'you set up no service account: the instance keeps them to admins where you hold access');
       },

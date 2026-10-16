@@ -714,6 +714,19 @@ test('admit_member makes a service account with its first grant in one approval:
   const decided = await decide(id, true, { shown }, ROOT);
   assert.equal(decided.status, 200, JSON.stringify(decided.body));
   assert.deepEqual((await clientFor(deps, ROOT).members.access('token:ci-new')).grants.map((grant) => [grant.project, grant.environment, grant.role]), [['market', 'prod', 'viewer']]);
+
+  // Access with a role or a scope, or for a person, is refused before anyone is asked: the page would show what Approve never makes.
+  const before = (await approvalRows()).length;
+  for (const args of [
+    { member: 'service:ci-owner', role: 'owner', access: { market: 'viewer' } },
+    { member: 'service:ci-scoped', scope: { projects: 'all' }, access: { market: 'viewer' } },
+    { member: 'user:eve@acme.example', access: { market: 'viewer' } },
+  ]) {
+    const refused = (await callRaw(root, 'admit_member', args)).body.result!;
+    assert.equal(refused.isError, true, JSON.stringify(args));
+    assert.match(refused.content[0]!.text!, /access comes with a service account, and no role or scope/);
+  }
+  assert.equal((await approvalRows()).length, before);
 });
 
 test("the decision moves an approval only while it is unexpired by the database's clock as the write runs (I3)", async () => {
