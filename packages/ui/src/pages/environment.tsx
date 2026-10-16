@@ -1188,6 +1188,8 @@ function SecretRow({
                         variant="act"
                         value={shown !== null ? shown.value : readForCopy}
                         label={`Copy ${entry.key}`}
+                        // A copy that works retires the last one's complaint.
+                        onCopied={() => setError(null)}
                         onError={() =>
                           setError(
                             'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',

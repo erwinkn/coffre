@@ -254,6 +254,7 @@ export function CopyButton({
   label = 'Copy',
   variant = 'icon',
   onError,
+  onCopied,
 }: {
   value: string | (() => Promise<string>);
   label?: string;
@@ -261,6 +262,8 @@ export function CopyButton({
   variant?: 'icon' | 'act';
   /** Called with whatever made the copy fail, apart from `ValueUnavailable`. */
   onError?: (failure: unknown) => void;
+  /** Called once the text is on the clipboard. */
+  onCopied?: () => void;
 }) {
   const [state, setState] = useState<'idle' | 'pending' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -289,6 +292,7 @@ export function CopyButton({
       return;
     }
     settle('copied');
+    onCopied?.();
   }
 
   const text = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : label;
