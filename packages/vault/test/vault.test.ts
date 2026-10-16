@@ -2584,6 +2584,7 @@ test('nobody demotes, narrows or removes an Owner the deployment names: not anot
     leave: await w.vault.remove({ actor: ROOT, principal: ROOT }),
     'be demoted by an Owner': await w.vault.admit({ actor: BOB, principal: ROOT, role: 'developer' }),
     'be removed by an Owner': await w.vault.remove({ actor: BOB, principal: ROOT }),
+    'be demoted by an Admin': await w.vault.admit({ actor: ADA, principal: ROOT, role: 'developer' }),
     'be removed by an Admin': await w.vault.remove({ actor: ADA, principal: ROOT }),
   };
   const rule = named('root@acme.example');
@@ -2596,7 +2597,7 @@ test('nobody demotes, narrows or removes an Owner the deployment names: not anot
   const refused = (await vaultLog(w)).filter((entry) => entry.outcome === 'refuse' && entry.subject === ROOT);
   assert.deepEqual(refused.map((entry) => [entry.action, entry.actor, entry.code]), [
     ['member.add', ROOT, 'not_allowed'], ['member.add', ROOT, 'not_allowed'], ['member.remove', ROOT, 'not_allowed'],
-    ['member.add', BOB, 'not_allowed'], ['member.remove', BOB, 'not_allowed'], ['member.remove', ADA, 'not_allowed'],
+    ['member.add', BOB, 'not_allowed'], ['member.remove', BOB, 'not_allowed'], ['member.add', ADA, 'not_allowed'], ['member.remove', ADA, 'not_allowed'],
   ]);
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });

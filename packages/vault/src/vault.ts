@@ -1707,11 +1707,12 @@ class VaultService implements Vault {
         return this.#enlist(d, acting, principal, row, wanted, input, refused);
       }
       const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
+      // One the deployment names stays an Owner of the whole instance, whoever asks: the list says where to change that.
+      if (changed && this.#listed(principal) && !ownsInstance(wanted)) throw refused('not_allowed', declaredOwner(principal));
       // Read under both rows' locks: neither the actor's role nor the subject's changes before this commits.
       if (changed && (wanted.role === 'owner' || subject.live.role === 'owner') && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
       // Nobody sets their own role, but an Owner of the whole instance, who holds all there is: running the instance never lets anyone widen what they hold themselves.
       if (changed && actor === principal && !ownsInstance(acting.live)) throw refused('not_allowed', 'nobody changes their own instance role: ask another admin');
-      if (changed && this.#listed(principal) && !ownsInstance(wanted)) throw refused('not_allowed', declaredOwner(principal));
       if (changed && ownsInstance(subject.live) && !ownsInstance(wanted)) await this.#keepAnOwner(d, actor, principal, refused);
       if (changed) {
         d.log.push(accessEntry(actor, 'member.role', principal, 'allow', input, { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope }));
