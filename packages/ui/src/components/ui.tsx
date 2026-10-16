@@ -276,6 +276,8 @@ export function CopyButton({
   }
 
   async function copy() {
+    // An earlier copy's feedback must not end this one's: it would drop the spinner too soon.
+    if (timer.current !== null) clearTimeout(timer.current);
     // Nothing is awaited before `copyText` is called: the click's gesture is still live.
     const source = typeof value === 'string' ? value : value();
     if (typeof source !== 'string') setState('pending');

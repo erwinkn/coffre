@@ -120,3 +120,27 @@ test('a browser that renames the failure of an unreadable value does not hide it
 test('no clipboard at all is a failure, not a silent success', async () => {
   await assert.rejects(copyText('x', { clipboard: undefined, item: FakeItem }), /clipboard/i);
 });
+
+test('a read that fails after the copy already failed is not left unhandled', async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const refused: ClipboardLike = { async writeText() {}, async write() { throw new DOMException('no', 'NotAllowedError'); } };
+    let fail!: (reason: unknown) => void;
+    const late = new Promise<string>((_, reject) => (fail = reject));
+    await assert.rejects(copyText(late, { clipboard: refused, item: FakeItem }), { name: 'NotAllowedError' });
+    fail(new ValueUnavailable());
+
+    let failLater!: (reason: unknown) => void;
+    const later = new Promise<string>((_, reject) => (failLater = reject));
+    await assert.rejects(copyText(later, { clipboard: undefined, item: FakeItem }), /clipboard/i);
+    failLater(new ValueUnavailable());
+
+    // Let the runtime report anything it considers unhandled.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});

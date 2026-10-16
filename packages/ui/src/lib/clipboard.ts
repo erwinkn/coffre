@@ -40,6 +40,8 @@ export async function copyText(
     item = (globalThis as { ClipboardItem?: ClipboardItemConstructor }).ClipboardItem,
   }: { clipboard?: ClipboardLike; item?: ClipboardItemConstructor } = {},
 ): Promise<void> {
+  // A read that fails after the copy already has is the copy's failure to report, not an unhandled one.
+  if (typeof text !== 'string') text.catch(() => {});
   if (clipboard === undefined) throw new Error('The clipboard is not available here.');
   if (typeof text !== 'string' && item !== undefined && clipboard.write !== undefined) {
     // A browser that rejects the payload may report its own error instead of the
@@ -49,6 +51,7 @@ export async function copyText(
       read.failure = { reason };
       throw reason;
     });
+    tracked.catch(() => {});
     try {
       // Called before anything is awaited: this is what keeps the user gesture.
       // The text goes in as a string, not a Blob: decoding a Blob drops a leading U+FEFF.
