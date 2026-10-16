@@ -129,7 +129,8 @@ test('the Action takes one of a token or a service, and a service only with the 
     const path = `${bin}:/usr/bin:/bin`;
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
     const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
-    const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci' };
+    // As GitHub passes them, a default included.
+    const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'false' };
     const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
     const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: path, ...inputs, ...env }, timeout: 10_000 });
     for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
@@ -163,4 +164,69 @@ test('the Action takes one of a token or a service, and a service only with the 
         assert.notEqual(home, process.env.HOME);
         assert.equal(existsSync(home), false, `${home} outlived the step`);
     }
+});
+
+test('require-complete checks each environment before anything is read, and stops the step with an annotation for each that lacks keys', (t) => {
+    const dir = checkout(t);
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    // A fake CLI: `missing <env> --check` lacks keys in */prod, 50% off included, fails to check down/*, and passes elsewhere.
+    writeFileSync(join(bin, 'npx'), `#!/bin/bash
+echo "npx ran with: $*" >> '${join(dir, 'calls')}'
+cat > /dev/null
+for arg in "$@"; do
+  case "$arg" in
+    */prod) [ "\${*: -1}" = --check ] && { printf 'STRIPE_KEY                   in staging\\nPROMO_50%%                    in dev, staging\\n'; echo "coffre: $arg lacks 2 keys" >&2; exit 1; } ;;
+    down/*) [ "\${*: -1}" = --check ] && { echo 'coffre: could not reach it' >&2; exit 1; } ;;
+  esac
+done
+[ "\${*: -1}" != --check ] || echo "\${@: -2:1} has every key of its sibling environments"
+exit 0
+`, { mode: 0o755 });
+    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
+    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
+    const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
+    const run = (env) => {
+        rmSync(join(dir, 'calls'), { force: true });
+        const ran = spawnSync('/bin/bash', ['-e', '-o', 'pipefail', '-c', shell], {
+            encoding: 'utf8',
+            env: { PATH: `${bin}:/usr/bin:/bin`, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', ...env },
+            timeout: 10_000,
+        });
+        return { ...ran, calls: existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n') : [] };
+    };
+    const signIn = `npx ran with: ${cli} login https://coffre.example.com --token`;
+    const login = `npx ran with: ${cli} --url https://coffre.example.com`;
+
+    const refused = run({ INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'yes' });
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /require-complete is true or false/);
+    assert.deepEqual(refused.calls, []);
+
+    // Each environment checked, then none read: an annotation per incomplete one, its lines and % escaped.
+    const stopped = run({ INPUT_ENVIRONMENT: 'market/prod app/ci api/prod', INPUT_REQUIRE_COMPLETE: 'true' });
+    assert.equal(stopped.status, 1);
+    assert.deepEqual(stopped.calls, [signIn, `${login} missing market/prod --check`, `${login} missing app/ci --check`, `${login} missing api/prod --check`]);
+    const lacks = (environment) =>
+        `::error title=${environment} lacks keys its sibling environments have::STRIPE_KEY                   in staging%0APROMO_50%25                    in dev, staging\n`;
+    assert.equal(stopped.stdout, `${lacks('market/prod')}app/ci has every key of its sibling environments\n${lacks('api/prod')}`);
+    assert.match(stopped.stderr, /coffre: market\/prod lacks 2 keys/);
+
+    // One it could not check stops the step at once, with the CLI's own words and no annotation of missing keys.
+    const unchecked = run({ INPUT_ENVIRONMENT: 'down/ci app/ci', INPUT_REQUIRE_COMPLETE: 'true' });
+    assert.equal(unchecked.status, 1);
+    assert.deepEqual(unchecked.calls, [signIn, `${login} missing down/ci --check`]);
+    assert.equal(unchecked.stdout, '');
+    assert.match(unchecked.stderr, /could not reach it/);
+
+    // Complete, it says so and reads them as without the check; with a service, each call signs in as it.
+    const complete = run({ INPUT_ENVIRONMENT: 'app/ci app/staging', INPUT_REQUIRE_COMPLETE: 'true' });
+    assert.equal(complete.status, 0, complete.stderr);
+    assert.equal(complete.stdout, 'app/ci has every key of its sibling environments\napp/staging has every key of its sibling environments\n');
+    assert.deepEqual(complete.calls, [signIn, `${login} missing app/ci --check`, `${login} missing app/staging --check`, `${login} export --format github app/ci app/staging`]);
+    const service = run({ INPUT_TOKEN: '', INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' });
+    assert.equal(service.status, 0, service.stderr);
+    const as = `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy`;
+    assert.deepEqual(service.calls, [`${as} missing app/ci --check`, `${as} export --format github app/ci`]);
 });

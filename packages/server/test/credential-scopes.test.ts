@@ -156,6 +156,14 @@ test('narrowing the account narrows every token at once, and a token narrower th
   await bearer(writer.token).secrets.set('market/dev', { API_KEY: 'again' });
 });
 
+test("a token that reads only dev lists the keys prod has and dev lacks, by name, as the CI gate needs: never prod's values", async () => {
+  await root.secrets.set('market/prod', { PROD_ONLY: 'prod-only' });
+  const issued = await ada.tokens.issue(CI, { label: 'gate', expiresInDays: 30, scope: { 'market/dev': 'viewer' } });
+  assert.deepEqual(await bearer(issued.token).environments.missing('market/dev'), { missing: [{ key: 'PROD_ONLY', in: ['prod'], folder: null }], dismissed: [] });
+  await assert.rejects(bearer(issued.token).environments.missing('market/prod'), { status: 403 });
+  assert.equal(await reads(issued.token, 'prod'), 403);
+});
+
 test('a scope names places by id: a place deleted takes its grants with it, and one made again under its name is another place', async () => {
   const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
   await root.environments.update('market/dev', { archived: true });

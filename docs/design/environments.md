@@ -410,17 +410,18 @@ have. The environment's page shows a strip above its secrets:
                                                [Dismiss all]   Dismissed (1)
 ```
 
-- **Only environments the viewer can read are compared.** Key names are
-  metadata, and listing an environment's keys takes `secret.read`. Bo,
-  reading only `market/dev`, sees no strip at all.
+- **Every sibling is compared, read or not.** Within a project, key
+  names are not secret; values are. Bo, reading only `market/dev`, sees
+  the strip as above: that prod has `SENTRY_DSN`, never its value. Other
+  projects are never compared. (Until 0.6, only the environments the
+  viewer read were.)
 - **Add** opens a new row with the key's name, empty; the strip says which
   folder the key is in elsewhere, when they agree, and moving it there is a
   step of its own. Copying a value from another environment is a separate,
   deliberate reveal.
 - **Dismiss** is shared: stored, logged, and listed under "Dismissed",
-  each with who and when, and a Restore. A dismissed key the viewer cannot
-  see elsewhere is not listed to them either. Archived keys are not
-  missing: archiving one was a decision.
+  each with who and when, and a Restore, while a sibling still has the
+  key. Archived keys are not missing: archiving one was a decision.
 
 ```
 GET   /api/projects/market/dev/missing         {"missing": [{"key", "in": ["prod"], "folder"}], "dismissed": [...]}
@@ -429,6 +430,7 @@ PATCH /api/projects/market/dev/dismissals      {"SENTRY_DSN": true, "OLD_KEY": n
 
 ```sh
 coffre missing market/dev                       # and the dismissed ones, --dismissed
+coffre missing market/prod --check              # exits 1 when one is missing, for CI (docs/ci.md)
 coffre missing dismiss market/dev/SENTRY_DSN    # or market/dev --all
 coffre missing restore market/dev/SENTRY_DSN
 ```

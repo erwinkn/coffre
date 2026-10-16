@@ -5,6 +5,9 @@ import { ACTION_VALUES, maskProbes, verifyMasks } from './action-fixtures.ts';
 
 const [command, path] = process.argv.slice(2);
 
+/** The one key of action-test/incomplete, which lacks every key its siblings have. */
+const INCOMPLETE_KEY = 'ACTION_TEST_INCOMPLETE';
+
 switch (command) {
   case 'serve':
     if (!path || !process.env.GITHUB_ENV) throw new Error('serve needs a ready-file path and GITHUB_ENV');
@@ -14,6 +17,8 @@ switch (command) {
     for (const [key, value] of Object.entries(ACTION_VALUES)) {
       if (process.env[key] !== value) throw new Error(`${key} was not exported intact`);
     }
+    // The incomplete environment's gate stopped its step before anything was read.
+    if (process.env[INCOMPLETE_KEY] !== undefined) throw new Error(`${INCOMPLETE_KEY} was exported past require-complete`);
     for (const [marker, value] of maskProbes()) console.log(marker + value);
     console.log('All exported values match, including multiline, punctuation, empty and GITHUB_TOKEN.');
     break;
@@ -45,9 +50,15 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     const { GITHUB_TOKEN, ...values } = ACTION_VALUES;
     await admin.api.secrets.set('action-test/ci', values);
     await admin.api.secrets.set('action-test/deploy', { GITHUB_TOKEN: GITHUB_TOKEN! });
+    // For require-complete: ci and deploy each dismiss what they lack of the
+    // other two, and incomplete, which lacks all of theirs, stops its step.
+    await admin.api.environments.create('action-test/incomplete', { name: 'Incomplete' });
+    await admin.api.secrets.set('action-test/incomplete', { [INCOMPLETE_KEY]: 'never-exported' });
+    await admin.api.environments.dismiss('action-test/ci', { GITHUB_TOKEN: true, [INCOMPLETE_KEY]: true });
+    await admin.api.environments.dismiss('action-test/deploy', { ...Object.fromEntries(Object.keys(values).map((key) => [key, true as const])), [INCOMPLETE_KEY]: true });
     const member = 'token:action-test';
     await admin.api.members.add(member);
-    await admin.api.access.set(member, { 'action-test/ci': 'viewer', 'action-test/deploy': 'viewer' });
+    await admin.api.access.set(member, { 'action-test/ci': 'viewer', 'action-test/deploy': 'viewer', 'action-test/incomplete': 'viewer' });
     const { token } = await admin.api.tokens.issue(member, { label: 'Action test', expiresInDays: 1 });
     // The foreground setup step forwards this command from the fixture log.
     // Only the credential is masked here; the Action must mask all values.

@@ -169,7 +169,7 @@ export const queries = {
       queryFn: () => uiResult(() => client.secrets.list(`${place.project}/${place.environment}`)),
     }),
 
-  /** What an environment lacks of its siblings' keys, those you read, and what its team dismissed. */
+  /** What an environment lacks of its siblings' keys, read or not, and what its team dismissed. */
   missing: (client: CoffreClient, place: Place) =>
     queryOptions({
       queryKey: keys.missing(place),

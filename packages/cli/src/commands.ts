@@ -120,8 +120,12 @@ export const SECTIONS = [
       { command: 'folders remove', usage: [`folders remove ${P} <folder> [--apply]`], about: ['every key out of it, into no folder; more than one is', 'shown first'] },
       {
         command: 'missing',
-        usage: [`missing   ${P} [--dismissed] [--json]`],
-        about: ["keys its sibling environments have and it lacks, of those you", 'read; --dismissed, those its team decided it does not need'],
+        usage: [`missing   ${P} [--dismissed | --check] [--json]`],
+        about: [
+          'keys its sibling environments have and it lacks, by name, read',
+          'or not; --dismissed, those its team decided it does not need;',
+          '--check exits 1 when one is missing, for CI',
+        ],
       },
       { command: 'missing dismiss', usage: [`missing dismiss ${P}/<KEY>`, `missing dismiss ${P} --all`], about: ['for the whole team, logged; restore brings it back'] },
       { command: 'missing restore', usage: [`missing restore ${P}/<KEY>`] },

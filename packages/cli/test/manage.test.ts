@@ -318,6 +318,23 @@ test('missing lists what siblings have, and dismiss --all dismisses each in one 
   await assert.rejects(manage.missingDismiss(connect, ['market/dev'], true, io), /expected <project>\/<environment>\/<KEY>/);
 });
 
+test('missing --check is a gate: it lists what is missing and fails, passes when nothing is, and a dismissed key never fails it', async () => {
+  let listing = { missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }], dismissed: [] as unknown[] };
+  const { connect, written, io } = fixture(() => listing);
+  await assert.rejects(manage.missing(connect, ['market/dev', '--check'], io), (error: Error) =>
+    !(error instanceof manage.UsageError) && /^market\/dev lacks a key its sibling environments have: `coffre set market\/dev\/<KEY>` adds one/.test(error.message));
+  assert.match(written.out, /^SENTRY_DSN\s+in prod, staging\n$/, 'the key, and the advice once, in the error');
+  written.out = '';
+  await assert.rejects(manage.missing(connect, ['market/dev', '--check', '--json'], io), /lacks a key/);
+  assert.deepEqual(JSON.parse(written.out), listing.missing);
+
+  listing = { missing: [], dismissed: [{ key: 'SENTRY_DSN', in: ['prod'], folder: null, dismissedBy: 'ada@acme.example', dismissedAt: '2026-10-16T00:00:00.000Z' }] };
+  written.out = '';
+  await manage.missing(connect, ['market/dev', '--check'], io);
+  assert.equal(written.out, 'market/dev has every key of its sibling environments, but 1 dismissed: --dismissed lists them\n');
+  await assert.rejects(manage.missing(connect, ['market/dev', '--check', '--dismissed'], io), manage.UsageError);
+});
+
 test('lists group by folder: the unfiled first, then each folder by name, each in its own order', () => {
   const rows = [{ key: 'B', folder: 'stripe' }, { key: 'A', folder: null }, { key: 'C', folder: 'database' }, { key: 'D', folder: 'stripe' }];
   assert.deepEqual(byFolder(rows).map(([folder, keys]) => [folder, keys.map((row) => row.key)]), [

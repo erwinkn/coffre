@@ -17,6 +17,12 @@ inputs:
       Instead of a token: the coffre service this run signs in as, with the ID token GitHub signs for it,
       through a trust binding that accepts this workflow's runs. The job needs `permissions: id-token: write`.
     required: false
+  require-complete:
+    description: >-
+      `true` stops the step, before anything is read, when an environment lacks a key one of its project's
+      other environments has, read by this run or not, unless its team dismissed that key (`coffre missing`)
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -27,6 +33,7 @@ runs:
         INPUT_TOKEN: ${{ inputs.token }}
         INPUT_SERVICE: ${{ inputs.service }}
         INPUT_ENVIRONMENT: ${{ inputs.environment }}
+        INPUT_REQUIRE_COMPLETE: ${{ inputs.require-complete }}
       run: |
         if ! command -v node >/dev/null || ! command -v npx >/dev/null; then
           echo '::error::coffre requires Node.js 20 or newer and npx. Set up your job toolchain before this Action.' >&2
@@ -44,6 +51,10 @@ runs:
           echo '::error::service needs the job to have `permissions: id-token: write`.' >&2
           exit 1
         fi
+        if [ "$INPUT_REQUIRE_COMPLETE" != true ] && [ "$INPUT_REQUIRE_COMPLETE" != false ]; then
+          echo '::error::require-complete is true or false.' >&2
+          exit 1
+        fi
         # The CLI's home is the step's own, and goes with it: on a runner
         # whose user several runners share, no other job sees the session.
         # npx keeps its cache where it was.
@@ -54,9 +65,29 @@ runs:
         read -r -d '' -a environments <<< "$INPUT_ENVIRONMENT" || true
         if [ -n "$INPUT_SERVICE" ]; then
           # Nothing more than its name, and the runner's ID token.
-          coffre --url "$INPUT_URL" --service "$INPUT_SERVICE" export --format github "${environments[@]}"
+          session=(--url "$INPUT_URL" --service "$INPUT_SERVICE")
         else
           # The token goes on stdin, never in an argument, which ps shows.
           printf '%s' "$INPUT_TOKEN" | coffre login "$INPUT_URL" --token
-          coffre --url "$INPUT_URL" export --format github "${environments[@]}"
+          session=(--url "$INPUT_URL")
         fi
+        if [ "$INPUT_REQUIRE_COMPLETE" = true ]; then
+          # Each environment against its siblings, by key name only. The CLI
+          # lists what one lacks on stdout and fails; failing with nothing
+          # listed, it could not check, and has said why on stderr.
+          incomplete=false
+          for environment in "${environments[@]}"; do
+            if lacking="$(coffre "${session[@]}" missing "$environment" --check)"; then
+              echo "$lacking"
+            else
+              [ -n "$lacking" ] || exit 1
+              lacking="${lacking//'%'/'%25'}"
+              lacking="${lacking//$'\r'/'%0D'}"
+              lacking="${lacking//$'\n'/'%0A'}"
+              echo "::error title=$environment lacks keys its sibling environments have::$lacking"
+              incomplete=true
+            fi
+          done
+          if [ "$incomplete" = true ]; then exit 1; fi
+        fi
+        coffre "${session[@]}" export --format github "${environments[@]}"

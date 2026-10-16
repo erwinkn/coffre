@@ -8,8 +8,8 @@ import { Card } from './page';
 import { ErrorLine, Timestamp } from './ui';
 
 /**
- * Keys the environment's siblings have and it lacks, of those you read
- * (docs/design/environments.md): each with Add, which opens a new row with
+ * Keys the environment's siblings have and it lacks, by name, whether you
+ * read them or not (docs/design/environments.md): each with Add, which opens a new row with
  * its name, and Dismiss, which the whole team then sees, and below them
  * Dismiss all and what was dismissed, each with Restore. Nothing shows when
  * nothing is missing or dismissed.
@@ -42,7 +42,7 @@ export function MissingKeys({
         wide
         labelledBy="missing-keys"
         title={missing.length === 0 ? 'Nothing missing' : `${missing.length} ${missing.length === 1 ? 'key' : 'keys'} from other environments ${missing.length === 1 ? "isn't" : "aren't"} here`}
-        description="Compared with the environments you can read."
+        description="Compared with every other environment of the project, by key name."
       >
         <div className="dt-wrap">
           <table className="dt stacks missing-keys">

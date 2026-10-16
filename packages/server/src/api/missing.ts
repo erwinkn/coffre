@@ -3,16 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { dismissedKeys } from '@coffre/db/schema';
 
 import { dismissalsIn, environmentSecrets, liveKeysIn, places, secretFolderOf, update, upsert, type ResolvedPath } from '../db/queries.ts';
-import { can, placeOf } from './caller.ts';
 import { allowed, audited, type ApiContext } from './context.ts';
 import { ApiError, notFound } from './errors.ts';
 import { checkEnvironment } from './secrets.ts';
 
 /**
  * Missing keys: those the project's other environments have and this one
- * does not, with Add and Dismiss (docs/design/environments.md). Key names
- * are metadata, so only environments the caller reads are compared.
- * Dismissals are the team's.
+ * does not, with Add and Dismiss (docs/design/environments.md). Every
+ * sibling is compared, read or not: within a project, key names are not
+ * secret, only values are. Dismissals are the team's.
  */
 
 /** A key missing here: the environments that have it, and its folder there, when they agree. */
@@ -30,15 +29,14 @@ function live(place: ResolvedPath): { projectId: string; environmentId: string }
 
 /**
  * What this environment lacks of the live keys in the other live
- * environments of its project that the caller reads, the dismissed apart.
+ * environments of its project, the dismissed apart: a reader of dev learns
+ * that prod has `STRIPE_KEY`, never its value, and nothing of another project.
  * A key archived here is not missing: archiving it was a decision.
  */
 export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise<{ missing: MissingKey[]; dismissed: DismissedKey[] }> {
   const here = live(place);
   const project = (await places(ctx.db)).find((each) => each.id === here.projectId)!;
-  const others = project.environments.filter((environment) =>
-    environment.id !== here.environmentId && environment.archivedAt === null
-    && can(ctx.caller, 'secret.read', placeOf(project, environment)));
+  const others = project.environments.filter((environment) => environment.id !== here.environmentId && environment.archivedAt === null);
   const [present, elsewhere, dismissals] = await Promise.all([
     environmentSecrets(ctx.db, here.environmentId),
     liveKeysIn(ctx.db, others.map((environment) => environment.id)),
@@ -62,7 +60,7 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
   const dismissedBy = new Map(dismissals.map((row) => [row.key, row]));
   return {
     missing: keys.filter((entry) => !dismissedBy.has(entry.key)),
-    // Only what is still missing from somewhere you read: a name from elsewhere is not yours to learn here.
+    // Only what is still missing: a dismissal of a key no sibling has any more is moot.
     dismissed: keys.flatMap((entry) => {
       const row = dismissedBy.get(entry.key);
       return row === undefined ? [] : [{ ...entry, dismissedBy: row.dismissedBy, dismissedAt: row.dismissedAt.toISOString() }];

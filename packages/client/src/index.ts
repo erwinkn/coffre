@@ -197,7 +197,7 @@ export function createClient(options: ClientOptions) {
       },
       /** Delete an archived environment for good, as a project is. Owners only. */
       delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
-      /** The keys its sibling environments have and it lacks, those you can see, and those its team dismissed. */
+      /** The keys its sibling environments have and it lacks, read or not, and those its team dismissed. */
       missing: (path: string) => call('GET /projects/:project/:environment/missing', place(path)),
       /** Dismiss missing keys (`true`) or restore them (`null`). */
       dismiss: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment/dismissals'>) =>

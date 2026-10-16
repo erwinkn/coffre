@@ -293,14 +293,29 @@ export async function referencesBreak(connect: () => CoffreClient, args: string[
 
 // --- missing keys ------------------------------------------------------------
 
-/** `coffre missing market/dev`: the keys its siblings have and it lacks, of those you read. */
+/**
+ * `coffre missing market/dev`: the keys its sibling environments have and it
+ * lacks, by name, whether you read them or not. With --check, a gate for CI:
+ * it fails when one is missing, and a dismissed key never fails it.
+ */
 export async function missing(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { ...json, dismissed: { type: 'boolean', default: false } }, ['<project>/<environment>']);
+  const { values, positionals } = parse(args, { ...json, dismissed: { type: 'boolean', default: false }, check: { type: 'boolean', default: false } }, ['<project>/<environment>']);
+  if (values.check && values.dismissed) throw new UsageError('--check fails on the missing keys, --dismissed lists the others: one or the other');
   const { project, environment } = place(positionals[0]!, true);
   const path = `${project}/${environment}`;
   const api = connect();
   const result = await api.environments.missing(path);
-  if (values.json) return asJson(io, values.dismissed ? result.dismissed : result.missing);
+  const hint = `\`coffre set ${path}/<KEY>\` adds one; \`coffre missing dismiss ${path}/<KEY>\`, or --all, says it is not needed`;
+  // What the gate says once the list is out: on stderr, with exit 1, so a CI step stops on it.
+  const incomplete = () => {
+    const count = result.missing.length;
+    return new Error(`${path} lacks ${count === 1 ? 'a key' : `${count} keys`} its sibling environments have: ${hint}`);
+  };
+  if (values.json) {
+    asJson(io, values.dismissed ? result.dismissed : result.missing);
+    if (values.check && result.missing.length > 0) throw incomplete();
+    return;
+  }
   if (values.dismissed) {
     if (result.dismissed.length === 0) return void io.out.write(`nothing dismissed in ${path}\n`);
     for (const key of result.dismissed) {
@@ -309,11 +324,12 @@ export async function missing(connect: () => CoffreClient, args: string[], io: I
     return;
   }
   if (result.missing.length === 0) {
-    io.out.write(`${path} has every key of the sibling environments you read${result.dismissed.length === 0 ? '' : `, but ${result.dismissed.length} dismissed: --dismissed lists them`}\n`);
+    io.out.write(`${path} has every key of its sibling environments${result.dismissed.length === 0 ? '' : `, but ${result.dismissed.length} dismissed: --dismissed lists them`}\n`);
     return;
   }
   for (const key of result.missing) io.out.write(`${key.key.padEnd(28)} in ${key.in.join(', ')}\n`);
-  io.out.write(`\n\`coffre set ${path}/<KEY>\` adds one; \`coffre missing dismiss ${path}/<KEY>\`, or --all, says it is not needed\n`);
+  if (values.check) throw incomplete();
+  io.out.write(`\n${hint}\n`);
 }
 
 /** `coffre missing dismiss market/dev/KEY` (or `market/dev --all`), and `restore`: for the whole team, logged. */
