@@ -379,7 +379,14 @@ function workloadsConfig(options: WorkloadsOptions, publicUrl: string): Workload
       `workloads.allowLoopbackIssuersForDevelopment is for an instance on loopback, and ${publicUrl} is not one: turn it off`,
     );
   }
-  const githubApp = options.githubApp === undefined ? null : githubAppOf(options.githubApp, (value) => baseUrl(value, 'workloads.githubApp.apiUrl'));
+  const githubApp = options.githubApp === undefined ? null : githubAppOf(options.githubApp, (value) => {
+    const url = baseUrl(value, 'workloads.githubApp.apiUrl');
+    // Its repositories' IDs are trusted under github.com's issuer, the one the lookup and the pages bind to.
+    if (url !== 'https://api.github.com' && !isLoopback(new URL(url))) {
+      throw new Error('workloads.githubApp is for github.com: GitHub Enterprise Server is not supported yet, and apiUrl is for the dev IdP, on loopback');
+    }
+    return url;
+  });
   return { allowLoopback: loopback, limits: options.limits, githubApp };
 }
 

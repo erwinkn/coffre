@@ -77,6 +77,8 @@ test('the configuration is checked where it is written, and a refusal never repe
     return true;
   });
   assert.throws(() => configure({ appId: 1001, privateKey: key, apiUrl: 'http://github.acme.example/api/v3' }), /apiUrl must use HTTPS/);
+  assert.throws(() => configure({ appId: 1001, privateKey: key, apiUrl: 'https://github.acme.example/api/v3' }), /GitHub Enterprise Server is not supported yet/);
+  assert.equal(configure({ appId: 1001, privateKey: key, apiUrl: 'http://127.0.0.1:8081/github/api' }).workloads!.githubApp!.apiUrl, 'http://127.0.0.1:8081/github/api');
   assert.equal(configure({ appId: 1001, privateKey: key }).workloads!.githubApp!.apiUrl, 'https://api.github.com');
   assert.equal(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS } }).workloads!.githubApp, null);
 });
@@ -200,6 +202,28 @@ test('with a cold cache and more installations than the budget reaches, those it
     assert.deepEqual([listed.repositories.length, listed.truncated], [19, true], `${count} installations`);
     assert.equal(listed.installations.length, count);
   }
+});
+
+test('with every kept token refused, the installations a listing starts each finish their first page', async () => {
+  idp.githubApp.installations = Array.from({ length: 38 }, (_, i) => ({
+    id: 600 + i,
+    account: { login: `crew-${String(i).padStart(2, '0')}`, id: 1600 + i, type: 'Organization' as const },
+    suspended: false,
+    repositories: [{ id: 5_000_000 + i, name: 'only', private: true }],
+  }));
+  const app = appOf();
+  await app.repositories();
+  idp.githubApp.revokeTokens();
+  requests = [];
+  const listed = await app.repositories();
+  assert.ok(requests.length <= MAX_LISTING_REQUESTS, `${requests.length} requests`);
+  // The installations, then three each: the refusal, a new token, the page. 13 of them.
+  assert.deepEqual([listed.repositories.length, listed.truncated], [13, true]);
+  // Those 13 tokens kept now, a wave's unspent reserve goes to the next: more fit.
+  requests = [];
+  const next = await app.repositories();
+  assert.ok(requests.length <= MAX_LISTING_REQUESTS, `${requests.length} requests`);
+  assert.ok(next.repositories.length > 13, `${next.repositories.length} listed`);
 });
 
 test("a repository by name: its IDs when the app is installed on it, private or not; null when it is not", async () => {

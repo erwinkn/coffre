@@ -23,7 +23,11 @@ export type GitHubAppOptions = {
   appId: string | number;
   /** A private key generated on its settings page: the PEM file, as downloaded. */
   privateKey: string;
-  /** https://api.github.com, or `${host}/api/v3` on Enterprise Server. */
+  /**
+   * https://api.github.com, the default; another only on loopback, the dev
+   * IdP's. GitHub Enterprise Server is not supported yet: its runs' tokens
+   * come from another issuer than the one the lookup's IDs are bound to.
+   */
   apiUrl?: string;
 };
 
@@ -86,17 +90,9 @@ export class GitHubApp {
     this.#app ??= await this.#appInfo(budget);
     const { installations, more } = await this.#installations(budget);
     let truncated = more;
-    const listed = await Promise.all(installations.map(async (installation) => {
+    /** An installation's repositories, its first page paid from `own`, and the rest from what the listing has left. */
+    const list = async (installation: Installation, own: Budget): Promise<GitHubRepository[]> => {
       const repositories: GitHubRepository[] = [];
-      // Its first page reserved before any request goes out, a token too unless one is kept, so that no
-      // installation's token starves the others' pages; the rest, more pages and retries, spend what is left.
-      const first = this.#kept(installation.id) === null ? 2 : 1;
-      if (budget.left < first) {
-        truncated = true;
-        return repositories;
-      }
-      budget.left -= first;
-      const own: Budget = { left: first, then: budget };
       try {
         for (let page = 1; ; page++) {
           const body = record(await this.#asInstallation(installation.id, `/installation/repositories?per_page=${PAGE}&page=${page}`, { budget: own }));
@@ -110,7 +106,27 @@ export class GitHubApp {
         truncated = true;
         return repositories;
       }
-    }));
+    };
+    // In waves, at once within each: every installation of a wave reserves what its first page can cost at
+    // worst, a token and the page, or a kept token refused, a new one and the page again, so that each one
+    // started finishes its first page. What a wave did not spend goes to the next.
+    const listed: GitHubRepository[][] = [];
+    for (let rest = installations; rest.length > 0; ) {
+      const wave: { installation: Installation; own: Budget }[] = [];
+      for (const installation of rest) {
+        const worst = this.#kept(installation.id) === null ? 2 : 3;
+        if (budget.left < worst) break;
+        budget.left -= worst;
+        wave.push({ installation, own: { left: worst, then: budget } });
+      }
+      if (wave.length === 0) {
+        truncated = true;
+        break;
+      }
+      rest = rest.slice(wave.length);
+      listed.push(...(await Promise.all(wave.map(({ installation, own }) => list(installation, own)))));
+      for (const { own } of wave) budget.left += own.left;
+    }
     const byId = new Map(listed.flat().map((each) => [each.repositoryId, each]));
     return {
       app: this.#app,

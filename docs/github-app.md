@@ -85,8 +85,9 @@ workloads: {
 },
 ```
 
-On GitHub Enterprise Server, add `apiUrl: 'https://github.acme.example/api/v3'`.
-The configuration is checked when the app starts: an ID that is not a
+It is for github.com: GitHub Enterprise Server's runs sign their tokens
+under its own issuer, which the pages and `coffre trust` do not bind to
+yet, so the app refuses another API. The configuration is checked when the app starts: an ID that is not a
 number, or a key that is not a PEM, stops it with a message saying which,
 never the key.
 
