@@ -29,7 +29,7 @@ import {
   type SecretChange,
   type SecretDraft,
 } from '../lib/secret-edit-batch';
-import { ValueUnavailable } from '../lib/clipboard';
+import { copyAttempts } from '../lib/copy-attempts';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { noReads, revealToggleDisabled, rowReads } from '../lib/row-reads';
 import { sortKeys, type Sort } from '../lib/secret-order';
@@ -1011,19 +1011,40 @@ function SecretRow({
     else void readValue();
   }
 
-  // Copy on a hidden value reads it the way Reveal does (the same audited read)
-  // and hands it to the clipboard, never to the screen or to the row's reveal
-  // state: it shares nothing with Reveal but the endpoint, so neither can change
-  // whether a value is shown or Hide can be pressed. Its in-flight state is its
-  // button's, and its refusals are `copyError`.
-  async function readForCopy(): Promise<string> {
+  // Copy reads a hidden value the way Reveal does (the same audited read) and hands
+  // it to the clipboard, never to the screen or to the row's reveal state: it shares
+  // nothing with Reveal but the endpoint, so neither can change whether a value is
+  // shown or Hide can be pressed. Copies do not lock each other out; the latest one
+  // wins. The row holds the attempts, which a remount of the button does not reset,
+  // and only the latest may set `copyError`: an older copy's late result is dropped.
+  const copies = useRef<ReturnType<typeof copyAttempts> | null>(null);
+  async function copyValue(): Promise<'copied' | 'failed' | 'superseded'> {
+    copies.current ??= copyAttempts();
     dispatch({ type: 'copy-started' });
-    try {
-      return await fetchValue();
-    } catch (failure) {
-      dispatch({ type: 'copy-failed', message: readFailureMessage(failure) });
-      throw new ValueUnavailable();
+    // What a failed read said, if the read is what failed rather than the clipboard.
+    const read: { failed: boolean; failure?: unknown } = { failed: false };
+    const text =
+      shown !== null
+        ? shown.value
+        : fetchValue().catch((failure: unknown) => {
+            read.failed = true;
+            read.failure = failure;
+            throw failure;
+          });
+    const result = await copies.current(text);
+    if (result.outcome === 'superseded') return 'superseded';
+    if (result.outcome === 'copied') {
+      dispatch({ type: 'copy-succeeded' });
+      return 'copied';
     }
+    dispatch({
+      type: 'copy-failed',
+      message:
+        read.failed
+          ? readFailureMessage(read.failure)
+          : 'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
+    });
+    return 'failed';
   }
 
   // An edit starts from the current value, read the way Reveal reads it, so
@@ -1191,22 +1212,7 @@ function SecretRow({
                         as for Reveal, it takes secret.read, and a reference copies the
                         value it reads through. */}
                     <SecretReadOnly canReveal={canReveal}>
-                      <CopyButton
-                        variant="act"
-                        value={shown !== null ? shown.value : readForCopy}
-                        label={`Copy ${entry.key}`}
-                        // A copy that works retires the last one's complaint.
-                        onCopied={() => dispatch({ type: 'copy-succeeded' })}
-                        onError={() =>
-                          dispatch({
-                            type: 'copy-failed',
-                            message:
-                              'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
-                          })
-                        }
-                      />
-                    </SecretReadOnly>
-                    <SecretReadOnly canReveal={canReveal}>
+                      <CopyButton variant="act" value={copyValue} label={`Copy ${entry.key}`} />
                       <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                         <button
                           className="act act-icon act-accent"
