@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Copy a secret without revealing it.** A hidden value now has a Copy button
+  beside Reveal, for whoever may reveal it. It reads the value the way Reveal
+  does, with the same audit entry, and puts it on the clipboard exactly as
+  stored, newlines included, without showing it: the mask stays. If the copy
+  fails, the button turns red and the row says why.
+- **A revealed value breaks only at its newlines.** A long token no longer wraps
+  mid-word; it scrolls sideways inside the value, so the row and its buttons
+  keep their place. A multi-line value, a PEM for one, shows one line per line.
+
 ## 0.6.1 (2026-10-16)
 
 - **Shift+Enter types a line break in a secret's value.** A value could only

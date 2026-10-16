@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
 import { AlertDialog } from '@base-ui/react/alert-dialog';
 import { Dialog } from '@base-ui/react/dialog';
 import { Menu } from '@base-ui/react/menu';
 import { Popover } from '@base-ui/react/popover';
 import { Tooltip } from '@base-ui/react/tooltip';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
+import { createCopier, type Copier } from '../lib/copy-attempts';
 import { usePreferences } from '../lib/preferences';
 
 /* -------------------------------------------------------------------------- */
@@ -240,47 +241,55 @@ export function breakAfterUnderscores(text: string): ReactNode {
  *
  * The glyph turns into a check, and screen readers hear "Copied", for 1.4s --
  * long enough to be noticed after the eye has moved on, short enough not to
- * look stuck.
+ * look stuck. A copy that fails says so the same way, in red, rather than
+ * leaving the click looking ignored.
+ *
+ * `value` is the text. A caller that must read it first (Copy on a hidden
+ * secret) passes the `copier` it owns instead, and `onCopy`, called inside the
+ * click so the clipboard write keeps its user gesture, which starts a copy on
+ * that copier. Copies do not lock the button: a click while one is out starts
+ * the next, and the latest one's ending is the one that shows. The copier's
+ * owner outlives the button, so a remount keeps the feedback of a copy in flight.
  */
 export function CopyButton({
-  value,
   label = 'Copy',
   variant = 'icon',
+  ...source
 }: {
-  value: string;
   label?: string;
   /** `act` sits among a table row's actions; `icon` anywhere else. */
   variant?: 'icon' | 'act';
-}) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+} & ({ value: string; copier?: undefined; onCopy?: undefined } | { value?: undefined; copier: Copier; onCopy: () => void })) {
+  const [own] = useState(() => createCopier());
+  const copier = source.copier ?? own;
+  const state = useSyncExternalStore(copier.subscribe, copier.feedback, copier.feedback);
 
-  useEffect(() => () => {
-    if (timer.current !== null) clearTimeout(timer.current);
-  }, []);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      return; // Clipboard denied; say nothing rather than claim success.
-    }
-    setCopied(true);
-    if (timer.current !== null) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setCopied(false), 1400);
+  function copy() {
+    if (source.copier !== undefined) source.onCopy();
+    else void own.run(source.value);
   }
 
+  const text = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : label;
   return (
-    <Tip label={copied ? 'Copied' : label}>
+    <Tip label={text}>
       <button
         type="button"
         className={variant === 'act' ? 'act act-icon' : 'btn btn-quiet btn-sm btn-icon'}
         aria-label={label}
+        aria-busy={state === 'pending'}
         onClick={copy}
       >
-        {copied ? <Check size={14} className="copied" /> : <Copy size={14} />}
+        {state === 'pending' ? (
+          <Spinner size={13} />
+        ) : state === 'copied' ? (
+          <Check size={14} className="copied" />
+        ) : state === 'failed' ? (
+          <AlertCircle size={14} className="copy-failed" />
+        ) : (
+          <Copy size={14} />
+        )}
         <span className="visually-hidden" aria-live="polite">
-          {copied ? 'Copied' : ''}
+          {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : ''}
         </span>
       </button>
     </Tip>

@@ -1,6 +1,6 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -29,7 +29,9 @@ import {
   type SecretChange,
   type SecretDraft,
 } from '../lib/secret-edit-batch';
+import { createCopier } from '../lib/copy-attempts';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
+import { noReads, revealToggleDisabled, rowReads } from '../lib/row-reads';
 import { sortKeys, type Sort } from '../lib/secret-order';
 import { inDialog } from '../lib/shortcuts';
 import { secretKeyProblem } from '../lib/validation';
@@ -94,6 +96,13 @@ const Route = pageRoute<typeof environment>();
  * already logged, and re-revealing writes a second, honest audit row.
  */
 const REVEAL_TTL_SECONDS = 45;
+
+/** Why a read of a secret's value failed, as the row says it. */
+function readFailureMessage(failure: unknown): string {
+  return failure instanceof CoffreError
+    ? failureMessage(failure)
+    : 'The request could not be sent. Nothing was read.';
+}
 
 export function EnvironmentPage() {
   const { project, environment } = Route.useParams();
@@ -931,9 +940,10 @@ function SecretRow({
   saveReady: boolean;
   onMarkArchive: () => void;
 }) {
-  const [reveal, setReveal] = useState<Reveal | null>(null);
+  const [reads, dispatch] = useReducer(rowReads, noReads);
+  const { reveal, revealing, error, copyError } = reads;
+  const setReveal = (next: Reveal | null) => dispatch({ type: 'set-reveal', reveal: next });
   const coffre = useCoffre();
-  const [revealing, setRevealing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [moving, setMoving] = useState(false);
   const [referring, setReferring] = useState(false);
@@ -948,7 +958,6 @@ function SecretRow({
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
   const holderPath = `${project}/${environment}/${entry.key}`;
-  const [error, setError] = useState<string | null>(null);
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
   // version identical to the one it came from.
@@ -978,28 +987,62 @@ function SecretRow({
 
   async function readValue({ show = true } = {}): Promise<string | null> {
     if (shown !== null) return shown.value;
-    setRevealing(true);
+    dispatch({ type: 'read-started' });
     try {
-      const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
-      const value = values[entry.key];
-      setError(null);
-      if (show) setReveal({ value, version: readVersion, at: Date.now() });
+      const value = await fetchValue();
+      dispatch({
+        type: 'read-succeeded',
+        reveal: show ? { value, version: readVersion, at: Date.now() } : null,
+      });
       return value;
     } catch (failure) {
-      setError(
-        failure instanceof CoffreError
-          ? failureMessage(failure)
-          : 'The request could not be sent. Nothing was read.',
-      );
+      dispatch({ type: 'read-failed', message: readFailureMessage(failure) });
       return null;
-    } finally {
-      setRevealing(false);
     }
+  }
+
+  async function fetchValue(): Promise<string> {
+    const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
+    return values[entry.key];
   }
 
   function toggleReveal() {
     if (shown !== null) setReveal(null);
     else void readValue();
+  }
+
+  // Copy reads a hidden value the way Reveal does (the same audited read) and hands
+  // it to the clipboard, never to the screen or to the row's reveal state: it shares
+  // nothing with Reveal but the endpoint, so neither can change whether a value is
+  // shown or Hide can be pressed. Copies do not lock each other out; the latest one
+  // wins. The row holds the copier, which a remount of the button does not reset,
+  // and only the latest copy may set `copyError` or the button's feedback.
+  const [copier] = useState(() => createCopier());
+  function copyValue() {
+    dispatch({ type: 'copy-started' });
+    // What a failed read said, if the read is what failed rather than the clipboard.
+    const read: { failed: boolean; failure?: unknown } = { failed: false };
+    const text =
+      shown !== null
+        ? shown.value
+        : fetchValue().catch((failure: unknown) => {
+            read.failed = true;
+            read.failure = failure;
+            throw failure;
+          });
+    void copier.run(text).then((result) => {
+      if (result.outcome === 'superseded') return;
+      dispatch(
+        result.outcome === 'copied'
+          ? { type: 'copy-succeeded' }
+          : {
+              type: 'copy-failed',
+              message: read.failed
+                ? readFailureMessage(read.failure)
+                : 'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
+            },
+      );
+    });
   }
 
   // An edit starts from the current value, read the way Reveal reads it, so
@@ -1162,16 +1205,17 @@ function SecretRow({
                   </>
                 ) : (
                   <>
-                    {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
-                    {shown !== null && (
-                      <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
-                    )}
+                    {/* Copy sits left of Reveal, hidden or shown, so Hide stays where
+                        Reveal was clicked. Hidden, it copies without showing the value;
+                        as for Reveal, it takes secret.read, and a reference copies the
+                        value it reads through. */}
                     <SecretReadOnly canReveal={canReveal}>
+                      <CopyButton variant="act" copier={copier} onCopy={copyValue} label={`Copy ${entry.key}`} />
                       <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                         <button
                           className="act act-icon act-accent"
                           onClick={toggleReveal}
-                          disabled={revealing}
+                          disabled={revealToggleDisabled(reads, shown)}
                           aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                         >
                           {revealing && !opening ? (
@@ -1371,13 +1415,15 @@ function SecretRow({
         </tr>
       )}
 
-      {(error ?? actError) !== null && (
+      {(error ?? actError) !== null || copyError !== null ? (
         <tr className="row-error">
           <td colSpan={columns}>
-            <ErrorLine error={(error ?? actError)!} />
+            {/* Reveal's refusal and Copy's are independent: neither hides the other. */}
+            <ErrorLine error={error ?? actError} />
+            <ErrorLine error={copyError} />
           </td>
         </tr>
-      )}
+      ) : null}
     </>
   );
 }
