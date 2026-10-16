@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
-import { defineSignin, github, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
+import { defineSignin, github, githubApp, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
@@ -266,7 +266,7 @@ test('with workloads off, the routes say how to turn them on', async () => {
   delete deps.workloads;
   await assert.rejects(bind(), /this instance trusts no workloads: the deployment's signin\(\{ workloads \}\) turns them on/);
   // The configuration that turns them on.
-  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS, githubApp: null });
+  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS, github: null });
   // Never without both limits.
   assert.throws(
     () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: {} as never }),
@@ -281,7 +281,7 @@ test('loopback issuers are for development: an instance off loopback refuses to 
   assert.throws(() => at('https://secrets.acme.example'), /allowLoopbackIssuersForDevelopment is for an instance on loopback, and https:\/\/secrets\.acme\.example is not one: turn it off/);
   assert.throws(() => at('https://127.0.0.1.nip.io'), /is not one/);
   for (const publicUrl of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000']) {
-    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS, githubApp: null });
+    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS, github: null });
   }
   // As a deployment writes it: signin() takes it, and the instance's own URL decides.
   const auth = signinAuth({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, allowLoopbackIssuersForDevelopment: true } });
@@ -323,7 +323,7 @@ test("an owner looks up a public repository's, owner's or project's IDs; a priva
 
 /** The service, with the deployment's GitHub App: the dev IdP's. */
 function withGitHubApp(): void {
-  const config = defineSignin({ publicUrl: SIGNIN.publicUrl, providers: SIGNIN.providers, workloads: { limits: LIMITS, githubApp: idp.githubApp.options } });
+  const config = defineSignin({ publicUrl: SIGNIN.publicUrl, providers: SIGNIN.providers, workloads: { limits: LIMITS, github: githubApp(idp.githubApp.options) } });
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: config });
   deps.workloads = new WorkloadService({
     db: deps.db, chainKey: deps.chainKey, vault: deps.vault, config: config.workloads!, transport, signin, publicUrl: config.publicUrl,

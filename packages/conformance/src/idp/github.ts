@@ -97,14 +97,15 @@ export class FakeGitHub {
       return fail('incorrect_client_credentials', 'The client_id and/or client_secret passed are incorrect.');
     }
 
+    // A GitHub App's user tokens expire in eight hours; an OAuth app's do not, unless it opts in.
+    const app = this.#isApp(client.clientId);
     const result = this.#authz.exchange('github', {
       client,
       code: params.get('code') ?? '',
       redirectUri: params.get('redirect_uri') ?? undefined,
       codeVerifier: params.get('code_verifier') ?? '',
-      // OAuth app tokens do not expire unless the app opts in.
-      accessTokenTtl: Infinity,
-      accessTokenPrefix: 'gho_',
+      accessTokenTtl: app ? 8 * 60 * 60 : Infinity,
+      accessTokenPrefix: app ? 'ghu_' : 'gho_',
     });
     if (!result.ok) {
       if (result.error === 'redirect_uri_mismatch') {
@@ -112,6 +113,8 @@ export class FakeGitHub {
       }
       return fail('bad_verification_code', 'The code passed is incorrect or expired.');
     }
+    // https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
+    if (app) return reply({ access_token: result.accessToken, expires_in: String(8 * 60 * 60), token_type: 'bearer', scope: '' });
     reply({ access_token: result.accessToken, token_type: 'bearer', scope: result.grant.scope.join(',') });
   }
 
@@ -140,7 +143,10 @@ export class FakeGitHub {
   #emails(req: IncomingMessage, res: ServerResponse): void {
     const auth = this.#authenticate(req, res);
     if (!auth) return;
-    if (!this.#hasScope(auth.grant, ['user:email', 'user'])) return this.#notFound(res, auth.grant);
+    // A GitHub App's user token carries the app's permissions, not scopes: "Email addresses", read.
+    if (this.#isApp(auth.grant.clientId)) {
+      if (this.#idp.githubApp.permissions.emails === undefined) return this.#notAccessible(res, auth.grant);
+    } else if (!this.#hasScope(auth.grant, ['user:email', 'user'])) return this.#notFound(res, auth.grant);
     this.#json(res, auth.grant, 200, auth.account.emails);
   }
 
@@ -153,7 +159,11 @@ export class FakeGitHub {
   #membership(req: IncomingMessage, res: ServerResponse, org: string): void {
     const auth = this.#authenticate(req, res);
     if (!auth) return;
-    if (!this.#hasScope(auth.grant, ['read:org', 'write:org', 'admin:org', 'user'])) {
+    // A GitHub App's user token reaches an organization's members only with the app's "Members" permission, and only
+    // where the app is installed: elsewhere, "Resource not accessible by integration".
+    if (this.#isApp(auth.grant.clientId)) {
+      if (this.#idp.githubApp.permissions.members === undefined || !this.#idp.githubApp.installedOn(org)) return this.#notAccessible(res, auth.grant);
+    } else if (!this.#hasScope(auth.grant, ['read:org', 'write:org', 'admin:org', 'user'])) {
       return this.#json(res, auth.grant, 403, {
         message: 'You need at least read:org scope or user scope to read organization memberships.',
         documentation_url: DOCS,
@@ -190,6 +200,15 @@ export class FakeGitHub {
       return undefined;
     }
     return { grant, account: this.#idp.gitHubUserFor(normalizeEmail(grant.email)) };
+  }
+
+  /** The deployment's GitHub App's OAuth client, whose tokens are user tokens of the app's. */
+  #isApp(clientId: string): boolean {
+    return clientId === this.#idp.githubApp.clientId;
+  }
+
+  #notAccessible(res: ServerResponse, grant: Grant): void {
+    this.#json(res, grant, 403, { message: 'Resource not accessible by integration', documentation_url: DOCS });
   }
 
   #hasScope(grant: Grant, accepted: readonly string[]): boolean {

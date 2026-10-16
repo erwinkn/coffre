@@ -17,7 +17,7 @@
  * Each returns a `SigninProvider`, and a provider that speaks neither can be
  * one of the deployment's own, in the same list.
  */
-import { githubAppOf, type GitHubApp, type GitHubAppOptions } from '../github-app.ts';
+import { GitHubApp, pkcs8Of, type GitHubAppOptions } from '../github-app.ts';
 import { GitHubSigninProvider } from './github.ts';
 import { OidcSigninProvider } from './oidc.ts';
 import type { SigninBrand, SigninProvider } from './types.ts';
@@ -97,13 +97,14 @@ export type WorkloadsOptions = {
    */
   allowLoopbackIssuersForDevelopment?: boolean;
   /**
-   * The deployment's own GitHub App, installed on its organizations: where
-   * an owner trusts a workflow, the pages list the repositories it is
-   * installed on, private ones too, and a repository typed by name resolves
-   * through it (docs/github-app.md). Left out, repositories are typed, and
-   * only public ones' IDs are looked up.
+   * The deployment's own GitHub App, `githubApp(…)`, installed on its
+   * organizations: where an owner trusts a workflow, the pages list the
+   * repositories it is installed on, private ones too, and a repository
+   * typed by name resolves through it (docs/github-app.md). The same value
+   * may sign people in, `github({ app })`. Left out, repositories are typed,
+   * and only public ones' IDs are looked up.
    */
-  githubApp?: GitHubAppOptions;
+  github?: GitHubApp;
 };
 
 /** Cloudflare's rate-limiting binding, as coffre calls it; `processLimits()` has the same shape. */
@@ -111,7 +112,7 @@ export type RateLimiter = { limit(options: { key: string }): Promise<{ success: 
 
 export type WorkloadLimits = { perSource: RateLimiter; total: RateLimiter };
 
-export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits; githubApp: GitHubApp | null };
+export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits; github: GitHubApp | null };
 
 /**
  * MCP clients, Claude among them, acting as the people who connect them,
@@ -250,25 +251,60 @@ export function microsoft(
   });
 }
 
-/** GitHub accounts; with `organization`, only that organization's members. */
+/**
+ * GitHub accounts; with `organization`, only that organization's members.
+ * Through an OAuth app, or a GitHub App's OAuth client, by its credentials;
+ * or the deployment's GitHub App, `github({ app })`, the same value its
+ * `workloads.github` lists repositories with:
+ *
+ *   const app = githubApp({ appId, privateKey, clientId, clientSecret });
+ *   signin({ providers: [github({ app, organization: 'acme' })], workloads: { limits, github: app } })
+ */
 export function github(
-  options: Credentials & {
-    id?: string;
-    label?: string;
-    organization?: string;
-    webUrl?: string;
-    apiUrl?: string;
-  },
+  options: { id?: string; label?: string; organization?: string } & (
+    | (Credentials & { webUrl?: string; apiUrl?: string })
+    | { app: GitHubApp }
+  ),
 ): GitHubSigninProvider {
   const id = checkId(options.id ?? 'github');
+  const how = ((): Credentials & { webUrl?: string; apiUrl?: string } => {
+    if (!('app' in options)) return options;
+    const client = options.app instanceof GitHubApp ? options.app.signinClient() : null;
+    if (client === null) {
+      throw new Error(`sign-in provider ${id} signs in with the GitHub App's OAuth client: githubApp({ appId, privateKey, clientId, clientSecret })`);
+    }
+    return { ...client, webUrl: options.app.webUrl, apiUrl: options.app.apiUrl };
+  })();
   return new GitHubSigninProvider({
     id,
     label: options.label ?? 'GitHub',
     brand: 'github',
-    ...credentials(id, options),
-    webUrl: baseUrl(options.webUrl ?? 'https://github.com', `sign-in provider ${id} web URL`),
-    apiUrl: baseUrl(options.apiUrl ?? 'https://api.github.com', `sign-in provider ${id} API URL`),
+    ...credentials(id, how),
+    webUrl: baseUrl(how.webUrl ?? 'https://github.com', `sign-in provider ${id} web URL`),
+    apiUrl: baseUrl(how.apiUrl ?? 'https://api.github.com', `sign-in provider ${id} API URL`),
     organization: options.organization?.trim() || null,
+  });
+}
+
+/**
+ * The deployment's GitHub App, checked where it is written: its numeric ID
+ * and private key, and its OAuth client when it signs people in too. One
+ * value, passed to each side that uses it: `github({ app })` and
+ * `workloads.github` (`../github-app.ts`).
+ */
+export function githubApp(options: GitHubAppOptions): GitHubApp {
+  const appId = String(options.appId ?? '').trim();
+  if (!/^[1-9][0-9]{0,19}$/.test(appId)) throw new Error('githubApp(…).appId must be the app\'s numeric ID (its settings page, "App ID"), not its client ID');
+  const [clientId, clientSecret] = [options.clientId?.trim() || null, options.clientSecret || null];
+  if ((clientId === null) !== (clientSecret === null)) {
+    throw new Error('githubApp(…) takes its OAuth client whole, clientId and clientSecret, or neither');
+  }
+  return new GitHubApp({
+    appId,
+    pkcs8: pkcs8Of(options.privateKey),
+    webUrl: baseUrl(options.webUrl ?? 'https://github.com', 'githubApp(…).webUrl'),
+    apiUrl: baseUrl(options.apiUrl ?? 'https://api.github.com', 'githubApp(…).apiUrl'),
+    ...(clientId === null || clientSecret === null ? {} : { client: { clientId, clientSecret } }),
   });
 }
 
@@ -379,15 +415,15 @@ function workloadsConfig(options: WorkloadsOptions, publicUrl: string): Workload
       `workloads.allowLoopbackIssuersForDevelopment is for an instance on loopback, and ${publicUrl} is not one: turn it off`,
     );
   }
-  const githubApp = options.githubApp === undefined ? null : githubAppOf(options.githubApp, (value) => {
-    const url = baseUrl(value, 'workloads.githubApp.apiUrl');
-    // Its repositories' IDs are trusted under github.com's issuer, the one the lookup and the pages bind to.
-    if (url !== 'https://api.github.com' && !isLoopback(new URL(url))) {
-      throw new Error('workloads.githubApp is for github.com: GitHub Enterprise Server is not supported yet, and apiUrl is for the dev IdP, on loopback');
-    }
-    return url;
-  });
-  return { allowLoopback: loopback, limits: options.limits, githubApp };
+  const app = options.github;
+  if (app !== undefined && !(app instanceof GitHubApp)) {
+    throw new Error('workloads.github is the deployment\'s GitHub App: githubApp({ appId, privateKey })');
+  }
+  // Its repositories' IDs are trusted under github.com's issuer, the one the lookup and the pages bind to.
+  if (app !== undefined && app.apiUrl !== 'https://api.github.com' && !isLoopback(new URL(app.apiUrl))) {
+    throw new Error('workloads.github is for github.com: GitHub Enterprise Server is not supported yet; sign in with its app, and leave workloads.github out');
+  }
+  return { allowLoopback: loopback, limits: options.limits, github: app ?? null };
 }
 
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */

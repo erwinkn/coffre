@@ -92,6 +92,13 @@ export class DevIdp {
       anyLoopbackRedirect: true,
     });
     for (const client of options.clients ?? []) this.registerClient(client);
+    // The GitHub App's own OAuth client, which signs people in as the fake GitHub's do.
+    this.#clients.set(this.githubApp.clientId, {
+      clientId: this.githubApp.clientId,
+      clientSecret: this.githubApp.clientSecret,
+      redirectUris: [],
+      anyLoopbackRedirect: true,
+    });
 
     const authz = new AuthorizationServer(this);
     this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes(), ...this.githubApp.routes(), ...this.workloads.routes()];

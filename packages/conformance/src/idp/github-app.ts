@@ -62,6 +62,15 @@ export class FakeGitHubApp {
   readonly appId = '1001';
   readonly name = 'Coffre (dev)';
   readonly slug = 'coffre-dev';
+  /** Its OAuth client, for signing people in: a GitHub App's client ID, and a local fixture for its secret. */
+  readonly clientId = 'Iv23li-coffre-dev';
+  readonly clientSecret = 'coffre-dev-app-secret';
+  /**
+   * What it may do, as its settings page grants it. Its user tokens carry
+   * these, not OAuth scopes: their email addresses with `emails`, and
+   * organization memberships with `members`, where it is installed.
+   */
+  permissions: { metadata: 'read'; emails?: 'read'; members?: 'read' } = { metadata: 'read', emails: 'read', members: 'read' };
   /** The installations, by account; a test edits them as it likes. */
   installations: FakeInstallation[] = fakeInstallations();
   /** How long an installation token lives: an hour, as GitHub's. */
@@ -85,9 +94,21 @@ export class FakeGitHubApp {
     return this.#privateKey;
   }
 
-  /** What a deployment's `workloads.githubApp` names to reach this one. */
-  get options(): { appId: string; privateKey: string; apiUrl: string } {
-    return { appId: this.appId, privateKey: this.privateKey, apiUrl: `${this.#origin()}${API}` };
+  /** What a deployment's `githubApp(…)` names to reach this one, for repositories and sign-in alike. */
+  get options(): { appId: string; privateKey: string; clientId: string; clientSecret: string; webUrl: string; apiUrl: string } {
+    return {
+      appId: this.appId,
+      privateKey: this.privateKey,
+      clientId: this.clientId,
+      clientSecret: this.clientSecret,
+      webUrl: `${this.#origin()}/github`,
+      apiUrl: `${this.#origin()}${API}`,
+    };
+  }
+
+  /** Whether it is installed on this account, and not suspended: where its user tokens reach. */
+  installedOn(login: string): boolean {
+    return this.installations.some((each) => each.account.login.toLowerCase() === login.toLowerCase() && !each.suspended);
   }
 
   async start(): Promise<void> {
@@ -141,7 +162,7 @@ export class FakeGitHubApp {
   }
 
   #app(): Answer {
-    return [200, { id: Number(this.appId), slug: this.slug, name: this.name, html_url: `${this.#origin()}/github/apps/${this.slug}`, permissions: { metadata: 'read' } }];
+    return [200, { id: Number(this.appId), slug: this.slug, name: this.name, client_id: this.clientId, html_url: `${this.#origin()}/github/apps/${this.slug}`, permissions: this.permissions }];
   }
 
   /** https://docs.github.com/en/rest/apps/apps#list-installations-for-the-authenticated-app */
@@ -165,7 +186,7 @@ export class FakeGitHubApp {
     const expiresAt = Date.now() + this.tokenTtlMs;
     this.#tokens.set(token, { installation: id, expiresAt });
     this.tokensIssued++;
-    return [201, { token, expires_at: new Date(expiresAt).toISOString().replace(/\.\d{3}Z$/, 'Z'), permissions: { metadata: 'read' }, repository_selection: 'selected' }];
+    return [201, { token, expires_at: new Date(expiresAt).toISOString().replace(/\.\d{3}Z$/, 'Z'), permissions: this.permissions, repository_selection: 'selected' }];
   }
 
   /** https://docs.github.com/en/rest/apps/apps#get-a-repository-installation-for-the-authenticated-app */

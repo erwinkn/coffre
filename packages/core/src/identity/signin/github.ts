@@ -86,11 +86,15 @@ export class GitHubSigninProvider implements SigninProvider {
     }
 
     const organization = this.config.organization;
-    if (organization !== null && !(await this.#isMember(token, organization))) {
+    const standing = organization === null ? 'member' : await this.#membership(token, organization);
+    if (standing === 'unseen') {
       throw new SigninError(
         'not_in_organization',
-        `only members of the ${organization} organization may sign in with ${label}`,
+        `${label} would not show ${organization}'s members to coffre: a GitHub App needs the Members organization permission, read, and to be installed on ${organization}; an OAuth app, the organization's approval`,
       );
+    }
+    if (standing === 'outside') {
+      throw new SigninError('not_in_organization', `only members of the ${organization} organization may sign in with ${label}`);
     }
 
     const listed = await this.#api<GitHubEmail[]>(token, '/user/emails');
@@ -136,17 +140,25 @@ export class GitHubSigninProvider implements SigninProvider {
     return body.access_token;
   }
 
-  async #isMember(token: string, organization: string): Promise<boolean> {
+  /**
+   * Whether the person is an active member: `outside` when GitHub says they
+   * are not (404), `unseen` when it will not say (403), which a GitHub App's
+   * user token gets without the Members permission or an installation on
+   * the organization, and an OAuth app's where the organization restricts
+   * it. Either way, no sign-in.
+   */
+  async #membership(token: string, organization: string): Promise<'member' | 'outside' | 'unseen'> {
     const response = await this.#send(
       `${this.config.apiUrl}/user/memberships/orgs/${encodeURIComponent(organization)}`,
       { headers: apiHeaders(token) },
     );
-    if (response.status === 404 || response.status === 403) return false;
+    if (response.status === 404) return 'outside';
+    if (response.status === 403) return 'unseen';
     const body = (await readJson(response)) as { state?: unknown } | null;
     if (!response.ok || body === null) {
       throw new SigninError('invalid_response', `${this.config.label} answered the membership check with ${response.status}`);
     }
-    return body.state === 'active';
+    return body.state === 'active' ? 'member' : 'outside';
   }
 
   async #api<T>(token: string, path: string): Promise<T | null> {

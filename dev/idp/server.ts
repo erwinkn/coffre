@@ -25,6 +25,7 @@ console.log(`  authorize            ${idp.origin}/github/login/oauth/authorize`)
 console.log(`  access token         ${idp.origin}/github/login/oauth/access_token`);
 console.log(`  client               same as above`);
 console.log(`  GitHub App           ${idp.githubApp.appId}, installed on ${idp.githubApp.installations.map((each) => each.account.login).join(', ')}`);
+console.log(`    its client         ${idp.githubApp.clientId} / ${idp.githubApp.clientSecret}, which signs people in too`);
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {

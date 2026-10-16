@@ -10,6 +10,7 @@ import {
   defineSignin,
   github,
   GitHubApp,
+  githubApp,
   GitHubAppUnavailable,
   MAX_LISTING_REQUESTS,
   pkcs8Of,
@@ -65,22 +66,44 @@ test('a PEM as GitHub downloads it, PKCS #1, imports as PKCS #8; so does PKCS #8
   await crypto.subtle.importKey('pkcs8', pkcs8Of(pkcs1), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
 });
 
-test('the configuration is checked where it is written, and a refusal never repeats the key', () => {
-  const configure = (githubApp: GitHubAppOptions) =>
-    defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, githubApp } });
+test('the configuration is checked where it is written, and a refusal never repeats the key or the secret', () => {
   const key = idp.githubApp.privateKey;
-  assert.throws(() => configure({ appId: 'Iv1.abc', privateKey: key }), /appId must be the app's numeric ID/);
+  const withSignin = (options: Partial<GitHubAppOptions>) => githubApp({ appId: 1001, privateKey: key, ...options });
+  const forge = (app: GitHubApp) =>
+    defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, github: app } });
+  assert.throws(() => githubApp({ appId: 'Iv1.abc', privateKey: key }), /appId must be the app's numeric ID/);
   const broken = key.replace('-----END RSA PRIVATE KEY-----', '');
-  assert.throws(() => configure({ appId: 1001, privateKey: broken }), (error: Error) => {
+  assert.throws(() => githubApp({ appId: 1001, privateKey: broken }), (error: Error) => {
     assert.match(error.message, /privateKey must be the app's private key, the PEM file GitHub downloads/);
     assert.ok(!error.message.includes(broken.split('\n')[1]!));
     return true;
   });
-  assert.throws(() => configure({ appId: 1001, privateKey: key, apiUrl: 'http://github.acme.example/api/v3' }), /apiUrl must use HTTPS/);
-  assert.throws(() => configure({ appId: 1001, privateKey: key, apiUrl: 'https://github.acme.example/api/v3' }), /GitHub Enterprise Server is not supported yet/);
-  assert.equal(configure({ appId: 1001, privateKey: key, apiUrl: 'http://127.0.0.1:8081/github/api' }).workloads!.githubApp!.apiUrl, 'http://127.0.0.1:8081/github/api');
-  assert.equal(configure({ appId: 1001, privateKey: key }).workloads!.githubApp!.apiUrl, 'https://api.github.com');
-  assert.equal(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS } }).workloads!.githubApp, null);
+  assert.throws(() => withSignin({ clientId: 'Iv23li-x' }), /takes its OAuth client whole, clientId and clientSecret, or neither/);
+  assert.throws(() => withSignin({ clientSecret: 'shh-do-not-repeat' }), (error: Error) => !error.message.includes('shh-do-not-repeat'));
+  assert.throws(() => withSignin({ apiUrl: 'http://github.acme.example/api/v3' }), /apiUrl must use HTTPS/);
+
+  // The forge side is github.com's, or the dev IdP's on loopback; sign-in takes an Enterprise Server's.
+  const enterprise = withSignin({ clientId: 'Iv23li-x', clientSecret: 'y', webUrl: 'https://github.acme.example', apiUrl: 'https://github.acme.example/api/v3' });
+  assert.throws(() => forge(enterprise), /workloads.github is for github.com: GitHub Enterprise Server is not supported yet/);
+  assert.equal(github({ app: enterprise }).config.apiUrl, 'https://github.acme.example/api/v3');
+  assert.equal(forge(withSignin({ apiUrl: 'http://127.0.0.1:8081/github/api' })).workloads!.github!.apiUrl, 'http://127.0.0.1:8081/github/api');
+  assert.equal(forge(withSignin({})).workloads!.github!.apiUrl, 'https://api.github.com');
+  assert.throws(() => forge({ appId: 1001, privateKey: key } as never), /workloads.github is the deployment's GitHub App: githubApp/);
+  assert.equal(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS } }).workloads!.github, null);
+});
+
+test('one app, passed to both sides: sign-in takes its client, and an app without one signs nobody in', () => {
+  const app = githubApp({ appId: 1001, privateKey: idp.githubApp.privateKey, clientId: 'Iv23li-acme', clientSecret: 'app-secret', webUrl: 'https://github.com' });
+  const provider = github({ app, organization: 'acme' });
+  assert.deepEqual(
+    [provider.config.clientId, provider.config.clientSecret, provider.config.webUrl, provider.config.apiUrl, provider.config.organization],
+    ['Iv23li-acme', 'app-secret', 'https://github.com', 'https://api.github.com', 'acme'],
+  );
+  const config = defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [provider], workloads: { limits: LIMITS, github: app } });
+  assert.equal(config.workloads!.github, app, 'the same value, on both sides');
+  assert.throws(() => github({ app: githubApp({ appId: 1001, privateKey: idp.githubApp.privateKey }) }), /signs in with the GitHub App's OAuth client: githubApp\(\{ appId, privateKey, clientId, clientSecret \}\)/);
+  // The secret stays in the app's private fields.
+  for (const shown of [JSON.stringify(app), inspect(app, { showHidden: true, depth: 5 })]) assert.ok(!shown.includes('app-secret'), shown);
 });
 
 test('the app signs its JWT with RS256 over its ID, issued a minute back, for nine minutes', async () => {
