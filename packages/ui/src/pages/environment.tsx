@@ -1,6 +1,6 @@
-import { byFolder, CoffreError, foldersOf, planImport, type CoffreClient, type ListedReference } from '@coffre/client';
+import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -30,6 +30,7 @@ import {
   type SecretDraft,
 } from '../lib/secret-edit-batch';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
+import { sortKeys, type Sort } from '../lib/secret-order';
 import { inDialog } from '../lib/shortcuts';
 import { secretKeyProblem } from '../lib/validation';
 import {
@@ -61,6 +62,8 @@ import {
   Clock,
   Eye,
   ArrowRight,
+  ChevronDown,
+  ChevronsUpDown,
   EyeOff,
   Folder,
   Generate,
@@ -127,6 +130,7 @@ export function EnvironmentPage() {
       environment={environment}
       permissions={result.permissions}
       keys={result.keys}
+      rotateAfterDays={result.rotateAfterDays}
     />
   );
 }
@@ -138,11 +142,14 @@ function EnvironmentLedger({
   environment,
   permissions,
   keys,
+  rotateAfterDays,
 }: {
   project: string;
   environment: string;
   permissions: Permission[];
   keys: SecretKey[];
+  /** Days a value may go unchanged before it is flagged for rotation; null for no flag. */
+  rotateAfterDays: number | null;
 }) {
   const coffre = useCoffre();
   const { principal } = useShell();
@@ -169,6 +176,9 @@ function EnvironmentLedger({
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [query, setQuery] = useState(Route.useSearch().filter ?? '');
+  const [sort, setSort] = useState<Sort>({ by: 'key', descending: false });
+  // A column's first click sorts it ascending: names A to Z, the oldest values first.
+  const sortBy = (by: Sort['by']) => setSort((current) => ({ by, descending: current.by === by && !current.descending }));
   const nextDraftId = useRef(0);
 
   const canWrite = permissions.includes('secret.write');
@@ -402,8 +412,10 @@ function EnvironmentLedger({
   // Filtering narrows what is listed, never what is saved: a pending edit on
   // a row the filter hides still counts, and still shows in the save bar.
   const needle = query.trim().toLowerCase();
-  const listed =
-    needle === '' ? active : active.filter((entry) => entry.key.toLowerCase().includes(needle));
+  const listed = sortKeys(
+    needle === '' ? active : active.filter((entry) => entry.key.toLowerCase().includes(needle)),
+    sort,
+  );
   const columns = 6;
 
   return (
@@ -461,16 +473,14 @@ function EnvironmentLedger({
           </EmptyState>
         ) : (
           <div className="dt-wrap">
-            <table className="dt secrets stacks">
+            <table className="dt secrets stacks sortable">
               <thead>
                 <tr>
                   <th className="n">#</th>
-                  <th className="col-key">
-                    <span className="th">
-                      <Key size={14} />
-                      Key
-                    </span>
-                  </th>
+                  <SortHeader className="col-key" by="key" sort={sort} onSort={sortBy}>
+                    <Key size={14} />
+                    Key
+                  </SortHeader>
                   <th>
                     <span className="th">
                       <Lock size={14} />
@@ -484,12 +494,10 @@ function EnvironmentLedger({
                       Version
                     </span>
                   </th>
-                  <th className="col-written col-hide-narrow">
-                    <span className="th">
-                      <Clock size={14} />
-                      Last written
-                    </span>
-                  </th>
+                  <SortHeader className="col-written" by="written" sort={sort} onSort={sortBy}>
+                    <Clock size={14} />
+                    Last written
+                  </SortHeader>
                   <th className="col-actions">
                     <span className="visually-hidden">Actions</span>
                   </th>
@@ -508,6 +516,7 @@ function EnvironmentLedger({
                       project={project}
                       environment={environment}
                       entry={entry}
+                      rotateAfterDays={rotateAfterDays}
                       change={change ?? { key: entry.key, value: null, archived: false }}
                       editing={
                         change?.archived !== true &&
@@ -857,6 +866,7 @@ function SecretRow({
   project,
   environment,
   entry,
+  rotateAfterDays,
   change,
   editing,
   canWrite,
@@ -881,6 +891,7 @@ function SecretRow({
   project: string;
   environment: string;
   entry: SecretKey;
+  rotateAfterDays: number | null;
   change: SecretChange;
   editing: boolean;
   canWrite: boolean;
@@ -1191,8 +1202,8 @@ function SecretRow({
           )}
         </td>
 
-        <td className="col-written col-hide-narrow" data-label="Last written">
-          <Written entry={reference === null ? entry : { ...entry, updatedBy: reference.createdBy.replace(/^user:/, ''), updatedAt: reference.createdAt }} />
+        <td className="col-written" data-label="Last written">
+          <Written entry={entry} rotateAfterDays={rotateAfterDays} />
         </td>
 
         <td className="col-actions">
@@ -1359,29 +1370,80 @@ function SecretRow({
 }
 
 /**
- * Who wrote the current version and how long ago, on one line: the local part
- * of the email is enough to recognise a colleague, and the full address and
- * the exact time are a hover away.
+ * A column header that orders the table: its first click ascending, the
+ * next descending. Below the width where rows stack, the sortable headers
+ * stay, a row of their own above the keys.
  */
-function Written({ entry }: { entry: SecretKey }) {
-  if (entry.updatedBy === null && entry.updatedAt === null) {
-    return <span className="cell-muted">—</span>;
+function SortHeader({
+  className,
+  by,
+  sort,
+  onSort,
+  children,
+}: {
+  className: string;
+  by: Sort['by'];
+  sort: Sort;
+  onSort: (by: Sort['by']) => void;
+  children: ReactNode;
+}) {
+  const sorted = sort.by === by;
+  return (
+    <th className={`${className} th-sortable`} aria-sort={sorted ? (sort.descending ? 'descending' : 'ascending') : undefined}>
+      <button type="button" className="th th-sort" onClick={() => onSort(by)}>
+        {children}
+        {sorted ? (
+          <ChevronDown size={13} className={sort.descending ? 'sort-mark' : 'sort-mark is-ascending'} />
+        ) : (
+          <ChevronsUpDown size={13} className="sort-mark is-idle" />
+        )}
+      </button>
+    </th>
+  );
+}
+
+/**
+ * Who wrote the value a key reads and how long ago, on one line: the local
+ * part of the email is enough to recognise a colleague, and the full address
+ * and the exact time are a hover away. A reference's value is its source's,
+ * as old as the version it reads, and who made the reference is a hover
+ * away too. A value unchanged past the deployment's `rotateAfterDays` gets a
+ * quiet tag, its age in days a hover away: it is due for rotation.
+ */
+function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays: number | null }) {
+  const { reference } = entry;
+  const made = reference === null
+    ? undefined
+    : `Reference made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}`;
+  if (entry.updatedAt === null) {
+    return <span className="cell-muted" title={made}>—</span>;
   }
   const by = entry.updatedBy ?? 'unknown';
+  const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays);
+  const age = ageInDays(entry);
   return (
     <span className="written">
-      <span className="written-by" title={by}>
-        {by.split('@')[0]}
+      {reference === null ? (
+        <span className="written-by" title={by}>
+          {by.split('@')[0]}
+        </span>
+      ) : (
+        <span className="written-by cell-muted" title={`Its source's current version. ${made}`}>
+          source
+        </span>
+      )}
+      <span className="cell-muted" aria-hidden>
+        ·
       </span>
-      {entry.updatedAt !== null && (
-        <>
-          <span className="cell-muted" aria-hidden>
-            ·
+      <span className="cell-muted">
+        <Timestamp iso={entry.updatedAt} display="relative" />
+      </span>
+      {due && (
+        <Tip label={`Unchanged for ${age} days, past the ${rotateAfterDays} this deployment allows: rotate it`}>
+          <span className="tag tag-amber written-flag" tabIndex={0}>
+            Rotate
           </span>
-          <span className="cell-muted">
-            <Timestamp iso={entry.updatedAt} display="relative" />
-          </span>
-        </>
+        </Tip>
       )}
     </span>
   );
@@ -1552,7 +1614,7 @@ function ArchivedRow({
           <span className="version-shift">{entry.version === null ? '—' : `v${entry.version}`}</span>
         </td>
         <td className="col-written col-hide-narrow" data-label="Last written">
-          <Written entry={entry} />
+          <Written entry={entry} rotateAfterDays={null} />
         </td>
         <td className="col-actions">
           {state.state === 'pending' ? (

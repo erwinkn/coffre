@@ -42,8 +42,15 @@ export type SecretKey = {
   /** The folder it is listed in within this environment, or null for none. */
   folder: string | null;
   archived: boolean;
+  /** Its own current version; a reference has none, and reads its source's. */
   version: number | null;
+  /**
+   * When the value it reads was written: its current version, or a live
+   * reference's source's current version. A rename or a move is no write.
+   * Null while it reads no value.
+   */
   updatedAt: string | null;
+  /** Who wrote its own current version; null for a reference. */
   updatedBy: string | null;
 };
 
@@ -118,11 +125,14 @@ export async function currentEnvelopes(
   );
 }
 
-/** Secret names and who last changed them, never values. */
+/**
+ * Secret names, who last changed them and when, never values; and the days
+ * a value may go unchanged before it is flagged (`rotateAfterDays`).
+ */
 export async function listSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
-): Promise<{ permissions: Permission[]; keys: SecretKey[] }> {
+): Promise<{ permissions: Permission[]; keys: SecretKey[]; rotateAfterDays: number | null }> {
   const environment = requireLive(place);
   const [rows, folders] = await Promise.all([
     environmentSecrets(ctx.db, environment.environmentId),
@@ -136,6 +146,12 @@ export async function listSecrets(
     const canOpenSource = source !== null && can(ctx.caller, 'secret.read', placeOfRow(source));
     return { ...reference.view, canOpenSource };
   };
+  // A reference's value is its source's: as old as the version it reads.
+  const writtenAt = (row: (typeof rows)[number]): Date | null => {
+    if (row.current !== null) return row.current.createdAt;
+    const reference = references.get(row.id);
+    return reference?.state === 'live' ? reference.source!.currentVersionAt : null;
+  };
   return {
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys: rows.map((row) => ({
@@ -144,9 +160,10 @@ export async function listSecrets(
       folder: folders.get(row.id) ?? null,
       archived: row.archivedAt !== null,
       version: row.current?.version ?? null,
-      updatedAt: row.current?.createdAt.toISOString() ?? null,
+      updatedAt: writtenAt(row)?.toISOString() ?? null,
       updatedBy: row.current?.createdBy ?? null,
     })),
+    rotateAfterDays: ctx.rotateAfterDays,
   };
 }
 

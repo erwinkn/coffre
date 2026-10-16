@@ -27,6 +27,8 @@ export type CoffreRuntime = {
   verifier: IdentityVerifier;
   /** Background work that must outlive the response, that is explicitly scheduled. */
   waitUntil: (promise: Promise<unknown>) => void;
+  /** Days a value may go unchanged before it is flagged for rotation, or null for no flag. */
+  rotateAfterDays: number | null;
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
 };
@@ -91,6 +93,7 @@ export function createRuntime(
     verifier,
     waitUntil,
     schema,
+    rotateAfterDays: config.rotateAfterDays,
   };
 }
 
@@ -119,6 +122,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     credentialId: identity.credentialId,
     provenance: identity.provenance,
     via: identity.via,
+    rotateAfterDays: runtime.rotateAfterDays,
   };
 }
 

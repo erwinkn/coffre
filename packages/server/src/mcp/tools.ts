@@ -88,7 +88,7 @@ const READ_TOOLS: readonly Tool[] = [
     name: 'list_secrets',
     needs: 'secret.read',
     title: 'List secrets',
-    description: "An environment's keys: each one's version, folder, who last changed it and when, and whether it is a reference to another secret. Never a value.",
+    description: "An environment's keys: each one's version, folder, who last changed it and when (`updatedAt`; a reference's value is its source's), and whether it is a reference to another secret; and `rotateAfterDays`, the days a value may go unchanged before it is due for rotation. Never a value.",
     scope: 'read',
     readOnly: true,
     idempotent: true,

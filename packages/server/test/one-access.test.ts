@@ -52,6 +52,7 @@ before(async () => {
     verifier: service,
     waitUntil,
     schema: { migrated: true },
+    rotateAfterDays: 365,
   };
 });
 

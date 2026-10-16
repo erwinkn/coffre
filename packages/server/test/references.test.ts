@@ -5,6 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, secretReferences, secrets, secretVersions } from './db/tables.ts';
+import { withTriggersLifted } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // References between environments and projects (docs/design/environments.md).
@@ -81,6 +82,24 @@ test("a reader of the holder reads the source through it, live, without a grant 
     [null, 'market/prod/DATABASE_URL', 'live', 2, false, `user:${ADA}`],
   );
   assert.equal((await ada.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL')!.reference?.canOpenSource, true);
+});
+
+test("a reference's age is its source's current version's: when the value it reads was written, not when it was made", async () => {
+  const written = new Date('2025-01-02T03:04:05.000Z');
+  await withTriggersLifted(db.owner, 'secret_versions', (owner) => owner.update(secretVersions).set({ createdAt: written }));
+  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
+  const age = async () => (await bo.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL')!;
+  const made = await age();
+  assert.deepEqual([made.updatedAt, made.updatedBy, made.version], [written.toISOString(), null, null]);
+
+  // A rotation in market is a new value in billing too.
+  await caro.secrets.set('market/prod', { DATABASE_URL: 'postgres://v2' });
+  const { versions } = await root.secrets.history('market/prod/DATABASE_URL');
+  assert.equal((await age()).updatedAt, versions.find((version) => version.current)!.createdAt);
+
+  // Broken, it reads no value: it has no age.
+  await max.references.break('billing/prod/DATABASE_URL');
+  assert.equal((await age()).updatedAt, null);
 });
 
 test("an instance role scoped to prod reads through a reference held in prod, as the holder's slug decides", async () => {

@@ -44,6 +44,15 @@ test('a bad configuration fails on start, naming what is wrong', () => {
   }
 });
 
+test('a value is flagged for rotation after a year, unless the deployment says otherwise or turns it off', () => {
+  assert.equal(resolveConfig(base).rotateAfterDays, 365);
+  assert.equal(resolveConfig({ ...base, rotateAfterDays: 90 }).rotateAfterDays, 90);
+  assert.equal(resolveConfig({ ...base, rotateAfterDays: null }).rotateAfterDays, null);
+  for (const days of [0, -1, 1.5, Number.NaN, '90' as never]) {
+    assert.throws(() => resolveConfig({ ...base, rotateAfterDays: days }), /rotateAfterDays must be a whole number of days/, String(days));
+  }
+});
+
 test('auth constructors refuse what cannot be right', () => {
   assert.throws(() => cloudflareAccess({ teamDomain: 'acme.example.com', audience: 'aud' }), /cloudflareaccess\.com/);
   assert.throws(() => signin({ providers: [] }), /provider/);

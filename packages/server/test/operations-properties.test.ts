@@ -79,7 +79,7 @@ async function scenario(operations: readonly Operation[]) {
     ...deps, signin, workloads: null, mcp: null,
 
     auth: { mode: 'signin', signin: signinConfig },
-    publicUrl: 'https://coffre.test', verifier: signin, waitUntil, schema: { migrated: true },
+    publicUrl: 'https://coffre.test', verifier: signin, waitUntil, schema: { migrated: true }, rotateAfterDays: 365,
   };
   const root = clientFor(deps, ROOT);
   const model = {

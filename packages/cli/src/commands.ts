@@ -80,7 +80,11 @@ export const SECTIONS = [
   {
     title: 'Secrets',
     entries: [
-      { command: 'list', usage: [`list      ${P} [--json]`], about: ['keys, versions and who changed them; no value'] },
+      {
+        command: 'list',
+        usage: [`list      ${P} [--older-than <days>d | --stale] [--json]`],
+        about: ['keys, versions, who changed them and when; no value', "--stale: those unchanged past the instance's rotateAfterDays"],
+      },
       { command: 'get', usage: [`get       ${P}/<KEY>`] },
       { command: 'set', usage: [`set       ${P}/<KEY>`], about: ['the value asked for, or piped in'] },
       {

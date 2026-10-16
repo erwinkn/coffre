@@ -38,6 +38,7 @@ function freshRuntime(): CoffreRuntime {
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
     schema: { migrated: false },
+    rotateAfterDays: 365,
   };
 }
 
