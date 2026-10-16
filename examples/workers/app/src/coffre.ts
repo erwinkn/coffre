@@ -2,7 +2,7 @@
 // src/server.ts, and so only on the server. The app reaches the database
 // through Hyperdrive and the keys only through the vault Worker's service
 // binding.
-import { createCoffre, github, postgres, signin, type CoffreContext, type Vault } from '@coffre/server/cloudflare';
+import { createCoffre, github, githubApp, postgres, signin, type CoffreContext, type Vault } from '@coffre/server/cloudflare';
 
 export type Env = {
   HYPERDRIVE: Hyperdrive;
@@ -14,7 +14,7 @@ export type Env = {
   GITHUB_URL?: string;
   GITHUB_API_URL?: string;
   APP_KEY: string;
-  /** Your GitHub App, when you have one (docs/github-app.md): its ID a var, its private key a secret. */
+  /** The GitHub App's ID, a var, and private key, a secret: with them, it lists your repositories too (docs/github-app.md). */
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   /** What every CI run's exchange passes first: app/wrangler.jsonc's rate-limiting bindings. */
@@ -28,37 +28,34 @@ export type Env = {
   MCP_TOTAL: RateLimit;
 };
 
-export const coffre = createCoffre((env: Env) => ({
-  publicUrl: env.PUBLIC_URL,
-  database: postgres(env.HYPERDRIVE),
-  vault: env.VAULT,
-  auth: signin({
-    providers: [
-      github({
-        clientId: env.GITHUB_CLIENT_ID,
-        clientSecret: env.GITHUB_CLIENT_SECRET,
-        webUrl: env.GITHUB_URL,
-        apiUrl: env.GITHUB_API_URL,
-      }),
-    ],
-    // CI runs may sign in as services with their platform's ID token, through
-    // the trust bindings owners make (docs/design/oidc.md).
-    workloads: {
-      limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
-      allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
-      // Lists the repositories your GitHub App is installed on, private ones
-      // too, where an owner trusts a workflow (docs/github-app.md). Without
-      // its ID, repositories are typed by name.
-      githubApp: env.GITHUB_APP_ID ? { appId: env.GITHUB_APP_ID, privateKey: env.GITHUB_APP_PRIVATE_KEY ?? '' } : undefined,
-    },
-    // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
-    // people who approve them (docs/mcp.md). Remove this to turn it off.
-    mcp: {
-      limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
-    },
-  }),
-  auditChainKey: env.APP_KEY,
-}));
+export const coffre = createCoffre((env: Env) => {
+  const client = { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET, webUrl: env.GITHUB_URL, apiUrl: env.GITHUB_API_URL };
+  // One GitHub App signs people in and, given its ID and private key, lists
+  // your repositories where an owner trusts a workflow, private ones too
+  // (docs/github-app.md). Without them, sign-in alone, and repositories typed.
+  const app = env.GITHUB_APP_ID ? githubApp({ ...client, appId: env.GITHUB_APP_ID, privateKey: env.GITHUB_APP_PRIVATE_KEY ?? '' }) : undefined;
+  return {
+    publicUrl: env.PUBLIC_URL,
+    database: postgres(env.HYPERDRIVE),
+    vault: env.VAULT,
+    auth: signin({
+      providers: [app ? github({ app }) : github(client)],
+      // CI runs may sign in as services with their platform's ID token, through
+      // the trust bindings owners make (docs/design/oidc.md).
+      workloads: {
+        limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
+        allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
+        github: app,
+      },
+      // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
+      // people who approve them (docs/mcp.md). Remove this to turn it off.
+      mcp: {
+        limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
+      },
+    }),
+    auditChainKey: env.APP_KEY,
+  };
+});
 
 // What src/server.ts hands Start with each request, for Start's types.
 declare module '@tanstack/react-router' {

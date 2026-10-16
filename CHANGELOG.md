@@ -189,7 +189,7 @@ Owner picked from a list where before they typed a name.
 trust binding names a repository by its IDs, and coffre looked up only a
 public one's: a private one's were typed, from `gh api`. Now a deployment
 may pass a GitHub App, installed on its organizations, as
-`workloads.githubApp`. In "Trust a workload", the Repository field then
+`workloads.github`. In "Trust a workload", the Repository field then
 offers every repository the app is installed on, private ones marked, as
 the name is typed; picking one fills in its IDs at once, with no lookup.
 For a reusable workflow called from any repository, the Organization
@@ -201,12 +201,29 @@ installation page; GitHub down, it says so and the name can still be
 typed. `GET /api/workloads/repositories` is the list, `{ "app": null }`
 without an app, for whoever may set up a service account. The app needs
 Metadata: read-only, which every GitHub App has, and no one's personal
-token. A deployment `coffre init` writes reads `GITHUB_APP_ID`, a var,
-and `GITHUB_APP_PRIVATE_KEY`, a secret of the app Worker; without them,
-nothing changes. [docs/github-app.md](docs/github-app.md) registers,
-installs and passes it. The key stays in the app's configuration and
-memory, beside the GitHub sign-in's secret, never in the vault, the
-database, a log line or an answer.
+token. [docs/github-app.md](docs/github-app.md) registers, installs and
+passes it. The key stays in the app's configuration and memory, never in
+the vault, the database, a log line or an answer.
+
+**One GitHub App signs people in and lists repositories.**
+`githubApp({ appId, privateKey, clientId, clientSecret })` makes the
+deployment's app once, and the deployment passes the same value to each
+side: `github({ app, organization: 'acme' })` signs in with its OAuth
+client, `workloads: { github: app }` lists with its key. Neither side
+picks up the other's credentials, and each works alone: `github({
+clientId, clientSecret })` as before, or an app with no client for the
+list only, with people signing in with Google, say. A deployment `coffre
+init` writes signs in with `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
+as before, and with `GITHUB_APP_ID`, a var, and `GITHUB_APP_PRIVATE_KEY`,
+a secret of the app Worker, makes the app from all four for both. Its
+permissions are Metadata, Email addresses and, with `organization`,
+organization Members, each read-only; the organization check passes only
+where the app is installed. When GitHub will not show the organization's
+members (403), the sign-in is refused as before, and the server's log now
+says why: the app lacks Members, or is not installed there. The sign-in
+page's message for it names both remedies. GitHub Enterprise Server signs
+in with an app, and `workloads.github` refuses its API, as the list's
+IDs would be bound to github.com's issuer.
 
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description

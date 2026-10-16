@@ -32,6 +32,13 @@ Each provider's callback is `<publicUrl>/auth/callback/<id>`. `github()`,
 Connect; anything else that speaks OIDC (Okta, Auth0, Keycloak, Authentik,
 Clerk, WorkOS…) needs only `oidc()` and its issuer.
 
+`github()` takes an OAuth app's or a GitHub App's client, or
+`github({ app })`, the deployment's GitHub App made with `githubApp(…)`:
+the same value its `workloads.github` lists repositories with, passed to
+each side ([github-app.md](github-app.md)). With `organization`, a GitHub
+App needs the Members organization permission and an installation on the
+organization, or nobody signs in.
+
 ### A provider of your own
 
 A provider is a `SigninProvider`: a way to send the browser to whoever knows

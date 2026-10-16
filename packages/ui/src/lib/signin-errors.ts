@@ -14,7 +14,7 @@ const MESSAGES: Record<string, string> = {
     'That account has no verified email address, so coffre cannot match it to an invitation.',
   wrong_domain: 'That account is outside the organization this instance belongs to.',
   not_in_organization:
-    'That GitHub account is not a member of the required organization. If it is, grant coffre access to the organization when GitHub asks.',
+    'That GitHub account is not a member of the required organization, or coffre cannot see its members. If it is a member, grant coffre access to the organization when GitHub asks, or ask whoever runs coffre to install its GitHub App there with the Members organization permission, read-only, and to approve that permission on the installation.',
   not_registered:
     'Nobody has invited that account’s email address. Ask an owner to add you under Users, then sign in again.',
   deactivated: 'Your access to this coffre was removed. Ask an owner if that is a mistake.',

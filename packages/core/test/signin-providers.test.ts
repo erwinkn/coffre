@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { DevIdp } from '@coffre/conformance/idp';
 import {
   github,
+  githubApp,
   GitHubSigninProvider,
   oidc,
   OidcSigninProvider,
@@ -373,6 +374,50 @@ test('GitHub: an organization admits its members only, and asks for read:org', a
 
   idp.setGitHubUser('contractor@acme.example', { orgs: ['elsewhere'] });
   await refusal(signIn(provider, 'contractor@acme.example'), 'not_in_organization');
+});
+
+test("GitHub App: one app signs people in with its user tokens, and its organization check follows the app's permissions and installations", async () => {
+  const app = githubApp(idp.githubApp.options);
+  const tokens: Record<string, unknown>[] = [];
+  const provider = (organization: string) =>
+    new GitHubSigninProvider(github({ app, id: 'dev-github', organization }).config, {
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        if (!String(input).endsWith('/login/oauth/access_token')) return response;
+        tokens.push((await response.clone().json()) as Record<string, unknown>);
+        return response;
+      },
+    });
+  const fake = idp.githubApp;
+  const permissions = fake.permissions;
+  try {
+    // A member of an organization the app is installed on, with Members and Email addresses, read.
+    assert.deepEqual((await signIn(provider('acme'), 'dev@acme.example')).emails, ['dev@acme.example']);
+    // A user token of the app, not an OAuth app's, answered as GitHub answers an expiring one.
+    const answer = tokens[0]!;
+    assert.match(String(answer.access_token), /^ghu_/);
+    assert.match(String(answer.refresh_token), /^ghr_/);
+    assert.deepEqual([answer.expires_in, answer.refresh_token_expires_in, answer.token_type], [28_800, 15_897_600, 'bearer']);
+
+    idp.setGitHubUser('contractor-app@acme.example', { orgs: ['elsewhere'] });
+    await refusal(signIn(provider('acme'), 'contractor-app@acme.example'), 'not_in_organization');
+
+    // A member of an organization the app is not installed on: GitHub will not say, and nobody signs in.
+    idp.setGitHubUser('globex@acme.example', { orgs: ['globex'] });
+    await assert.rejects(signIn(provider('globex'), 'globex@acme.example'), (error: unknown) =>
+      error instanceof SigninError && error.code === 'not_in_organization' && /installed on globex/.test(error.message));
+
+    // Without the Members permission, not even its own organization's members.
+    fake.permissions = { metadata: 'read', emails: 'read' };
+    await assert.rejects(signIn(provider('acme'), 'dev@acme.example'), (error: unknown) =>
+      error instanceof SigninError && error.code === 'not_in_organization' && /Members organization permission/.test(error.message));
+
+    // Without Email addresses, GitHub lists none: the sign-in cannot say who it is.
+    fake.permissions = { metadata: 'read', members: 'read' };
+    await refusal(signIn(provider('acme'), 'dev@acme.example'), 'invalid_response');
+  } finally {
+    fake.permissions = permissions;
+  }
 });
 
 test('GitHub: a callback for another sign-in is a state mismatch, even when it reports an error', async () => {

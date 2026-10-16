@@ -3,7 +3,7 @@
 // OpenID Connect provider, so both provider kinds run without a network.
 //
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
-import { createCoffre, github, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
+import { createCoffre, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
 import type { RateLimiter, Vault } from '@coffre/server/cloudflare';
 
@@ -25,22 +25,32 @@ export type Env = {
 export const coffre = createCoffre((env: Env) => {
   const idp = env.COFFRE_DEV_IDP_URL;
   const local = { clientId: 'coffre-local', clientSecret: 'coffre-local-secret' };
+  // The dev IdP's GitHub App, installed on acme and octo-dev: one value, which signs people in through its own
+  // client and lists those accounts' repositories (docs/github-app.md). Its client is a local fixture; its key
+  // is the one dev/start.sh made.
+  const app = githubApp({
+    appId: '1001',
+    privateKey: env.COFFRE_DEV_GITHUB_APP_KEY,
+    clientId: 'Iv23li-coffre-dev',
+    clientSecret: 'coffre-dev-app-secret',
+    webUrl: `${idp}/github`,
+    apiUrl: `${idp}/github/api`,
+  });
   return {
     publicUrl: env.COFFRE_PUBLIC_URL,
     database: postgres(env.HYPERDRIVE),
     vault: env.VAULT,
     auth: signin({
       providers: [
-        github({ ...local, webUrl: `${idp}/github`, apiUrl: `${idp}/github/api` }),
+        github({ app }),
         oidc({ ...local, id: 'local', label: 'Dev IdP', issuer: idp }),
       ],
       note: 'Local development. Both buttons lead to the dev IdP.',
-      // CI runs signing in as services; the dev IdP is plain HTTP on loopback,
-      // and plays the deployment's GitHub App, installed on acme and octo-dev.
+      // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
       workloads: {
         limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
         allowLoopbackIssuersForDevelopment: true,
-        githubApp: { appId: '1001', privateKey: env.COFFRE_DEV_GITHUB_APP_KEY, apiUrl: `${idp}/github/api` },
+        github: app,
       },
       // MCP clients at /mcp; a client's metadata document may be plain HTTP on loopback here.
       mcp: {

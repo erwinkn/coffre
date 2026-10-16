@@ -376,7 +376,7 @@ export class WorkloadService {
     }
     if (input.github !== undefined) {
       if (!GITHUB_REPOSITORY.test(input.github)) throw badRequest('a GitHub repository is <owner>/<name>, and an owner <owner>');
-      const app = this.#deps.config.githubApp;
+      const app = this.#deps.config.github;
       if (app !== null) {
         const found = await unavailable(() => app.repository(input.github!));
         if (found !== null) return { github: found.github, repositoryId: found.repositoryId, ownerId: found.ownerId };
@@ -415,7 +415,7 @@ export class WorkloadService {
    */
   async repositories(ctx: Asker): Promise<GitHubAppRepositories | { app: null }> {
     await this.#setsUp(ctx);
-    const app = this.#deps.config.githubApp;
+    const app = this.#deps.config.github;
     return app === null ? { app: null } : unavailable(() => app.repositories());
   }
 

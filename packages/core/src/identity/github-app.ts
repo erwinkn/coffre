@@ -1,15 +1,24 @@
 /**
- * The deployment's own GitHub App, when it has one: it lets the pages list
- * the repositories it is installed on, private ones too, where an owner
- * trusts a workflow, and resolves `owner/name` to the IDs a binding names
- * (docs/github-app.md). It needs one permission, Metadata: read-only, so
- * what it reaches is the names and IDs of those repositories.
+ * The deployment's own GitHub App, made once with `githubApp(…)` and passed
+ * to each side that uses it (docs/github-app.md):
+ *
+ *   const app = githubApp({ appId, privateKey, clientId, clientSecret });
+ *   signin({ providers: [github({ app })], workloads: { limits, github: app } })
+ *
+ * Sign-in uses its OAuth client, `clientId` and `clientSecret`, as it would
+ * an OAuth app's (`github({ app })`). The forge side, `workloads.github`,
+ * uses its ID and private key: it lists the repositories the app is
+ * installed on, private ones too, where an owner trusts a workflow, and
+ * resolves `owner/name` to the IDs a binding names, with Metadata:
+ * read-only, so what it reaches there is the names and IDs of those
+ * repositories. Either side may go without the other: `github({ clientId,
+ * clientSecret })` signs in alone, and an app with no client lists alone.
  *
  * The app's private key lives with the app, the rest of the deployment's
  * configuration, not in the vault: it opens no secret, and the vault's
- * isolation is for the keys that do. It stays in this object's private
- * fields, and no message, log line or answer carries it, the JWTs it signs
- * or the installation tokens they buy.
+ * isolation is for the keys that do. It and the client secret stay in this
+ * object's private fields, and no message, log line or answer carries them,
+ * the JWTs it signs or the installation tokens they buy.
  *
  * The object lives as long as its configuration: the isolate's, on Workers,
  * or the process's. It keeps settled values only (AGENTS.md, "What an
@@ -23,10 +32,16 @@ export type GitHubAppOptions = {
   appId: string | number;
   /** A private key generated on its settings page: the PEM file, as downloaded. */
   privateKey: string;
+  /** Its OAuth client, on the same page: for signing people in with it, `github({ app })`. Both, or neither. */
+  clientId?: string;
+  clientSecret?: string;
+  /** https://github.com, or a GitHub Enterprise Server host: where people sign in. */
+  webUrl?: string;
   /**
-   * https://api.github.com, the default; another only on loopback, the dev
-   * IdP's. GitHub Enterprise Server is not supported yet: its runs' tokens
-   * come from another issuer than the one the lookup's IDs are bound to.
+   * https://api.github.com, or `${host}/api/v3` on Enterprise Server. The
+   * forge side takes github.com's only, or the dev IdP's on loopback: an
+   * Enterprise Server's runs sign their tokens under another issuer than
+   * the one its lookups bind to.
    */
   apiUrl?: string;
 };
@@ -67,7 +82,11 @@ type Token = { token: string; expiresAt: number };
 
 export class GitHubApp {
   readonly appId: string;
+  readonly webUrl: string;
   readonly apiUrl: string;
+  /** Its OAuth client's ID, which is no secret; null when it was given none. */
+  readonly clientId: string | null;
+  readonly #clientSecret: string | null;
   readonly #pkcs8: Uint8Array<ArrayBuffer>;
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
@@ -75,12 +94,23 @@ export class GitHubApp {
   #app: GitHubAppRepositories['app'] | null = null;
   readonly #tokens = new Map<number, Token>();
 
-  constructor(options: { appId: string; apiUrl: string; pkcs8: Uint8Array<ArrayBuffer> }, io: { fetch?: typeof fetch; now?: () => number } = {}) {
+  constructor(
+    options: { appId: string; apiUrl: string; webUrl?: string; pkcs8: Uint8Array<ArrayBuffer>; client?: { clientId: string; clientSecret: string } },
+    io: { fetch?: typeof fetch; now?: () => number } = {},
+  ) {
     this.appId = options.appId;
+    this.webUrl = options.webUrl ?? 'https://github.com';
     this.apiUrl = options.apiUrl;
+    this.clientId = options.client?.clientId ?? null;
+    this.#clientSecret = options.client?.clientSecret ?? null;
     this.#pkcs8 = options.pkcs8;
     this.#fetch = io.fetch ?? ((input, init) => fetch(input, init));
     this.#now = io.now ?? Date.now;
+  }
+
+  /** Its OAuth client, for `github({ app })`; null when it was given none. */
+  signinClient(): { clientId: string; clientSecret: string } | null {
+    return this.clientId === null || this.#clientSecret === null ? null : { clientId: this.clientId, clientSecret: this.#clientSecret };
   }
 
   /** Every repository of every account the app is installed on, as many as `MAX_LISTING_REQUESTS` reach. */
@@ -261,13 +291,6 @@ function spend(budget: Budget | undefined): boolean {
 /** None left: the listing stops there, and says it is partial. */
 const SPENT = Symbol('spent');
 
-/** The deployment's options, checked now: an ID that is a number, a key that is a PEM, an API URL. */
-export function githubAppOf(options: GitHubAppOptions, apiUrl: (value: string) => string): GitHubApp {
-  const appId = String(options.appId ?? '').trim();
-  if (!/^[1-9][0-9]{0,19}$/.test(appId)) throw new Error('workloads.githubApp.appId must be the app\'s numeric ID (its settings page, "App ID")');
-  return new GitHubApp({ appId, apiUrl: apiUrl(options.apiUrl ?? 'https://api.github.com'), pkcs8: pkcs8Of(options.privateKey) });
-}
-
 /**
  * A private key's PEM as PKCS #8, which Web Crypto imports: GitHub's
  * download is PKCS #1 (`BEGIN RSA PRIVATE KEY`), wrapped here as an RSA
@@ -278,7 +301,7 @@ export function pkcs8Of(pem: string): Uint8Array<ArrayBuffer> {
   const text = typeof pem === 'string' ? pem.replaceAll('\\n', '\n').trim() : '';
   const match = /^-----BEGIN (RSA )?PRIVATE KEY-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END \1PRIVATE KEY-----$/.exec(text);
   if (match === null) {
-    throw new Error('workloads.githubApp.privateKey must be the app\'s private key, the PEM file GitHub downloads (BEGIN RSA PRIVATE KEY)');
+    throw new Error('githubApp(…).privateKey must be the app\'s private key, the PEM file GitHub downloads (BEGIN RSA PRIVATE KEY)');
   }
   const der = new Uint8Array(Buffer.from(match[2]!.replace(/\s+/g, ''), 'base64'));
   if (match[1] === undefined) return der;
