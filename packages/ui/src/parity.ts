@@ -55,7 +55,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'GET /projects/:project/:environment/missing': {
-    ui: [{ does: "an environment: the keys its siblings you read have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
+    ui: [{ does: "an environment: the keys its siblings have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
   },
   'PATCH /projects/:project/:environment/dismissals': {
     ui: [{ does: 'an environment › Missing keys › Dismiss, Dismiss all, Restore', in: 'components/missing.tsx', call: 'environments.dismiss' }],

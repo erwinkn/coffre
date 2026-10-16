@@ -138,6 +138,7 @@ coffre rename   market/dev/DB_URL DATABASE_URL   # the key, with its versions
 coffre archive  market/dev/OLD_KEY          # out of reads, runs and exports; its versions kept
 coffre unarchive market/dev/OLD_KEY         # back, as it was
 coffre missing  market/dev                  # keys its sibling environments have and it lacks; missing dismiss, restore
+coffre missing  market/prod --check        # for CI: exits 1 when one is missing, dismissed ones apart
 
 coffre move     market/dev/STRIPE_KEY stripe   # into a folder, to arrange the list; --none takes it out
 coffre move     market Clients              # a project into a folder of projects

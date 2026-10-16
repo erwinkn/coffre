@@ -99,6 +99,17 @@ jobs:
           node "$cli" roles > /dev/null
           node "$cli" keys --json > /dev/null
           node "$cli" init --node "$RUNNER_TEMP/coffre-action-generated" > /dev/null
+      - name: Stop on an environment that lacks its siblings' keys
+        id: incomplete
+        continue-on-error: true
+        uses: ./action
+        env:
+          npm_config_offline: 'true'
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/incomplete
+          require-complete: true
       - name: Load secrets through the Action
         uses: ./action
         env:
@@ -109,10 +120,14 @@ jobs:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/ci action-test/deploy
+          # Each dismissed what it lacks: complete, so read.
+          require-complete: true
       - name: Assert values and exercise runner masking
         env:
           TOOLING_NODE: ${{ steps.tooling.outputs.node }}
+          INCOMPLETE_OUTCOME: ${{ steps.incomplete.outcome }}
         run: |
+          test "$INCOMPLETE_OUTCOME" = failure
           node --version > "$RUNNER_TEMP/coffre-action-node-after"
           cmp "$RUNNER_TEMP/coffre-action-node-before" "$RUNNER_TEMP/coffre-action-node-after"
           printf '%s' "$PATH" > "$RUNNER_TEMP/coffre-action-path-after"

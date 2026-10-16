@@ -168,18 +168,21 @@ export async function references(deployment: Deployment, { admin, reader, leaver
 const PROD_ONLY = 'CONFORMANCE_PROD_ONLY';
 
 /**
- * Key names are metadata: what dev is missing is compared only with the
- * environments the viewer reads. The admin sees prod's key missing from dev;
- * the reader, a viewer on dev alone, sees nothing of prod, and dismisses
- * nothing. A dismissal is the team's, and restoring undoes it.
+ * Within a project, key names are not secret; values are. What dev is
+ * missing is compared with every sibling: the reader, a viewer on dev who
+ * cannot read prod, is told prod has the key, as the admin is, and nothing
+ * of its value, and dismisses nothing. A dismissal is the team's, and
+ * restoring undoes it.
  */
 export async function missingKeys({ admin, reader }: People): Promise<string> {
-  await admin.api.secrets.set(PROD, { [PROD_ONLY]: canary() });
+  const value = canary();
+  await admin.api.secrets.set(PROD, { [PROD_ONLY]: value });
   try {
     const seen = await admin.api.environments.missing(DEV);
     expect(seen.missing.some((key) => key.key === PROD_ONLY), "the admin was not told dev lacks prod's key", seen);
-    const hidden = await reader.api.environments.missing(DEV);
-    expect(![...hidden.missing, ...hidden.dismissed].some((key) => key.key === PROD_ONLY), "a viewer on dev learned a key name from prod, which they cannot read", hidden);
+    const told = await reader.api.environments.missing(DEV);
+    expect(told.missing.some((key) => key.key === PROD_ONLY && key.in.includes('prod')), "a viewer on dev was not told dev lacks prod's key, by name", told);
+    expect(!JSON.stringify(told).includes(value), "a viewer on dev was told prod's value with its key's name");
     await refused('a viewer dismissed a missing key', reader.api.environments.dismiss(DEV, { [PROD_ONLY]: true }));
     await admin.api.environments.dismiss(DEV, { [PROD_ONLY]: true });
     const dismissed = await admin.api.environments.missing(DEV);
@@ -189,5 +192,5 @@ export async function missingKeys({ admin, reader }: People): Promise<string> {
   } finally {
     await admin.api.secrets.update(`${PROD}/${PROD_ONLY}`, { archived: true });
   }
-  return "only who reads prod learns what dev lacks of it; a viewer dismisses nothing; a dismissal is listed, and restored";
+  return "a viewer on dev learns prod's key name, not its value, and dismisses nothing; a dismissal is listed, and restored";
 }

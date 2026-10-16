@@ -23,7 +23,7 @@ import { readSecret } from './secret.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
 import { clash, environmentPaths, listOf } from './environments.ts';
 import * as manage from './manage.ts';
-import { memberOf, parse, UsageError } from './manage.ts';
+import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
@@ -1580,8 +1580,14 @@ if ('group' in found) {
 try {
   await COMMANDS[found.command](found.args);
 } catch (error) {
-  const misuse = parseError(error);
-  if (misuse === null) fail(error instanceof Error ? error.message : String(error));
-  process.stderr.write(`coffre: ${misuse}\n${helpText(words)}`);
-  process.exit(2);
+  if (error instanceof CheckFailed) {
+    // Not process.exit: what the command printed to a pipe would be cut short.
+    process.stderr.write(`coffre: ${error.message}\n`);
+    process.exitCode = 1;
+  } else {
+    const misuse = parseError(error);
+    if (misuse === null) fail(error instanceof Error ? error.message : String(error));
+    process.stderr.write(`coffre: ${misuse}\n${helpText(words)}`);
+    process.exit(2);
+  }
 }

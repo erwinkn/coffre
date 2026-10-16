@@ -120,6 +120,27 @@ you name. A `coffre.json` that is a link, holds anything but `"url"`, or
 names something other than an origin stops the commands below it, with
 its path. One in your home directory or above it is ignored.
 
+**A deploy can stop on a key the other environments have.** Add
+`STRIPE_WEBHOOK_SECRET` to `market/staging` but not `market/prod`, and
+`coffre missing market/prod --check` lists it ("STRIPE_WEBHOOK_SECRET in
+staging") and exits 1, so `coffre missing market/prod --check && coffre
+run market/prod -- ./deploy` stops before anything is read. A key the team
+dismissed never fails it, and with `--json` it fails the same way. The
+Action takes `require-complete: true` (default `false`): it checks each
+environment it reads, and stops the step before exporting, with an error
+annotation per environment listing its missing keys
+([ci.md](docs/ci.md#a-key-the-other-environments-have)).
+
+**Key names are visible across a project.** Missing keys are now compared
+with every other live environment of the project, not only those the
+caller reads: the page's strip, `coffre missing`, `GET
+/api/projects/market/prod/missing` and the gate above all show a reader of
+`market/prod` that `market/staging` has `STRIPE_WEBHOOK_SECRET`. That is how
+a CI token that reads only prod can check it is complete. Anyone who reads
+one environment of a project can now learn the key names of its other
+environments, and which of them the team dismissed, but never their
+values. Values are unchanged, and other projects are never compared.
+
 **An OIDC binding can require a GitHub environment.** Name one, such as
 `production`, and only jobs that run in that environment sign in, after
 its protection rules (required reviewers, the branches it deploys) let

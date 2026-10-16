@@ -221,6 +221,33 @@ stops the command, and no value is used, but the reads made before it are
 in the audit log. The service account needs a `viewer` grant on each
 environment.
 
+## A key the other environments have
+
+You add `STRIPE_WEBHOOK_SECRET` to `market/staging` and forget
+`market/prod`. `coffre missing --check` stops the deploy before it reads
+anything:
+
+```sh
+coffre missing market/prod --check && coffre run market/prod -- ./deploy
+```
+
+```
+STRIPE_WEBHOOK_SECRET        in staging
+coffre: market/prod lacks a key its sibling environments have: `coffre set market/prod/<KEY>` adds one; `coffre missing dismiss market/prod/<KEY>`, or --all, says it is not needed
+```
+
+It exits 1 when the environment lacks a live key that another live
+environment of its project has, and 0 otherwise. It compares against every
+one of the project's environments, including those the credential can't
+read: a token that reads only `market/prod` still sees that `staging` has
+`STRIPE_WEBHOOK_SECRET`. Within a project, key names are not secret: anyone
+who reads one of its environments can learn which keys its other
+environments have, never their values. Other projects are never compared.
+A key that `market/prod` doesn't need, dismissed with `coffre missing
+dismiss market/prod/<KEY>`, never fails the check. `--json` lists the same
+keys as JSON and fails the same way. An instance older than 0.6 compares
+only the environments the credential reads.
+
 ## GitHub Actions
 
 Use a released tag containing the [Action](../action/action.yml), replacing
@@ -267,9 +294,9 @@ that key is refused. GitHub's default metadata variables cannot be
 overridden. Other names such as `GITHUB_TOKEN` work.
 [GitHub documents these runner rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-environment-variable).
 
-The inputs are `url`, `environment`, and one of `token` or `service`.
-`environment` takes several environments, separated by spaces or lines,
-read together as [above](#several-environments):
+The inputs are `url`, `environment`, one of `token` or `service`, and
+`require-complete`. `environment` takes several environments, separated by
+spaces or lines, read together as [above](#several-environments):
 
 ```yaml
   - uses: erwinkn/coffre/action@v<version>
@@ -277,7 +304,15 @@ read together as [above](#several-environments):
       url: https://secrets.acme.example
       service: token:api-deploy
       environment: deploy/prod auth/prod
+      require-complete: true
 ```
+
+`require-complete: true` (the default is `false`) runs [`coffre missing
+--check`](#a-key-the-other-environments-have) on each environment before
+anything is read. When one lacks keys, the step fails before exporting,
+with an error annotation per environment that lists each missing key and
+where it is: `market/prod lacks keys its sibling environments have:
+STRIPE_WEBHOOK_SECRET in staging`.
 
 With `service`, the run's ID token and the credential it buys are masked too.
 

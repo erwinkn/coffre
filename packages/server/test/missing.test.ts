@@ -8,7 +8,8 @@ import { auditChainHead, auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // Missing keys (docs/design/environments.md): what market/dev lacks of the
-// keys its siblings have, compared only with those the viewer reads.
+// keys its siblings have, every sibling compared, read or not. Key names are
+// not secret within a project; values are, and other projects are not siblings.
 
 const ROOT = 'admin@acme.example';
 /** Develops market/dev, and reads market/staging, not prod. */
@@ -52,18 +53,26 @@ beforeEach(async () => {
   firstSeq = head.nextSeq;
 });
 
-test('missing keys come only from environments the viewer reads, and an archived key is not missing', async () => {
-  assert.deepEqual((await root.environments.missing('market/dev')).missing, [
+test('missing keys come from every sibling, read or not, never another project, and an archived key is not missing', async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/dev', { name: 'dev' });
+  await root.secrets.set('billing/dev', { BILLING_ONLY: 'b' });
+  const all = [
     { key: 'PROD_ONLY', in: ['prod'], folder: null },
     { key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null },
     { key: 'STRIPE_KEY', in: ['staging'], folder: 'stripe' },
-  ]);
-  // Dev reads staging, not prod: prod's names are not theirs to learn.
-  assert.deepEqual((await dev.environments.missing('market/dev')).missing.map((key) => [key.key, key.in]), [
+  ];
+  assert.deepEqual((await root.environments.missing('market/dev')).missing, all);
+  // Dev reads staging, not prod; the viewer reads neither: each learns prod's names, as the admin does.
+  assert.deepEqual((await dev.environments.missing('market/dev')).missing, all);
+  assert.deepEqual(await viewer.environments.missing('market/dev'), { missing: all, dismissed: [] });
+  // Listing an environment's missing keys still takes reading it.
+  await assert.rejects(viewer.environments.missing('market/prod'), { status: 403 });
+  // An archived sibling is compared with nothing.
+  await root.environments.update('market/prod', { archived: true });
+  assert.deepEqual((await viewer.environments.missing('market/dev')).missing.map((key) => [key.key, key.in]), [
     ['SENTRY_DSN', ['staging']], ['STRIPE_KEY', ['staging']],
   ]);
-  assert.deepEqual(await viewer.environments.missing('market/dev'), { missing: [], dismissed: [] });
-  await assert.rejects(viewer.environments.missing('market/prod'), { status: 403 });
 });
 
 test('dismissals are shared, logged, listed and undone; dismissing takes write', async () => {
@@ -96,8 +105,12 @@ test('dismissals are shared, logged, listed and undone; dismissing takes write',
   assert.equal(missingRows[0]!.operationId, missingRows[1]!.operationId);
 });
 
-test("a dismissed key the viewer cannot see elsewhere is not listed to them", async () => {
+test('a dismissal is listed to every reader, and only while a sibling still has its key', async () => {
   await root.environments.dismiss('market/dev', { PROD_ONLY: true });
-  assert.deepEqual((await dev.environments.missing('market/dev')).dismissed, []);
-  assert.deepEqual((await root.environments.missing('market/dev')).dismissed.map((key) => key.key), ['PROD_ONLY']);
+  assert.deepEqual((await viewer.environments.missing('market/dev')).dismissed.map((key) => [key.key, key.in, key.dismissedBy]), [['PROD_ONLY', ['prod'], ROOT]]);
+  await root.secrets.update('market/prod/PROD_ONLY', { archived: true });
+  assert.deepEqual(await viewer.environments.missing('market/dev'), {
+    missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }, { key: 'STRIPE_KEY', in: ['staging'], folder: 'stripe' }],
+    dismissed: [],
+  });
 });
