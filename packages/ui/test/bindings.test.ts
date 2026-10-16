@@ -12,6 +12,7 @@ import {
   githubTarget,
   lookupable,
   listedIds,
+  listingGap,
   lookupFailure,
   lookupOf,
   planned,
@@ -201,4 +202,17 @@ test("a GitHub App's listing tells each repository's IDs, and each owner's once,
   const known = listedIds(listed).reduce((map, ids) => answered(map, ids.github, { state: 'found', ids }), new Map() as GitHubLookups);
   assert.deepEqual(lookupOf(known, { kind: 'repository', name: 'ACME/infra' }), { state: 'found', ids: { github: 'acme/infra', repositoryId: '41540', ownerId: '9919' } });
   assert.deepEqual(lookupOf(known, { kind: 'owner', name: 'octo-dev' }), { state: 'found', ids: { github: 'octo-dev', ownerId: '583231' } });
+});
+
+test('a listing that stopped short says so before saying the app is installed nowhere or reaches nothing', () => {
+  const repo = { github: 'acme/api' };
+  // GitHub's first 100 installations suspended, an active one past them: nothing listed, and partial.
+  assert.equal(listingGap({ installations: [], repositories: [], truncated: true }, false), 'partial');
+  assert.equal(listingGap({ installations: Array(20).fill('org'), repositories: [], truncated: true }, false), 'partial');
+  assert.equal(listingGap({ installations: [], repositories: [], truncated: false }, false), 'not_installed');
+  assert.equal(listingGap({ installations: [], repositories: [], truncated: false }, true), 'not_installed');
+  assert.equal(listingGap({ installations: ['acme'], repositories: [], truncated: false }, false), 'no_repositories');
+  // The organization field offers accounts, which it has.
+  assert.equal(listingGap({ installations: ['acme'], repositories: [], truncated: false }, true), null);
+  assert.equal(listingGap({ installations: ['acme'], repositories: [repo], truncated: false }, false), null);
 });

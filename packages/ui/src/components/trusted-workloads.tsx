@@ -3,7 +3,7 @@ import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useState } from 'react';
-import { askedScope, bindingOf, EMPTY_FORM, githubTarget, listedIds, planned, summary, type Form, type GitHubLookup, type RefKind, type ScopeChoice } from '../lib/bindings';
+import { askedScope, bindingOf, EMPTY_FORM, githubTarget, listedIds, listingGap, planned, summary, type Form, type GitHubLookup, type RefKind, type ScopeChoice } from '../lib/bindings';
 import { removeBinding } from '../lib/changes';
 import { memberRef, statusOf, useCoffre } from '../lib/coffre';
 import { affects, queries } from '../lib/queries';
@@ -198,7 +198,7 @@ function GitHubFound({ lookup, kind }: { lookup: GitHubLookup | null; kind: 'rep
 }
 
 /**
- * What the deployment's GitHub App could not list, said under the field: it
+ * What the deployment's GitHub App could not list, said under the field (`listingGap`): it
  * is installed nowhere yet, or reaches no repository, with where to change
  * that, or GitHub did not answer. Nothing without an app, or while it lists.
  */
@@ -215,15 +215,16 @@ function Listing({ listing, owner }: { listing: { data?: Awaited<ReturnType<Coff
       {words}
     </a>
   );
-  if (listed.installations.length === 0) {
-    return <p className="hint">{listed.app.name} is installed on no account yet: {install('install it')} on yours to pick its repositories here.</p>;
+  switch (listingGap(listed, owner)) {
+    case 'partial':
+      return <p className="hint">Only some of {listed.app.name}'s repositories are listed: type any other by name.</p>;
+    case 'not_installed':
+      return <p className="hint">{listed.app.name} is installed on no account yet: {install('install it')} on yours to pick its repositories here.</p>;
+    case 'no_repositories':
+      return <p className="hint">{listed.app.name} reaches no repository yet: {install('choose some')} to pick them here.</p>;
+    case null:
+      return null;
   }
-  // A partial list says so first: an empty one may only lack what it did not reach.
-  if (listed.truncated) return <p className="hint">Only some of {listed.app.name}'s repositories are listed: type any other by name.</p>;
-  if (!owner && listed.repositories.length === 0) {
-    return <p className="hint">{listed.app.name} reaches no repository yet: {install('choose some')} to pick them here.</p>;
-  }
-  return null;
 }
 
 /** What trusting `pull_request` or `workflow_run` exposes, said where the owner chooses it and again before saving. */
