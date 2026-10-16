@@ -1,14 +1,13 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
 import { EVERYWHERE } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
-import { memberAccess, recoveries } from '../src/db/queries.ts';
+import { memberAccess } from '../src/db/queries.ts';
 import { auditLog } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // A person's instance role and its scope, which project grants add to:
 // docs/design/instance-roles.md.
@@ -18,8 +17,6 @@ const ADA = 'user:ada@acme.example';
 const LEAD = 'user:lead@acme.example';
 const BOSS = 'user:boss@acme.example';
 const CI = 'token:ci-deploy';
-/** The vault key, so that the same vault can be deployed again with another configuration. */
-const KEK = randomBytes(32);
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -30,7 +27,7 @@ let boss: CoffreClient;
 
 before(async () => {
   db = await openTestDatabase();
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek: KEK }) });
+  deps = testDeps(db.runtime, [ROOT]);
   root = clientFor(deps, ROOT);
   ada = clientFor(deps, 'ada@acme.example');
   lead = clientFor(deps, 'lead@acme.example');
@@ -223,22 +220,6 @@ test("where someone's role applies is told only to those who run the instance: a
   // A scoped admin runs no instance either.
   await root.members.add(BOSS, { role: 'admin', scope: { projects: { only: ['market'] } } });
   assert.deepEqual([(await listed(boss))?.scope, (await boss.members.access(ADA)).scope], [null, null]);
-});
-
-test('People tells those who run the instance whom a recovery made an Owner, for a month', async () => {
-  // The vault deployed again with a recovery naming Lead: its first call makes them an Owner.
-  const until = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
-  await testVault([ROOT], { recoverOwner: { email: 'lead@acme.example', until } }, { kek: KEK }).access(LEAD);
-  const recovered = await root.members.list();
-  assert.deepEqual(recovered.recovered.map(({ member }) => member), [LEAD]);
-  assert.equal(recovered.members.find((member) => member.member === LEAD)?.instanceRole, 'owner');
-  assert.deepEqual((await boss.members.list()).recovered.map(({ member }) => member), [LEAD], 'an Admin of the whole instance runs it too');
-  // Not a scoped Admin, nor a project's list.
-  await root.members.add(BOSS, { role: 'admin', scope: { projects: { only: ['market'] } } });
-  assert.deepEqual((await boss.members.list()).recovered, []);
-  assert.deepEqual((await root.members.list('market')).recovered, []);
-  // Only those since a time: a month back, as the list asks, and none after it.
-  assert.deepEqual((await recoveries(db.runtime, new Date(Date.now() + 60_000))), []);
 });
 
 test('a scoped auditor reads the log of the places in its scope; an auditor of the whole instance reads all of it', async () => {

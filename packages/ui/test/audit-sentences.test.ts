@@ -239,7 +239,7 @@ test("the app's missing permissions are said as the grant that was missing", () 
   );
 });
 
-test('the vault making an Owner says why: a bootstrap, a root admin of 0.5, once, or a recovery', () => {
+test('the vault making an Owner says why: a bootstrap, or a root admin of 0.5, once', () => {
   const vault = { author: 'vault', actorType: 'system', actorId: 'vault' } as const;
   assert.equal(
     said(entry({ action: 'member.add', ...vault, subject: 'user:root@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, reason: 'bootstrap' } })),
@@ -248,10 +248,6 @@ test('the vault making an Owner says why: a bootstrap, a root admin of 0.5, once
   assert.equal(
     said(entry({ action: 'member.role', ...vault, subject: 'user:root@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, previousRole: 'member', reason: 'root-admin' } })),
     'made root@acme.example an Owner, was Member: they were a root admin',
-  );
-  assert.equal(
-    said(entry({ action: 'member.role', ...vault, subject: 'user:omar@acme.example', metadata: { role: 'owner', scope: { projects: 'all', environments: 'all' }, previousRole: 'admin', reason: 'recovery' } })),
-    "made omar@acme.example an Owner, was Admin: recovered by the deployment's operator, not by an Owner",
   );
   assert.equal(
     said(entry({ action: 'root-admins.convert', ...vault, metadata: { owners: ['user:root@acme.example', 'user:sam@acme.example'] } })),

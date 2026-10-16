@@ -30,15 +30,7 @@ instance: a member like any other, in People, changed by the same rules.
   Owners; a root admin was beyond its reach, and their Owners are not.
 - **An Owner who can't sign in any more** (a lost GitHub account) is not
   recovered by editing the list, as a root admin was: the instance still
-  has its Owner. Keep two. If none of them can sign in, name someone in
-  the vault's configuration, `recoverOwner: { email:
-  'omar@acme.example', until: '2026-10-20' }`, and deploy: each new vault
-  process makes them an Owner of the whole instance, though it has one,
-  until `until`, at most a week ahead, logged as the vault's
-  ("recovered by the deployment's operator, not by an Owner"), and Users
-  tells whoever runs the instance for a month. Only whoever deploys the
-  vault can, and they hold its key already
-  ([deployment-auth.md](docs/deployment-auth.md#when-no-owner-can-sign-in)).
+  has its Owner. Keep two Owners until `coffre recover owner` exists.
 - **A wrong vault key is an outage.** A vault given the wrong key checks
   no member's row, the Owner's included, so every member's request answers
   503 and nobody signs in, with the reason in the app's log, where before root

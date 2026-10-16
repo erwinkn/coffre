@@ -38,7 +38,6 @@ export type {
   OffboardingReport,
   ProjectSummary,
   ReferenceView,
-  Recovered,
   RemovedMember,
   SecretKey,
   SecretVersion,

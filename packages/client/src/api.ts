@@ -417,10 +417,6 @@ export type Api = {
         principalId: string;
         toRotate: number;
       }[];
-      recovered: {
-        member: string;
-        at: string;
-      }[];
     };
   };
   "GET /members/:member": {
@@ -1615,11 +1611,6 @@ export type ReferenceView = {
   createdAt: string;
   endedBy: string | null;
   endedAt: string | null;
-};
-
-export type Recovered = {
-  member: string;
-  at: string;
 };
 
 export type RemovedMember = {

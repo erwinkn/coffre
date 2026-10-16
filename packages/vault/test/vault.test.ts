@@ -25,7 +25,7 @@ import { everyProjectPreview } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, sql } from 'drizzle-orm';
 
-import { checkBootstrapOwners, checkRecoverOwner, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
+import { checkBootstrapOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
@@ -77,7 +77,6 @@ function configure(overrides: Partial<ResolvedVaultConfig> = {}): ResolvedVaultC
     bootstrapOwners: ['root@acme.example'],
     signingKeys: [SIGNING_KEY],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-    recoverOwner: null,
     ...overrides,
   };
 }
@@ -2221,16 +2220,6 @@ test('configuration', () => {
   ] as const) {
     assert.throws(() => resolveVaultConfig({ ...base, kek }), message);
   }
-  // A recovery: a person, until a date or time at most a week ahead; one already over is kept, and does nothing.
-  const now = Date.parse('2026-10-15T09:00:00Z');
-  assert.deepEqual(checkRecoverOwner({ email: ' Omar@Acme.example ', until: '2026-10-20' }, now), { email: 'omar@acme.example', until: Date.parse('2026-10-20T00:00:00Z') });
-  assert.deepEqual(checkRecoverOwner({ email: 'omar@acme.example', until: '2026-10-01T18:00:00Z' }, now).until, Date.parse('2026-10-01T18:00:00Z'));
-  assert.throws(() => checkRecoverOwner({ email: 'omar@acme.example', until: '2026-10-23' }, now), /at most a week ahead/);
-  assert.throws(() => checkRecoverOwner({ email: 'omar@acme.example', until: 'next friday' }, now), /ISO 8601/);
-  assert.throws(() => checkRecoverOwner({ email: 'omar@acme.example', until: '2026-13-40' }, now), /ISO 8601/);
-  assert.throws(() => checkRecoverOwner({ email: 'token:ci', until: '2026-10-16' }, now), /a person's email/);
-  assert.equal(resolveVaultConfig(base).recoverOwner, null);
-  assert.throws(() => resolveVaultConfig({ ...base, recoverOwner: { email: 'omar@acme.example', until: new Date(Date.now() + 8 * 86_400_000).toISOString() } }), /at most a week ahead/);
   assert.deepEqual(checkBootstrapOwners(['First.Admin@example.com', ' second@example.org ']), ['first.admin@example.com', 'second@example.org']);
   assert.throws(() => checkBootstrapOwners([]), /at least one/);
   assert.throws(() => checkBootstrapOwners(['admin@example,com']), /human email/);
@@ -2717,96 +2706,6 @@ test('a conversion entry forged in the vault\'s name stops nothing, and is repor
   assert.equal((await upgraded.access(ROOT)).role, 'owner');
   const reports = (await store.vaultPage(db.owner, undefined, 50)).filter((entry) => entry.action === 'vault.tampered').map(entryView);
   assert.deepEqual(reports.map((entry) => entry.code), ['forged_entry']);
-});
-
-// --- recovering an Owner ----------------------------------------------------------
-
-const OMAR = 'user:omar@acme.example';
-
-/** A vault deployed with `recoverOwner` naming `email` until `until`, on `w`'s clock. */
-function recovering(w: World, email: string, until: number): Promise<LocalVault> {
-  return openLocalVault(db.vault, configure({ recoverOwner: { email, until } }), { clockOffset: () => w.clock.offset });
-}
-
-test('a recovery makes the person it names an Owner of the whole instance though it has one, and ends at its until', async () => {
-  const w = await world();
-  assert.ok((await w.vault.admit({ actor: ROOT, principal: OMAR, role: 'admin' })).ok);
-  const until = Date.now() + 24 * 60 * 60_000;
-  // Its first call, whatever it is, recovers them: they need not sign in first.
-  const deployed = await recovering(w, 'omar@acme.example', until);
-  assert.equal((await deployed.access(ADA)).status, 'unknown');
-  const omar = await deployed.access(OMAR);
-  assert.deepEqual([omar.status, omar.role, omar.scope], ['active', 'owner', EVERYWHERE]);
-  assert.equal((await deployed.access(ROOT)).role, 'owner', 'the Owners it had stay');
-  const [made] = (await vaultLog(w)).filter((entry) => entry.action === 'member.role');
-  assert.deepEqual([made!.actor, made!.subject, made!.detail.role, made!.detail.previousRole, made!.detail.reason], ['system:vault', OMAR, 'owner', 'admin', 'recovery']);
-  // Another process finds them an Owner already, and writes nothing.
-  const logged = (await vaultLog(w)).length;
-  assert.equal((await (await recovering(w, 'omar@acme.example', until)).access(ADA)).status, 'unknown');
-  assert.equal((await vaultLog(w)).length, logged);
-  // Left in place, it makes them one again in each new process, after an Owner demoted them, until it ends.
-  assert.ok((await w.vault.admit({ actor: ROOT, principal: OMAR, role: 'admin' })).ok);
-  assert.equal((await (await recovering(w, 'omar@acme.example', until)).access(OMAR)).role, 'owner');
-  assert.ok((await w.vault.admit({ actor: ROOT, principal: OMAR, role: 'admin' })).ok);
-  w.clock.offset = until - Date.now() + 1;
-  assert.equal((await (await recovering(w, 'omar@acme.example', until)).access(OMAR)).role, 'admin', 'over, it does nothing');
-  assert.deepEqual((await ownership(w)).filter(([, , , reason]) => reason === 'recovery').map(([action]) => action), ['member.role', 'member.role']);
-  assert.equal((await deployed.verifyLog({})).ok, true, 'the log replays to every row');
-});
-
-test('a recovery kept waiting for the log\'s head past its until makes nobody an Owner', postgresOnly('SQLite runs one writer at a time'), async () => {
-  const w = await world();
-  const until = Date.now() + 60 * 60_000;
-  const deployed = await recovering(w, 'omar@acme.example', until);
-  const holder = await db.connect();
-  let release = () => {};
-  const held = new Promise<void>((resolve) => (release = resolve));
-  let locked = () => {};
-  const isLocked = new Promise<void>((resolve) => (locked = resolve));
-  const holding = holder.transaction(async (tx) => {
-    await lockLogHead(tx);
-    locked();
-    await held;
-  });
-  await isLocked;
-  // Its first call checks the clock, then waits on the head, which a database writer could hold this long.
-  const asked = deployed.access(ADA);
-  await sleep(300);
-  w.clock.offset = until - Date.now() + 1;
-  release();
-  await holding;
-  assert.equal((await asked).status, 'unknown');
-  assert.equal(await store.member(db.owner, OMAR), undefined, 'over by the time it held the locks');
-  assert.deepEqual((await ownership(w)).filter(([, , , reason]) => reason === 'recovery'), []);
-});
-
-test('a recovery admits a person the instance never had, and brings back one an Owner removed', async () => {
-  const w = await world();
-  const until = Date.now() + 60 * 60_000;
-  await (await recovering(w, 'carol@acme.example', until)).access(ADA);
-  assert.deepEqual((await ownership(w)).at(-1), ['member.add', CAROL, 'allow', 'recovery']);
-  assert.ok((await w.vault.admit({ actor: ROOT, principal: SAM })).ok);
-  assert.ok((await w.vault.remove({ actor: ROOT, principal: SAM })).ok);
-  const sam = await (await recovering(w, 'sam@acme.example', until)).access(SAM);
-  assert.deepEqual([sam.status, sam.role, sam.scope], ['active', 'owner', EVERYWHERE]);
-  assert.deepEqual((await ownership(w)).at(-1), ['member.restore', SAM, 'allow', 'recovery']);
-  assert.equal((await w.vault.verifyLog({})).ok, true);
-});
-
-test('only the vault\'s configuration recovers: a row and an entry written around the vault, as a database writer could, make nobody an Owner', async () => {
-  const w = await world();
-  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'admin' })).ok);
-  // Ada's row says Owner, and an entry in the vault's name says a recovery made her one: neither carries its MAC.
-  const { vaultMembers } = tablesOf(db.owner);
-  await db.owner.update(vaultMembers).set({ role: 'owner', owner: true }).where(eq(vaultMembers.principal, ADA));
-  await forgeEntries(1, { action: 'member.role', actor: 'system:vault', subjectPrincipal: ADA, metadata: JSON.stringify({ role: 'owner', scope: EVERYWHERE, previousRole: 'admin', reason: 'recovery' }) });
-  // A vault with no recovery configured, in a new process: her row fails its check, and she holds nothing.
-  const deployed = await namingOwners('root@acme.example', 'ada@acme.example');
-  assert.equal((await deployed.access(ADA)).status, 'tampered');
-  assert.equal((await deployed.access(ROOT)).role, 'owner');
-  assert.deepEqual((await store.instanceOwners(db.owner)).map((row) => row.principal).sort(), [ADA, ROOT].sort(), 'only her row says so');
-  // Nor does she make herself one: her row holds nothing.
-  assert.equal((await deployed.admit({ actor: ADA, principal: ADA, role: 'owner' })).ok, false);
 });
 
 /**

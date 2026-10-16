@@ -87,7 +87,6 @@ function subject(entry: AuditEntry): Part[] {
 function owned(entry: AuditEntry): Part[] {
   if (entry.metadata.reason === 'bootstrap') return [': no Owner was left, and the deployment names them to take over'];
   if (entry.metadata.reason === 'root-admin') return [': they were a root admin'];
-  if (entry.metadata.reason === 'recovery') return [": recovered by the deployment's operator, not by an Owner"];
   return [];
 }
 

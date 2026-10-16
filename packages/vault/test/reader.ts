@@ -22,7 +22,6 @@ const vault = openVault(
     bootstrapOwners: ['root@acme.example'],
     signingKeys: [Buffer.from(signingKey, 'base64')],
     bulkLimit,
-    recoverOwner: null,
   }),
 );
 const outcomes = await Promise.all(Array.from({ length: reads }, () => vault.unwrap(input)));

@@ -36,7 +36,6 @@ const config = (): ResolvedVaultConfig => ({
   bootstrapOwners: ['root@acme.example'],
   signingKeys: [randomBytes(32)],
   bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-  recoverOwner: null,
 });
 
 /** market/prod/DATABASE_URL, a value; billing/prod, where references are held; and the three people. */

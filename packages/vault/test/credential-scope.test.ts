@@ -34,7 +34,6 @@ test('every call that takes a credential scope decides on it: within it a call g
     bootstrapOwners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-    recoverOwner: null,
   });
   // Root signs in first, and the bootstrap makes them the Owner.
   await vault.access(ROOT);
