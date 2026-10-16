@@ -14,9 +14,7 @@ function fakeClipboard({ failWrite = false }: { failWrite?: boolean } = {}) {
     async write(items) {
       if (failWrite) throw new DOMException('denied', 'NotAllowedError');
       for (const item of items as FakeItem[]) {
-        const blob = await item.parts['text/plain'];
-        assert.equal(blob.type, 'text/plain');
-        calls.push(`write:${await blob.text()}`);
+        calls.push(`write:${await item.parts['text/plain']}`);
       }
     },
   };
@@ -24,8 +22,8 @@ function fakeClipboard({ failWrite = false }: { failWrite?: boolean } = {}) {
 }
 
 class FakeItem {
-  parts: Record<string, Promise<Blob>>;
-  constructor(parts: Record<string, Promise<Blob>>) {
+  parts: Record<string, Promise<string>>;
+  constructor(parts: Record<string, Promise<string>>) {
     this.parts = parts;
   }
 }
@@ -62,6 +60,12 @@ test('write is called before the value arrives, which keeps the click gesture', 
   await done;
 });
 
+test('a leading byte order mark survives, as a Blob would have dropped it', async () => {
+  const { clipboard, calls } = fakeClipboard();
+  await copyText(Promise.resolve('\uFEFFstart'), { clipboard, item: FakeItem });
+  assert.deepEqual(calls, ['write:\uFEFFstart']);
+});
+
 test('an empty value copies as empty', async () => {
   const { clipboard, calls } = fakeClipboard();
   await copyText(Promise.resolve(''), { clipboard, item: FakeItem });
@@ -93,6 +97,24 @@ test('a value that cannot be read fails the copy and writes nothing', async () =
   await assert.rejects(copyText(unread, { clipboard, item: FakeItem }), ValueUnavailable);
   await assert.rejects(copyText(Promise.reject(new ValueUnavailable()), { clipboard, item: undefined }), ValueUnavailable);
   assert.deepEqual(calls, []);
+});
+
+test('a browser that renames the failure of an unreadable value does not hide it', async () => {
+  // WebKit rejects write() with NotAllowedError whatever the payload promise rejected with.
+  const clipboard: ClipboardLike = {
+    async writeText() {},
+    async write(items) {
+      try {
+        await (items as FakeItem[])[0].parts['text/plain'];
+      } catch {
+        throw new DOMException('payload rejected', 'NotAllowedError');
+      }
+    },
+  };
+  await assert.rejects(copyText(Promise.reject(new ValueUnavailable()), { clipboard, item: FakeItem }), ValueUnavailable);
+  // A refusal with a readable value is still the clipboard's.
+  const refused: ClipboardLike = { async writeText() {}, async write() { throw new DOMException('no', 'NotAllowedError'); } };
+  await assert.rejects(copyText(Promise.resolve('x'), { clipboard: refused, item: FakeItem }), { name: 'NotAllowedError' });
 });
 
 test('no clipboard at all is a failure, not a silent success', async () => {

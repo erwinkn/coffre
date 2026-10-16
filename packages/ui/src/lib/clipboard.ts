@@ -18,7 +18,7 @@ export type ClipboardLike = {
   write?(items: unknown[]): Promise<void>;
 };
 
-type ClipboardItemConstructor = new (items: Record<string, Promise<Blob>>) => unknown;
+type ClipboardItemConstructor = new (items: Record<string, Promise<string>>) => unknown;
 
 /**
  * The value could not be read, and the reader has already said why.
@@ -42,9 +42,20 @@ export async function copyText(
 ): Promise<void> {
   if (clipboard === undefined) throw new Error('The clipboard is not available here.');
   if (typeof text !== 'string' && item !== undefined && clipboard.write !== undefined) {
-    const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
-    // Called before anything is awaited: this is what keeps the user gesture.
-    await clipboard.write([new item({ 'text/plain': blob })]);
+    // A browser that rejects the payload may report its own error instead of the
+    // source's (WebKit's is always NotAllowedError), so the source's is kept.
+    const read: { failure?: { reason: unknown } } = {};
+    const tracked = text.catch((reason: unknown) => {
+      read.failure = { reason };
+      throw reason;
+    });
+    try {
+      // Called before anything is awaited: this is what keeps the user gesture.
+      // The text goes in as a string, not a Blob: decoding a Blob drops a leading U+FEFF.
+      await clipboard.write([new item({ 'text/plain': tracked })]);
+    } catch (failure) {
+      throw read.failure === undefined ? failure : read.failure.reason;
+    }
     return;
   }
   await clipboard.writeText(await text);
