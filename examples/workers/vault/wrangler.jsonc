@@ -14,9 +14,10 @@
     // Names the vault key below, and is not secret: from `coffre setup`. A
     // rotation gives the new key a new ID.
     "VAULT_KEY_ID": "vault-1",
-    // Comma-separated emails: whoever signs in first becomes the Owner, while
-    // the instance has none. Keep it to people you would trust as Owner.
-    "BOOTSTRAP_OWNERS": "you@example.com"
+    // Comma-separated emails, each an Owner of the whole instance at every
+    // deploy: add yours and deploy to get back in. Taking one off keeps them
+    // an Owner, whom another Owner may then demote.
+    "OWNERS": "you@example.com"
   },
   "secrets": {
     // The vault key, from `coffre setup`: wrangler secret put VAULT_KEY. The

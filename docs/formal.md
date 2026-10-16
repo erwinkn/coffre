@@ -50,7 +50,6 @@ counterexamples is printed in CI's log.
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
 | A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
 | Demoting or removing an Owner of the whole instance counts the others under the head (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or stepping down at once, under rows the other does not lock: none left (`OwnerStays`) | |
-| A bootstrap reads under the head whether anyone owns the instance (`vault.ts`, `#bootstrap`) | two people the configuration names, signing in at once, both made Owners (`BootstrapOnlyWithoutOwner`) | |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
 re-read turned off:
@@ -125,7 +124,7 @@ Traces are shortened here; the script prints every step.
 | `NothingReleasedThroughEndedReference` | No `secret.read` through a reference follows its `reference.end`, or the deletion of its source's place or its holder's, in the log |
 | `EveryReferenceBreakable` | A reference that has not ended is held in a standing place, where the API can name its holder, and so break it |
 | `OwnerStays` | Once the instance has an active Owner of all of it, it always has one |
-| `BootstrapOnlyWithoutOwner` | A bootstrap makes an Owner only while the instance has none |
+| `DeclaredStay` | Someone the deployment names, once the vault made them an Owner, stays one: nobody demotes or removes them, themselves included |
 | `ReferencedSourcesStayLive` | And if it is held in a live place, its source is neither archived nor deleted. The exception is a holder that was archived when its source was archived, and has been restored since: its reads refuse, as any broken reference's |
 
 ## The model
@@ -148,7 +147,7 @@ Traces are shortened here; the script prints every step.
   - add an environment, or rename, archive or restore a key;
   - sign in;
   - remove a member, or take away their Owner role;
-  - make the bootstrap Owner;
+  - make someone the deployment names an Owner;
   - rotate the vault's key;
   - make a reference, or break one.
 - **Each operation** follows its code path. For example, a read takes these
@@ -184,7 +183,7 @@ Traces are shortened here; the script prints every step.
 | `References` | A member reads through a reference while an owner breaks it, makes it again, or revokes or removes the reader, and either place is archived, then deleted | 113 thousand |
 | `Referencing` | An owner makes a reference while another archives, restores and archives again either place, and a third deletes one | 13 thousand |
 | `Owners` | Two Owners of the whole instance each leave, step down, or take the other's role, while an Admin, who is no Owner, tries to demote or remove either | 3 thousand |
-| `Bootstrap` | Two people the configuration names sign in at once on an instance nobody owns, while one leaves or steps down, and an Admin, no Owner, tries to demote or remove one | 2 thousand |
+| `Declare` | Two people the deployment names are made Owners at once on an instance nobody owns, while one tries to leave or step down, the other, an Owner once made one, to demote them, and an Admin, no Owner, to demote or remove one | 13 thousand |
 
 Every scenario starts from one project and its one environment, holding one
 secret. A third environment, in another project, holds a key that is a
@@ -209,9 +208,13 @@ reference to that secret in `References`, and none yet elsewhere.
   on every project of 0.4 is one decision per member, under those same
   locks, and is not modelled apart. Who owns the whole instance is state of
   its own (`owners`), apart from the `"*"` an Owner reads by: the last-Owner
-  rule and the bootstrap decide on it, not on what anyone reads. Turning
-  0.5's root admins into Owners is one decision under every row it names
-  and the head, once, and is not modelled apart. Who may unmake an Owner,
+  rule and the deployment's list decide on it, not on what anyone reads.
+  The list itself is configuration (`Listed`), the same in every process
+  of the model; during a deploy an old process and a new one may name
+  different people, which changes who is refused, never which locks are
+  taken. Refusing to demote or remove someone on it takes no lock, and
+  making them an Owner takes their row, then the head, whoever else owns
+  the instance. Who may unmake an Owner,
   an Owner of the whole instance (`ChangesOwners`), is read under the
   actor's row, as the rest of the check is; making one is admission,
   which is left out (below).

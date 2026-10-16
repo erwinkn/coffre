@@ -13,7 +13,7 @@ import { auditLog } from './db/tables.ts';
 import { withLogUnlocked } from './db/engine.ts';
 
 const db = await openTestDatabase();
-// A log nobody has signed in to: the vault's only entries are its checkpoints.
+// A log nobody has signed in to: the vault's entries are its checkpoints, and the one that makes the Owner its deployment names.
 const vault = testVault([]);
 const chainKey = Buffer.alloc(32, 1);
 after(() => db.close());
@@ -91,9 +91,8 @@ test('a rewritten entry is never signed over, and readiness goes red', async () 
   assert.deepEqual(warned, { code: 'log_broken' });
   assert.equal((await latestCheckpoint(db.owner))?.seq, signed);
   // The refusal is in the log too.
-  const [refused] = (await entries()).filter((row) => row.decision === 'deny');
-  assert.equal(refused.action, 'audit.checkpoint');
-  assert.equal(refused.code, 'log_broken');
+  const refused = (await entries()).find((row) => row.decision === 'deny' && row.action === 'audit.checkpoint');
+  assert.equal(refused?.code, 'log_broken');
 
   const ready = await auditReadiness(db.runtime, vault);
   assert.equal(ready.ok, false);

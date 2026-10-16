@@ -53,10 +53,11 @@ export function waitUntil(promise: Promise<unknown>): void {
  * a second instance would be, shares `keys`: rows sealed under another
  * deployment's keys are refused as tampered.
  *
- * `owners` own the instance from the start: the first is its bootstrap
- * Owner, signed in as the vault opens, and makes the others Owners too, as
- * a deployment's first Owner would. With none, nobody has signed in yet,
- * and the configuration names someone who never comes.
+ * `owners` own the instance from the start: the first is the one the
+ * deployment names (`owners`), signed in as the vault opens, and makes the
+ * others Owners too, as a deployment's first Owner would. With none,
+ * nobody has signed in yet, and the configuration names someone who never
+ * comes.
  */
 export function testVault(
   owners: readonly string[],
@@ -72,7 +73,7 @@ export function testVault(
       {
         database: await openVaultDatabase(),
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
-        bootstrapOwners: owners.length > 0 ? owners : ['nobody@coffre.test'],
+        owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
         ...config,
       },
       { clockOffset: () => offset },

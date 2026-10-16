@@ -150,7 +150,7 @@ function describe(op) {
     case 'read': case 'write': return `${op.kind} ${op.at} as ${op.who}`;
     case 'grant': case 'revoke': return `${op.kind} ${op.who}@${op.at} by ${op.actor}`;
     case 'remove': case 'demote': return `${op.kind} ${op.who} by ${op.actor}`;
-    case 'bootstrap': return `bootstrap ${op.who}`;
+    case 'declare': return `declare ${op.who}`;
     case 'signin': return `signin ${op.who}`;
     case 'rotate': return 'rotate';
     default: return `${op.kind} ${op.at} by ${op.actor}`;

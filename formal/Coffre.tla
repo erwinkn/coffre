@@ -35,6 +35,7 @@ CONSTANTS
     Members,        \* principals with a vault_members row
     Rank,           \* Rank[m]: the principal's place in lock order
     InitOwners,     \* the Owners of the whole instance at the start
+    Listed,         \* those the deployment names Owners: nobody demotes or removes them
     Admins,         \* Admins of the whole instance: they manage access and roles too
     Procs,          \* concurrent requests, each one a process
     Ops,            \* Ops[p]: the operations process p may run
@@ -99,10 +100,7 @@ CONSTANTS
     ReferenceRereadInDeletion,
     \* Demoting or removing an Owner counts the other Owners under the head,
     \* not only under the rows it locks (vault vault.ts, #keepAnOwner).
-    LastOwnerCheckUnderHead,
-    \* A bootstrap reads whether anyone owns the instance under the head, not
-    \* only under its own row (vault vault.ts, #bootstrap).
-    BootstrapCheckUnderHead
+    LastOwnerCheckUnderHead
 
 None == "none"
 \* No reference. A reference is named by the operation that made it, as
@@ -137,12 +135,12 @@ VARIABLES
     deletions,      \* a record per deletion that committed
     everDeleted,    \* everDeleted[x]: a deletion of x committed
     excused,        \* the reference whose holder was archived when its source last was
-    ownedBootstrap  \* a bootstrap committed while someone owned the instance
+    declared        \* those the vault has made Owners as the deployment names them
 
 rows == <<slug, archived, held, version, status, gen, grants, owners, refRow>>
 locks == <<memberLock, head>>
 procs == <<pc, op, l, left>>
-history == <<revealed, deletions, everDeleted, excused, ownedBootstrap>>
+history == <<revealed, deletions, everDeleted, excused, declared>>
 vars == <<rows, log, creds, locks, procs, history>>
 
 -----------------------------------------------------------------------------
@@ -313,7 +311,7 @@ FirstLabel(kind) ==
       [] kind = "signin"    -> "signin.access"
       [] kind = "remove"    -> "remove.lock"
       [] kind = "demote"    -> "demote.lock"
-      [] kind = "bootstrap" -> "boot.lock"
+      [] kind = "declare"   -> "declare.lock"
       [] kind = "rotate"    -> "rotate.read"
       [] kind = "refer"     -> "refer.resolve"
       [] kind = "break"     -> "break.resolve"
@@ -325,7 +323,7 @@ Begin(p) ==
          /\ op' = [op EXCEPT ![p] = o]
          /\ l' = [l EXCEPT ![p] = [L0 EXCEPT !.id = <<p, left[p]>>,
                                              !.toLock = CASE o.kind \in {"read", "write", "remove", "demote"} -> LockOrder(o.actor, o.who)
-                                                           [] o.kind = "bootstrap" -> <<o.who>>
+                                                           [] o.kind = "declare" -> <<o.who>>
                                                            [] o.kind = "refer" -> <<o.actor>>
                                                            [] OTHER -> <<>>]]
          /\ Goto(p, FirstLabel(o.kind))
@@ -400,7 +398,7 @@ ReadAnswer(p) ==
     /\ pc[p] = "read.answer"
     /\ revealed' = revealed \cup {l[p].id}
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<rows, log, creds, locks, op, l, left, deletions, everDeleted, excused, ownedBootstrap>>
+    /\ UNCHANGED <<rows, log, creds, locks, op, l, left, deletions, everDeleted, excused, declared>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -576,7 +574,7 @@ DeleteCommit(p) ==
               /\ everDeleted' = [everDeleted EXCEPT ![x] = TRUE]
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, owners, creds, op, l, left, revealed, excused, ownedBootstrap>>
+              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, owners, creds, op, l, left, revealed, excused, declared>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -615,7 +613,7 @@ PatchCommit(p) ==
                                ELSE excused
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, held, version, status, gen, grants, owners, log, creds, op, l, left, revealed, deletions, everDeleted, ownedBootstrap>>
+              /\ UNCHANGED <<refRow, held, version, status, gen, grants, owners, log, creds, op, l, left, revealed, deletions, everDeleted, declared>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -801,7 +799,7 @@ SigninCommit(p) ==
 (* rows; their grants go and their generation moves on. Only an Owner      *)
 (* removes an Owner, themselves included, and leaves another, or is        *)
 (* refused (#keepAnOwner): the code counts the others under the head,      *)
-(* which the commit step holds.                                            *)
+(* which the commit step holds. Nobody removes one the deployment names.   *)
 (***************************************************************************)
 
 RemoveLock(p) == pc[p] = "remove.lock" /\ LockNext(p, "remove.check")
@@ -814,6 +812,7 @@ RemoveCheck(p) ==
     /\ pc[p] = "remove.check"
     /\ IF /\ MayManage(op[p].actor)
           /\ status[op[p].who] = "active"
+          /\ op[p].who \notin Listed
           /\ (op[p].who \notin owners \/ ChangesOwners(op[p].actor))
           /\ KeepsAnOwnerUnderRows(op[p].who)
          THEN Read(p, "remove.head", l[p])
@@ -839,7 +838,8 @@ RemoveCommit(p) ==
 (***************************************************************************)
 (* Taking someone's Owner role away (vault vault.ts, admit with another    *)
 (* role, or a narrower scope): one decision under both rows, by an Owner,  *)
-(* their own included. It leaves another Owner, or is refused.             *)
+(* their own included. It leaves another Owner, or is refused, as it is    *)
+(* about one the deployment names.                                         *)
 (***************************************************************************)
 
 DemoteLock(p) == pc[p] = "demote.lock" /\ LockNext(p, "demote.check")
@@ -847,7 +847,7 @@ DemoteLock(p) == pc[p] = "demote.lock" /\ LockNext(p, "demote.check")
 DemoteCheck(p) ==
     LET m == op[p].who IN
     /\ pc[p] = "demote.check"
-    /\ IF ChangesOwners(op[p].actor) /\ status[m] = "active" /\ m \in owners /\ KeepsAnOwnerUnderRows(m)
+    /\ IF ChangesOwners(op[p].actor) /\ status[m] = "active" /\ m \in owners /\ m \notin Listed /\ KeepsAnOwnerUnderRows(m)
          THEN Read(p, "demote.head", l[p])
          ELSE Refuse(p)
 
@@ -866,34 +866,25 @@ DemoteCommit(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* The bootstrap (vault vault.ts, #bootstrap): a person the configuration  *)
-(* names, asked about while nobody owns the instance, becomes its Owner,   *)
-(* in one decision under their row; the code reads again under the head    *)
-(* whether anyone owns it, which the commit step holds.                    *)
+(* Making someone the deployment names an Owner (vault vault.ts,          *)
+(* #declare), as it starts and when they sign in: one decision under their *)
+(* row, whoever else owns the instance, then the head its entry takes.     *)
 (***************************************************************************)
 
-BootLock(p) == pc[p] = "boot.lock" /\ LockNext(p, "boot.check")
+DeclareLock(p) == pc[p] = "declare.lock" /\ LockNext(p, "declare.head")
 
-BootCheck(p) ==
-    /\ pc[p] = "boot.check"
-    /\ IF BootstrapCheckUnderHead \/ ActiveOwners = {}
-         THEN Read(p, "boot.head", l[p])
-         ELSE Refuse(p)
+DeclareHead(p) == pc[p] = "declare.head" /\ TakeHead(p, "declare.commit")
 
-BootHead(p) == pc[p] = "boot.head" /\ TakeHead(p, "boot.commit")
-
-BootCommit(p) ==
+DeclareCommit(p) ==
     LET m == op[p].who IN
-    /\ pc[p] = "boot.commit"
-    /\ IF ~BootstrapCheckUnderHead \/ ActiveOwners = {}
-         THEN /\ owners' = owners \cup {m}
-              /\ status' = [status EXCEPT ![m] = "active"]
-              /\ log' = Append(log, Entry("member.bootstrap", "*", p))
-              /\ ownedBootstrap' = (ownedBootstrap \/ ActiveOwners # {})
-              /\ Release(p)
-              /\ Goto(p, "idle")
-              /\ UNCHANGED <<slug, archived, held, version, gen, grants, refRow, creds, op, l, left, revealed, deletions, everDeleted, excused>>
-         ELSE Refuse(p)
+    /\ pc[p] = "declare.commit"
+    /\ owners' = owners \cup {m}
+    /\ status' = [status EXCEPT ![m] = "active"]
+    /\ log' = Append(log, Entry("member.declare", "*", p))
+    /\ declared' = declared \cup {m}
+    /\ Release(p)
+    /\ Goto(p, "idle")
+    /\ UNCHANGED <<slug, archived, held, version, gen, grants, refRow, creds, op, l, left, revealed, deletions, everDeleted, excused>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -939,7 +930,7 @@ Init ==
     /\ deletions = {}
     /\ everDeleted = [x \in Places |-> FALSE]
     /\ excused = {}
-    /\ ownedBootstrap = FALSE
+    /\ declared = {}
 
 Step(p) ==
     \/ Begin(p)
@@ -956,7 +947,7 @@ Step(p) ==
     \/ SigninAccess(p) \/ SigninHead(p) \/ SigninCommit(p)
     \/ RemoveLock(p) \/ RemoveCheck(p) \/ RemoveHead(p) \/ RemoveCommit(p)
     \/ DemoteLock(p) \/ DemoteCheck(p) \/ DemoteHead(p) \/ DemoteCommit(p)
-    \/ BootLock(p) \/ BootCheck(p) \/ BootHead(p) \/ BootCommit(p)
+    \/ DeclareLock(p) \/ DeclareHead(p) \/ DeclareCommit(p)
     \/ RotateRead(p) \/ RotateLock(p) \/ RotateHead(p) \/ RotateCommit(p)
     \/ ReferResolve(p) \/ ReferLock(p) \/ ReferCheck(p) \/ ReferHead(p) \/ ReferSeal(p)
     \/ ReferTx(p) \/ ReferCommit(p)
@@ -982,14 +973,15 @@ TypeOK ==
     /\ status \in [Members -> {"active", "removed"}]
     /\ grants \subseteq [who : Members, at : GrantPlaces]
     /\ owners \subseteq Members
+    /\ declared \subseteq Listed
     /\ memberLock \in [Members -> Procs \cup {None}]
     /\ head \in Procs \cup {None}
 
 \* The process p waits for: the holder of the lock its next step takes.
-LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "boot.lock", "rotate.lock", "refer.lock", "end.lock"}
+LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
 HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
                "delete.head", "patch.head", "addenv.head", "renamekey.head",
-               "signin.head", "remove.head", "demote.head", "boot.head", "rotate.head", "refer.head", "refer.tx", "end.head"}
+               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head"}
 WaitsFor(p) ==
     IF pc[p] \in LockLabels /\ l[p].toLock # <<>> /\ memberLock[Head(l[p].toLock)] \notin {None, p}
       THEN {memberLock[Head(l[p].toLock)]}
@@ -1084,9 +1076,10 @@ ReferencedSourcesStayLive ==
 \* Once the instance has an Owner of all of it, it always does: the last
 \* one is never demoted or removed, by anyone, themselves included.
 OwnerStays ==
-    (InitOwners # {} \/ \E i \in 1..Len(log) : log[i].kind = "member.bootstrap") => ActiveOwners # {}
+    (InitOwners # {} \/ declared # {}) => ActiveOwners # {}
 
-\* A bootstrap makes an Owner only while nobody owns the instance.
-BootstrapOnlyWithoutOwner == ~ownedBootstrap
+\* Someone the deployment names, once made an Owner, stays one: nobody
+\* demotes or removes them, themselves included.
+DeclaredStay == declared \subseteq ActiveOwners
 
 =============================================================================

@@ -63,6 +63,14 @@ export type Deployment = {
 
 const OWNER = 'root@conformance.example';
 
+/**
+ * The vault's Owners, under each name a deployment's vault may read them by:
+ * `OWNERS`, and `BOOTSTRAP_OWNERS` and 0.5's `ROOT_ADMINS`, read until 0.7,
+ * as an older deployment's vault entry still does. Each Worker gets only the
+ * vars its wrangler.jsonc declares.
+ */
+export const OWNER_VARS = { OWNERS: OWNER, BOOTSTRAP_OWNERS: OWNER, ROOT_ADMINS: OWNER };
+
 type Child = { name: string; child: ChildProcess; daemon: boolean; exited: boolean; output: Buffer[] };
 
 /**
@@ -226,7 +234,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       APP_KEY: KEYS.APP_KEY,
       VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
       VAULT_KEY: KEYS.VAULT_KEY,
-      BOOTSTRAP_OWNERS: OWNER,
+      ...OWNER_VARS,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: runtime,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
       WRANGLER_SEND_METRICS: 'false',
@@ -260,7 +268,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       DATABASE_URL: `file:${database}`,
       VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
       VAULT_KEY: KEYS.VAULT_KEY,
-      BOOTSTRAP_OWNERS: OWNER,
+      ...OWNER_VARS,
     });
     await until('the vault socket', async () => existsSync(socket), 30, alive);
     // The pages as they run: the deployment's Start app, built by its own Vite.

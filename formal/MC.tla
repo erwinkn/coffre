@@ -162,21 +162,22 @@ OwnersBudget == [p \in OwnersProcs |-> 1]
 OwnersGrants == {}
 
 -----------------------------------------------------------------------------
-(* The bootstrap: two people the configuration names sign in at once on an
-   instance nobody owns, while one leaves or steps down, and an Admin, no
-   Owner, tries to demote or remove one of them. One becomes the Owner; the
-   other finds them, and does not. *)
+(* Owners the deployment names: root and Sam made Owners at once on an
+   instance nobody owns, while root tries to leave or step down, Sam, an
+   Owner once made one, tries to demote root, and an Admin, no Owner, tries
+   to demote or remove one of them. Both become Owners, and stay ones. *)
 
-BootstrapMembers == {"ada", "root", "sam"}
-BootstrapRank == [m \in BootstrapMembers |-> AllRanks[m]]
-BootstrapOwners == {}
-BootstrapAdmins == {"ada"}
-BootstrapProcs == {"root", "sam", "ada"}
-BootstrapOps == [p \in BootstrapProcs |->
-    CASE p = "root" -> {Op("bootstrap", None, "root", None), Op("remove", "root", "root", None), Op("demote", "root", "root", None)}
-      [] p = "sam" -> {Op("bootstrap", None, "sam", None)}
+DeclareMembers == {"ada", "root", "sam"}
+DeclareRank == [m \in DeclareMembers |-> AllRanks[m]]
+DeclareOwners == {}
+DeclareListed == {"root", "sam"}
+DeclareAdmins == {"ada"}
+DeclareProcs == {"root", "sam", "ada"}
+DeclareOps == [p \in DeclareProcs |->
+    CASE p = "root" -> {Op("declare", None, "root", None), Op("remove", "root", "root", None), Op("demote", "root", "root", None)}
+      [] p = "sam" -> {Op("declare", None, "sam", None), Op("demote", "sam", "root", None)}
       [] p = "ada" -> {Op("demote", "ada", "root", None), Op("remove", "ada", "sam", None)}]
-BootstrapBudget == [p \in BootstrapProcs |-> IF p = "root" THEN 2 ELSE 1]
-BootstrapGrants == {}
+DeclareBudget == [p \in DeclareProcs |-> 2]
+DeclareGrants == {}
 
 =============================================================================

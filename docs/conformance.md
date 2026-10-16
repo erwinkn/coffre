@@ -81,7 +81,7 @@ The people:
 
 | | |
 |---|---|
-| admin | `root@conformance.example`, the one bootstrap Owner the vault is told of, and so the instance's Owner |
+| admin | `root@conformance.example`, the one Owner the vault's deployment names, and so the instance's Owner |
 | reader | a viewer on `conformance/dev` |
 | leaver | a developer on `conformance/dev`, in a browser and in the CLI (a device login); removed along the way |
 | bulk reader | a viewer on `conformance/bulk`, where there are more values than the bulk limit |

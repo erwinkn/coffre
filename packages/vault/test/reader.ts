@@ -19,7 +19,7 @@ const vault = openVault(
   db,
   await prepareVault({
     keks: new KekRegistry(new LocalKekProvider(Buffer.from(kek, 'base64'), 'test-kek-1')),
-    bootstrapOwners: ['root@acme.example'],
+    owners: ['root@acme.example'],
     signingKeys: [Buffer.from(signingKey, 'base64')],
     bulkLimit,
   }),

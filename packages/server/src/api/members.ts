@@ -87,6 +87,13 @@ export type Member = {
    * at its first use, and the scheduled checkpoint looks every few minutes.
    */
   tampered: boolean;
+  /**
+   * A person the deployment names an Owner of the whole instance (`owners`,
+   * in the vault's configuration): the vault makes them one, and refuses
+   * anyone who would demote or remove them, until the deployment stops
+   * naming them.
+   */
+  declared: boolean;
   grants: MemberGrant[];
 };
 
@@ -126,6 +133,8 @@ export type OffboardingReport = {
   status: 'active' | 'removed' | 'tampered';
   instanceRole: Member['instanceRole'];
   scope: Scope;
+  /** As in `Member`. */
+  declared: boolean;
   removedAt: string | null;
   removedBy: string | null;
   /** What still lets them in. All zero once removed. */
@@ -242,6 +251,15 @@ async function directory(ctx: ApiContext, now: Date, member?: MemberRef): Promis
   });
 }
 
+/** The emails of those the vault's deployment names Owners (`owners`); none, from a vault of 0.5. */
+async function declaredOwners(ctx: ApiContext): Promise<ReadonlySet<string>> {
+  return new Set((await ctx.vault.about()).owners ?? []);
+}
+
+function declared(owners: ReadonlySet<string>, member: MemberRef): boolean {
+  return member.type === 'user' && owners.has(member.id.toLowerCase());
+}
+
 function instanceRole(listed: Listed): InstanceRole {
   return listed.status === 'active' && listed.member.type === 'user' ? listed.row?.role ?? 'member' : 'member';
 }
@@ -277,10 +295,11 @@ export async function listMembers(
 ): Promise<{ members: Member[]; removed: RemovedMember[] }> {
   const { caller } = ctx;
   const administrator = administers(caller.role);
-  const [all, known, setting] = await Promise.all([
+  const [all, known, setting, owners] = await Promise.all([
     directory(ctx, new Date()),
     places(ctx.db),
     runsInstance(caller) ? null : serviceSettingFor(ctx.vault, caller),
+    declaredOwners(ctx),
   ]);
   if (!administrator && !canAnywhere(caller, 'grant.manage') && !setsUp(caller, setting, known)) {
     throw forbidden('only admins, owners, members with grant.manage on a project, and those who set up service accounts can list members');
@@ -323,6 +342,7 @@ export async function listMembers(
       reachesByRole: byRole,
       managed,
       tampered: listed.status === 'tampered',
+      declared: declared(owners, ref),
       grants: visible.map((grant) => ({
         id: `${member}/${grant.project}${grant.environment === null ? '' : `/${grant.environment}`}`,
         project: grant.project,
@@ -439,7 +459,7 @@ const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<OffboardingReport> {
   if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
   // Everyone, not just them: the service tokens they issued belong to others.
-  const [everyone, known] = await Promise.all([directory(ctx, new Date()), places(ctx.db)]);
+  const [everyone, known, owners] = await Promise.all([directory(ctx, new Date()), places(ctx.db), declaredOwners(ctx)]);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
@@ -464,6 +484,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     status,
     instanceRole: instanceRole(listed),
     scope: scopeView(scopeOf(listed), known),
+    declared: declared(owners, member),
     // When and by whom, as the vault wrote it: the removal is its decision.
     removedAt: status === 'removed' ? row!.statusChangedAt.toISOString() : null,
     removedBy: status === 'removed' ? parseGrantee(row!.statusChangedBy).id : null,

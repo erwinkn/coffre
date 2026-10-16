@@ -8,8 +8,8 @@ const LOCAL_SEED_CONFIG = Object.freeze({
 /**
  * Identities the login page lists as seeded personas.
  *
- * The Owner is the vault's bootstrap (`COFFRE_BOOTSTRAP_OWNERS`): signing
- * in first makes them one, so they are not listed here. Everyone else must be registered here before `createGrant` will accept them,
+ * The Owner is the one the vault's deployment names (`COFFRE_OWNERS`): the
+ * vault makes them one, so they are not listed here. Everyone else must be registered here before `createGrant` will accept them,
  * some with an instance role and its scope. `outsider@` is registered with no
  * grants so the closed-door view is a denial, not `/unregistered`.
  */
@@ -67,7 +67,7 @@ export function loadLocalSeedConfig(env) {
         databaseUrl: env.DATABASE_URL ?? LOCAL_SEED_CONFIG.databaseUrl,
         apiUrl: env.COFFRE_DEV_URL ?? LOCAL_SEED_CONFIG.apiUrl,
         idpUrl: env.COFFRE_DEV_IDP_URL ?? LOCAL_SEED_CONFIG.idpUrl,
-        owner: env.COFFRE_BOOTSTRAP_OWNERS ?? LOCAL_SEED_CONFIG.owner,
+        owner: env.COFFRE_OWNERS ?? LOCAL_SEED_CONFIG.owner,
     };
 
     for (const [key, pattern] of Object.entries(LOCAL_TARGETS)) {

@@ -33,7 +33,7 @@ beforeEach(() => emptyDatabase(db.owner));
 
 const config = (): ResolvedVaultConfig => ({
   keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-  bootstrapOwners: ['root@acme.example'],
+  owners: ['root@acme.example'],
   signingKeys: [randomBytes(32)],
   bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
 });

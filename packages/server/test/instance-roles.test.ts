@@ -5,9 +5,10 @@ import type { CoffreClient } from '@coffre/client';
 import { EVERYWHERE } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
+import { listMembers } from '../src/api/members.ts';
 import { memberAccess } from '../src/db/queries.ts';
-import { auditLog } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { auditLog, vaultMembers } from './db/tables.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // A person's instance role and its scope, which project grants add to:
 // docs/design/instance-roles.md.
@@ -178,17 +179,44 @@ test('a service account holds project grants only, and no grant is on every proj
   assert.deepEqual(await refusals(), [['member.add', 'service_cannot_hold_role']]);
 });
 
-test('the last Owner of the whole instance stays one: 409, saying what to do first, until another is', async () => {
-  const last = { status: 409, reason: 'last_owner', message: "you're the last Owner of the whole instance: make someone else an Owner first" };
-  await assert.rejects(root.members.remove(`user:${ROOT}`), last);
-  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'admin' }), last);
-  // An Owner of one project owns no instance.
-  await root.members.add(ADA, { role: 'owner', scope: { projects: { only: ['market'] } } });
-  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'admin' }), last);
-  // Another Owner of all of it, and root may step down.
+test('the Owner the deployment names stays one: 403, saying where they are named', async () => {
+  const named = {
+    status: 403,
+    reason: 'not_allowed',
+    message: "the vault refused: the deployment names admin@acme.example an Owner (owners, in the vault's configuration): take them off that list and deploy first",
+  };
+  await assert.rejects(root.members.remove(`user:${ROOT}`), named);
+  await assert.rejects(root.members.add(`user:${ROOT}`, { role: 'admin' }), named);
   await root.members.add(ADA, { role: 'owner' });
-  assert.equal((await root.members.add(`user:${ROOT}`, { role: 'admin' })).instanceRole, 'admin');
+  await assert.rejects(ada.members.add(`user:${ROOT}`, { role: 'admin' }), named);
+  await assert.rejects(ada.members.remove(`user:${ROOT}`), named);
+  // Ada, whom it does not name, steps down as any Owner may.
+  assert.equal((await ada.members.add(ADA, { role: 'admin' })).instanceRole, 'admin');
+});
+
+test('Users marks the Owner the deployment names, in the list and on their page; a vault of 0.5 names none', async () => {
+  await root.members.add(ADA, { role: 'owner' });
+  const marked = async (client: CoffreClient) => (await client.members.list()).members.filter((member) => member.declared).map((member) => member.member);
+  assert.deepEqual(await marked(root), [`user:${ROOT}`]);
+  assert.deepEqual(await marked(boss), [`user:${ROOT}`]);
+  assert.deepEqual([(await root.members.get(`user:${ROOT}`)).declared, (await root.members.get(ADA)).declared], [true, false]);
+  // An app of this version beside a vault of 0.5, during a deploy: its about() has root admins, and no owners.
+  const ctx = await contextFor(deps, ROOT);
+  const older = { ...ctx, vault: { ...ctx.vault, about: async () => ({ checkpointKeys: {}, rootAdmins: [ROOT] }) } } as never;
+  assert.deepEqual((await listMembers(older, {})).members.filter((member) => member.declared), []);
+});
+
+test('the last Owner of the whole instance stays one: 409, saying what to do first, while the Owner the deployment names fails its check', async () => {
+  const last = { status: 409, reason: 'last_owner', message: "you're the last Owner of the whole instance: make someone else an Owner first" };
+  await root.members.add(ADA, { role: 'owner' });
+  // Root's row, changed around the vault, owns nothing: Ada is the only Owner it counts. An Owner of one project counts for nothing.
+  await root.members.add(LEAD, { role: 'owner', scope: { projects: { only: ['market'] } } });
+  await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, `user:${ROOT}`));
   await assert.rejects(ada.members.remove(ADA), last);
+  await assert.rejects(ada.members.add(ADA, { role: 'admin' }), last);
+  // Root's next request makes them an Owner again, started over: then Ada may step down.
+  assert.equal((await root.me()).instanceRole, 'owner');
+  assert.equal((await ada.members.add(ADA, { role: 'admin' })).instanceRole, 'admin');
 });
 
 test('only an Owner of the whole instance makes or unmakes an Owner: an Admin of all of it is refused, 403', async () => {

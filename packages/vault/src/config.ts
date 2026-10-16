@@ -16,10 +16,11 @@ export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_00
 export type ResolvedVaultConfig = {
   keks: KekRegistry;
   /**
-   * Emails, lowercased: who becomes an Owner of the whole instance when it
-   * has none, signing in (`access` in vault.ts). Otherwise nothing.
+   * Emails, lowercased: the Owners of the whole instance its deployment
+   * names, made one at each start and at sign-in (`#declare` in vault.ts),
+   * and never demoted or removed while named.
    */
-  bootstrapOwners: readonly string[];
+  owners: readonly string[];
   /**
    * The seeds of the vault's own keys, which MAC its log entries, seal member
    * rows and sign checkpoints: the first signs; every one verifies what it
@@ -36,13 +37,13 @@ export type ResolvedVaultConfig = {
 export type Kek = { id: string; key: string } | KekProvider;
 
 /**
- * What a deployment writes: every key coffre has, and who may claim the
- * instance while nobody owns it. The app holds none of it.
+ * What a deployment writes: every key coffre has, and who owns the
+ * instance whatever its database says. The app holds none of it.
  *
  *   {
  *     kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials: { … } }),
  *     previousKeks: [{ id: 'vault-2025-01-10-k7q2xm', key: env.OLD_VAULT_KEY }],
- *     bootstrapOwners: ['admin@acme.example'],
+ *     owners: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
  *   }
  */
@@ -63,19 +64,29 @@ export type VaultConfig = {
   signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
-} & BootstrapOwners;
+} & Owners;
 
 /**
- * At least one email, who becomes an Owner of the whole instance by signing
- * in while it has none: the way into a fresh instance, and back into one
- * whose every Owner is gone. While it has one, the list does nothing.
- * `rootAdmins` is its name before 0.6, read for one release.
+ * At least one email, each an Owner of the whole instance: made one when
+ * the vault starts, and when they sign in, whatever their row says, and
+ * refused to anyone who would demote or remove them, themselves included.
+ * The way into a fresh instance, and back into one whose Owners are all
+ * locked out: add an email, deploy, sign in. Taking an email off makes
+ * them an Owner like any other, whom an Owner may demote. `rootAdmins`, as
+ * 0.5 named it, and `bootstrapOwners` are read until 0.7.
  */
-type BootstrapOwners =
-  | { bootstrapOwners: readonly string[]; rootAdmins?: never }
+type Owners =
+  | { owners: readonly string[]; bootstrapOwners?: never; rootAdmins?: never }
   | {
-      /** @deprecated 0.5's name for `bootstrapOwners`, read until 0.7: a root admin is an Owner now. */
+      /** @deprecated `owners`, read until 0.7. */
+      bootstrapOwners: readonly string[];
+      owners?: never;
+      rootAdmins?: never;
+    }
+  | {
+      /** @deprecated 0.5's name for `owners`, read until 0.7: a root admin is an Owner now. */
       rootAdmins: readonly string[];
+      owners?: never;
       bootstrapOwners?: never;
     };
 
@@ -128,7 +139,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
   if (twice !== undefined) throw new Error(`two vault keys share an id: ${twice}`);
   return {
     keks: new KekRegistry(current, previous),
-    bootstrapOwners: checkBootstrapOwners(config.bootstrapOwners ?? config.rootAdmins ?? []),
+    owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
   };
@@ -193,18 +204,18 @@ function isHumanEmail(value: string): boolean {
 }
 
 /**
- * The bootstrap Owners, lowercased the way they are compared. At least one,
- * in every mode: they are the only way into a fresh instance, and back into
- * one with no Owner left.
+ * The Owners the deployment names, lowercased the way they are compared.
+ * At least one, in every mode: they are the only way into a fresh
+ * instance, and back into one whose Owners are locked out.
  */
-export function checkBootstrapOwners(emails: readonly string[]): string[] {
+export function checkOwners(emails: readonly string[]): string[] {
   const owners = [...new Set(emails.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
   if (owners.length === 0) {
-    throw new Error('bootstrapOwners must name at least one email, or nobody can manage coffre');
+    throw new Error('owners must name at least one email, or nobody can manage coffre');
   }
   const invalid = owners.find((entry) => !isHumanEmail(entry));
   if (invalid) {
-    throw new Error(`bootstrapOwners must be human email identities; invalid: ${invalid}`);
+    throw new Error(`owners must be human email identities; invalid: ${invalid}`);
   }
-  return owners.map((entry) => entry.toLowerCase());
+  return [...new Set(owners.map((entry) => entry.toLowerCase()))];
 }
