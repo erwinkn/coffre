@@ -152,7 +152,10 @@ Workers deployment shares; once they are spent the dialog says so and
 offers the ID fields. `GET /api/workloads/lookup` takes an owner as well as
 a repository, answers with GitHub's spelling, and answers 429 when GitHub's
 limit is spent and 503 when GitHub does not answer, where it said 404 for
-both.
+both. In `@coffre/client`, `WorkloadIds` gains that answer,
+`{ github, ownerId }` with no `repositoryId`: code that read a GitHub
+answer's `repositoryId` after checking only for `github` checks
+`'repositoryId' in ids`.
 
 **Events are chosen in a combobox.** The GitHub events and GitLab pipeline
 sources a binding trusts were a row of checkboxes. Now you type to filter
