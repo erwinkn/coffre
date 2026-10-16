@@ -3,6 +3,8 @@
 // page receives shows only there: wrangler's keep_names once wrapped the
 // functions seroval writes into a page in an `__name` that only the Worker
 // had, and a signed-in page rendered, then went blank.
+import { randomBytes } from 'node:crypto';
+
 import { Browser } from '../browser.ts';
 import { Chrome, findChrome } from '../chrome.ts';
 import type { Deployment } from '../harness.ts';
@@ -162,6 +164,100 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     await chrome.close();
   }
   return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, on its tab, no error from their scripts; a project's tabs by their links, back and forward; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev, project by project; the account's Connected apps tab, with this instance's MCP URL and Claude Code's command; the MCP consent page, a registered client shown as unverified`;
+}
+
+/** Where values are pasted in: an environment of their own, the others' values being the canaries'. */
+const PASTED = `${PROJECT}/pasted`;
+
+/** A private key as a PEM file holds it, made up: random base64 in lines of 64, each ending in a line break, the last too. */
+function pem(): string {
+  const body = randomBytes(120).toString('base64').match(/.{1,64}/g)!.join('\n');
+  return `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\n`;
+}
+
+/**
+ * A row's value field, opened by the button `open` names, and `text`
+ * pasted into it as the clipboard would, over the characters `select`
+ * picks; then the row saved by its own button. A new secret is named first.
+ * Answers which field has the focus after the paste, and where its caret is.
+ */
+const pasteInto = (steps: { open: string; name?: string; field: string; select?: [number, number]; text: string; save: string }) => `(async () => {
+  const { open, name, field, select, text, save } = ${JSON.stringify(steps)};
+  const wait = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
+  // What the page shows once it has it: an edit first reads the value it starts from.
+  const shown = async (label) => {
+    for (let tries = 0; tries < 50; tries++, await wait()) {
+      const found = document.querySelector(\`[aria-label="\${label}"]\`);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  const button = (words) => [...document.querySelectorAll('button')].find((each) => each.getAttribute('aria-label') === words || each.textContent.trim() === words);
+  button(open)?.click();
+  if (name !== undefined) {
+    const named = await shown('Name of the new secret');
+    if (named === null) return { field: null };
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(named, name);
+    named.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const input = await shown(field);
+  if (input === null) return { field: null };
+  input.focus();
+  if (select !== undefined) input.setSelectionRange(...select);
+  const clipboard = new DataTransfer();
+  clipboard.setData('text/plain', text);
+  input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clipboard, bubbles: true, cancelable: true }));
+  await wait(300);
+  const focused = document.activeElement;
+  const answer = { field: focused.tagName.toLowerCase(), label: focused.getAttribute('aria-label'), caret: [focused.selectionStart, focused.selectionEnd] };
+  button(save)?.click();
+  return answer;
+})()`;
+
+/**
+ * A multi-line value pasted into a secret's value field keeps its line
+ * breaks. A text input drops them, so the page puts the paste into the
+ * value itself and turns the field into a textarea, the caret after the
+ * paste. A new secret's PEM key saves byte for byte; one pasted over part
+ * of an existing value replaces just that part, its \r\n saved as \n.
+ * Values never shown: a failure says their lengths and line counts.
+ */
+export async function pastedValues(deployment: Deployment, admin: Person, browser: string | null): Promise<string> {
+  const executable = chromeOrSkip(browser);
+  await admin.api.environments.create(PASTED, { name: 'Pasted' });
+  const before = `coffre-paste-${randomBytes(12).toString('hex')}`;
+  await admin.api.secrets.set(PASTED, { EDITED_KEY: before });
+  const page = new URL(`/projects/${PASTED}`, deployment.origin).href;
+  const added = pem();
+  const edit = pem();
+  const shape = (value: string | undefined) => (value === undefined ? 'nothing' : `${value.length} characters, ${value.split('\n').length} lines`);
+  const chrome = await Chrome.open(executable);
+  try {
+    const caret = added.length;
+    const adding = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'New secret', name: 'PASTED_KEY', field: 'Value for PASTED_KEY', text: added, save: 'Save PASTED_KEY now' }));
+    expect(adding.errors.length === 0, `${page} reported errors in the browser`, adding.errors.join('\n'));
+    expect(
+      JSON.stringify(adding.answer) === JSON.stringify({ field: 'textarea', label: 'Value for PASTED_KEY', caret: [caret, caret] }),
+      "a PEM key pasted into a new secret's value did not leave a textarea focused, its caret after the paste",
+      adding.answer,
+    );
+    const at = [8, 20] as const;
+    const editing = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'Edit EDITED_KEY', field: 'New value for EDITED_KEY', select: [...at], text: edit.replaceAll('\n', '\r\n'), save: 'Save EDITED_KEY now' }));
+    expect(editing.errors.length === 0, `${page} reported errors in the browser`, editing.errors.join('\n'));
+    const after = at[0] + edit.length;
+    expect(
+      JSON.stringify(editing.answer) === JSON.stringify({ field: 'textarea', label: 'New value for EDITED_KEY', caret: [after, after] }),
+      "a PEM key pasted into an edited value did not leave a textarea focused, its caret after the paste",
+      editing.answer,
+    );
+  } finally {
+    await chrome.close();
+  }
+  const { values } = await admin.api.secrets.reveal(PASTED);
+  expect(values.PASTED_KEY === added, `the new secret saved ${shape(values.PASTED_KEY)}, not the ${shape(added)} pasted`);
+  const edited = before.slice(0, 8) + edit + before.slice(20);
+  expect(values.EDITED_KEY === edited, `the edited secret saved ${shape(values.EDITED_KEY)}, not the ${shape(edited)} of its value with the paste in characters 8 to 20`);
+  return `in Chrome, a ${added.split('\n').length - 1}-line PEM key pasted into a new secret's value and into part of an edited one: each field a textarea after, focused, its caret after the paste; the new value saved byte for byte, the edited one with the paste in place and its \r\n as \n`;
 }
 
 /**

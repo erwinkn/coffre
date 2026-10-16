@@ -2306,6 +2306,13 @@ a.crumb-link:hover {
   display: none;
 }
 
+/* Its buttons stay on its first line, however tall a paste makes it, and
+   hide the text that scrolls under them. */
+.secret-row .input.value-lines ~ .input-addon {
+  top: 0.0625rem;
+  background: var(--panel);
+}
+
 /* Masked where the browser cannot draw discs: the text is there, unseen. */
 .input.is-masked-fallback {
   color: transparent;

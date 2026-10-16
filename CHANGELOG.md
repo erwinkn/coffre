@@ -217,6 +217,17 @@ value. It makes:
   is cancelled, whole, in one write, so a new private key never lands
   beside the old public key. Typing over the value drops the public key.
 
+**Pasting a multi-line value keeps its line breaks.** A new secret's value
+field, and an edited single-line one's, is a text input, and a text input
+drops the line breaks of what is pasted into it: a PEM private key pasted
+there was saved on one line, and no longer parsed. Now a paste holding a line
+break goes into the value whole, and the field becomes a textarea, focused,
+its caret after the paste, and stays one until the row is saved or
+cancelled. Line breaks are saved as `\n`: a `\r\n` from a Windows clipboard
+becomes `\n`, as a textarea and PEM and `.env` tooling read them. Masking is
+unchanged. Fields that already held a multi-line value were textareas, and
+still are. Conformance pastes a key in Chrome (`pasted values`).
+
 **`coffre get` no longer adds a newline when piped.** It printed the value
 and a newline whatever stdout was, so `coffre get app/prod/KEY | wc -c`
 counted one byte more than the value, and a secret copied that way into

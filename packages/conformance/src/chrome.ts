@@ -20,6 +20,8 @@ export type Loaded = {
   href: string;
   /** The text of the dialog open at the end, as after `then` opened one; null for none. */
   dialog: string | null;
+  /** What `then` returned, as JSON gives it; null without one. */
+  answer: unknown;
   errors: string[];
 };
 
@@ -141,7 +143,7 @@ export class Chrome {
    * shows once its scripts have run and settled, and every uncaught error,
    * console error and failed load along the way. `then`, a script run once
    * the page settles, does what a person would next, such as open a dialog,
-   * whose text is read with the rest.
+   * whose text is read with the rest, and may answer what it saw.
    */
   async load(url: string, cookies: [string, string][], settle = 2_000, then?: string): Promise<Loaded> {
     const { targetId } = (await this.#send('Target.createTarget', { url: 'about:blank' })) as { targetId: string };
@@ -173,8 +175,12 @@ export class Chrome {
       await Promise.race([load, new Promise((resolve) => setTimeout(resolve, 30_000))]);
       // What streams in after the load, and hydration, have their time: the page may render, then fail.
       await new Promise((resolve) => setTimeout(resolve, settle));
+      let answer: unknown = null;
       if (then !== undefined) {
-        await this.#send('Runtime.evaluate', { expression: then, awaitPromise: true }, sessionId);
+        const { result } = (await this.#send('Runtime.evaluate', { expression: then, awaitPromise: true, returnByValue: true }, sessionId)) as {
+          result: { value?: unknown };
+        };
+        answer = result.value ?? null;
         // What it asked of the server has its time to come back.
         await new Promise((resolve) => setTimeout(resolve, settle));
       }
@@ -190,7 +196,7 @@ export class Chrome {
       const { result } = (await this.#send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)) as {
         result: { value: { heading: string | null; tab: string | null; cards: string[]; text: string; href: string; dialog: string | null } };
       };
-      return { ...result.value, errors };
+      return { ...result.value, answer, errors };
     } finally {
       this.#listeners.delete(listener);
       await this.#send('Target.closeTarget', { targetId }).catch(() => {});
