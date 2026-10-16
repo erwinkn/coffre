@@ -3,7 +3,6 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   allows,
   assignableToEnvironment,
-  convertEveryProjectGrants,
   EVERYWHERE,
   givesService,
   grantKind,
@@ -78,7 +77,7 @@ import {
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
-import { newestAccess, reportStands } from '@coffre/db/grants';
+import { everyProjectConversion, newestAccess, reportStands, ROOT_ADMINS_CONVERT, rootAdminsToConvert } from '@coffre/db/grants';
 import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
@@ -216,9 +215,6 @@ const TAMPERED_SUBJECT = "this member's record failed the vault's integrity chec
 /** The action of the vault's entry that signs a prefix of the log. */
 const CHECKPOINT = 'audit.checkpoint';
 
-/** The action of the vault's entry that says it turned the root admins of 0.5 into Owners, once (`#convertRootAdmins`). */
-const ROOT_ADMINS_CONVERT = 'root-admins.convert';
-
 /** The action of the vault's entry that holds the instance's settings, and changes them (`settings`). */
 const SETTINGS = 'settings.change';
 
@@ -227,6 +223,9 @@ const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
 
 /** The settings when the log has some, but none the vault wrote within reach: people set up no service accounts. */
 const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, environments: 'all' } };
+
+/** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
+const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
 
 /** Why a person's change to a service account is refused. */
 const NOT_THEIRS = 'a person gives a service account at most what they hold, where the instance lets them set one up, and only to one whose every grant they hold';
@@ -586,7 +585,8 @@ class VaultService implements Vault {
     // database; calls that race settle it alike, and a rotation they race
     // to write goes in once (`#rotate`).
     if (prepared.since === null && prepared.superseded === null) await this.#settle();
-    if (prepared.superseded === null && !prepared.converted) await this.#convert();
+    // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
+    if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert();
     return prepared.superseded;
   }
 
@@ -604,62 +604,68 @@ class VaultService implements Vault {
    * genuine row put back). `reportStands` is the rule, which `coffre
    * migrate` applies too, holding no key, to every entry in the vault's
    * name: it lists and marks a member so reported, forged or not.
-   * Removing them clears both.
+   * Removing them clears both. Then the root admins of 0.5 become Owners
+   * (`#convertRootAdmins`): after, so that what their grants become is
+   * what `coffre migrate` says, by the same rule over the same rows
+   * (`everyProjectConversion`), which cannot tell who the configuration
+   * names. Until that finishes, each call converts again what is left, a
+   * few reads once nothing is.
    */
   async #convert(): Promise<void> {
-    await this.#convertRootAdmins();
     for (const principal of await store.everyProjectHolders(this.#db)) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
-    this.#prepared.converted = true;
+    this.#prepared.converted = await this.#convertRootAdmins();
   }
 
   /**
    * Turn the root admins of 0.5 into Owners of the whole instance, once, on
    * an instance that ran 0.5 with one: its vault gave a root admin who
-   * signed in a row, in an entry of its own (`rootAdminRows`). Everyone the
+   * signed in a row, in an entry of its own (`rootAdminsToConvert`). Everyone the
    * configuration names when this release first runs becomes an Owner, as
    * `system:vault`, each `reason: 'root-admin'`, one who never signed in
    * too: 0.5 held them root admins already. A `root-admins.convert` entry
    * under the vault's MAC says it is done, with whom it made Owners, so from
-   * then on the list only bootstraps (`#bootstrap`). A new instance has no
-   * root admins to convert, and writes nothing. One decision, under every
-   * listed row and then the log's head, which reads again whether another
-   * process did it first. Entries forged in its name say nothing either way,
-   * and are reported.
+   * then on the list only bootstraps (`#bootstrap`). An instance with no
+   * root admins to convert, a new one above all, writes the entry too,
+   * naming nobody, once its log holds an entry of the vault's. From then
+   * on, only those a vault of 0.5 gives a root admin's row after the entry,
+   * still serving during this release's first deploy or rolled back to,
+   * become Owners, each while nobody has changed them since, and another
+   * entry says so: never the whole list again, which would make an Owner of
+   * someone demoted or removed since. One decision, under the rows of
+   * those it makes Owners and then the log's head, which reads again
+   * whether another process did it first. Entries forged in its name say
+   * nothing either way, and are reported. Whether it is done.
    */
-  async #convertRootAdmins(): Promise<void> {
+  async #convertRootAdmins(): Promise<boolean> {
     const reports: NewEntry[] = [];
-    const due = await this.#rootAdminsToConvert(this.#db, reports);
+    const listed = this.#config.bootstrapOwners.map((email) => `user:${email}`);
+    let due = await rootAdminsToConvert(this.#db, this.#check(reports, null), listed);
     // Not `#record`, which would settle the vault, and so convert, again.
     if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
     this.#reported(reports);
-    if (!due) return;
-    const principals = this.#config.bootstrapOwners.map((email) => `user:${email}`);
-    await this.#decideNow(principals, async (d) => {
-      await lockLogHead(d.tx);
-      if (!(await this.#rootAdminsToConvert(d.tx, d.reports))) return;
-      const owners: string[] = [];
-      for (const principal of principals) {
-        if (await this.#makeOwner(d, principal, 'root-admin')) owners.push(principal);
-      }
-      d.log.push({ actor: VAULT_ACTOR, action: ROOT_ADMINS_CONVERT, decision: 'allow', metadata: JSON.stringify({ owners }) });
-    });
-  }
-
-  /**
-   * Whether this instance had root admins, which the vault has not turned
-   * into Owners yet: an entry of its own gave one a row, and none says it
-   * converted them, unless too many forged ones hide whether one does.
-   */
-  async #rootAdminsToConvert(db: Queryable, reports: NewEntry[]): Promise<boolean> {
-    const check = this.#check(reports, null);
-    const converted = await newestAuthentic((before) => store.newestVaultEntries(db, ROOT_ADMINS_CONVERT, LOOK_BACK.page, before), check);
-    if (converted !== 'none' && converted !== 'forged') return false;
-    const rows = await store.rootAdminRows(db, LOOK_BACK.page);
-    const rooted = rows.filter((entry) => this.#authentic(entry));
-    for (const entry of rows) if (!rooted.includes(entry)) check.forged(entry);
-    return rooted.length > 0;
+    // Read again under the rows and the head: a 0.5 vault still serving may
+    // give a root admin a row between the reads, which takes other locks.
+    for (let attempt = 1; due !== null && attempt <= 3; attempt += 1) {
+      const asked = due;
+      // Those the configuration names, all of them or, after an entry of its own, those 0.5 gave a row since.
+      const principals = asked.whole ? (asked.rooted.length > 0 ? listed : []) : asked.rooted;
+      const decided = await this.#decideNow(principals, async (d) => {
+        await lockLogHead(d.tx);
+        const now = await rootAdminsToConvert(d.tx, this.#check(d.reports, null), listed);
+        if (JSON.stringify(now) !== JSON.stringify(asked)) return { due: now };
+        const owners: string[] = [];
+        for (const principal of principals) {
+          if (await this.#makeOwner(d, principal, 'root-admin')) owners.push(principal);
+        }
+        d.log.push({ actor: VAULT_ACTOR, action: ROOT_ADMINS_CONVERT, decision: 'allow', metadata: JSON.stringify({ owners }) });
+        return { due: null };
+      });
+      due = decided.ok ? decided.due : null;
+    }
+    // Still due after three: 0.5 kept letting root admins in between the reads. The next call tries again.
+    return due === null;
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
@@ -672,15 +678,7 @@ class VaultService implements Vault {
     // The projects there are now, read under the log's head, which a deletion holds.
     await lockLogHead(d.tx);
     const before = roleOf(principal, row);
-    const conversion = convertEveryProjectGrants({
-      person: principal.startsWith('user:'),
-      role: before.role,
-      everyProject: everyProject.filter((grant) => live(grant, d.at)).map((grant) => ({ environmentSlug: grant.environmentSlug, role: grant.role as Role, expiresAt: grant.expiresAt })),
-      grants: subject.stored
-        .filter((grant) => grantKind(grant) !== null && live(grant, d.at))
-        .map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role as Role, expiresAt: grant.expiresAt })),
-      projects: await store.liveProjects(d.tx),
-    });
+    const conversion = everyProjectConversion(principal, before.role, subject.stored, d.at, await store.liveProjects(d.tx));
     const after = { role: conversion.role, scope: conversion.scope };
     const replacedBy = { role: after.role, scope: after.scope, grants: conversion.grants.length };
     d.grants.set(principal, [...subject.stored]);
@@ -1754,6 +1752,7 @@ class VaultService implements Vault {
         d.log.push(accessEntry(actor, action, principal, 'allow', input, detail));
 
       if (row === undefined || row.status === 'removed') {
+        if (wanted?.role === 'owner' && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
         // Coming back is a fresh start: a member, unless given a role again.
         const { role, scope } = wanted ?? { role: 'member' as const, scope: EVERYWHERE };
         entry(row === undefined ? 'member.add' : 'member.restore', { role, scope });
@@ -1779,8 +1778,10 @@ class VaultService implements Vault {
         return { created: true, role, scope, generation: row?.generation ?? 0 };
       }
       const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
-      // Nobody sets their own role: running the instance never lets anyone widen what they hold themselves.
-      if (changed && actor === principal) throw refused('not_allowed', 'nobody changes their own instance role: ask another admin');
+      // Read under both rows' locks: neither the actor's role nor the subject's changes before this commits.
+      if (changed && (wanted.role === 'owner' || subject.live.role === 'owner') && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
+      // Nobody sets their own role, but an Owner of the whole instance, who holds all there is: running the instance never lets anyone widen what they hold themselves.
+      if (changed && actor === principal && !ownsInstance(acting.live)) throw refused('not_allowed', 'nobody changes their own instance role: ask another admin');
       if (changed && ownsInstance(subject.live) && !ownsInstance(wanted)) await this.#keepAnOwner(d, actor, principal, refused);
       if (changed) {
         entry('member.role', { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope });
@@ -1815,6 +1816,7 @@ class VaultService implements Vault {
         if (!theirs) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members, and a service account whoever manages it');
       }
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
+      if (subject.live.role === 'owner' && !ownsInstance(holder)) throw refused('not_allowed', OWNERS_ONLY);
       if (ownsInstance(subject.live)) await this.#keepAnOwner(d, actor, principal, refused);
 
       const revoked = held.filter((grant) => live(grant, d.at));

@@ -351,13 +351,14 @@ permission everywhere, reading secrets included, so keep them few. The
 instance always has one: the vault's `bootstrapOwners` names who becomes
 the first by signing in, and the last cannot be demoted or removed until
 there is another ([deployment-auth.md](docs/deployment-auth.md#the-first-owner)).
+Only an Owner of the whole instance makes, changes or removes an Owner.
 An Admin or Owner whose scope narrows nothing **runs the instance**: adds and removes people,
 sets instance roles and the instance's settings, and manages every service
 account. An Auditor, Admin or Owner whose scope narrows nothing reads the
 whole log, the instance's own entries included, and verifies it. A scoped
 Admin manages environments and grants inside its scope only, and sets no
-role. Nobody changes their own role or grants themselves one, which stops a
-quiet read of one's own; it is no boundary. An Admin holds no secret
+role. Nobody changes their own role, but an Owner stepping down, or grants
+themselves one, which stops a quiet read of one's own; it is no boundary. An Admin holds no secret
 permission, but can still reach any value in its scope by admitting a
 service account, granting it a reading role and issuing its token, each
 step in the log, as a 0.4 owner could: make Admins only people you would

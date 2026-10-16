@@ -1,5 +1,5 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
@@ -224,6 +224,25 @@ export function entryColumns(db: Queryable) {
  * forged goes to `forged`.
  */
 export type Authenticity = { authentic: (entry: StoredEntry) => boolean; forged: (entry: StoredEntry) => void };
+
+/** Up to `limit` of the entries in the vault's name, allowed, of one `action`, before `before` (the newest when undefined), newest first. */
+export async function newestVaultEntries(db: Queryable, action: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.author, 'vault'),
+        eq(auditLog.action, action),
+        eq(auditLog.decision, 'allow'),
+        before === undefined ? undefined : lt(auditLog.seq, before),
+      ),
+    )
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return rows as StoredEntry[];
+}
 
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
 export const LOOK_BACK = { page: 32, pages: 32 };

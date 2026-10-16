@@ -25,9 +25,13 @@ instance: a member like any other, in People, changed by the same rules.
   email you control, deploy, sign in. Keep it to people you would trust as
   Owner: should every Owner's row fail the vault's check, the next one it
   names to sign in takes over.
-- **Owners are changed by the usual rules.** An Admin of the whole
-  instance makes and unmakes Owners, but for the last, as it did 0.5's
-  Owners; a root admin was beyond its reach, and their Owners are not.
+- **Only Owners make Owners.** Making someone an Owner, scoped or not,
+  and changing or removing an Owner take an Owner of the whole instance:
+  an Admin of all of it does neither (403, `not_allowed`), and People
+  offers it no Owner to set or remove. An Owner of the whole instance may
+  step down, the one role change anyone makes about themselves, unless
+  they are the last. The vault decides it under both rows' locks, so an
+  Owner demoted meanwhile makes nobody an Owner.
 - **An Owner who can't sign in any more** (a lost GitHub account) is not
   recovered by editing the list, as a root admin was: the instance still
   has its Owner. Keep two Owners until `coffre recover owner` exists.
@@ -52,7 +56,13 @@ instance: a member like any other, in People, changed by the same rules.
    loses what they held. A `root-admins.convert` entry records it, after
    which the list only bootstraps. Someone you took off the list before
    upgrading is not made an Owner. Where no root admin ever signed in, the
-   first listed person to sign in becomes the Owner, as on a new instance.
+   entry names nobody, and the first listed person to sign in becomes the
+   Owner, as on a new instance, which writes the entry too. After the
+   entry the list is never converted again: rolled back to 0.5 and forward,
+   or during the deploy, only a listed person 0.5 let in after it, and
+   nobody has changed since, becomes an Owner. A root admin who still
+   held grants on every project of 0.4 has them converted as anyone's
+   first, then becomes an Owner: `coffre migrate` lists both.
    The vault reads 0.5's entries by its keys, so keep any vault key it
    replaced in `previousKeks`, as always.
 3. **Check Users**, where your root admins are now Owners: demote those

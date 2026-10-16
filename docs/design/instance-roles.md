@@ -100,7 +100,9 @@ Nobody hands out more than they reach:
 - A scoped Admin gives and takes grants only inside its scope, and never
   sets an instance role.
 - **Nobody changes their own instance role or scope**, not even an
-  unscoped Admin: another admin does it, and the log says who.
+  unscoped Admin: another admin does it, and the log says who. An Owner
+  of the whole instance may step down, since nothing is more than what
+  they hold ("Owners of the whole instance", below).
 - An Admin holds no secret permission, scoped or not, and **nobody grants
   themselves a role** (giving one up is fine). That stops a quiet read of one's own, and
   is no boundary: an Admin can grant a project role that reads to someone
@@ -309,9 +311,9 @@ included: the vault refuses with `last_owner`, "you're the last Owner of
 the whole instance: make someone else an Owner first", and logs it. The
 vault counts the others under the log's head, after the rows it locks:
 `admit` and `remove` lock only the actor's row and the subject's, so two
-changes about different Owners, Ada removing herself while Omar's Admin
-demotes Omar, lock nothing in common, and a count under the rows alone
-would let both pass, leaving none. The head puts one after the other.
+changes about different Owners, Ada removing herself while Omar steps
+down, lock nothing in common, and a count under the rows alone would let
+both pass, leaving none. The head puts one after the other.
 `formal/Coffre.tla` models it (`Owners`: `OwnerStays`, which fails without
 `LastOwnerCheckUnderHead`). A row that fails the vault's check counts for
 nothing.
@@ -332,20 +334,81 @@ first named person to sign in to a fresh vault process or Worker isolate
 ones), even one an Owner removed: the list is a
 standing way in, to keep to people one would trust as Owner. An Owner who
 exists but cannot sign in any more is not recovered by this; that is a
-command of its own, not built yet (`coffre recover owner`). Owners are
-made and unmade by whoever runs the instance, an Admin of all of it
-included, as any role is: 0.5's root admins were beyond an Admin's reach,
-and the Owners they become are not.
+command of its own, not built yet (`coffre recover owner`).
+
+**Only Owners make Owners** (Erwin's decision, 2026-10-15, standing rule
+R1). Making someone an Owner, scoped or not, adding or bringing them back
+as one, and changing or removing an Owner, scoped or not, take an Owner of
+the whole instance: the vault refuses anyone else, an Admin of all of it
+included, with `not_allowed`, "only an Owner of the whole instance makes
+someone an Owner, or changes or removes one", and logs it. An Owner of the
+whole instance may change their own role, which only ever narrows what
+they hold, so may step down, unless they are the last. An Admin keeps
+everything else: anyone's role but an Owner's, and an Owner's grants on
+projects, which add nothing to what an Owner holds. So an Admin cannot
+make itself, or anyone it trusts, an Owner and read every value, nor push
+an Owner out.
+
+| Ada, an Admin of the whole instance, asks to | Answer |
+|---|---|
+| make Carol an Owner, or an Owner of `market` | no |
+| make Omar, an Owner of `market`, an Admin, or an Owner of everything | no |
+| remove Omar | no |
+| make Carol a Developer | yes |
+
+The vault decides it in the decision about the change, under the actor's
+row and the subject's, which it locks first (`#decide`): neither role can
+change before it commits. So Omar, an Owner, making Carol one while Root
+takes Omar's Owner away, either finishes first or finds himself an Admin
+and is refused; and Ada removing Carol while Root makes her an Owner
+either removes a Member or is refused. Those two decisions share a row,
+so the head adds nothing. In the model's `Owners` scenario an Admin tries
+both and is refused, beside two Owners stepping down or leaving at once,
+who lock nothing in common and leave one, by the head. The app and the pages follow the vault:
+People offers the Owner role only to an Owner of the whole instance, and
+in place of an Owner's menu shows anyone else a lock saying who may change
+them.
+
+A row the vault finds tampered with holds nothing, an Owner's too, so
+whoever runs the instance may start it over (remove it) as before; an
+Owner whose row fails its check owns nothing until then, and the bootstrap
+covers an instance left with none.
 
 **Upgrading from 0.5.** The first call of a 0.6 vault makes every email
 the configuration names an Owner of the whole instance, once, as
 `system:vault`, `reason: 'root-admin'`: 0.5 held them root admins already,
 so one who never signed in gets a row too, and nobody loses anything. It
 does so only on an instance whose vault of 0.5 gave a root admin a row (its
-`member.add` with `rootAdmin: true`, under the vault's MAC): a new instance
-has none, and writes nothing. A `root-admins.convert` entry under the
-vault's MAC records it, naming whom it made Owners, and from then on the
-list only bootstraps. One forged in the vault's name is passed over and
+`member.add` with `rootAdmin: true`, under the vault's MAC). A
+`root-admins.convert` entry under the vault's MAC records it, naming whom
+it made Owners, and from then on the list only bootstraps. An instance with
+no such row, a new one above all, writes the entry too, naming nobody, at
+its first call once its log holds an entry of the vault's (an empty log
+stays empty until someone acts): otherwise, rolled back to 0.5, which gives
+each listed person who signs in a row of its own, and forward again, it
+would make the whole list Owners then, someone an Owner demoted since
+included. After the entry, the whole list is never converted again. Only a
+listed person a vault of 0.5 gives a root admin's row after it, still
+serving during the first deploy or rolled back to, becomes an Owner, at the
+next process's first call, with another entry naming them; and only while
+that row's entry is still the newest about them, so one an Owner removed or
+changed meanwhile stays as they left them. It reads only rows about people
+the configuration names, which 0.5 gives one each at most, so it passes
+over none; with more than 1024 in its name there, it would convert nobody
+and write nothing. 0.5 held them root admins, and everyone else stays as
+0.6 left them:
+
+| Listed, on an instance that ran 0.6, then 0.5, then 0.6 again | After |
+|---|---|
+| Sam, made a Developer on 0.6 | a Developer |
+| Carol, first signed in on 0.5, during the rollback | an Owner |
+| Carol, the same, removed by an Owner on 0.6 before the next process | removed |
+| Dan, who never signed in | nothing: the list bootstraps only an instance with no Owner |
+
+The same holds for a first deploy with 0.5 still serving: an instance
+whose root admins had not signed in when 0.6 first ran converts only those
+who sign in to 0.5 after it, as one where nobody had would bootstrap the
+first to sign in. One forged in the vault's name is passed over and
 reported, and stops no conversion; as many forged in a row as the vault
 reads back (1024) hide whether it converted, and it converts nobody. No
 migration: the rows are 0.5's, `role` `owner` and a null `scope`, sealed as 0.5 seals them, so 0.5 reads them
@@ -395,8 +458,12 @@ to the next. It leaves a member the vault has reported tampered with
 (`vault.tampered`) as they are, until their access next changes or they
 are started over: the vault's report in the log decides, not whether
 their row checks out now, so a genuine row put back after a report stays
-left. A root admin of 0.5 kept theirs; 0.6 makes them an Owner first, then
-converts theirs like anyone's.
+left. A root admin of 0.5 kept theirs; 0.6 converts theirs like anyone's,
+by their row's role, then makes them an Owner ("Upgrading from 0.5",
+above). That order is the one `coffre migrate` can say: it reads the same
+rows by the same function (`everyProjectConversion`), and lists the root
+admins who signed in (`rootAdminsToConvert`), but the configuration that
+names the rest is the vault's.
 
 One rule says whether a report stands, `reportStands` in
 `@coffre/db/grants`: the vault applies it to its own entries, passing over

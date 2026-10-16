@@ -49,7 +49,7 @@ counterexamples is printed in CI's log.
 | Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
 | A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
-| Demoting or removing an Owner of the whole instance counts the others under the head (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or demoted by another Admin at once, under rows the other does not lock: none left (`OwnerStays`) | |
+| Demoting or removing an Owner of the whole instance counts the others under the head (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or stepping down at once, under rows the other does not lock: none left (`OwnerStays`) | |
 | A bootstrap reads under the head whether anyone owns the instance (`vault.ts`, `#bootstrap`) | two people the configuration names, signing in at once, both made Owners (`BootstrapOnlyWithoutOwner`) | |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
@@ -183,8 +183,8 @@ Traces are shortened here; the script prints every step.
 | `Mixed` | Two owners run nearly every operation on places and grants, while a member reads, writes, signs in or rotates | 1 million |
 | `References` | A member reads through a reference while an owner breaks it, makes it again, or revokes or removes the reader, and either place is archived, then deleted | 113 thousand |
 | `Referencing` | An owner makes a reference while another archives, restores and archives again either place, and a third deletes one | 13 thousand |
-| `Owners` | Two Owners of the whole instance each leave, or take the other's role, while an Admin demotes or removes either | 1 thousand |
-| `Bootstrap` | Two people the configuration names sign in at once on an instance nobody owns, while an Admin demotes or removes one, or one leaves | 2 thousand |
+| `Owners` | Two Owners of the whole instance each leave, step down, or take the other's role, while an Admin, who is no Owner, tries to demote or remove either | 3 thousand |
+| `Bootstrap` | Two people the configuration names sign in at once on an instance nobody owns, while one leaves or steps down, and an Admin, no Owner, tries to demote or remove one | 2 thousand |
 
 Every scenario starts from one project and its one environment, holding one
 secret. A third environment, in another project, holds a key that is a
@@ -211,7 +211,10 @@ reference to that secret in `References`, and none yet elsewhere.
   its own (`owners`), apart from the `"*"` an Owner reads by: the last-Owner
   rule and the bootstrap decide on it, not on what anyone reads. Turning
   0.5's root admins into Owners is one decision under every row it names
-  and the head, once, and is not modelled apart.
+  and the head, once, and is not modelled apart. Who may unmake an Owner,
+  an Owner of the whole instance (`ChangesOwners`), is read under the
+  actor's row, as the rest of the check is; making one is admission,
+  which is left out (below).
 - **The key service.** A remote KEK's intent transaction, budget and
   partial outages are left out. The key decision is modelled as with a
   local KEK, which holds the same locks in the same order.

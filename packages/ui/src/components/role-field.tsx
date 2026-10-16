@@ -9,10 +9,12 @@ import { X } from './icons';
  * A person's instance role, one dropdown, and under it, for every role but
  * Member, where it applies: projects and environments, each All, Only or
  * All except. Projects are picked from those there are; environments are
- * names, so any slug goes, the ones made later too.
+ * names, so any slug goes, the ones made later too. Owner is offered only
+ * to an Owner of the whole instance, who alone makes one.
  */
 export function RoleField({ value, onChange }: { value: RoleVars; onChange: (value: RoleVars) => void }) {
   const { role, scope } = value;
+  const owners = useShell().capabilities.ownsInstance;
   return (
     <>
       <label className="field">
@@ -22,7 +24,7 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
           value={role}
           onChange={(event) => onChange({ role: event.target.value as InstanceRole, scope })}
         >
-          {INSTANCE_ROLE_NAMES.map((name) => (
+          {INSTANCE_ROLE_NAMES.filter((name) => owners || name !== 'owner').map((name) => (
             <option key={name} value={name}>
               {INSTANCE_ROLES[name].name}
             </option>
@@ -30,6 +32,7 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
         </select>
         <span className="hint">
           Default permissions: {INSTANCE_ROLES[role].description} Project grants add more.
+          {!owners && ' Only an Owner makes someone an Owner.'}
         </span>
       </label>
       {role !== 'member' && <ScopeField scope={scope} onChange={(next) => onChange({ role, scope: next })} />}

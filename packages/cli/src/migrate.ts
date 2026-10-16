@@ -14,7 +14,7 @@ import { parseArgs } from 'node:util';
 import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
-import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
+import { everyProjectPreview, readGrants, rootAdminsToConvert, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
 import { DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
@@ -156,35 +156,71 @@ async function migrateDeployment(
   out.write(describeFirstRun(await previewFirstRun(url)));
 }
 
-/** What this version does to 0.4's rows when it first runs, which the database says: what `coffre migrate` shows. */
+/** What this version does to 0.4's and 0.5's rows when it first runs, which the database says: what `coffre migrate` shows. */
 export type FirstRun = {
   everyProject: EveryProjectPreview[];
+  /** The root admins of 0.5 the vault makes Owners after converting those grants (`rootAdminsToConvert`); null once it has. */
+  rootAdmins: { whole: boolean; rooted: string[] } | null;
   unsealed: Unsealed[];
   /** The members who hold a live grant on a project or an environment now. */
   holding: ReadonlySet<string>;
 };
 
+/** A reader with no key to the vault's MACs: every entry in its name is its own. */
+const TRUSTING = { authentic: () => true, forged: () => {} };
+
 /**
  * What the vault will make of the grants on every project of 0.4 still
- * there, and the tokens and bindings the app will seal, read with the
- * owner's login.
+ * there and of the root admins of 0.5, and the tokens and bindings the app
+ * will seal, read with the owner's login.
  */
 async function previewFirstRun(url: URL): Promise<FirstRun> {
   const { db, close } = await openDatabase(url.href);
   try {
     const at = new Date();
-    const [everyProject, unsealed, grants] = await Promise.all([everyProjectPreview(db, at.getTime()), unsealedCredentials(db, at), readGrants(db, { liveAt: at.getTime() })]);
-    return { everyProject, unsealed, holding: new Set(grants.filter((grant) => grant.projectId !== null).map((grant) => grant.principal)) };
+    const [everyProject, rootAdmins, unsealed, grants] = await Promise.all([
+      everyProjectPreview(db, at.getTime()),
+      rootAdminsToConvert(db, TRUSTING),
+      unsealedCredentials(db, at),
+      readGrants(db, { liveAt: at.getTime() }),
+    ]);
+    return { everyProject, rootAdmins, unsealed, holding: new Set(grants.filter((grant) => grant.projectId !== null).map((grant) => grant.principal)) };
   } finally {
     await close();
   }
 }
 
-export function describeFirstRun({ everyProject, unsealed, holding }: FirstRun): string {
+export function describeFirstRun({ everyProject, rootAdmins, unsealed, holding }: FirstRun): string {
   // What a member holds once the vault has converted: their grants on a place, and what it makes of those on every project, unless it leaves them.
   const converted = everyProject.filter((preview) => !preview.reported && preview.conversion.grants.length > 0).map((preview) => preview.principal);
   const holds = new Set([...holding, ...converted]);
-  return describeEveryProject(everyProject) + describeUnsealed(unsealed, new Set(unsealed.map((row) => row.principal).filter((principal) => !holds.has(principal))));
+  return describeEveryProject(everyProject) + describeRootAdmins(rootAdmins) +
+    describeUnsealed(unsealed, new Set(unsealed.map((row) => row.principal).filter((principal) => !holds.has(principal))));
+}
+
+/**
+ * The root admins of 0.5, whom the vault makes Owners of the whole
+ * instance when this version first runs, after the grants above: everyone
+ * its configuration names, of whom the database knows only those who
+ * signed in; or, once it has, those a vault of 0.5 let in since, still
+ * serving or rolled back to. Nothing on an instance that had none.
+ *
+ *   Root admins are gone in this version. When it first runs, after any conversion above, the vault makes
+ *   everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:
+ *     user:root@acme.example
+ */
+export function describeRootAdmins(rootAdmins: FirstRun['rootAdmins']): string {
+  if (rootAdmins === null || rootAdmins.rooted.length === 0) return '';
+  const head = rootAdmins.whole
+    ? [
+        'Root admins are gone in this version. When it first runs, after any conversion above, the vault makes',
+        "everyone its bootstrapOwners (0.5's rootAdmins) names an Owner of the whole instance, once. Of them, these signed in:",
+      ]
+    : [
+        'A vault of 0.5 let these root admins in after this version made its Owners. When it next runs, the vault',
+        'makes each its bootstrapOwners still names an Owner of the whole instance, and nobody else on the list:',
+      ];
+  return ['', ...head, ...rootAdmins.rooted.map((principal) => `  ${shownMember(principal)}`), ''].join('\n');
 }
 
 /**

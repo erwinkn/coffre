@@ -99,7 +99,9 @@ DELETE /api/members/user:ada@acme.example   remove; answers with the report
 Services are `token:<name>`. From the client, `coffre.members.get(member)` and
 `coffre.members.remove(member)`.
 
-Both need an Admin or Owner whose scope narrows nothing.
+Both need an Admin or Owner whose scope narrows nothing. Removing an Owner,
+scoped or not, needs an Owner of the whole instance, and the last one stays
+(`last_owner`): make another Owner before offboarding them.
 
 The generation is what makes removal stick. Even if the app's own clean-up
 failed after the vault committed, re-adding someone cannot revive a session,

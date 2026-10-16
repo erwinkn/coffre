@@ -27,8 +27,13 @@ function checkout(t) {
     return dir;
 }
 
+// Bump ends by asking npm's registry how old each pinned dependency is, a
+// few seconds of fetches at best and the whole timeout on a slow day. These
+// tests check what it writes, never that: offline, it says it could not.
+const OFFLINE = 'data:text/javascript,globalThis.fetch = () => Promise.reject(new Error("offline in tests"));';
+
 function run(dir, script, ...args) {
-    return spawnSync(process.execPath, [join(dir, 'scripts', script), ...args], { cwd: dir, encoding: 'utf8', timeout: 10_000 });
+    return spawnSync(process.execPath, ['--import', OFFLINE, join(dir, 'scripts', script), ...args], { cwd: dir, encoding: 'utf8', timeout: 10_000 });
 }
 
 test('bump moves the Action with the packages and examples; check:pins rejects drift and ranges', (t) => {
