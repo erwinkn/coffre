@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Shift+Enter types a line break in a secret's value.** A value could only
+  become multi-line by pasting one. In the value field of a new or edited
+  secret, Shift+Enter now inserts a line break at the caret, over any
+  selection, and the field turns into the focused textarea, its caret after
+  it. Enter alone, Cmd/Ctrl+Enter (save) and Escape are as they were.
 - **A deployment-declared Owner shows a plain Owner tag.** People no
   longer adds "· set by deployment" after it. To another Owner, the tag
   is greyed, with the hint "Set by deployment" on hover or tap, or by keyboard;

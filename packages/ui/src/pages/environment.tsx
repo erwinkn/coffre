@@ -747,8 +747,16 @@ function ValueField({
   // the end of the edit: taking its last line break out moves no focus.
   const [lines, setLines] = useState(() => start.includes('\n') || value.includes('\n'));
   if (!lines && value.includes('\n')) setLines(true);
-  // Where the caret goes in the textarea a paste opened.
+  // Where the caret goes in the textarea a paste or a typed line break opened.
   const caret = useRef<number | null>(null);
+  // Text goes into the value of the single-line field in place of its
+  // selection, and the field turns into a textarea, focused, its caret after it.
+  const insert = (text: string, field: HTMLInputElement) => {
+    const from = field.selectionStart ?? value.length;
+    const to = field.selectionEnd ?? from;
+    caret.current = from + text.length;
+    onChange(value.slice(0, from) + text + value.slice(to));
+  };
   const field = {
     className: 'input input-mono',
     masked: !shown,
@@ -789,11 +797,15 @@ function ValueField({
             const pasted = event.clipboardData.getData('text/plain');
             if (!/[\r\n]/.test(pasted)) return;
             event.preventDefault();
-            const text = pasted.replace(/\r\n?/g, '\n');
-            const from = event.currentTarget.selectionStart ?? value.length;
-            const to = event.currentTarget.selectionEnd ?? from;
-            caret.current = from + text.length;
-            onChange(value.slice(0, from) + text + value.slice(to));
+            insert(pasted.replace(/\r\n?/g, '\n'), event.currentTarget);
+          }}
+          // Shift+Enter types a line break, the way a textarea's Enter does.
+          // Enter alone stays as it was, and so does Cmd/Ctrl+Enter, which saves.
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && event.shiftKey && !event.metaKey && !event.ctrlKey) {
+              event.preventDefault();
+              insert('\n', event.currentTarget);
+            } else field.onKeyDown(event);
           }}
         />
       )}
