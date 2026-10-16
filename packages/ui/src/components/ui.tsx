@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
 import { AlertDialog } from '@base-ui/react/alert-dialog';
 import { Dialog } from '@base-ui/react/dialog';
 import { Menu } from '@base-ui/react/menu';
 import { Popover } from '@base-ui/react/popover';
 import { Tooltip } from '@base-ui/react/tooltip';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
-import { copyAttempts } from '../lib/copy-attempts';
+import { createCopier, type Copier } from '../lib/copy-attempts';
 import { usePreferences } from '../lib/preferences';
 
 /* -------------------------------------------------------------------------- */
@@ -244,50 +244,29 @@ export function breakAfterUnderscores(text: string): ReactNode {
  * look stuck. A copy that fails says so the same way, in red, rather than
  * leaving the click looking ignored.
  *
- * `value` is the text, or a function that does the whole copy and says how it
- * ended (Copy on a hidden secret: it reads the value, then copies it). The
- * function is called inside the click, so the clipboard write keeps its user
- * gesture. Copies do not lock the button: a click while one is out starts the
- * next, and the latest one's ending is the one that shows (`copyAttempts`).
+ * `value` is the text. A caller that must read it first (Copy on a hidden
+ * secret) passes the `copier` it owns instead, and `onCopy`, called inside the
+ * click so the clipboard write keeps its user gesture, which starts a copy on
+ * that copier. Copies do not lock the button: a click while one is out starts
+ * the next, and the latest one's ending is the one that shows. The copier's
+ * owner outlives the button, so a remount keeps the feedback of a copy in flight.
  */
 export function CopyButton({
-  value,
   label = 'Copy',
   variant = 'icon',
+  ...source
 }: {
-  value: string | (() => Promise<'copied' | 'failed' | 'superseded'>);
   label?: string;
   /** `act` sits among a table row's actions; `icon` anywhere else. */
   variant?: 'icon' | 'act';
-}) {
-  const [state, setState] = useState<'idle' | 'pending' | 'copied' | 'failed'>('idle');
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const attempts = useRef<ReturnType<typeof copyAttempts> | null>(null);
+} & ({ value: string; copier?: undefined; onCopy?: undefined } | { value?: undefined; copier: Copier; onCopy: () => void })) {
+  const [own] = useState(() => createCopier());
+  const copier = source.copier ?? own;
+  const state = useSyncExternalStore(copier.subscribe, copier.feedback, copier.feedback);
 
-  useEffect(() => () => {
-    if (timer.current !== null) clearTimeout(timer.current);
-  }, []);
-
-  function settle(next: 'copied' | 'failed') {
-    setState(next);
-    if (timer.current !== null) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setState('idle'), next === 'copied' ? 1400 : 3000);
-  }
-
-  async function copy() {
-    // An earlier copy's feedback must not end this one's.
-    if (timer.current !== null) clearTimeout(timer.current);
-    // Nothing is awaited before the copy starts: the click's gesture is still live.
-    let ended: Promise<'copied' | 'failed' | 'superseded'>;
-    if (typeof value === 'string') {
-      attempts.current ??= copyAttempts();
-      ended = attempts.current(value).then((result) => result.outcome);
-    } else {
-      ended = value();
-      setState('pending');
-    }
-    const outcome = await ended;
-    if (outcome !== 'superseded') settle(outcome);
+  function copy() {
+    if (source.copier !== undefined) source.onCopy();
+    else void own.run(source.value);
   }
 
   const text = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : label;

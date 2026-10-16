@@ -29,7 +29,7 @@ import {
   type SecretChange,
   type SecretDraft,
 } from '../lib/secret-edit-batch';
-import { copyAttempts } from '../lib/copy-attempts';
+import { createCopier } from '../lib/copy-attempts';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { noReads, revealToggleDisabled, rowReads } from '../lib/row-reads';
 import { sortKeys, type Sort } from '../lib/secret-order';
@@ -1015,11 +1015,10 @@ function SecretRow({
   // it to the clipboard, never to the screen or to the row's reveal state: it shares
   // nothing with Reveal but the endpoint, so neither can change whether a value is
   // shown or Hide can be pressed. Copies do not lock each other out; the latest one
-  // wins. The row holds the attempts, which a remount of the button does not reset,
-  // and only the latest may set `copyError`: an older copy's late result is dropped.
-  const copies = useRef<ReturnType<typeof copyAttempts> | null>(null);
-  async function copyValue(): Promise<'copied' | 'failed' | 'superseded'> {
-    copies.current ??= copyAttempts();
+  // wins. The row holds the copier, which a remount of the button does not reset,
+  // and only the latest copy may set `copyError` or the button's feedback.
+  const [copier] = useState(() => createCopier());
+  function copyValue() {
     dispatch({ type: 'copy-started' });
     // What a failed read said, if the read is what failed rather than the clipboard.
     const read: { failed: boolean; failure?: unknown } = { failed: false };
@@ -1031,20 +1030,19 @@ function SecretRow({
             read.failure = failure;
             throw failure;
           });
-    const result = await copies.current(text);
-    if (result.outcome === 'superseded') return 'superseded';
-    if (result.outcome === 'copied') {
-      dispatch({ type: 'copy-succeeded' });
-      return 'copied';
-    }
-    dispatch({
-      type: 'copy-failed',
-      message:
-        read.failed
-          ? readFailureMessage(read.failure)
-          : 'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
+    void copier.run(text).then((result) => {
+      if (result.outcome === 'superseded') return;
+      dispatch(
+        result.outcome === 'copied'
+          ? { type: 'copy-succeeded' }
+          : {
+              type: 'copy-failed',
+              message: read.failed
+                ? readFailureMessage(read.failure)
+                : 'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
+            },
+      );
     });
-    return 'failed';
   }
 
   // An edit starts from the current value, read the way Reveal reads it, so
@@ -1212,7 +1210,7 @@ function SecretRow({
                         as for Reveal, it takes secret.read, and a reference copies the
                         value it reads through. */}
                     <SecretReadOnly canReveal={canReveal}>
-                      <CopyButton variant="act" value={copyValue} label={`Copy ${entry.key}`} />
+                      <CopyButton variant="act" copier={copier} onCopy={copyValue} label={`Copy ${entry.key}`} />
                       <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                         <button
                           className="act act-icon act-accent"
@@ -1417,13 +1415,15 @@ function SecretRow({
         </tr>
       )}
 
-      {(error ?? copyError ?? actError) !== null && (
+      {(error ?? actError) !== null || copyError !== null ? (
         <tr className="row-error">
           <td colSpan={columns}>
-            <ErrorLine error={(error ?? copyError ?? actError)!} />
+            {/* Reveal's refusal and Copy's are independent: neither hides the other. */}
+            <ErrorLine error={error ?? actError} />
+            <ErrorLine error={copyError} />
           </td>
         </tr>
-      )}
+      ) : null}
     </>
   );
 }
