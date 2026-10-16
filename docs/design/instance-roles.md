@@ -335,8 +335,8 @@ over first, as removing them would. While named, nobody demotes, narrows
 or removes them, themselves included: the vault refuses with `not_allowed`,
 "the deployment names root@acme.example an Owner (owners, in the vault's
 configuration): take them off that list and deploy first", and Users shows
-them "Owner · set by deployment" with a lock in place of their menu
-(`about().owners`, which the members list reads).
+other Owners their Owner tag greyed, hinting "Set by deployment", with a lock
+in place of their menu (`about().owners`, which the members list reads).
 
 | The list, at a deploy | Sam, before | After |
 |---|---|---|

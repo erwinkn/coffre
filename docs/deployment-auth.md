@@ -207,8 +207,8 @@ Owner, and the others follow at the vault's next call, whether they have
 signed in or not.
 
 While listed, nobody can demote, narrow or remove them, not another Owner
-and not themselves: People shows them "Owner · set by deployment", and
-the API answers 403, "the deployment names omar@acme.example an Owner
+and not themselves: People greys their Owner tag for other Owners, with the hint "Set by
+deployment" and a lock in place of their menu, and the API answers 403, "the deployment names omar@acme.example an Owner
 (owners, in the vault's configuration): take them off that list and deploy
 first".
 Taking an email off the list demotes nobody: they stay an Owner, now one

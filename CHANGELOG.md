@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A deployment-declared Owner shows a plain Owner tag.** People no
+  longer adds "· set by deployment" after it. To another Owner, the tag
+  is greyed, with the hint "Set by deployment" on hover, focus or tap;
+  everyone else sees the normal tag.
+
 ## 0.6.0 (2026-10-16)
 
 **Owners replace root admins.** Root admins were emails in the vault's

@@ -88,3 +88,15 @@ export function SecretReadOnly({
 }): ReactNode {
   return canReveal ? children : null;
 }
+
+/**
+ * Whether an Owner's tag greys out with "Set by deployment": the deployment names
+ * this Owner, and the viewer is someone who could otherwise change Owners. Anyone
+ * else sees the plain Owner tag, as nothing is theirs to change.
+ */
+export function setByDeployment(
+  principal: { instanceRole: string; declared?: boolean },
+  capabilities: Pick<UiCapabilities, 'ownsInstance'>,
+): boolean {
+  return principal.declared === true && principal.instanceRole === 'owner' && capabilities.ownsInstance;
+}
