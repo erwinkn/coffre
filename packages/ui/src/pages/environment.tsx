@@ -800,9 +800,10 @@ function ValueField({
             insert(pasted.replace(/\r\n?/g, '\n'), event.currentTarget);
           }}
           // Shift+Enter types a line break, the way a textarea's Enter does.
-          // Enter alone stays as it was, and so does Cmd/Ctrl+Enter, which saves.
+          // Enter alone stays as it was, and so does Cmd/Ctrl+Enter, which saves,
+          // and so does Shift+Enter that confirms text an input method is composing.
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && event.shiftKey && !event.metaKey && !event.ctrlKey) {
+            if (event.key === 'Enter' && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               insert('\n', event.currentTarget);
             } else field.onKeyDown(event);

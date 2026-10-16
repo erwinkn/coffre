@@ -215,7 +215,7 @@ const pasteInto = (steps: { open: string; name?: string; field: string; select?:
 })()`;
 
 /**
- * A new secret's value typed as a person would: `first`, Shift+Enter, then
+ * A new secret's value typed as a person would: `first`, Shift+Enter while composing (which does nothing), Shift+Enter, then
  * `second` into whichever field the page has by then; then the row saved.
  * Answers which field has the focus after the line break, and where its caret is.
  */
@@ -243,6 +243,10 @@ const typeLines = (steps: { name: string; field: string; first: string; second: 
   if (input === null) return { field: null };
   input.focus();
   typed(input, first);
+  // Shift+Enter that confirms an input method's composition is not a line break.
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, isComposing: true, bubbles: true, cancelable: true }));
+  await wait(300);
+  if (document.activeElement !== input || input.value !== first) return { field: 'composing', value: document.activeElement.value };
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
   await wait(300);
   const focused = document.activeElement;
