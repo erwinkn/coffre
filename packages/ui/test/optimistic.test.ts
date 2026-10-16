@@ -132,6 +132,32 @@ test('an optimistic add shows at once as saving, then as confirmed', async () =>
   stop();
 });
 
+test('a grant to a new service account makes it in the same call, and its refusal leaves none to show', async () => {
+  const { client } = server([lead]);
+  const sent: [string, unknown][] = [];
+  const asked = later<unknown>();
+  (client.members as unknown as { add: (member: string, input: unknown) => Promise<unknown> }).add = (member, input) => {
+    sent.push([member, input]);
+    return asked.promise;
+  };
+  const queryClient = createQueryClient();
+  const stop = await onScreen(queryClient, client);
+  const add = new MutationObserver(queryClient, changeOptions(queryClient, grantAccess(client, 'market')));
+  const fresh: GrantVars = { principalType: 'service', principalId: 'ci-new', role: 'viewer', roleName: 'Viewer', environmentSlug: 'prod', expiresAt: '2999-12-31T23:59:59.000Z', admit: true };
+
+  const done = add.mutate(fresh).catch(() => {});
+  await settle();
+  assert.deepEqual(sent, [['token:ci-new', { access: { 'market/prod': { role: 'viewer', until: '2999-12-31T23:59:59.000Z' } } }]], 'one call: no access.set');
+  asked.reject(new CoffreError(403, 'vault_refused', 'the vault refused: user:admin@acme.example removed this service account: only they, or someone who runs the whole instance, may bring it back', 'not_allowed'));
+  await done;
+  await settle();
+  assert.deepEqual(listed(queryClient).map(grantId), [grantId(lead)]);
+  const status = itemStatus(changes(queryClient), grantId(fresh));
+  assert.equal(status.state === 'failed' && status.error, 'user:admin@acme.example removed this service account: only they, or someone who runs the whole instance, may bring it back', 'in the vault\'s words');
+  assert.deepEqual(failedAdds<GrantVars>(changes(queryClient), listed(queryClient).map(grantId)).map((entry) => entry.vars), [fresh]);
+  stop();
+});
+
 test('a refused add rolls back and says why, in the API’s words, on a row of its own', async () => {
   const { client, held } = server([lead]);
   const queryClient = createQueryClient();

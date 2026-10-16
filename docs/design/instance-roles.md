@@ -135,7 +135,9 @@ what it was.
 Inside the setting, a person who holds access somewhere
 (`setsUpServices`):
 
-- **adds a service account**, which holds nothing yet;
+- **adds a service account**, which holds nothing yet, or adds it with
+  its first grants, in one vault decision: a grant refused adds nothing,
+  so no account is left without the access it was made for;
 - **gives it a grant** on a place where they hold everything the role
   does (`givesService`): a Developer of `market/dev` gives `viewer` or
   `developer` there, never `maintainer` or `owner`, nor `market`, which
@@ -535,7 +537,9 @@ grant given is an `access.grant` with `reason: 'every-project'`.
   `report` only to those who run the instance.
   `PUT /api/members/<member>` takes `{ role, scope }`, the scope's
   projects by slug: `{ "role": "developer", "scope": { "environments": { "only": ["dev"] } } }`
-  (either filter left out is `all`). Members list `instanceRole` and
+  (either filter left out is `all`); for a service account, `{ access }`
+  instead, its first grants as `PATCH /api/access` takes them, in the same
+  vault call (`setAccess` with `admit`). Members list `instanceRole` and
   `scope`, which is null but for those who run the instance: a scope names
   projects the caller may not see. `GET /api/members?path=market` lists those who reach `market` by
   their instance role too, with no grant. `GET /api/members/<member>/access`

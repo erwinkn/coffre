@@ -508,6 +508,12 @@ export type Api = {
           except: string[];
         };
       };
+      access?: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
+          role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          until: string | null;
+        };
+      };
     };
     output: {
       member: string;
@@ -525,6 +531,9 @@ export type Api = {
         };
       };
       created: boolean;
+      changes?: {
+        [key: string]: "created" | "revoked" | "unchanged" | "updated";
+      };
     };
   };
   "DELETE /members/:member": {
@@ -754,6 +763,23 @@ export type Api = {
     output: {
       changes: {
         [key: string]: "created" | "revoked" | "unchanged" | "updated";
+      };
+      admitted?: {
+        created: boolean;
+        role: "admin" | "auditor" | "developer" | "member" | "owner";
+        scope: {
+          projects: "all" | {
+            only: string[];
+          } | {
+            except: string[];
+          };
+          environments: "all" | {
+            only: string[];
+          } | {
+            except: string[];
+          };
+        };
+        generation: number;
       };
     };
   };

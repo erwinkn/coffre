@@ -31,6 +31,8 @@ export function failureMessage(error: unknown): string {
   if (!(error instanceof CoffreError)) return 'The request could not be sent. Nothing was changed.';
   if (error.status === 401) return 'Your session has ended. Sign in again, then retry.';
   if (error.code === 'cross_origin') return 'coffre refused a change that did not come from this page. Reload, then retry.';
+  // The vault's own rule, which the app could not foresee (one removed by someone else, say), in its words.
+  if (error.code === 'vault_refused' && error.reason === 'not_allowed') return error.message.replace(/^the vault refused: /, '');
   if (error.status === 403) {
     return 'You hold no grant that covers this. Someone with grant.manage on the project can add one.';
   }

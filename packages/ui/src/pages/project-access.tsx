@@ -3,7 +3,7 @@ import { useSuspenseQuery } from '@tanstack/react-query';
 import { useShell } from '../lib/use-shell';
 import { useCoffre } from '../lib/coffre';
 import { grantAccess, grantId } from '../lib/changes';
-import { queries } from '../lib/queries';
+import { listsServices, queries } from '../lib/queries';
 import { useChange } from '../lib/use-change';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import { ReferencesInto } from '../components/references';
@@ -116,17 +116,25 @@ function NewGrant({
   environments: ProjectSummary['environments'];
   grants: GrantRow[];
 }) {
-  const { capabilities } = useShell();
+  const shell = useShell();
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
+  // A new service account, named in the picker: the grant makes it.
+  const [admit, setAdmit] = useState(false);
   const [permission, setPermission] = useState('viewer:');
   const [expiresAt, setExpiresAt] = useState('');
   const grant = useChange(grantAccess(useCoffre(), project));
   const permissionOptions = projectAccessOptions(environments);
   const kind = KIND[principalType];
+  const service = principalType === 'service';
 
+  // Each opening starts afresh: the picker's filter does, and a new account is named only there.
   function close() {
     setOpen(false);
+    setPrincipalId('');
+    setAdmit(false);
+    setExpiresAt('');
+    setPermission('viewer:');
   }
 
   return (
@@ -160,19 +168,22 @@ function NewGrant({
               roleName: permissionOptions.find((option) => option.value === permission)?.label ?? access.role,
               environmentSlug: access.environmentSlug,
               expiresAt: expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
+              admit,
             });
-            setPrincipalId('');
-            setExpiresAt('');
-            setPermission('viewer:');
             close();
           }}
         >
           <PrincipalPicker
             principalType={principalType}
-            canList={capabilities.canManageGrants}
+            canList={service ? listsServices(shell) : shell.capabilities.canManageGrants}
+            canCreate={service && shell.capabilities.setsUpServices}
             grants={grants}
             value={principalId}
-            onChange={setPrincipalId}
+            admit={admit}
+            onChange={(next, isNew) => {
+              setPrincipalId(next);
+              setAdmit(isNew);
+            }}
           />
 
           <div className="form-row">
@@ -209,7 +220,7 @@ function NewGrant({
               Cancel
             </button>
             <button className="btn btn-primary" type="submit" disabled={principalId.trim() === ''}>
-              Grant access
+              {admit ? 'Create and grant access' : 'Grant access'}
             </button>
           </div>
         </form>

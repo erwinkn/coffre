@@ -49,6 +49,7 @@ import {
   type AccessChange,
   type AccessFault,
   type AdmitInput,
+  type Admitted,
   type Checkpoint,
   type CheckpointKey,
   type EndReferencesInput,
@@ -1511,7 +1512,7 @@ class VaultService implements Vault {
 
   // --- changing access ----------------------------------------------------------
 
-  setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>> {
+  setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[]; admitted?: Admitted }>> {
     const { actor, principal } = input;
     const changes = input.changes.map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, environmentSlug: null, role, expiresAt }));
     const action = changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
@@ -1580,12 +1581,15 @@ class VaultService implements Vault {
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
       if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
-      if (row?.status === 'removed') throw refused('removed');
-      if (row === undefined) throw refused('not_a_member');
+      // A service account admitted with its first grants, as `admit` would: all of it, or none.
+      const admitted = input.admit === true && row?.status !== 'active' ? await this.#admitWith(d, acting, principal, row, input) : undefined;
+      if (admitted === undefined && row?.status === 'removed') throw refused('removed');
+      if (admitted === undefined && row === undefined) throw refused('not_a_member');
       if (!manages) {
         // The setting as of the log's head, which a change to it takes too.
         const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
-        const account = await this.#account(d.tx, subject, row);
+        // One just admitted holds nothing yet, and is theirs.
+        const account = admitted !== undefined || row === undefined ? { grants: [], admittedBy: actor } : await this.#account(d.tx, subject, row);
         // Each place's new role they must hold, and what it held before: taking a grant away is changing it.
         const gives = changes.every((change, i) => {
           const before = subject.live.grants.find((grant) => placeKey({ ...grant, environmentSlug: null }) === placeKey(change));
@@ -1598,8 +1602,21 @@ class VaultService implements Vault {
       d.grants.set(principal, [...held]);
       const outcomes = changes.map((change) => this.#apply(d, actor, principal, held, change, input));
       if (d.writes.length > 0) d.touched.add(principal);
-      return { changes: outcomes };
+      return { changes: outcomes, ...(admitted === undefined ? {} : { admitted }) };
     });
+  }
+
+  /**
+   * Admit a service account that `setAccess` gives its first grants, as
+   * `admit` would, its refusals logged as `member.add`'s: someone who does
+   * not run the instance sets one up as they would through `admit`.
+   */
+  async #admitWith(d: Decision, acting: Standing, principal: string, row: Member | undefined, input: SetAccessInput): Promise<Admitted> {
+    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+      new Refused(refusal(code, message), [accessEntry(acting.principal, 'member.add', principal, 'deny', input, { changes: input.changes }, code)]);
+    if (!SERVICE.test(principal)) throw refused('invalid', 'only a service account is admitted with its grants: a person, by an instance role');
+    if (!runsInstance(acting.live)) await this.#setsUp(d, acting, true, refused);
+    return this.#enlist(d, acting, principal, row, undefined, input, refused);
   }
 
   /** One place's change, logged when it changes what is live. */
@@ -1653,7 +1670,7 @@ class VaultService implements Vault {
     return current === undefined ? 'created' : 'updated';
   }
 
-  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; role: InstanceRole; scope: Scope; generation: number }>> {
+  admit(input: AdmitInput): Promise<Outcome<Admitted>> {
     const { actor, principal } = input;
     const asked = input.role === undefined ? {} : { role: input.role, scope: input.scope ?? EVERYWHERE };
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
@@ -1664,19 +1681,9 @@ class VaultService implements Vault {
       validateCorrelation(input);
       const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!runsInstance(acting.live)) {
-        // A service account, with no grant yet, any person who could give it one sets up (`setsUpServices`).
-        const service = SERVICE.test(principal) && (input.role ?? 'member') === 'member' && input.scope === undefined;
-        const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
-        if (!service || !PERSON.test(actor) || !setsUpServices(acting.live, setting, placesOf(await store.liveProjects(d.tx)))) {
-          throw refused('not_allowed', 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up');
-        }
-        // One removed they bring back only if they removed it themselves, never one someone else took away.
-        const removed = d.members.get(principal);
-        if (removed?.status === 'removed' && removed.statusChangedBy !== actor) {
-          throw refused('not_allowed', `${shownMember(removed.statusChangedBy)} removed this service account: only they, or someone who runs the whole instance, may bring it back`);
-        }
-      }
+      // A service account, with no grant yet, any person who could give it one sets up (`setsUpServices`).
+      const service = SERVICE.test(principal) && (input.role ?? 'member') === 'member' && input.scope === undefined;
+      if (!runsInstance(acting.live)) await this.#setsUp(d, acting, service, refused);
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (input.role !== undefined && !isInstanceRole(input.role)) throw refused('invalid', `no such instance role: ${input.role}`);
       if (input.scope !== undefined && (input.role === undefined || !isScope(input.scope))) throw refused('invalid', 'a scope is a role\'s: { projects, environments }, each all, only or except');
@@ -1689,35 +1696,8 @@ class VaultService implements Vault {
       if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       d.touched.add(principal);
       d.grants.set(principal, [...subject.stored]);
-      const entry = (action: string, detail: Record<string, unknown>) =>
-        d.log.push(accessEntry(actor, action, principal, 'allow', input, detail));
 
-      if (row === undefined || row.status === 'removed') {
-        if (wanted?.role === 'owner' && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
-        // Coming back is a fresh start: a member, unless given a role again.
-        const { role, scope } = wanted ?? { role: 'member' as const, scope: EVERYWHERE };
-        entry(row === undefined ? 'member.add' : 'member.restore', { role, scope });
-        d.writes.push(async (at) => {
-          if (row === undefined) {
-            await store.insertMember(d.tx, {
-              principal,
-              status: 'active',
-              role,
-              scope,
-              generation: 0,
-              createdAt: at,
-              createdBy: actor,
-              statusChangedAt: at,
-              statusChangedBy: actor,
-              ...UNSEALED,
-            });
-          } else {
-            await store.updateMember(d.tx, principal, { status: 'active', role, scope, statusChangedAt: at, statusChangedBy: actor });
-          }
-        });
-        // A removal moved the generation on already; coming back keeps it.
-        return { created: true, role, scope, generation: row?.generation ?? 0 };
-      }
+      if (row === undefined || row.status === 'removed') return this.#enlist(d, acting, principal, row, wanted, input, refused);
       const changed = wanted !== undefined && JSON.stringify(standing(wanted)) !== JSON.stringify(standing(row));
       // Read under both rows' locks: neither the actor's role nor the subject's changes before this commits.
       if (changed && (wanted.role === 'owner' || subject.live.role === 'owner') && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
@@ -1726,12 +1706,69 @@ class VaultService implements Vault {
       if (changed && this.#listed(principal) && !ownsInstance(wanted)) throw refused('not_allowed', declaredOwner(principal));
       if (changed && ownsInstance(subject.live) && !ownsInstance(wanted)) await this.#keepAnOwner(d, actor, principal, refused);
       if (changed) {
-        entry('member.role', { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope });
+        d.log.push(accessEntry(actor, 'member.role', principal, 'allow', input, { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope }));
         d.writes.push(() => store.updateMember(d.tx, principal, { role: wanted.role, scope: wanted.scope }));
         return { created: false, ...wanted, generation: row.generation };
       }
       return { created: false, role: row.role, scope: row.scope, generation: row.generation };
     });
+  }
+
+  /**
+   * Whether `acting`, who does not run the instance, may admit `principal`:
+   * only a service account (`service`: one asked for with no role), as a
+   * person who could give it a grant somewhere (`setsUpServices`), and one
+   * removed only if they removed it themselves, never one someone else
+   * took away.
+   */
+  async #setsUp(d: Decision, acting: Standing, service: boolean, refused: (code: RefusalCode, message?: string) => Refused): Promise<void> {
+    const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
+    if (!service || !PERSON.test(acting.principal) || !setsUpServices(acting.live, setting, placesOf(await store.liveProjects(d.tx)))) {
+      throw refused('not_allowed', 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up');
+    }
+  }
+
+  /**
+   * Admit `principal`, who has no row or a removed one: a fresh start, as a
+   * member unless given a role (`wanted`), at the generation a removal
+   * moved on. The caller has checked who may, and locked the row.
+   */
+  #enlist(
+    d: Decision,
+    acting: Standing,
+    principal: string,
+    row: Member | undefined,
+    wanted: { role: InstanceRole; scope: Scope } | undefined,
+    correlation: Correlation,
+    refused: (code: RefusalCode, message?: string) => Refused,
+  ): Admitted {
+    const actor = acting.principal;
+    if (row?.status === 'removed' && row.statusChangedBy !== actor && !runsInstance(acting.live)) {
+      throw refused('not_allowed', `${shownMember(row.statusChangedBy)} removed this service account: only they, or someone who runs the whole instance, may bring it back`);
+    }
+    if (wanted?.role === 'owner' && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
+    const { role, scope } = wanted ?? { role: 'member' as const, scope: EVERYWHERE };
+    d.log.push(accessEntry(actor, row === undefined ? 'member.add' : 'member.restore', principal, 'allow', correlation, { role, scope }));
+    d.writes.push(async (at) => {
+      if (row === undefined) {
+        await store.insertMember(d.tx, {
+          principal,
+          status: 'active',
+          role,
+          scope,
+          generation: 0,
+          createdAt: at,
+          createdBy: actor,
+          statusChangedAt: at,
+          statusChangedBy: actor,
+          ...UNSEALED,
+        });
+      } else {
+        await store.updateMember(d.tx, principal, { status: 'active', role, scope, statusChangedAt: at, statusChangedBy: actor });
+      }
+    });
+    // A removal moved the generation on already; coming back keeps it.
+    return { created: true, role, scope, generation: row?.generation ?? 0 };
   }
 
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>> {

@@ -224,7 +224,9 @@ reference to that secret in `References`, and none yet elsewhere.
 - **Retries.** A write whose version moved prepares again in the code; in
   the model it ends. A deletion asked again is a second operation.
 - **Admission and restoring a member**, checkpoints, sessions beyond their
-  generation, and lapsed grants.
+  generation, and lapsed grants. A service account admitted with its first
+  grants (`setAccess` with `admit`) takes a grant's locks, the member's row
+  and then the head, in one decision, so it is a grant to the model.
 - **References, to their shape.**
   - There is one holder and one source, in different projects. A holder
     inside what is archived, which doesn't block the archive, is left out.

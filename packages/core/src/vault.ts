@@ -63,14 +63,18 @@ export interface Vault {
    * becomes one here, logged (`reason: 'owners'`).
    */
   access(principal: string): Promise<Access>;
-  /** Set roles at several places for one principal: all of it, or none. */
-  setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>>;
+  /**
+   * Set roles at several places for one principal: all of it, or none.
+   * With `admit`, a service account that is not a member is admitted
+   * first, in the same decision, as `admit` would: `admitted` says so.
+   */
+  setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[]; admitted?: Admitted }>>;
   /**
    * Add a member, bring back a removed one, or change a person's instance
    * role and its scope. `generation` is theirs now: sessions and tokens of
    * an earlier one are dead.
    */
-  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; role: InstanceRole; scope: Scope; generation: number }>>;
+  admit(input: AdmitInput): Promise<Outcome<Admitted>>;
   /**
    * Remove a member: revoke every grant and refuse them until admitted
    * again, from `generation` on. An Owner, only an Owner of the whole
@@ -336,6 +340,12 @@ export type SetAccessInput = Correlation & Through & {
   actor: string;
   principal: string;
   changes: GrantChange[];
+  /**
+   * Admit the principal, a service account, unless it is a member: a
+   * grant refused admits nobody. A vault older than this refuses one that
+   * is not a member, `not_a_member`, and admits nobody either.
+   */
+  admit?: boolean;
 };
 
 export type AdmitInput = Correlation & Through & {
@@ -353,6 +363,9 @@ export type AdmitInput = Correlation & Through & {
   role?: InstanceRole;
   scope?: Scope;
 };
+
+/** A member as `admit` left them; `created` when they were not one before. */
+export type Admitted = { created: boolean; role: InstanceRole; scope: Scope; generation: number };
 
 export type RemoveInput = Correlation & Through & {
   actor: string;
