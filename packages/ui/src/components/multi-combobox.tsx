@@ -34,11 +34,12 @@ export function MultiCombobox({
 }) {
   const { portal } = usePreferences();
   const id = useId();
+  const labelId = useId();
   const hintId = useId();
   return (
     <Combobox.Root items={options} multiple value={value} onValueChange={(next) => onChange(options.filter((option) => next.includes(option)))}>
       <div className="field">
-        <label className="label" htmlFor={id}>
+        <label className="label" htmlFor={id} id={labelId}>
           {label}
         </label>
         <Combobox.InputGroup className={`combo${mono ? ' combo-mono' : ''}`}>
@@ -53,6 +54,8 @@ export function MultiCombobox({
             ))}
             <Combobox.Input
               id={id}
+              // Named by reference too: while the list is open, Base UI hides what lies outside it, the label included.
+              aria-labelledby={labelId}
               className="combo-input"
               placeholder={value.length > 0 ? undefined : placeholder}
               aria-describedby={hint === undefined ? undefined : hintId}

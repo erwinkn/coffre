@@ -116,6 +116,25 @@ export type GitHubLookup =
   | { state: 'found'; ids: GitHubIds }
   | { state: 'missing' | 'failed'; message: string };
 
+/** The lookups a page made, by `lookupKey`: a Map, since `constructor` is an owner's name, not a lookup made. */
+export type GitHubLookups = ReadonlyMap<string, GitHubLookup>;
+
+/** What the page knows of the name the form names: nothing yet, or nothing to ask while it reads as no name. */
+export function lookupOf(known: GitHubLookups, target: { kind: 'repository' | 'owner'; name: string }): GitHubLookup | null {
+  return lookupable(target) ? (known.get(lookupKey(target.name)) ?? null) : null;
+}
+
+/**
+ * The lookups with one more answer. IDs found always stand. Anything else
+ * replaces only the lookup under way for that name: a failure arriving after
+ * the name was found otherwise, as a repository's owner, changes nothing.
+ */
+export function answered(known: GitHubLookups, name: string, answer: GitHubLookup): GitHubLookups {
+  const key = lookupKey(name);
+  if (answer.state !== 'found' && answer.state !== 'looking' && known.get(key)?.state !== 'looking') return known;
+  return new Map(known).set(key, answer);
+}
+
 /** A lookup that failed, as the dialog says it. */
 export function lookupFailure(name: string, failure: unknown): GitHubLookup {
   if (failure instanceof CoffreError && failure.status === 404) return { state: 'missing', message: `GitHub shows nothing public at ${name}.` };

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useCoffre } from './coffre';
-import { lookupable, lookupFailure, lookupKey, type GitHubIds, type GitHubLookup } from './bindings';
+import { answered, lookupable, lookupFailure, lookupKey, lookupOf, type GitHubIds, type GitHubLookup, type GitHubLookups } from './bindings';
 
 /** How long a name rests in its field before it is looked up. */
 export const LOOKUP_PAUSE_MS = 700;
@@ -24,17 +24,19 @@ export function useGitHubLookup(target: { kind: 'repository' | 'owner'; name: st
   remember: (ids: GitHubIds) => void;
 } {
   const coffre = useCoffre();
-  const [known, setKnown] = useState<Record<string, GitHubLookup>>({});
+  const [known, setKnown] = useState<GitHubLookups>(new Map());
   const key = lookupKey(target.name);
   const valid = lookupable(target);
-  const lookup = valid ? (known[key] ?? null) : null;
+  const lookup = lookupOf(known, target);
+
+  const record = (name: string, answer: GitHubLookup) => setKnown((current) => answered(current, name, answer));
 
   function remember(ids: GitHubIds) {
-    setKnown((current) => ({ ...current, [lookupKey(ids.github)]: { state: 'found', ids } }));
+    record(ids.github, { state: 'found', ids });
   }
 
   function ask(name: string) {
-    setKnown((current) => ({ ...current, [lookupKey(name)]: { state: 'looking' } }));
+    record(name, { state: 'looking' });
     coffre.bindings.lookup({ github: name }).then(
       (ids) => {
         if (!('github' in ids)) return;
@@ -42,7 +44,7 @@ export function useGitHubLookup(target: { kind: 'repository' | 'owner'; name: st
         // The owner of a repository found is known too: no lookup when the binding turns to the whole organization.
         if ('repositoryId' in ids) remember({ github: ids.github.split('/')[0]!, ownerId: ids.ownerId });
       },
-      (failure: unknown) => setKnown((current) => ({ ...current, [lookupKey(name)]: lookupFailure(name, failure) })),
+      (failure: unknown) => record(name, lookupFailure(name, failure)),
     );
   }
 

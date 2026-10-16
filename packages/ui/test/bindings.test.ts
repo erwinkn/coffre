@@ -5,16 +5,19 @@ import { CoffreError } from '@coffre/client';
 import { checkBinding } from '@coffre/core/workloads';
 
 import {
+  answered,
   askedScope,
   bindingOf,
   EMPTY_FORM,
   githubTarget,
   lookupable,
   lookupFailure,
+  lookupOf,
   planned,
   summary,
   type Form,
   type GitHubIds,
+  type GitHubLookups,
   type ScopeChoice,
 } from '../src/lib/bindings.ts';
 
@@ -89,6 +92,27 @@ test('a GitHub environment narrows the binding, left out when empty', () => {
   checkBinding(deploy);
   const reusable = bindingOf(form({ reusable: true, repository: 'acme/api', called: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', sha: SHA, environment: 'prod/eu' }), API);
   assert.equal(checkBinding(reusable).claims.environment, 'prod/eu');
+});
+
+test('the page keeps each lookup by name: IDs found stand, and a late failure replaces only its own lookup', () => {
+  const owner = { kind: 'owner' as const, name: 'acme' };
+  let known: GitHubLookups = new Map();
+  // An owner named like an object's own property is a name like any other: not known before it is asked.
+  assert.equal(lookupOf(known, { kind: 'owner', name: 'constructor' }), null);
+  assert.equal(lookupOf(known, { kind: 'owner', name: '__proto__' }), null);
+  known = answered(known, 'acme', { state: 'looking' });
+  // The repository's answer names its owner while the owner's own lookup is under way.
+  known = answered(known, 'acme/api', { state: 'found', ids: API });
+  known = answered(known, 'acme', { state: 'found', ids: ACME });
+  // Then the owner's lookup fails, the hour's spent: the IDs found stand.
+  known = answered(known, 'ACME', { state: 'failed', message: 'spent' });
+  assert.deepEqual(lookupOf(known, owner), { state: 'found', ids: ACME });
+  // A failure over its own lookup is recorded, under the name in any case.
+  known = answered(known, 'acme/web', { state: 'looking' });
+  known = answered(known, 'Acme/Web', { state: 'missing', message: 'nothing' });
+  assert.deepEqual(lookupOf(known, { kind: 'repository', name: 'acme/web' }), { state: 'missing', message: 'nothing' });
+  // A name that does not read as one is never looked up, whatever the page knows.
+  assert.equal(lookupOf(known, { kind: 'repository', name: 'acme' }), null);
 });
 
 test("a lookup that fails says why: nothing public there, final; the hour's lookups spent, or no answer, worth asking again", () => {
