@@ -215,6 +215,49 @@ const pasteInto = (steps: { open: string; name?: string; field: string; select?:
 })()`;
 
 /**
+ * A new secret's value typed as a person would: `first`, Shift+Enter while composing (which does nothing), Shift+Enter, then
+ * `second` into whichever field the page has by then; then the row saved.
+ * Answers which field has the focus after the line break, and where its caret is.
+ */
+const typeLines = (steps: { name: string; field: string; first: string; second: string; save: string }) => `(async () => {
+  const { name, field, first, second, save } = ${JSON.stringify(steps)};
+  const wait = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
+  const shown = async (label) => {
+    for (let tries = 0; tries < 50; tries++, await wait()) {
+      const found = document.querySelector(\`[aria-label="\${label}"]\`);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  const button = (words) => [...document.querySelectorAll('button')].find((each) => each.getAttribute('aria-label') === words || each.textContent.trim() === words);
+  const typed = (node, text) => {
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value').set.call(node, text);
+    node.dispatchEvent(new Event('input', { bubbles: true }));
+    node.setSelectionRange(text.length, text.length);
+  };
+  button('New secret')?.click();
+  const named = await shown('Name of the new secret');
+  if (named === null) return { field: null };
+  typed(named, name);
+  const input = await shown(field);
+  if (input === null) return { field: null };
+  input.focus();
+  typed(input, first);
+  // Shift+Enter that confirms an input method's composition is not a line break.
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, isComposing: true, bubbles: true, cancelable: true }));
+  await wait(300);
+  if (document.activeElement !== input || input.value !== first) return { field: 'composing', value: document.activeElement.value };
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
+  await wait(300);
+  const focused = document.activeElement;
+  const answer = { field: focused.tagName.toLowerCase(), label: focused.getAttribute('aria-label'), value: focused.value, caret: [focused.selectionStart, focused.selectionEnd] };
+  typed(focused, focused.value + second);
+  await wait(100);
+  button(save)?.click();
+  return answer;
+})()`;
+
+/**
  * A multi-line value pasted into a secret's value field keeps its line
  * breaks. A text input drops them, so the page puts the paste into the
  * value itself and turns the field into a textarea, the caret after the
@@ -250,14 +293,22 @@ export async function pastedValues(deployment: Deployment, admin: Person, browse
       "a PEM key pasted into an edited value did not leave a textarea focused, its caret after the paste",
       editing.answer,
     );
+    const typing = await chrome.load(page, admin.browser.cookies(), undefined, typeLines({ name: 'TYPED_KEY', field: 'Value for TYPED_KEY', first: 'abc', second: 'def', save: 'Save TYPED_KEY now' }));
+    expect(typing.errors.length === 0, `${page} reported errors in the browser`, typing.errors.join('\n'));
+    expect(
+      JSON.stringify(typing.answer) === JSON.stringify({ field: 'textarea', label: 'Value for TYPED_KEY', value: 'abc\n', caret: [4, 4] }),
+      "Shift+Enter typed in a new secret's value did not leave a textarea focused holding the line break, its caret after it",
+      typing.answer,
+    );
   } finally {
     await chrome.close();
   }
   const { values } = await admin.api.secrets.reveal(PASTED);
+  expect(values.TYPED_KEY === 'abc\ndef', `the typed secret saved ${shape(values.TYPED_KEY)}, not two lines, abc and def`);
   expect(values.PASTED_KEY === added, `the new secret saved ${shape(values.PASTED_KEY)}, not the ${shape(added)} pasted`);
   const edited = before.slice(0, 8) + edit + before.slice(20);
   expect(values.EDITED_KEY === edited, `the edited secret saved ${shape(values.EDITED_KEY)}, not the ${shape(edited)} of its value with the paste in characters 8 to 20`);
-  return `in Chrome, a ${added.split('\n').length - 1}-line PEM key pasted into a new secret's value and into part of an edited one: each field a textarea after, focused, its caret after the paste; the new value saved byte for byte, the edited one with the paste in place and its \r\n as \n`;
+  return `in Chrome, a ${added.split('\n').length - 1}-line PEM key pasted into a new secret's value and into part of an edited one: each field a textarea after, focused, its caret after the paste; the new value saved byte for byte, the edited one with the paste in place and its \r\n as \n; and a value typed with Shift+Enter between two words saved as two lines`;
 }
 
 /**
