@@ -378,14 +378,13 @@ test('GitHub: an organization admits its members only, and asks for read:org', a
 
 test("GitHub App: one app signs people in with its user tokens, and its organization check follows the app's permissions and installations", async () => {
   const app = githubApp(idp.githubApp.options);
-  const tokens: string[] = [];
+  const tokens: Record<string, unknown>[] = [];
   const provider = (organization: string) =>
     new GitHubSigninProvider(github({ app, id: 'dev-github', organization }).config, {
       fetch: async (input, init) => {
         const response = await fetch(input, init);
         if (!String(input).endsWith('/login/oauth/access_token')) return response;
-        const body = (await response.clone().json()) as { access_token?: string };
-        if (body.access_token !== undefined) tokens.push(body.access_token);
+        tokens.push((await response.clone().json()) as Record<string, unknown>);
         return response;
       },
     });
@@ -394,7 +393,11 @@ test("GitHub App: one app signs people in with its user tokens, and its organiza
   try {
     // A member of an organization the app is installed on, with Members and Email addresses, read.
     assert.deepEqual((await signIn(provider('acme'), 'dev@acme.example')).emails, ['dev@acme.example']);
-    assert.ok(tokens.length === 1 && tokens[0]!.startsWith('ghu_'), 'a user token of the app, not an OAuth app token');
+    // A user token of the app, not an OAuth app's, answered as GitHub answers an expiring one.
+    const answer = tokens[0]!;
+    assert.match(String(answer.access_token), /^ghu_/);
+    assert.match(String(answer.refresh_token), /^ghr_/);
+    assert.deepEqual([answer.expires_in, answer.refresh_token_expires_in, answer.token_type], [28_800, 15_897_600, 'bearer']);
 
     idp.setGitHubUser('contractor-app@acme.example', { orgs: ['elsewhere'] });
     await refusal(signIn(provider('acme'), 'contractor-app@acme.example'), 'not_in_organization');

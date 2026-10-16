@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { AuthorizationServer, Flavor, Grant } from './authorize.ts';
@@ -74,10 +75,11 @@ export class FakeGitHub {
    * https://docs.github.com/en/apps/oauth-apps/maintaining-oauth-apps/troubleshooting-oauth-app-access-token-request-errors
    */
   async #accessToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const reply = (body: Record<string, string>) => {
+    // Numbers stay numbers in JSON, and are strings in a form, as everything there is.
+    const reply = (body: Record<string, string | number>) => {
       if ((req.headers.accept ?? '').includes('application/json')) return sendJson(res, 200, body);
       res.writeHead(200, { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8' });
-      res.end(new URLSearchParams(body).toString());
+      res.end(new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)])).toString());
     };
     const fail = (error: string, description: string) =>
       reply({ error, error_description: description, error_uri: `${TROUBLESHOOTING}#${error.replaceAll('_', '-')}` });
@@ -114,7 +116,17 @@ export class FakeGitHub {
       return fail('bad_verification_code', 'The code passed is incorrect or expired.');
     }
     // https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
-    if (app) return reply({ access_token: result.accessToken, expires_in: String(8 * 60 * 60), token_type: 'bearer', scope: '' });
+    // An expiring user token comes with a refresh token, for six months; coffre uses neither, and keeps no token.
+    if (app) {
+      return reply({
+        access_token: result.accessToken,
+        expires_in: 8 * 60 * 60,
+        refresh_token: `ghr_${randomBytes(30).toString('hex')}`,
+        refresh_token_expires_in: 15_897_600,
+        token_type: 'bearer',
+        scope: '',
+      });
+    }
     reply({ access_token: result.accessToken, token_type: 'bearer', scope: result.grant.scope.join(',') });
   }
 
