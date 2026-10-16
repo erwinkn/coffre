@@ -63,7 +63,7 @@ function read(url: URL, response: IncomingMessage): Promise<unknown> {
     if (response.statusCode !== 200) {
       // Closed, not drained: its body would be read past every bound.
       response.destroy();
-      reject(new FetchRefused(url, `answered ${response.statusCode}`));
+      reject(FetchRefused.answered(url, response.statusCode ?? 0));
       return;
     }
     const encoding = response.headers['content-encoding'];

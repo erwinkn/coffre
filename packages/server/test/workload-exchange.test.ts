@@ -694,6 +694,24 @@ test("a reusable workflow's binding names its caller's ref: a feature branch cal
   assert.equal((await appEntries('token.exchange'))[0]!.metadata.bindingId, id);
 });
 
+test('a binding that names a GitHub environment takes only jobs in it, whatever their sub, the plain and the reusable profile alike', async () => {
+  const id = await bind({ ...DEPLOY, environment: 'production' }, [bound]);
+  const inside = (environment: string) => ({ environment, sub: `repo:acme/api:environment:${environment}` });
+  // GitHub names the environment in sub, which no GitHub binding reads; ref and workflow_ref stay as they were.
+  assert.equal((await trade(token(rsa, inside('production')))).status, 200);
+  assert.equal((await trade(token(rsa, inside('Production')))).status, 200, 'GitHub environment names are case-insensitive');
+  const staging = (await trade(token(rsa, inside('staging')))).body;
+  assert.deepEqual([staging.reason, staging.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: environment differ`]);
+  assert.equal((await trade(token(rsa))).body.reason, 'no_match', 'a job in no environment');
+  assert.equal(((await appEntries('token.exchange')).at(-1)!.metadata.run as Record<string, unknown>).environment, 'Production');
+
+  const called = { job_workflow_ref: 'acme/workflows/.github/workflows/deploy.yml@refs/tags/v1', job_workflow_sha: 'a'.repeat(40) };
+  await bind({ repository_owner_id: '9919', repository_id: '41532', ref: 'refs/heads/main', event_name: 'push', ...called, environment: 'production' }, [id], 'github-reusable');
+  const caller = { ...called, workflow_ref: 'acme/api/.github/workflows/release.yml@refs/heads/main' };
+  assert.equal((await trade(token(rsa, { ...caller, ...inside('production') }))).status, 200);
+  assert.equal((await trade(token(rsa, caller))).body.reason, 'no_match');
+});
+
 test('a GitLab binding names the namespace by ID: the same project moved to another namespace is refused', async () => {
   const gitlab = 'https://gitlab.com';
   published.set(`${gitlab}/.well-known/openid-configuration`, { issuer: gitlab, jwks_uri: `${gitlab}/oauth/discovery/keys` });

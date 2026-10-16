@@ -95,6 +95,27 @@ A schedule runs on a branch, and a release at a tag (`--tag v1 --event
 release`). On GitLab, `--source push,web,schedule` does the same for the
 pipeline's source.
 
+### In a GitHub environment
+
+`--github-environment production` (in the dialog, "GitHub environment")
+takes only the workflow's jobs that run in that GitHub environment:
+
+```yaml
+jobs:
+  deploy:
+    environment: production
+    permissions: { id-token: write, contents: read }
+```
+
+```sh
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --github-environment production --apply
+```
+
+The job then signs in only once the environment's protection rules, such
+as required reviewers, let it run. Without them, naming an environment adds
+nothing: anyone who can push a workflow can name one. The name matches
+whatever its case, as GitHub's environment names do.
+
 ### CI on pull requests
 
 `--event pull_request` trusts the workflow's runs for pull requests into
@@ -124,10 +145,11 @@ for anyone's pull request, forks included, and exists to label or comment
 on them.
 
 coffre looks up a repository's or project's IDs, which a binding keeps, so
-that a name passed on to someone else trusts nothing. GitHub and GitLab
+that a name passed on to someone else trusts nothing: the dialog as you type
+the name, and `coffre trust` before it shows the binding. GitHub and GitLab
 show a private one only to those signed in to it, so for one coffre says
 so and gives the command that gets them, whose output is the two flags to
-add:
+add (in the dialog, the fields under "Private repository? Enter IDs"):
 
 ```sh
 gh api repos/acme/website --jq '"--repository-id \(.id) --owner-id \(.owner.id)"'

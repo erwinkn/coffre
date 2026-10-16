@@ -7,6 +7,8 @@ import {
   checkFetchUrl,
   differingClaims,
   githubEventsAt,
+  githubReusable,
+  githubWorkflow,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
   MAX_CLAIMS,
@@ -109,6 +111,54 @@ test('a token matches when it carries every claim, one of a list; a pull request
   // Only GitHub's profiles read a pull request at its base, and a claim that is no string never matches.
   assert.deepEqual(differingClaims('custom', { ref: 'refs/heads/main' }, pr), ['ref']);
   assert.deepEqual(match({ ...push, repository_id: 41532 }), ['repository_id']);
+});
+
+test('a GitHub binding may name the environment its job runs in, matched whatever its case, whatever sub says', () => {
+  const binding = checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, environment: 'production' } });
+  assert.equal(binding.claims.environment, 'production');
+  // A job in an environment: GitHub names it in sub, which no GitHub binding reads; ref and workflow_ref are the same.
+  const job = {
+    repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main',
+    ref: 'refs/heads/main', event_name: 'push', environment: 'production', sub: 'repo:acme/api:environment:production',
+  };
+  assert.deepEqual(differingClaims('github', binding.claims, job), []);
+  // GitHub's environment names are case-insensitive: one environment, one set of protection rules.
+  assert.deepEqual(differingClaims('github', binding.claims, { ...job, environment: 'Production' }), []);
+  assert.deepEqual(differingClaims('github', binding.claims, { ...job, environment: 'staging', sub: 'repo:acme/api:environment:staging' }), ['environment']);
+  // A job in no environment carries no claim, and is refused.
+  const { environment: _, ...outside } = job;
+  assert.deepEqual(differingClaims('github', binding.claims, { ...outside, sub: 'repo:acme/api:ref:refs/heads/main' }), ['environment']);
+  // A binding without one takes the job either way, as before.
+  assert.deepEqual(differingClaims('github', GITHUB, job), []);
+  assert.deepEqual(differingClaims('github', GITHUB, outside), []);
+  // A pull request's job in the environment, at the branch it merges into.
+  const pr = { ...job, event_name: 'pull_request', ref: 'refs/pull/7/merge', base_ref: 'main', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/pull/7/merge' };
+  assert.deepEqual(differingClaims('github', { ...binding.claims, event_name: ['push', 'pull_request'] }, pr), []);
+  // Exact elsewhere: a custom binding's environment is the issuer's own claim.
+  assert.deepEqual(differingClaims('custom', { environment: 'production' }, { environment: 'Production' }), ['environment']);
+
+  // A reusable workflow's job names it too, its caller's ref and the called workflow unchanged.
+  const reusable = checkBinding({ profile: 'github-reusable', issuer: null, claims: { ...REUSABLE, environment: 'prod/eu' } });
+  assert.deepEqual(differingClaims('github-reusable', reusable.claims, { ...REUSABLE, environment: 'prod/eu', sub: 'repo:acme/api:environment:prod/eu' }), []);
+  assert.deepEqual(differingClaims('github-reusable', reusable.claims, REUSABLE), ['environment']);
+
+  for (const name of ['Staging EU', 'prod/eu:1', 'é'.repeat(100), 'x'.repeat(255)]) checkBinding({ profile: 'github', issuer: null, claims: { ...GITHUB, environment: name } });
+  for (const name of [' production', 'production ', 'prod\nuction', 'x'.repeat(256)]) {
+    refused({ profile: 'github', issuer: null, claims: { ...GITHUB, environment: name } }, /GitHub environment's name|longer than 256 bytes/);
+  }
+  refused({ profile: 'github', issuer: null, claims: { ...GITHUB, environment: '' } }, /nonempty string/);
+  refused({ profile: 'github', issuer: null, claims: { ...GITHUB, environment: ['production', 'staging'] } }, /only event_name lists several/);
+});
+
+test('the presets name an environment only when given one', () => {
+  const at = { repository: 'acme/api', repositoryId: '41532', ownerId: '9919', workflow: 'deploy.yml', ref: 'refs/heads/main', events: ['push'] };
+  assert.equal(githubWorkflow(at).claims.environment, undefined);
+  assert.equal(githubWorkflow({ ...at, environment: 'production' }).claims.environment, 'production');
+  const called = { repositoryId: null, ownerId: '9919', ref: 'refs/heads/main', called: REUSABLE.job_workflow_ref as string, sha: SHA, events: ['push'] };
+  assert.equal(githubReusable(called).claims.environment, undefined);
+  const reusable = githubReusable({ ...called, environment: 'production' });
+  assert.deepEqual({ profile: reusable.profile, environment: reusable.claims.environment }, { profile: 'github-reusable-organization', environment: 'production' });
+  checkBinding({ ...reusable, issuer: null });
 });
 
 test('a reusable workflow is pinned to one commit and called from one ref; the whole organization is an explicit profile', () => {

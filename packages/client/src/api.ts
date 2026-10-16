@@ -739,6 +739,9 @@ export type Api = {
       repositoryId: string;
       ownerId: string;
     } | {
+      github: string;
+      ownerId: string;
+    } | {
       gitlab: string;
       projectId: string;
       namespaceId: string;
@@ -1364,6 +1367,9 @@ export type DeletionResult = {
 export type WorkloadIds = {
   github: string;
   repositoryId: string;
+  ownerId: string;
+} | {
+  github: string;
   ownerId: string;
 } | {
   gitlab: string;

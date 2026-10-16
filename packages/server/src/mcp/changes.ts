@@ -772,7 +772,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     name: 'trust_workload',
     needs: 'services',
     title: 'Trust a CI workload',
-    description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. ${approved}`,
+    description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. event_name may list several events; a pull_request run matches by the branch it merges into. A GitHub binding may name environment, a GitHub environment, to take only the jobs that run in it, under its protection rules. ${approved}`,
     scope: 'manage-access',
     idempotent: false,
     destructive: false,
@@ -783,7 +783,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         issuer: z.string().max(400).optional().describe("The issuer's URL, for a custom profile"),
         claims: z
           .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
-          .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]'),
+          .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]; environment, on GitHub, the GitHub environment the job runs in, as "production", matched whatever its case'),
         scope: credentialScope,
         label: z.string().trim().min(1).max(120).optional(),
       })

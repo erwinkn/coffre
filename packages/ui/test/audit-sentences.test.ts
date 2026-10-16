@@ -195,6 +195,8 @@ test('every other action has a sentence', () => {
     [{ action: 'sign_out' }, 'signed out'],
     [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a bearer token to service:ci-deploy'],
     [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'trusted CI runs to sign in as service:api-deploy'],
+    [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy', profile: 'github', claims: { environment: 'production' }, scope: [{ role: 'viewer' }] } }, 'trusted CI runs to sign in as service:api-deploy, in GitHub environment production, reaching viewer on 1 place'],
+    [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy', profile: 'custom', claims: { sub: 'x', environment: 'production' } } }, 'trusted CI runs to sign in as service:api-deploy'],
     [{ action: 'token.unbind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'stopped trusting CI runs to sign in as service:api-deploy'],
     [{ action: 'token.seal', actor: 'system:app', metadata: { principalType: 'service', principalId: 'ci-web', tokens: ['t1', 't2'], bindings: ['b1'], scope: [{ role: 'developer' }, { role: 'viewer' }] } }, 'sealed 2 tokens and 1 trust binding of service:ci-web, reaching developer on 1 place, viewer on 1 place'],
     [{ action: 'token.seal', actor: 'system:app', metadata: { principalType: 'service', principalId: 'ci-web', tokens: ['t1'], bindings: [], scope: [] } }, 'sealed 1 token of service:ci-web, reaching nothing'],
