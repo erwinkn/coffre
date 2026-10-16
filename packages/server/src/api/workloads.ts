@@ -353,7 +353,7 @@ export class WorkloadService {
    */
   async lookup(ctx: Asker, input: { github?: string; gitlab?: string; gitlabUrl?: string }): Promise<WorkloadIds> {
     await this.#setsUp(ctx);
-    const ask = async (url: URL, missing = `${url.hostname} did not find it: for a private one, type its IDs`): Promise<Record<string, unknown>> => {
+    const ask = async (url: URL, missing = notFound(`${url.hostname} did not find it: for a private one, type its IDs`)): Promise<Record<string, unknown>> => {
       try {
         const answer = await this.#deps.transport.json(url);
         return typeof answer === 'object' && answer !== null ? (answer as Record<string, unknown>) : {};
@@ -362,7 +362,7 @@ export class WorkloadService {
         if (error.status === 403 || error.status === 429) {
           throw new ApiError('too_many_requests', `${url.hostname} allows only so many lookups an hour without signing in, and this hour's are spent: try again later, or type the IDs`);
         }
-        if (error.status === 404) throw notFound(missing);
+        if (error.status === 404) throw missing;
         throw new ApiError('unavailable', `${url.hostname} did not answer (${error.message}): try again, or type the IDs`);
       }
     };
@@ -384,7 +384,8 @@ export class WorkloadService {
       const owner = input.github.split('/')[0]!;
       const repository = await ask(
         new URL(`https://api.github.com/repos/${input.github}`),
-        app === null ? undefined : `GitHub did not find it, and the GitHub App is not installed on it: install it on ${owner}, or type its IDs`,
+        // `not_installed`: the pages say this, where a 404 is otherwise theirs to word.
+        app === null ? undefined : new ApiError('not_found', `GitHub did not find it, and the GitHub App is not installed on it: install it on ${owner}, or type its IDs`, 'not_installed'),
       );
       const [repositoryId, ownerId] = [id(repository.id), id((repository.owner as Record<string, unknown> | undefined)?.id)];
       if (repositoryId === null || ownerId === null) throw notFound(`GitHub does not know ${input.github}`);

@@ -120,6 +120,8 @@ test("a lookup that fails says why: nothing public there, final; the hour's look
     state: 'missing',
     message: 'GitHub shows nothing public at acme/secret.',
   });
+  const notInstalled = 'GitHub did not find it, and the GitHub App is not installed on it: install it on globex, or type its IDs';
+  assert.deepEqual(lookupFailure('globex/secret', new CoffreError(404, 'not_found', notInstalled, 'not_installed')), { state: 'missing', message: notInstalled });
   assert.deepEqual(lookupFailure('acme/api', new CoffreError(429, 'too_many_requests', "this hour's are spent")), {
     state: 'failed',
     message: "GitHub's hourly limit on lookups without signing in is spent. Enter the IDs, or try again later.",

@@ -351,10 +351,8 @@ test("with one, an owner lists the repositories it is installed on, private ones
   assert.deepEqual(await lead.bindings.lookup({ github: 'acme/payments' }), { github: 'acme/payments', repositoryId: '41541', ownerId: '9919' });
   documents.set('https://api.github.com/repos/torvalds/linux', { id: 2325298, owner: { id: 1024025 } });
   assert.deepEqual(await lead.bindings.lookup({ github: 'torvalds/linux' }), { github: 'torvalds/linux', repositoryId: '2325298', ownerId: '1024025' });
-  await assert.rejects(
-    lead.bindings.lookup({ github: 'globex/secret' }),
-    /GitHub did not find it, and the GitHub App is not installed on it: install it on globex, or type its IDs/,
-  );
+  await assert.rejects(lead.bindings.lookup({ github: 'globex/secret' }), (error: CoffreError) =>
+    error.status === 404 && error.reason === 'not_installed' && /the GitHub App is not installed on it: install it on globex, or type its IDs/.test(error.message));
   // Outside the app, GitHub's public limits still say so; an owner is looked up as without it.
   documents.set('https://api.github.com/repos/globex/busy', 429);
   await assert.rejects(lead.bindings.lookup({ github: 'globex/busy' }), (error: CoffreError) => error.status === 429 && /this hour's are spent/.test(error.message));
