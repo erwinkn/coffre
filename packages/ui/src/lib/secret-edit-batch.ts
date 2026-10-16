@@ -1,9 +1,18 @@
-export type SecretDraft = { id: number; key: string; value: string };
+/**
+ * A second secret a row writes with its own value, in the same patch: a
+ * generated key pair's public key, beside its private key. It is part of
+ * the row's edit, so saving, undoing or retrying the row takes both.
+ */
+export type Companion = { key: string; value: string };
+
+export type SecretDraft = { id: number; key: string; value: string; companion?: Companion };
 
 export type SecretChange = {
   key: string;
   value: string | null;
   archived: boolean;
+  /** Only beside a new value. */
+  companion?: Companion;
 };
 
 type ActiveSecret = { key: string };
@@ -33,6 +42,27 @@ export type SecretEditBatchResult = {
   error: unknown | null;
 };
 
+/**
+ * The companions a save writes: those of new rows, and of value edits to keys
+ * still listed. An edit whose key went from the list (renamed or archived
+ * elsewhere, then refreshed) writes nothing, its companion included.
+ */
+export function companionsOf(
+  active: readonly ActiveSecret[],
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+): Companion[] {
+  return [
+    ...drafts.flatMap((draft) => (draft.companion === undefined ? [] : [draft.companion])),
+    ...active.flatMap((entry) => {
+      const change = secretChangeFor(changes, entry.key);
+      return change === undefined || change.archived || change.value === null || change.companion === undefined
+        ? []
+        : [change.companion];
+    }),
+  ];
+}
+
 /** Return true when one save would give two pending edits the same target. */
 export function hasSecretEditConflict(
   active: readonly ActiveSecret[],
@@ -44,7 +74,8 @@ export function hasSecretEditConflict(
     .map((entry) => secretChangeFor(changes, entry.key)?.key.trim() ?? entry.key);
   if (new Set(finalActiveKeys).size !== finalActiveKeys.length) return true;
 
-  const draftKeys = drafts.map((draft) => draft.key.trim());
+  // A companion writes its key as a new row does.
+  const draftKeys = [...drafts, ...companionsOf(active, drafts, changes)].map((draft) => draft.key.trim());
   if (new Set(draftKeys).size !== draftKeys.length) return true;
 
   const valueEditTargets = new Set(
@@ -106,11 +137,11 @@ export async function applySecretEditBatch({
         await operations.rename(sourceKey, key);
         delete remainingChanges[sourceKey];
         applied += 1;
-        if (change.value !== null) remainingChanges[key] = { key, value: change.value, archived: false };
+        if (change.value !== null) remainingChanges[key] = { ...change, key };
       }
       if (change.value !== null) patch[key] = change.value;
     }
-    for (const draft of drafts) patch[draft.key.trim()] = draft.value;
+    for (const draft of [...drafts, ...companionsOf(active, drafts, changes)]) patch[draft.key.trim()] = draft.value;
 
     const written = Object.keys(patch).length;
     if (written > 0) await operations.write({ ...patch });
@@ -135,7 +166,9 @@ function planEdits(
       .filter((entry) => secretChangeFor(changes, entry.key)?.archived)
       .map((entry) => entry.key),
   );
-  const restoredByDraft = drafts.find((draft) => archivedKeys.has(draft.key.trim()));
+  const restoredByDraft = [...drafts, ...companionsOf(active, drafts, changes)].find((draft) =>
+    archivedKeys.has(draft.key.trim()),
+  );
   if (restoredByDraft) {
     return new Error(
       `${restoredByDraft.key.trim()}: cannot archive and write the same key in one save`,

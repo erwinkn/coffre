@@ -168,6 +168,7 @@ coffre offboard alice@acme.example          # previews; --apply removes (docs/of
 
 coffre admit api-deploy --service           # a service, for CI
 coffre grant market api-deploy --role viewer --env prod --service
+                                            # or both at once, all or nothing: --grant market/prod=viewer
 coffre tokens issue api-deploy --output-file token   # a new 0600 file, reaching what api-deploy holds now
                                             # (or less: --scope market/prod=viewer); or trust it, and no token at all:
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
