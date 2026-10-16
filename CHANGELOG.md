@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0 (2026-10-16)
+
 **Owners replace root admins.** Root admins were emails in the vault's
 configuration that held everything, outside the member table and its
 rules: nobody could change or remove them, and they showed in People only
