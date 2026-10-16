@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { assignableToEnvironment, givesService, type Role } from '@coffre/core/access';
-import type { AccessChange } from '@coffre/core/vault';
+import type { AccessChange, Admitted } from '@coffre/core/vault';
 
 import { memberStanding, places } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
@@ -52,12 +52,17 @@ function parseUntil(until: string, now: Date): Date {
  * grants and checks again, so a bug here cannot grant what the rules forbid.
  * The vault logs each change it makes, as `access.grant` or `access.revoke`,
  * and what it refuses; the app logs only what it refused itself.
+ *
+ * With `admit`, a service account that is not a member is admitted in the
+ * same vault call (`putMember`, which checks who sets one up): one just
+ * admitted holds nothing, and is the caller's to give what they could.
  */
 export async function setAccess(
   ctx: ApiContext,
   grantee: GranteeRef,
   patch: Record<string, AccessValue>,
-): Promise<{ changes: Record<string, AccessChange> }> {
+  admit = false,
+): Promise<{ changes: Record<string, AccessChange>; admitted?: Admitted }> {
   const now = new Date();
   const wanted: Wanted[] = Object.entries(patch).map(([raw, value]) => {
     const path = parsePath(raw, [1, 2]);
@@ -97,9 +102,11 @@ export async function setAccess(
     if (grantee.type === 'service' && ctx.caller.principal.type === 'user' && !located.every((want) => can(ctx.caller, 'grant.manage', want.place))) {
       // What it held at each place they change too: taking a grant away is changing it.
       const { standing, managed, setting } = await managedAccount(ctx, ctx.caller, grantee.id);
+      // One this admits holds nothing yet, and is theirs (`managesService`).
+      const theirs = managed || (admit && standing.status !== 'active' && setting !== null);
       const before = (want: (typeof located)[number]) =>
         standing.grants.find((grant) => grant.projectId === want.projectId && grant.environmentId === want.environmentId)?.role;
-      const beyond = located.find((want) => !managed || ![want.role, before(want)].every((role) => role == null || givesService(ctx.caller, setting, role, want.place)));
+      const beyond = located.find((want) => !theirs || ![want.role, before(want)].every((role) => role == null || givesService(ctx.caller, setting, role, want.place)));
       if (beyond !== undefined) {
         throw new Refusal(forbidden(NOT_THEIRS), denied(ctx, beyond.role === null ? 'access.revoke' : 'access.grant', 'not_service_manager', scoped(beyond)));
       }
@@ -121,11 +128,11 @@ export async function setAccess(
       new Refusal(conflict(message), denied(ctx, 'access.grant', reason, scoped(want)));
     for (const want of located) {
       if (want.role === null) continue;
-      // Members are admitted before they can be granted access.
-      if (standing === null) {
+      // Members are admitted before they can be granted access, unless this admits them.
+      if (standing === null && !admit) {
         throw refuse(want, 'add them as a member before granting access', 'principal_not_registered');
       }
-      if (standing?.status === 'removed') {
+      if (standing?.status === 'removed' && !admit) {
         throw refuse(want, 'they were removed; add them as a member again before granting access', 'principal_inactive');
       }
       if (want.environmentId !== null && !assignableToEnvironment(want.role)) {
@@ -144,6 +151,7 @@ export async function setAccess(
       operationId: randomUUID(),
       credentialId: ctx.provenance,
       credentialScope: ctx.caller.credentialScope,
+      ...(admit ? { admit } : {}),
       changes: located.map((want) => ({
         projectId: want.projectId,
         environmentId: want.environmentId,
@@ -154,6 +162,6 @@ export async function setAccess(
     if (!result.ok) throw vaultRefused(result.refusal);
     const changes: Record<string, AccessChange> = {};
     for (const [i, want] of located.entries()) changes[want.path] = result.changes[i];
-    return { changes };
+    return { changes, ...(result.admitted === undefined ? {} : { admitted: result.admitted }) };
   });
 }

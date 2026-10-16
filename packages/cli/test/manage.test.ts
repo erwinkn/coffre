@@ -122,6 +122,17 @@ test('admit makes a member, and for a service names the next steps: grant, then 
   ] as const) {
     await assert.rejects(manage.admit(person.connect, [...args], person.io), refusal);
   }
+  // A service account with its first grants: one call, and no next step to grant it.
+  const granted = fixture(() => ({ member: 'token:deploy', instanceRole: 'member', scope: EVERYWHERE, created: true, changes: { 'market/dev': 'created', 'market/prod': 'created' } }));
+  await manage.admit(granted.connect, ['deploy', '--service', '--grant', 'market/dev=developer,market/prod=viewer'], granted.io);
+  assert.deepEqual(granted.calls, [{ method: 'PUT', path: '/members/token:deploy', body: { access: { 'market/dev': 'developer', 'market/prod': 'viewer' } } }]);
+  assert.equal(granted.written.out, 'admitted service:deploy, holding developer on market/dev, viewer on market/prod\n');
+  for (const [args, refusal] of [
+    [['ada@acme.example', '--grant', 'market=viewer'], /--grant comes with a service account/],
+    [['deploy', '--service', '--grant', 'market=boss'], /--grant takes <project>\[\/<environment>\]=<role>/],
+  ] as const) {
+    await assert.rejects(manage.admit(granted.connect, [...args], granted.io), refusal);
+  }
   // A name that says it is a service account's is one, with --service or not: service:deploy, or token:deploy as before.
   for (const name of ['service:deploy', 'token:deploy']) {
     const service = fixture(() => ({ member: 'token:deploy', instanceRole: 'member', scope: EVERYWHERE, created: false }));

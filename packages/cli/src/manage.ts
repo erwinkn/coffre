@@ -464,13 +464,26 @@ const SCOPE_FLAGS = {
 /**
  * `coffre admit ada@acme.example --role developer --environments dev`: a
  * member, and for a person, their instance role and where it applies,
- * every project and environment unless the scope flags narrow it.
+ * every project and environment unless the scope flags narrow it. A
+ * service account takes its first grants with it, `--grant market/dev=developer`,
+ * in one call: refused, it is not admitted either.
  */
 export async function admit(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { service: { type: 'boolean', default: false }, role: { type: 'string' }, ...SCOPE_FLAGS }, ['<principal>']);
+  const { values, positionals } = parse(
+    args,
+    { service: { type: 'boolean', default: false }, role: { type: 'string' }, grant: { type: 'string', multiple: true }, ...SCOPE_FLAGS },
+    ['<principal>'],
+  );
   const name = positionals[0]!;
   const service = values.service || SERVICE.test(name);
   const role = values.role;
+  let access: ReturnType<typeof scopeFrom>;
+  try {
+    access = scopeFrom(values.grant, '--grant');
+  } catch (error) {
+    throw new UsageError((error as Error).message);
+  }
+  if (access !== undefined && (!service || role !== undefined)) throw new UsageError('--grant comes with a service account, and no --role: a person is granted once a member, coffre grant');
   if (role !== undefined && !isInstanceRole(role)) throw new UsageError(`no instance role "${role}": member, auditor, developer, admin or owner`);
   const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
   const scoped = projects !== undefined || environments !== undefined;
@@ -478,11 +491,15 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
   if (service && role !== undefined && role !== 'member') throw new UsageError('a service account holds project grants only: drop --role, then coffre grant');
   const who = memberOf(name, service);
   const api = connect();
-  const result = await api.members.add(who, role === undefined ? {} : { role, ...(scoped ? { scope: { ...(projects && { projects }), ...(environments && { environments }) } } : {}) });
+  const result = await api.members.add(
+    who,
+    access !== undefined ? { access } : role === undefined ? {} : { role, ...(scoped ? { scope: { ...(projects && { projects }), ...(environments && { environments }) } } : {}) },
+  );
   const as = result.instanceRole === 'member' ? '' : ` as ${roleInWords(result)}`;
   const shown = shownMember(result.member);
-  io.out.write(result.created ? `admitted ${shown}${as}\n` : `${shown} is a member${as}${role === undefined ? ' already' : ' now'}\n`);
-  if (service && result.created) {
+  const granted = access === undefined ? '' : `, holding ${Object.entries(access).map(([place, held]) => `${held} on ${place}`).join(', ')}`;
+  io.out.write(result.created ? `admitted ${shown}${as}${granted}\n` : `${shown} is a member${as}${role === undefined && access === undefined ? ' already' : ' now'}${granted}\n`);
+  if (service && result.created && access === undefined) {
     const bare = serviceName(who);
     io.out.write(
       `  next: coffre grant <project> ${bare} --role viewer [--env <env>] --service,\n` +

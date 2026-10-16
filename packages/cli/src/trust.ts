@@ -79,14 +79,15 @@ export function serviceMember(value: string): string {
 /**
  * A token's or a binding's scope, from `--scope market/dev=developer,market/prod=viewer`,
  * repeated or a comma list; undefined, all its account holds, when not given.
+ * `admit --grant` takes places and roles the same way.
  */
-export function scopeFrom(values: string[] | undefined): Record<string, Role> | undefined {
+export function scopeFrom(values: string[] | undefined, flag = '--scope'): Record<string, Role> | undefined {
   const pairs = listOf(values);
   if (pairs === undefined) return undefined;
   return Object.fromEntries(pairs.map((pair) => {
     const [path, role, ...rest] = pair.split('=');
     if (!path || role === undefined || rest.length > 0 || !isRole(role)) {
-      throw new Error(`--scope takes <project>[/<environment>]=<role>, a role one of viewer, developer, maintainer, access-manager, auditor, owner; not "${pair}"`);
+      throw new Error(`${flag} takes <project>[/<environment>]=<role>, a role one of viewer, developer, maintainer, access-manager, auditor, owner; not "${pair}"`);
     }
     return [path, role];
   }));
