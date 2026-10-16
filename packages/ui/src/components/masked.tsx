@@ -1,4 +1,4 @@
-import { useEffect, useState, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useState, type ComponentProps, type InputHTMLAttributes } from 'react';
 
 /**
  * A text field whose contents are masked until asked, for secret values.
@@ -44,7 +44,7 @@ export function MaskedTextarea({
   masked,
   className = '',
   ...props
-}: TextareaHTMLAttributes<HTMLTextAreaElement> & { masked: boolean }) {
+}: ComponentProps<'textarea'> & { masked: boolean }) {
   const cssMask = useCssMask();
   return (
     <textarea

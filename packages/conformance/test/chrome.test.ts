@@ -39,10 +39,12 @@ test("a page's heading, its cards' titles, its text and address, and what its sc
       text: 'Projects\nSign in with OIDC\nBearer tokens',
       href: `${origin}/fine`,
       dialog: null,
+      answer: null,
       errors: [],
     });
-    const removing = await browser.load(`${origin}/remove`, [], 200, 'document.getElementById("remove").click()');
+    const removing = await browser.load(`${origin}/remove`, [], 200, '(document.getElementById("remove").click(), { clicked: true })');
     assert.equal(removing.dialog, 'Removing revokes 2 grants', 'the dialog a step opened is read');
+    assert.deepEqual(removing.answer, { clicked: true }, 'what the step answered is read');
     assert.equal(removing.tab, 'Access', 'the tab shown is read');
     const broken = await browser.load(`${origin}/broken`, [], 200);
     assert.equal(broken.heading, 'Projects');

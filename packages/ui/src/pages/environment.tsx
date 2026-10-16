@@ -734,6 +734,12 @@ function ValueField({
 }) {
   const [shown, setShown] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // A value with a line break is edited in a textarea, and stays in one to
+  // the end of the edit: taking its last line break out moves no focus.
+  const [lines, setLines] = useState(() => start.includes('\n') || value.includes('\n'));
+  if (!lines && value.includes('\n')) setLines(true);
+  // Where the caret goes in the textarea a paste opened.
+  const caret = useRef<number | null>(null);
   const field = {
     className: 'input input-mono',
     masked: !shown,
@@ -750,15 +756,37 @@ function ValueField({
   return (
     <div className="input-group has-generate">
       {/* A value with line breaks opens one line tall, as tall as the row it
-          replaces, and grows only by the lines typed into it. */}
-      {start.includes('\n') ? (
+          replaces, and grows only by the lines typed or pasted into it. */}
+      {lines ? (
         <MaskedTextarea
           {...field}
+          ref={(node) => {
+            if (node === null || caret.current === null) return;
+            node.focus();
+            node.setSelectionRange(caret.current, caret.current);
+            caret.current = null;
+          }}
           className="input input-mono value-lines"
           rows={Math.min(8, 1 + Math.max(0, lineCount(value) - lineCount(start)))}
         />
       ) : (
-        <MaskedInput {...field} />
+        <MaskedInput
+          {...field}
+          // A text input drops a pasted value's line breaks, a PEM key's
+          // included. Such a paste goes into the value here instead, and the
+          // field turns into a textarea, focused, its caret after the paste.
+          // Line breaks are \n, as a textarea keeps them: \r\n is one \n.
+          onPaste={(event) => {
+            const pasted = event.clipboardData.getData('text/plain');
+            if (!/[\r\n]/.test(pasted)) return;
+            event.preventDefault();
+            const text = pasted.replace(/\r\n?/g, '\n');
+            const from = event.currentTarget.selectionStart ?? value.length;
+            const to = event.currentTarget.selectionEnd ?? from;
+            caret.current = from + text.length;
+            onChange(value.slice(0, from) + text + value.slice(to));
+          }}
+        />
       )}
       <Tip label="Generate a value">
         <button
