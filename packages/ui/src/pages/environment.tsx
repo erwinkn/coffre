@@ -1,6 +1,6 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -31,6 +31,7 @@ import {
 } from '../lib/secret-edit-batch';
 import { ValueUnavailable } from '../lib/clipboard';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
+import { noReads, revealToggleDisabled, rowReads } from '../lib/row-reads';
 import { sortKeys, type Sort } from '../lib/secret-order';
 import { inDialog } from '../lib/shortcuts';
 import { secretKeyProblem } from '../lib/validation';
@@ -95,6 +96,13 @@ const Route = pageRoute<typeof environment>();
  * already logged, and re-revealing writes a second, honest audit row.
  */
 const REVEAL_TTL_SECONDS = 45;
+
+/** Why a read of a secret's value failed, as the row says it. */
+function readFailureMessage(failure: unknown): string {
+  return failure instanceof CoffreError
+    ? failureMessage(failure)
+    : 'The request could not be sent. Nothing was read.';
+}
 
 export function EnvironmentPage() {
   const { project, environment } = Route.useParams();
@@ -932,9 +940,10 @@ function SecretRow({
   saveReady: boolean;
   onMarkArchive: () => void;
 }) {
-  const [reveal, setReveal] = useState<Reveal | null>(null);
+  const [reads, dispatch] = useReducer(rowReads, noReads);
+  const { reveal, revealing, error, copyError } = reads;
+  const setReveal = (next: Reveal | null) => dispatch({ type: 'set-reveal', reveal: next });
   const coffre = useCoffre();
-  const [revealing, setRevealing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [moving, setMoving] = useState(false);
   const [referring, setReferring] = useState(false);
@@ -949,7 +958,6 @@ function SecretRow({
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
   const holderPath = `${project}/${environment}/${entry.key}`;
-  const [error, setError] = useState<string | null>(null);
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
   // version identical to the one it came from.
@@ -977,33 +985,25 @@ function SecretRow({
     if (!editing) setBase(null);
   }, [editing]);
 
-  // A copy retried while its first read is still out starts a second one; only the
-  // latest may speak for the row, so an old failure cannot sit under a newer success.
-  const latestRead = useRef(0);
   async function readValue({ show = true } = {}): Promise<string | null> {
     if (shown !== null) return shown.value;
-    const read = ++latestRead.current;
-    const latest = () => read === latestRead.current;
-    setRevealing(true);
-    // Cleared as the read starts, not as it ends: a copy refused meanwhile has its say.
-    setError(null);
+    dispatch({ type: 'read-started' });
     try {
-      const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
-      const value = values[entry.key];
-      if (show) setReveal({ value, version: readVersion, at: Date.now() });
+      const value = await fetchValue();
+      dispatch({
+        type: 'read-succeeded',
+        reveal: show ? { value, version: readVersion, at: Date.now() } : null,
+      });
       return value;
     } catch (failure) {
-      if (latest()) {
-        setError(
-          failure instanceof CoffreError
-            ? failureMessage(failure)
-            : 'The request could not be sent. Nothing was read.',
-        );
-      }
+      dispatch({ type: 'read-failed', message: readFailureMessage(failure) });
       return null;
-    } finally {
-      if (latest()) setRevealing(false);
     }
+  }
+
+  async function fetchValue(): Promise<string> {
+    const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
+    return values[entry.key];
   }
 
   function toggleReveal() {
@@ -1012,17 +1012,17 @@ function SecretRow({
   }
 
   // Copy on a hidden value reads it the way Reveal does (the same audited read)
-  // and hands it to the clipboard, never to the screen or to state.
-  const [copying, setCopying] = useState(false);
+  // and hands it to the clipboard, never to the screen or to the row's reveal
+  // state: it shares nothing with Reveal but the endpoint, so neither can change
+  // whether a value is shown or Hide can be pressed. Its in-flight state is its
+  // button's, and its refusals are `copyError`.
   async function readForCopy(): Promise<string> {
-    setCopying(true);
+    dispatch({ type: 'copy-started' });
     try {
-      const value = await readValue({ show: false });
-      // readValue has said why on the row.
-      if (value === null) throw new ValueUnavailable();
-      return value;
-    } finally {
-      setCopying(false);
+      return await fetchValue();
+    } catch (failure) {
+      dispatch({ type: 'copy-failed', message: readFailureMessage(failure) });
+      throw new ValueUnavailable();
     }
   }
 
@@ -1196,11 +1196,13 @@ function SecretRow({
                         value={shown !== null ? shown.value : readForCopy}
                         label={`Copy ${entry.key}`}
                         // A copy that works retires the last one's complaint.
-                        onCopied={() => setError(null)}
+                        onCopied={() => dispatch({ type: 'copy-succeeded' })}
                         onError={() =>
-                          setError(
-                            'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
-                          )
+                          dispatch({
+                            type: 'copy-failed',
+                            message:
+                              'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
+                          })
                         }
                       />
                     </SecretReadOnly>
@@ -1209,10 +1211,10 @@ function SecretRow({
                         <button
                           className="act act-icon act-accent"
                           onClick={toggleReveal}
-                          disabled={revealing}
+                          disabled={revealToggleDisabled(reads, shown)}
                           aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                         >
-                          {revealing && !opening && !copying ? (
+                          {revealing && !opening ? (
                             <Spinner size={13} />
                           ) : shown === null ? (
                             <Eye size={15} />
@@ -1409,10 +1411,10 @@ function SecretRow({
         </tr>
       )}
 
-      {(error ?? actError) !== null && (
+      {(error ?? copyError ?? actError) !== null && (
         <tr className="row-error">
           <td colSpan={columns}>
-            <ErrorLine error={(error ?? actError)!} />
+            <ErrorLine error={(error ?? copyError ?? actError)!} />
           </td>
         </tr>
       )}
