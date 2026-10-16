@@ -4,8 +4,10 @@
 
 - **A deployment-declared Owner shows a plain Owner tag.** People no
   longer adds "· set by deployment" after it. To another Owner, the tag
-  is greyed, with the hint "Set by deployment" on hover, focus or tap;
-  everyone else sees the normal tag.
+  is greyed, with the hint "Set by deployment" on hover or tap, or by keyboard;
+  everyone else sees the normal tag. The Users table also keeps which
+  Owners the deployment names, so their row shows the lock in place of the
+  menu (it showed the menu, which the vault then refused).
 
 ## 0.6.0 (2026-10-16)
 

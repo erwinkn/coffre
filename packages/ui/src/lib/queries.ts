@@ -98,13 +98,14 @@ function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
     const { members, removed } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, scope, tampered, managed, grants }) => ({
+      ({ principalType, principalId, instanceRole, scope, tampered, managed, declared, grants }) => ({
         principalType,
         principalId,
         instanceRole,
         scope,
         tampered,
         managed,
+        declared,
         grants: grants.map(({ project, environment }) => ({ project, environment })),
       }),
     );
