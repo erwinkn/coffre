@@ -3,6 +3,7 @@ import { exportJWK, generateKeyPair, SignJWT, type JWK, type CryptoKey } from 'j
 
 import { AuthorizationServer } from './authorize.ts';
 import { FakeGitHub } from './github.ts';
+import { FakeGitHubApp } from './github-app.ts';
 import type { Route } from './http.ts';
 import { OidcProvider } from './oidc.ts';
 import { WorkloadIssuer } from './workloads.ts';
@@ -34,6 +35,8 @@ export interface DevIdpOptions {
   clients?: readonly DevIdpClient[];
   /** Skip the persona page when the request carries a login hint. For tests. */
   autoApprove?: boolean;
+  /** The fake GitHub App's private key, PKCS #1 PEM: made at start unless given. */
+  githubAppKey?: string;
 }
 
 /** Built in, so local dev needs no registration step. */
@@ -48,7 +51,7 @@ export const DEFAULT_CLIENT = Object.freeze({
  * For Cloudflare Access, it generates a keypair, serves a JWKS at the same
  * `cdn-cgi` path Access uses, and mints Access-shaped tokens. It is also an
  * OpenID Connect provider (under `/oauth`) signing with the same key, and an
- * imitation of GitHub's OAuth apps and REST API (under `/github`). The
+ * imitation of GitHub's OAuth apps, a GitHub App and REST API (under `/github`). The
  * point is that the code under test runs its real remote code paths against
  * real HTTP endpoints -- local mode is a different implementation of the same
  * interface, never a branch that skips verification.
@@ -77,8 +80,12 @@ export class DevIdp {
   /** A CI platform's ID tokens, under `/workloads`, for trust bindings. */
   readonly workloads = new WorkloadIssuer(() => this.origin);
 
+  /** A deployment's GitHub App, under `/github/api` beside the fake GitHub. */
+  readonly githubApp: FakeGitHubApp;
+
   constructor(options: DevIdpOptions = {}) {
     this.autoApprove = options.autoApprove ?? false;
+    this.githubApp = new FakeGitHubApp(() => this.origin, options.githubAppKey);
     this.#clients.set(DEFAULT_CLIENT.clientId, {
       ...DEFAULT_CLIENT,
       redirectUris: [],
@@ -87,7 +94,7 @@ export class DevIdp {
     for (const client of options.clients ?? []) this.registerClient(client);
 
     const authz = new AuthorizationServer(this);
-    this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes(), ...this.workloads.routes()];
+    this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes(), ...this.githubApp.routes(), ...this.workloads.routes()];
   }
 
   get origin(): string {
@@ -110,6 +117,7 @@ export class DevIdp {
     this.privateKey = privateKey;
     this.publicJwk = { ...(await exportJWK(publicKey)), kid: this.kid, alg: 'RS256', use: 'sig' };
     await this.workloads.start();
+    await this.githubApp.start();
 
     this.#server = createServer((req, res) => {
       // Dev-only: stands in for `cloudflared access login`. Cloudflare Access

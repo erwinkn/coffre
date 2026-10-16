@@ -311,7 +311,8 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | a member's instance role and scope, and the grants you manage, in one query | `GET /api/members/user:ada@acme.example/access` |
 | list, issue (`?dryRun=1` to preview what it reaches) or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
-| a public GitHub repository's or GitLab project's IDs, for a binding | `GET /api/workloads/lookup?github=acme/api` |
+| a GitHub repository's or GitLab project's IDs, for a binding: a public one, or one the deployment's GitHub App is installed on | `GET /api/workloads/lookup?github=acme/api` |
+| the repositories the deployment's GitHub App is installed on, private ones too ([github-app.md](github-app.md)) | `GET /api/workloads/repositories` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |

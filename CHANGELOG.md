@@ -184,6 +184,23 @@ Owner picked from a list where before they typed a name.
 - **CLI.** `coffre admit api-deploy --service --grant market/prod=viewer`,
   repeated or a comma list.
 - **MCP.** `admit_member` takes `access`; its approval page shows each grant.
+**A private repository's IDs, from a GitHub App of the deployment's own.**
+A trust binding names a repository by its IDs, and coffre looked up only
+a public one's: a private one's were typed, from `gh api`. Now a
+deployment may pass a GitHub App, installed on its organizations, as
+`workloads.githubApp`, and a name typed in "Trust a workload" or given
+to `coffre trust` resolves through it, private or not; a public one
+outside it still resolves through GitHub's public API.
+`GET /api/workloads/repositories` lists every repository the app is
+installed on, `{ "app": null }` without one, for whoever may set up a
+service account: what the pages' repository picker, next, shows. The app needs
+Metadata: read-only, which every GitHub App has, and no one's personal
+token. A deployment `coffre init` writes reads `GITHUB_APP_ID`, a var,
+and `GITHUB_APP_PRIVATE_KEY`, a secret of the app Worker; without them,
+nothing changes. [docs/github-app.md](docs/github-app.md) registers,
+installs and passes it. The key stays in the app's configuration and
+memory, beside the GitHub sign-in's secret, never in the vault, the
+database, a log line or an answer. GitHub down is a 503 that says so.
 
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description

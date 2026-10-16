@@ -17,6 +17,7 @@
  * Each returns a `SigninProvider`, and a provider that speaks neither can be
  * one of the deployment's own, in the same list.
  */
+import { githubAppOf, type GitHubApp, type GitHubAppOptions } from '../github-app.ts';
 import { GitHubSigninProvider } from './github.ts';
 import { OidcSigninProvider } from './oidc.ts';
 import type { SigninBrand, SigninProvider } from './types.ts';
@@ -95,6 +96,14 @@ export type WorkloadsOptions = {
    * loopback too, so no instance anyone else can reach ever trusts one.
    */
   allowLoopbackIssuersForDevelopment?: boolean;
+  /**
+   * The deployment's own GitHub App, installed on its organizations: where
+   * an owner trusts a workflow, the pages list the repositories it is
+   * installed on, private ones too, and a repository typed by name resolves
+   * through it (docs/github-app.md). Left out, repositories are typed, and
+   * only public ones' IDs are looked up.
+   */
+  githubApp?: GitHubAppOptions;
 };
 
 /** Cloudflare's rate-limiting binding, as coffre calls it; `processLimits()` has the same shape. */
@@ -102,7 +111,7 @@ export type RateLimiter = { limit(options: { key: string }): Promise<{ success: 
 
 export type WorkloadLimits = { perSource: RateLimiter; total: RateLimiter };
 
-export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits };
+export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits; githubApp: GitHubApp | null };
 
 /**
  * MCP clients, Claude among them, acting as the people who connect them,
@@ -370,7 +379,15 @@ function workloadsConfig(options: WorkloadsOptions, publicUrl: string): Workload
       `workloads.allowLoopbackIssuersForDevelopment is for an instance on loopback, and ${publicUrl} is not one: turn it off`,
     );
   }
-  return { allowLoopback: loopback, limits: options.limits };
+  const githubApp = options.githubApp === undefined ? null : githubAppOf(options.githubApp, (value) => {
+    const url = baseUrl(value, 'workloads.githubApp.apiUrl');
+    // Its repositories' IDs are trusted under github.com's issuer, the one the lookup and the pages bind to.
+    if (url !== 'https://api.github.com' && !isLoopback(new URL(url))) {
+      throw new Error('workloads.githubApp is for github.com: GitHub Enterprise Server is not supported yet, and apiUrl is for the dev IdP, on loopback');
+    }
+    return url;
+  });
+  return { allowLoopback: loopback, limits: options.limits, githubApp };
 }
 
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */

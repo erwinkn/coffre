@@ -361,6 +361,9 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'POST /members/:member/bindings': { commands: ['trust'] },
   'DELETE /members/:member/bindings/:id': { commands: ['untrust'] },
   'GET /workloads/lookup': { commands: ['trust'] },
+  'GET /workloads/repositories': {
+    browser: "the pages' repository picker: `coffre trust` names its repository, which `GET /workloads/lookup` resolves through the same GitHub App",
+  },
   'PATCH /access/:member': { commands: ['grant', 'revoke'] },
   'GET /settings': { commands: ['settings'] },
   'PUT /settings': { commands: ['settings'] },

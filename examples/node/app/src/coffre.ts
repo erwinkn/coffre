@@ -35,6 +35,10 @@ export const coffre = createCoffre({
       // Set by conformance only: a binding's issuer may then be plain HTTP on
       // loopback. Refused unless PUBLIC_URL is loopback too.
       allowLoopbackIssuersForDevelopment: process.env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
+      // Lists the repositories your GitHub App is installed on, private ones
+      // too, where an owner trusts a workflow (docs/github-app.md). Without
+      // its ID, repositories are typed by name.
+      githubApp: process.env.GITHUB_APP_ID ? { appId: process.env.GITHUB_APP_ID, privateKey: process.env.GITHUB_APP_PRIVATE_KEY ?? '' } : undefined,
     },
     // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
     // people who approve them (docs/mcp.md). Remove this to turn it off.

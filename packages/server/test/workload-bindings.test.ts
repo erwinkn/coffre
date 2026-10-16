@@ -2,6 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
+import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
 import { defineSignin, github, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
@@ -50,12 +51,18 @@ const transport: WorkloadTransport = {
   },
 };
 
+/** The deployment's GitHub App, played by the dev IdP. */
+let idp: DevIdp;
+
 before(async () => {
   db = await openTestDatabase();
+  idp = new DevIdp();
+  await idp.start();
 });
 
 after(async () => {
   await db.close();
+  await idp.stop();
 });
 
 beforeEach(async () => {
@@ -259,7 +266,7 @@ test('with workloads off, the routes say how to turn them on', async () => {
   delete deps.workloads;
   await assert.rejects(bind(), /this instance trusts no workloads: the deployment's signin\(\{ workloads \}\) turns them on/);
   // The configuration that turns them on.
-  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS });
+  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS, githubApp: null });
   // Never without both limits.
   assert.throws(
     () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: {} as never }),
@@ -274,7 +281,7 @@ test('loopback issuers are for development: an instance off loopback refuses to 
   assert.throws(() => at('https://secrets.acme.example'), /allowLoopbackIssuersForDevelopment is for an instance on loopback, and https:\/\/secrets\.acme\.example is not one: turn it off/);
   assert.throws(() => at('https://127.0.0.1.nip.io'), /is not one/);
   for (const publicUrl of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000']) {
-    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS });
+    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS, githubApp: null });
   }
   // As a deployment writes it: signin() takes it, and the instance's own URL decides.
   const auth = signinAuth({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, allowLoopbackIssuersForDevelopment: true } });
@@ -312,4 +319,75 @@ test("an owner looks up a public repository's, owner's or project's IDs; a priva
   await assert.rejects(lead.bindings.lookup({ gitlab: 'acme/api', gitlabUrl: 'http://10.0.0.1' }), /must use https/);
   await assert.rejects(lead.bindings.lookup({}), /look up a GitHub repository or a GitLab project/);
   await assert.rejects(as(DEV).bindings.lookup({ github: 'acme/api' }), /only those who set up service accounts may trust workloads/);
+});
+
+/** The service, with the deployment's GitHub App: the dev IdP's. */
+function withGitHubApp(): void {
+  const config = defineSignin({ publicUrl: SIGNIN.publicUrl, providers: SIGNIN.providers, workloads: { limits: LIMITS, githubApp: idp.githubApp.options } });
+  const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: config });
+  deps.workloads = new WorkloadService({
+    db: deps.db, chainKey: deps.chainKey, vault: deps.vault, config: config.workloads!, transport, signin, publicUrl: config.publicUrl,
+  });
+  idp.githubApp.installations = fakeInstallations();
+  idp.githubApp.down = false;
+}
+
+test('without a GitHub App, the pages are told there is none, and type their repositories', async () => {
+  assert.deepEqual(await as(LEAD).bindings.repositories(), { app: null });
+  await assert.rejects(as(DEV).bindings.repositories(), /only those who set up service accounts may trust workloads/);
+});
+
+test("with one, an owner lists the repositories it is installed on, private ones too, and looks one up by name; others may not", async () => {
+  withGitHubApp();
+  const lead = as(LEAD);
+  const listed = await lead.bindings.repositories();
+  assert.ok(listed.app !== null);
+  assert.deepEqual(listed.app, { name: 'Coffre (dev)', installUrl: `${idp.origin}/github/apps/coffre-dev/installations/new` });
+  assert.deepEqual(listed.installations, ['acme', 'octo-dev']);
+  assert.deepEqual(listed.repositories.find((each) => each.github === 'acme/infra'), { github: 'acme/infra', repositoryId: '41540', ownerId: '9919', private: true });
+  assert.equal(listed.repositories.length, 6);
+
+  // A private repository resolves through the app; a public one outside it through GitHub's public API.
+  assert.deepEqual(await lead.bindings.lookup({ github: 'acme/payments' }), { github: 'acme/payments', repositoryId: '41541', ownerId: '9919' });
+  documents.set('https://api.github.com/repos/torvalds/linux', { id: 2325298, owner: { id: 1024025 } });
+  assert.deepEqual(await lead.bindings.lookup({ github: 'torvalds/linux' }), { github: 'torvalds/linux', repositoryId: '2325298', ownerId: '1024025' });
+  await assert.rejects(lead.bindings.lookup({ github: 'globex/secret' }), (error: CoffreError) =>
+    error.status === 404 && error.reason === 'not_installed' && /the GitHub App is not installed on it: install it on globex, or type its IDs/.test(error.message));
+  // Outside the app, GitHub's public limits still say so; an owner is looked up as without it.
+  documents.set('https://api.github.com/repos/globex/busy', 429);
+  await assert.rejects(lead.bindings.lookup({ github: 'globex/busy' }), (error: CoffreError) => error.status === 429 && /this hour's are spent/.test(error.message));
+  documents.set('https://api.github.com/users/acme', { id: 9919, login: 'acme' });
+  assert.deepEqual(await lead.bindings.lookup({ github: 'acme' }), { github: 'acme', ownerId: '9919' });
+
+  // Only those who set up service accounts, as for the lookup.
+  await assert.rejects(as(DEV).bindings.repositories(), /only those who set up service accounts may trust workloads/);
+  await assert.rejects(as(DEV).bindings.lookup({ github: 'acme/infra' }), /only those who set up service accounts may trust workloads/);
+});
+
+test("GitHub down is a 503 that says so; nothing the app holds reaches an answer or the log", async () => {
+  withGitHubApp();
+  const lines: string[] = [];
+  const kept = { error: console.error, warn: console.warn, log: console.log, info: console.info };
+  for (const name of ['error', 'warn', 'log', 'info'] as const) console[name] = (...args: unknown[]) => void lines.push(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg) ?? String(arg))).join(' '));
+  const answers: string[] = [];
+  try {
+    answers.push(JSON.stringify(await as(LEAD).bindings.repositories()));
+    answers.push(JSON.stringify(await as(LEAD).bindings.lookup({ github: 'acme/infra' })));
+    idp.githubApp.down = true;
+    for (const call of [() => as(LEAD).bindings.repositories(), () => as(LEAD).bindings.lookup({ github: 'acme/infra' })]) {
+      await assert.rejects(call(), (error: Error & { status?: number }) => {
+        assert.equal(error.status, 503);
+        assert.match(error.message, /^GitHub answered \/[a-z/]+ with 503; type its IDs meanwhile$/);
+        answers.push(error.message);
+        return true;
+      });
+    }
+  } finally {
+    Object.assign(console, kept);
+  }
+  const keyLines = idp.githubApp.privateKey.split('\n').slice(1, -2);
+  for (const text of [...answers, ...lines]) {
+    assert.ok(!text.includes('ghs_'), text);
+    assert.ok(!keyLines.some((line) => text.includes(line)), text);
+  }
 });

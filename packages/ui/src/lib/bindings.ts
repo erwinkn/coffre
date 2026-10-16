@@ -137,7 +137,10 @@ export function answered(known: GitHubLookups, name: string, answer: GitHubLooku
 
 /** A lookup that failed, as the dialog says it. */
 export function lookupFailure(name: string, failure: unknown): GitHubLookup {
-  if (failure instanceof CoffreError && failure.status === 404) return { state: 'missing', message: `GitHub shows nothing public at ${name}.` };
+  if (failure instanceof CoffreError && failure.status === 404) {
+    // With the deployment's GitHub App, the server says where to install it.
+    return { state: 'missing', message: failure.reason === 'not_installed' ? failure.message : `GitHub shows nothing public at ${name}.` };
+  }
   if (failure instanceof CoffreError && failure.status === 429) {
     return { state: 'failed', message: "GitHub's hourly limit on lookups without signing in is spent. Enter the IDs, or try again later." };
   }

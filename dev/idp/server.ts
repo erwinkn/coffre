@@ -5,7 +5,8 @@
  */
 import { DEFAULT_CLIENT, DevIdp } from '@coffre/conformance/idp';
 
-const idp = new DevIdp();
+// The GitHub App's key, which dev/start.sh made and the app's configuration names too.
+const idp = new DevIdp({ githubAppKey: process.env.COFFRE_DEV_GITHUB_APP_KEY });
 idp.listenPort = Number(process.env.COFFRE_DEV_IDP_PORT ?? 8081);
 
 await idp.start();
@@ -23,6 +24,7 @@ console.log(`  api base URL         ${idp.origin}/github/api`);
 console.log(`  authorize            ${idp.origin}/github/login/oauth/authorize`);
 console.log(`  access token         ${idp.origin}/github/login/oauth/access_token`);
 console.log(`  client               same as above`);
+console.log(`  GitHub App           ${idp.githubApp.appId}, installed on ${idp.githubApp.installations.map((each) => each.account.login).join(', ')}`);
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {

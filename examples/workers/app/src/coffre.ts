@@ -14,6 +14,9 @@ export type Env = {
   GITHUB_URL?: string;
   GITHUB_API_URL?: string;
   APP_KEY: string;
+  /** Your GitHub App, when you have one (docs/github-app.md): its ID a var, its private key a secret. */
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   /** What every CI run's exchange passes first: app/wrangler.jsonc's rate-limiting bindings. */
   WORKLOADS_PER_SOURCE: RateLimit;
   WORKLOADS_TOTAL: RateLimit;
@@ -43,6 +46,10 @@ export const coffre = createCoffre((env: Env) => ({
     workloads: {
       limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
       allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
+      // Lists the repositories your GitHub App is installed on, private ones
+      // too, where an owner trusts a workflow (docs/github-app.md). Without
+      // its ID, repositories are typed by name.
+      githubApp: env.GITHUB_APP_ID ? { appId: env.GITHUB_APP_ID, privateKey: env.GITHUB_APP_PRIVATE_KEY ?? '' } : undefined,
     },
     // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
     // people who approve them (docs/mcp.md). Remove this to turn it off.

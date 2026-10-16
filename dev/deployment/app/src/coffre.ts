@@ -13,6 +13,8 @@ export type Env = {
   COFFRE_PUBLIC_URL: string;
   COFFRE_DEV_IDP_URL: string;
   COFFRE_APP_KEY: string;
+  /** The dev IdP's GitHub App's private key, which dev/start.sh makes. */
+  COFFRE_DEV_GITHUB_APP_KEY: string;
   WORKLOADS_PER_SOURCE: RateLimiter;
   WORKLOADS_TOTAL: RateLimiter;
   MCP_PER_SOURCE: RateLimiter;
@@ -33,8 +35,13 @@ export const coffre = createCoffre((env: Env) => {
         oidc({ ...local, id: 'local', label: 'Dev IdP', issuer: idp }),
       ],
       note: 'Local development. Both buttons lead to the dev IdP.',
-      // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
-      workloads: { limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL }, allowLoopbackIssuersForDevelopment: true },
+      // CI runs signing in as services; the dev IdP is plain HTTP on loopback,
+      // and plays the deployment's GitHub App, installed on acme and octo-dev.
+      workloads: {
+        limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
+        allowLoopbackIssuersForDevelopment: true,
+        githubApp: { appId: '1001', privateKey: env.COFFRE_DEV_GITHUB_APP_KEY, apiUrl: `${idp}/github/api` },
+      },
       // MCP clients at /mcp; a client's metadata document may be plain HTTP on loopback here.
       mcp: {
         limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },

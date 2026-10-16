@@ -43,6 +43,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'GET /members/:member/bindings': 'read',
   'POST /members/:member/bindings': 'manage-access',
   'GET /workloads/lookup': 'read',
+  'GET /workloads/repositories': 'read',
   'DELETE /members/:member/bindings/:id': 'manage-access',
   'PATCH /access/:member': 'manage-access',
   'GET /settings': 'read',

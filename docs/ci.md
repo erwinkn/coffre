@@ -147,9 +147,12 @@ on them.
 coffre looks up a repository's or project's IDs, which a binding keeps, so
 that a name passed on to someone else trusts nothing: the dialog as you type
 the name, and `coffre trust` before it shows the binding. GitHub and GitLab
-show a private one only to those signed in to it, so for one coffre says
-so and gives the command that gets them, whose output is the two flags to
-add (in the dialog, the fields under "Private repository? Enter IDs"):
+show a private one only to those signed in to it. With a GitHub App of the
+deployment's own ([github-app.md](github-app.md)), coffre resolves the names
+of the repositories it is installed on, private ones too. Otherwise, for a
+private one coffre says so and gives the command that gets them, whose
+output is the two flags to add (in the dialog, the fields under "Private
+repository? Enter IDs"):
 
 ```sh
 gh api repos/acme/website --jq '"--repository-id \(.id) --owner-id \(.owner.id)"'
