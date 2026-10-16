@@ -21,7 +21,7 @@ export const LOOKUP_PAUSE_MS = 700;
 export function useGitHubLookup(target: { kind: 'repository' | 'owner'; name: string }): {
   lookup: GitHubLookup | null;
   settle: () => void;
-  remember: (ids: GitHubIds) => void;
+  remember: (...found: GitHubIds[]) => void;
 } {
   const coffre = useCoffre();
   const [known, setKnown] = useState<GitHubLookups>(new Map());
@@ -31,8 +31,13 @@ export function useGitHubLookup(target: { kind: 'repository' | 'owner'; name: st
 
   const record = (name: string, answer: GitHubLookup) => setKnown((current) => answered(current, name, answer));
 
-  function remember(ids: GitHubIds) {
-    record(ids.github, { state: 'found', ids });
+  /** IDs found stand whatever was asked before (`answered`): all of them in one change, however many a picker lists. */
+  function remember(...found: GitHubIds[]) {
+    setKnown((current) => {
+      const next = new Map(current);
+      for (const ids of found) next.set(lookupKey(ids.github), { state: 'found', ids });
+      return next;
+    });
   }
 
   function ask(name: string) {

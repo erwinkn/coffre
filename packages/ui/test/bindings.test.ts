@@ -11,6 +11,7 @@ import {
   EMPTY_FORM,
   githubTarget,
   lookupable,
+  listedIds,
   lookupFailure,
   lookupOf,
   planned,
@@ -181,4 +182,23 @@ test("the Trust dialog leaves a binding's scope to the server until the person c
   const chosen: ScopeChoice = { scope: { market: 'viewer' }, chosen: true };
   assert.deepEqual(askedScope(chosen), { scope: { market: 'viewer' } });
   assert.equal(planned(chosen, { scope: { 'market/dev': 'viewer' } }), chosen);
+});
+
+test("a GitHub App's listing tells each repository's IDs, and each owner's once, so that picking either asks GitHub nothing", () => {
+  const listed = [
+    { github: 'acme/api', repositoryId: '41532', ownerId: '9919', private: false },
+    { github: 'acme/infra', repositoryId: '41540', ownerId: '9919', private: true },
+    { github: 'octo-dev/dotfiles', repositoryId: '70001', ownerId: '583231', private: true },
+  ];
+  assert.deepEqual(listedIds(listed), [
+    { github: 'acme/api', repositoryId: '41532', ownerId: '9919' },
+    { github: 'acme/infra', repositoryId: '41540', ownerId: '9919' },
+    { github: 'octo-dev/dotfiles', repositoryId: '70001', ownerId: '583231' },
+    { github: 'acme', ownerId: '9919' },
+    { github: 'octo-dev', ownerId: '583231' },
+  ]);
+  // What the form then binds: the picked repository's IDs, found without a lookup.
+  const known = listedIds(listed).reduce((map, ids) => answered(map, ids.github, { state: 'found', ids }), new Map() as GitHubLookups);
+  assert.deepEqual(lookupOf(known, { kind: 'repository', name: 'ACME/infra' }), { state: 'found', ids: { github: 'acme/infra', repositoryId: '41540', ownerId: '9919' } });
+  assert.deepEqual(lookupOf(known, { kind: 'owner', name: 'octo-dev' }), { state: 'found', ids: { github: 'octo-dev', ownerId: '583231' } });
 });

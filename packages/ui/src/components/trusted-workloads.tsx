@@ -1,14 +1,16 @@
-import type { BindingPlan, BindingView } from '@coffre/client';
+import type { BindingPlan, BindingView, CoffreClient } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
-import { Fragment, useState } from 'react';
-import { askedScope, bindingOf, EMPTY_FORM, githubTarget, planned, summary, type Form, type GitHubLookup, type RefKind, type ScopeChoice } from '../lib/bindings';
+import { useQuery } from '@tanstack/react-query';
+import { Fragment, useEffect, useState } from 'react';
+import { askedScope, bindingOf, EMPTY_FORM, githubTarget, listedIds, planned, summary, type Form, type GitHubLookup, type RefKind, type ScopeChoice } from '../lib/bindings';
 import { removeBinding } from '../lib/changes';
-import { memberRef, useCoffre } from '../lib/coffre';
-import { affects } from '../lib/queries';
+import { memberRef, statusOf, useCoffre } from '../lib/coffre';
+import { affects, queries } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { useGitHubLookup } from '../lib/use-github-lookup';
+import { GitHubPicker, type Listed } from './github-picker';
 import { MultiCombobox } from './multi-combobox';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { Card } from './page';
@@ -195,6 +197,34 @@ function GitHubFound({ lookup, kind }: { lookup: GitHubLookup | null; kind: 'rep
   );
 }
 
+/**
+ * What the deployment's GitHub App could not list, said under the field: it
+ * is installed nowhere yet, or reaches no repository, with where to change
+ * that, or GitHub did not answer. Nothing without an app, or while it lists.
+ */
+function Listing({ listing, owner }: { listing: { data?: Awaited<ReturnType<CoffreClient['bindings']['repositories']>>; error: unknown }; owner: boolean }) {
+  if (listing.error !== null && listing.error !== undefined) {
+    // A 503 says what GitHub answered, for the person; anything else is no more use to them than that it failed.
+    const why = statusOf(listing.error) === 503 ? `: ${(listing.error as Error).message}` : '. Type the name: it is still looked up.';
+    return <p className="hint">The GitHub App's repositories could not be listed{why}</p>;
+  }
+  const listed = listing.data;
+  if (listed === undefined || !('repositories' in listed)) return null;
+  const install = (words: string) => (
+    <a href={listed.app.installUrl} target="_blank" rel="noreferrer">
+      {words}
+    </a>
+  );
+  if (listed.installations.length === 0) {
+    return <p className="hint">{listed.app.name} is installed on no account yet: {install('install it')} on yours to pick its repositories here.</p>;
+  }
+  if (!owner && listed.repositories.length === 0) {
+    return <p className="hint">{listed.app.name} reaches no repository yet: {install('choose some')} to pick them here.</p>;
+  }
+  if (listed.truncated) return <p className="hint">Only some of {listed.app.name}'s repositories are listed: type any other by name.</p>;
+  return null;
+}
+
 /** What trusting `pull_request` or `workflow_run` exposes, said where the owner chooses it and again before saving. */
 function Exposure({ events }: { events: string[] }) {
   const exposed = events.filter((event) => EVENT_EXPOSURE[event] !== undefined);
@@ -235,6 +265,13 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   // Not asked while IDs are typed in: the name is then a private repository's, which GitHub would not show.
   const github = useGitHubLookup(form.typedIds ? { ...target, name: '' } : target);
   const found = github.lookup?.state === 'found' ? github.lookup.ids : null;
+  // What the deployment's GitHub App is installed on, asked once the dialog shows a GitHub binding: names the field offers, their IDs known.
+  const listing = useQuery({ ...queries.githubRepositories(coffre), enabled: open && form.platform === 'github' });
+  const listed = listing.data !== undefined && 'repositories' in listing.data ? listing.data : null;
+  useEffect(() => {
+    if (listed !== null) github.remember(...listedIds(listed.repositories));
+    // Once per listing: `remember` is new each render.
+  }, [listed]);
   const set = (changes: Partial<Form>) => {
     setForm((current) => ({ ...current, ...changes }));
     setPlan(null);
@@ -286,11 +323,25 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   // The repository, or the organization, its IDs looked up as it settles; typed in only where GitHub shows nothing.
   const owner = target.kind === 'owner';
   const lookedUp = github.lookup;
+  const named = owner
+    ? { label: 'Organization', key: 'owner' as const, placeholder: 'acme' }
+    : { label: 'Repository', key: 'repository' as const, placeholder: 'acme/api' };
   const githubIds = (
     <div className="lookup-group">
-      {owner
-        ? field('Organization', 'owner', { placeholder: 'acme', mono: true, onBlur: github.settle })
-        : field('Repository', 'repository', { placeholder: 'acme/api', mono: true, onBlur: github.settle })}
+      {listed === null ? (
+        field(named.label, named.key, { placeholder: named.placeholder, mono: true, onBlur: github.settle })
+      ) : (
+        <GitHubPicker
+          label={named.label}
+          value={form[named.key]}
+          onChange={(name) => set({ [named.key]: name })}
+          onBlur={github.settle}
+          options={owner ? listed.installations.map((name): Listed => ({ name })) : listed.repositories.map((each): Listed => ({ name: each.github, private: each.private }))}
+          placeholder={named.placeholder}
+          empty={`None of ${listed.app.name}'s ${owner ? 'accounts' : 'repositories'} match: type the whole name.`}
+        />
+      )}
+      <Listing listing={listing} owner={owner} />
       {!form.typedIds && <GitHubFound lookup={lookedUp} kind={target.kind} />}
       {(form.typedIds || lookedUp?.state === 'missing' || lookedUp?.state === 'failed') && (
         <details className="disclosure" open={form.typedIds} onToggle={(event) => set({ typedIds: event.currentTarget.open })}>

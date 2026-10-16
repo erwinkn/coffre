@@ -133,7 +133,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   },
   'DELETE /members/:member/bindings/:id': { ui: [{ does: 'a trust binding › Remove', in: 'components/trusted-workloads.tsx', call: 'bindings.remove' }] },
   'GET /workloads/lookup': { ui: [{ does: 'Trust a workload: a repository named, its IDs looked up', in: 'components/trusted-workloads.tsx', call: 'bindings.lookup' }] },
-  'GET /workloads/repositories': { inFlight: 'W104: the repository picker, on W102\'s Trust a workload form' },
+  'GET /workloads/repositories': { ui: [{ does: "Trust a workload: the repositories the deployment's GitHub App is installed on, offered as the name is typed", in: 'lib/queries.ts', call: 'bindings.repositories' }] },
   'PATCH /access/:member': {
     ui: [
       { does: 'a project › Users, Service accounts › Add user, Add service account', in: 'pages/project-access.tsx', call: 'access.set' },
