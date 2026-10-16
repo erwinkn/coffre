@@ -119,6 +119,47 @@ you name. A `coffre.json` that is a link, holds anything but `"url"`, or
 names something other than an origin stops the commands below it, with
 its path. One in your home directory or above it is ignored.
 
+**An OIDC binding can require a GitHub environment.** Name one, such as
+`production`, and only jobs that run in that environment sign in, after
+its protection rules (required reviewers, the branches it deploys) let
+them through. Set it under "GitHub environment" in the Trust dialog, with
+`coffre trust … --github-environment production`, or as the `environment`
+claim over the API and MCP. GitHub changes `sub` for such a job
+(`repo:acme/api:environment:production`), but no GitHub binding reads
+`sub`: `ref`, `workflow_ref` and `job_workflow_ref` are unchanged, so the
+plain and the reusable-workflow profiles both work with it.
+GitHub's environment names ignore case, so a binding for `production`
+also takes a job in `Production`; they are one environment, with the same
+rules. The name is checked as GitHub takes one: at most 255 characters, no
+control character, no space at either end. The binding's summary, `coffre
+trust`'s description of it and its audit entry ("…, in GitHub environment
+production, reaching …") name it. Existing bindings are unchanged and take
+jobs in any environment, or none, as before. `githubWorkflow` and
+`githubReusable` in `@coffre/core/workloads` take an optional `environment`.
+
+**The Trust dialog finds a repository's IDs itself.** Type `acme/api` and,
+once you pause or leave the field, coffre asks GitHub for its IDs. It then
+shows the repository and its owner as confirmation, spelled as GitHub
+spells them: `Acme/API` becomes `acme/api`, as the runs' `workflow_ref`
+names it. The ID fields appear only when GitHub shows nothing, behind
+"Private repository? Enter IDs", with the `gh api` command that prints
+them. For a reusable workflow called from any repository of the
+organization, the field asks for the organization, `acme`, and finds its ID
+the same way; `coffre trust --any-repository` looks it up too, instead of
+requiring `--owner-id`. Each name is asked once per page. GitHub answers
+60 lookups an hour to a server that does not sign in, which every user of a
+Workers deployment shares; once they are spent the dialog says so and
+offers the ID fields. `GET /api/workloads/lookup` takes an owner as well as
+a repository, answers with GitHub's spelling, and answers 429 when GitHub's
+limit is spent and 503 when GitHub does not answer, where it said 404 for
+both.
+
+**Events are chosen in a combobox.** The GitHub events and GitLab pipeline
+sources a binding trusts were a row of checkboxes. Now you type to filter
+and choose with the arrows and Enter, each chosen one a chip that Backspace
+removes. `pull_request` and `workflow_run` are marked "unreviewed code" in
+the list, and the warning under the field still says what each exposes.
+
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description
 of the role is gone: the role field under it already says what each role

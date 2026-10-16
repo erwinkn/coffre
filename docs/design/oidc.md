@@ -87,6 +87,22 @@ Some rules within the profiles:
   `pull_request_target` and every other event, even when their ref
   happens to match: they act on anyone's pull request with the base
   repository's tokens.
+- **GitHub environments.** A GitHub binding may name `environment`, the
+  GitHub environment its job runs in, such as `production`. Then only jobs
+  in that environment match, and only once its protection rules (required
+  reviewers, the branches it deploys) let them run. GitHub changes `sub`
+  for such a job, to `repo:acme/api:environment:production`, but no GitHub
+  profile binds `sub`, so `ref`, `workflow_ref` and `job_workflow_ref`
+  match as they would without it. A binding without `environment` takes
+  jobs in any environment, or none.
+  - The name matches whatever its case: GitHub's environment names are
+    case-insensitive, so `Production` and `production` are one environment
+    under the same rules. Every other claim matches exactly.
+  - It is checked as GitHub takes a name: at most 255 characters, no
+    control character, no space at either end.
+  - Anyone who can push a workflow can name an environment, and GitHub
+    makes it, unprotected, if it does not exist. Naming one adds what its
+    protection rules enforce, nothing more.
 - **Reusable workflows.** A reusable workflow is trusted at one commit:
   `job_workflow_sha` pins it, since its path can be reused and its branch
   changed. A new version needs a new binding.

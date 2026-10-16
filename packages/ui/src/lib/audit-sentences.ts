@@ -355,7 +355,7 @@ const TEMPLATES: Record<string, Template> = {
     did: 'trusted CI runs to sign in as',
     tried: 'trust CI runs to sign in as',
     what: (facts) => subject(facts.entry),
-    then: ({ entry }) => reaching(entry),
+    then: ({ entry }) => [...inGitHubEnvironment(entry), ...reaching(entry)],
   },
   // The tokens and bindings 0.4 made, given their own scope when 0.5 first checked a credential: what their account held then.
   'token.seal': {
@@ -478,6 +478,12 @@ function reaching(entry: AuditEntry, none = ''): Part[] {
     if (role !== null) byRole.set(role, (byRole.get(role) ?? 0) + 1);
   }
   return [`, reaching ${[...byRole].map(([role, count]) => `${role} on ${plural(count, 'place')}`).join(', ')}`];
+}
+
+/** The GitHub environment a binding takes its runs from, when it names one. */
+function inGitHubEnvironment(entry: AuditEntry): Part[] {
+  const environment = text((entry.metadata.claims as Record<string, unknown> | undefined)?.environment);
+  return environment === null || !String(entry.metadata.profile).startsWith('github') ? [] : [`, in GitHub environment ${environment}`];
 }
 
 /** The tokens and trust bindings a `token.seal` names, counted: `2 tokens and a trust binding`. */

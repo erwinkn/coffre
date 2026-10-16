@@ -21,11 +21,21 @@ export const MAX_BODY_BYTES = 64 * 1024;
 /** GitHub's API refuses a request that names no client. */
 export const USER_AGENT = 'coffre';
 
-/** A fetch that broke a limit, or failed: the message names the URL and why, never a body. */
+/**
+ * A fetch that broke a limit, or failed: the message names the URL and why,
+ * never a body. `status` is the one the host answered, when it answered.
+ */
 export class FetchRefused extends Error {
-  constructor(url: URL, why: string, options?: { cause?: unknown }) {
+  readonly status: number | null;
+  constructor(url: URL, why: string, options?: { cause?: unknown; status?: number }) {
     super(`${url.href}: ${why}`, options);
     this.name = 'FetchRefused';
+    this.status = options?.status ?? null;
+  }
+
+  /** A host that answered anything but a 200. */
+  static answered(url: URL, status: number): FetchRefused {
+    return new FetchRefused(url, `answered ${status}`, { status });
   }
 }
 
@@ -45,7 +55,7 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTranspo
       }
       if (response.status !== 200) {
         await response.body?.cancel();
-        throw new FetchRefused(url, `answered ${response.status}`);
+        throw FetchRefused.answered(url, response.status);
       }
       return parsed(url, response.headers.get('content-type'), await capped(url, response.body));
     },

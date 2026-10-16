@@ -170,11 +170,17 @@ export type BindingInput = {
   replaces: string[];
 };
 
-/** The IDs a binding names, as an owner would otherwise look them up. */
+/**
+ * The IDs a binding names, as an owner would otherwise look them up, under
+ * the names the host gives them: `Acme/API` looked up is `acme/api`, as its
+ * tokens name it. A GitHub owner, a user or an organization, has an ID alone.
+ */
 export type WorkloadIds =
   | { github: string; repositoryId: string; ownerId: string }
+  | { github: string; ownerId: string }
   | { gitlab: string; projectId: string; namespaceId: string };
 
+const GITHUB_OWNER = /^[A-Za-z0-9-]{1,39}$/;
 const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+){1,20}$/;
 
@@ -331,10 +337,14 @@ export class WorkloadService {
   }
 
   /**
-   * A public repository's or project's IDs, which bindings name rather than
-   * names: GitHub's API, or a GitLab's. The pages cannot ask those hosts
-   * themselves, since they may connect only to coffre; the CLI asks itself.
-   * A private one is not found, and its IDs are typed in.
+   * A public repository's, owner's or project's IDs, which bindings name
+   * rather than names: GitHub's API, or a GitLab's. The pages cannot ask
+   * those hosts themselves, since they may connect only to coffre; the CLI
+   * asks itself. A private one is not found, and its IDs are typed in.
+   *
+   * Asked without signing in, GitHub answers 60 lookups an hour per
+   * address, which every user of a Workers deployment shares: a 403 or a
+   * 429 says the hour's are spent, as `too_many_requests`.
    */
   async lookup(ctx: Asker, input: { github?: string; gitlab?: string; gitlabUrl?: string }): Promise<WorkloadIds> {
     // Asked of GitHub or GitLab for whoever sets up any service account; what they trust, each binding's own check decides.
@@ -346,17 +356,28 @@ export class WorkloadService {
         const answer = await this.#deps.transport.json(url);
         return typeof answer === 'object' && answer !== null ? (answer as Record<string, unknown>) : {};
       } catch (error) {
-        if (error instanceof FetchRefused) throw notFound(`${url.hostname} did not find it: for a private one, type its IDs`);
-        throw error;
+        if (!(error instanceof FetchRefused)) throw error;
+        if (error.status === 403 || error.status === 429) {
+          throw new ApiError('too_many_requests', `${url.hostname} allows only so many lookups an hour without signing in, and this hour's are spent: try again later, or type the IDs`);
+        }
+        if (error.status === 404) throw notFound(`${url.hostname} did not find it: for a private one, type its IDs`);
+        throw new ApiError('unavailable', `${url.hostname} did not answer (${error.message}): try again, or type the IDs`);
       }
     };
     const id = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : null);
+    const name = (value: unknown, given: string) => (typeof value === 'string' && value.toLowerCase() === given.toLowerCase() ? value : given);
+    if (input.github !== undefined && GITHUB_OWNER.test(input.github)) {
+      const owner = await ask(new URL(`https://api.github.com/users/${input.github}`));
+      const ownerId = id(owner.id);
+      if (ownerId === null) throw notFound(`GitHub does not know ${input.github}`);
+      return { github: name(owner.login, input.github), ownerId };
+    }
     if (input.github !== undefined) {
-      if (!GITHUB_REPOSITORY.test(input.github)) throw badRequest('a GitHub repository is <owner>/<name>');
+      if (!GITHUB_REPOSITORY.test(input.github)) throw badRequest('a GitHub repository is <owner>/<name>, and an owner <owner>');
       const repository = await ask(new URL(`https://api.github.com/repos/${input.github}`));
       const [repositoryId, ownerId] = [id(repository.id), id((repository.owner as Record<string, unknown> | undefined)?.id)];
       if (repositoryId === null || ownerId === null) throw notFound(`GitHub does not know ${input.github}`);
-      return { github: input.github, repositoryId, ownerId };
+      return { github: name(repository.full_name, input.github), repositoryId, ownerId };
     }
     if (input.gitlab !== undefined) {
       if (!GITLAB_PROJECT.test(input.gitlab)) throw badRequest('a GitLab project is <group>/<name>');
@@ -370,7 +391,7 @@ export class WorkloadService {
       const project = await ask(new URL(`${base.replace(/\/$/, '')}/api/v4/projects/${encodeURIComponent(input.gitlab)}`));
       const [projectId, namespaceId] = [id(project.id), id((project.namespace as Record<string, unknown> | undefined)?.id)];
       if (projectId === null || namespaceId === null) throw notFound(`GitLab does not know ${input.gitlab}`);
-      return { gitlab: input.gitlab, projectId, namespaceId };
+      return { gitlab: name(project.path_with_namespace, input.gitlab), projectId, namespaceId };
     }
     throw badRequest('look up a GitHub repository or a GitLab project');
   }

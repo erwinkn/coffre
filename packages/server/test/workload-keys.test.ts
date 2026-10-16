@@ -33,7 +33,7 @@ let fetches: number;
 const transport: WorkloadTransport = {
   json: async (url) => {
     fetches++;
-    if (url.href !== KEYS) throw new FetchRefused(url, 'answered 404');
+    if (url.href !== KEYS) throw FetchRefused.answered(url, 404);
     return { keys: published.map((each) => each.jwk) };
   },
 };

@@ -36,7 +36,7 @@ let fetched: string[] = [];
 const transport: WorkloadTransport = {
   json: async (url) => {
     fetched.push(url.href);
-    if (!documents.has(url.href)) throw new FetchRefused(url, 'answered 404');
+    if (!documents.has(url.href)) throw FetchRefused.answered(url, 404);
     return documents.get(url.href);
   },
 };

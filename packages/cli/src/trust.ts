@@ -31,6 +31,7 @@ export type TrustFlags = {
   reusable?: string;
   sha?: string;
   'any-repository'?: boolean;
+  'github-environment'?: string;
   gitlab?: string;
   'gitlab-url'?: string;
   /** Repeated, or a comma list. */
@@ -54,18 +55,22 @@ export type Lookup = (input: { github?: string; gitlab?: string; gitlabUrl?: str
 export const TRUST_USAGE = `usage: coffre trust <service>                       its trust bindings
        coffre trust <service> --github <owner>/<repo> --workflow <file> (--branch <b> | --tag <t>)
                     [--event push,workflow_dispatch,schedule,release,pull_request,workflow_run]
+                    [--github-environment <name>]
        coffre trust <service> --github <owner>/<repo> --reusable <owner>/<repo>/.github/workflows/<file>@<ref>
-                    --sha <commit> (--branch <b> | --tag <t>) [--event …] [--any-repository]
+                    --sha <commit> (--branch <b> | --tag <t>) [--event …] [--github-environment <name>]
+       coffre trust <service> --github <owner> --reusable … --any-repository
        coffre trust <service> --gitlab <group>/<project> (--branch <b> | --tag <t>)
                     [--source push,web,schedule] [--gitlab-url <url>]
        coffre trust <service> --issuer <url> --claim sub=<subject> [--claim <name>=<value> …]
-         IDs, when the lookup cannot see a private repository or project:
+         IDs, when the lookup cannot see a private repository, owner or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
          [--scope <path>=<role>,…] [--label <text>] [--replace <binding-id>] [--apply]
          --scope is what its runs reach, as market/dev=developer: at most what the account holds,
          all of it unless told, and nothing it is given later
          --event and --source take one or more, push alone unless told; a pull request matches
          by the branch it merges into
+         --github-environment takes only the jobs that run in that GitHub environment, under its
+         protection rules
        coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it
 A service account, service:<name>, signs in by OIDC this way, its CI's ID token matched by a trust
 binding, with no stored secret; or, for CI without OIDC, with a bearer token: coffre tokens issue <service>.`;
@@ -139,6 +144,7 @@ export async function bindingFrom(flags: TrustFlags, lookup: Lookup): Promise<Bi
   if (kinds !== 1) throw new Error('name one of --github, --gitlab or --issuer');
   const [events, sources] = [listOf(flags.event), listOf(flags.source)];
   if (flags.github === undefined && events !== undefined) throw new Error('--event is a GitHub run\'s: --source names a GitLab pipeline\'s');
+  if (flags.github === undefined && flags['github-environment'] !== undefined) throw new Error('--github-environment narrows a GitHub binding: name the repository with --github');
   if (flags.gitlab === undefined && sources !== undefined) throw new Error('--source is a GitLab pipeline\'s: --event names a GitHub run\'s');
   for (const event of events ?? []) {
     if (!(GITHUB_EVENTS as readonly string[]).includes(event)) throw new Error(`--event takes ${GITHUB_EVENTS.join(', ')}, not ${event}`);
@@ -159,41 +165,49 @@ function refFrom(flags: TrustFlags, form: 'full' | 'name'): { ref: string; type:
 }
 
 async function github(flags: TrustFlags, events: string[], lookup: Lookup): Promise<BindingRequest> {
-  const repository = flags.github!;
   const { ref } = refFrom(flags, 'full');
-  const ids = async () => {
-    if (flags['repository-id'] !== undefined && flags['owner-id'] !== undefined) {
-      return { repositoryId: flags['repository-id'], ownerId: flags['owner-id'] };
-    }
-    let found: WorkloadIds;
+  const environment = flags['github-environment'];
+  /** IDs given, or looked up: then the name as GitHub spells it, as its tokens do. */
+  const found = async (name: string, ids: string, flagsToAdd: string): Promise<Extract<WorkloadIds, { github: string }>> => {
     try {
-      found = await lookup({ github: repository });
+      const answer = await lookup({ github: name });
+      if (!('github' in answer)) throw new Error('not a GitHub repository or owner');
+      return answer;
     } catch (error) {
       if (!(error instanceof CoffreError && error.status === 404)) throw error;
       throw new Error(
-        `GitHub shows coffre nothing of ${repository}: it is private, or not there. Get its IDs with\n` +
-          `  gh api repos/${repository} --jq '"--repository-id \\(.id) --owner-id \\(.owner.id)"'\n` +
-          'and add the two flags it prints, --repository-id <n> --owner-id <n>, to this coffre trust.',
+        `GitHub shows coffre nothing of ${name}: it is private, or not there. Get its IDs with\n` +
+          `  gh api ${name.includes('/') ? 'repos' : 'users'}/${name} --jq '${ids}'\n` +
+          `and add ${flagsToAdd}, to this coffre trust.`,
       );
     }
-    if (!('repositoryId' in found)) throw new Error('not a GitHub repository');
-    return found;
+  };
+  const repository = async () => {
+    if (flags['repository-id'] !== undefined && flags['owner-id'] !== undefined) {
+      return { github: flags.github!, repositoryId: flags['repository-id'], ownerId: flags['owner-id'] };
+    }
+    const answer = await found(flags.github!, '"--repository-id \\(.id) --owner-id \\(.owner.id)"', 'the two flags it prints, --repository-id <n> --owner-id <n>');
+    if (!('repositoryId' in answer)) throw new Error(`--github takes <owner>/<repo>, not ${flags.github}`);
+    return answer;
   };
 
   if (flags.reusable !== undefined) {
     if (flags.sha === undefined) throw new Error('a reusable workflow is trusted at one commit: --sha <commit>');
-    const caller = flags.workflow === undefined ? undefined : { repository, workflow: flags.workflow };
-    const called = { ref, events, called: flags.reusable, sha: flags.sha, caller };
+    const called = { ref, events, called: flags.reusable, sha: flags.sha, environment };
     if (flags['any-repository'] === true) {
-      if (flags['owner-id'] === undefined) throw new Error('--any-repository trusts every repository of the organization: name it by --owner-id <n>');
-      return { ...githubReusable({ ...called, repositoryId: null, ownerId: flags['owner-id'] }), issuer: null };
+      // The organization, `acme`, or any of its repositories, `acme/api`: its ID, given or looked up.
+      const owner = flags.github!.split('/')[0]!;
+      const ownerId = flags['owner-id'] ?? (await found(owner, '"--owner-id \\(.id)"', 'the flag it prints, --owner-id <n>')).ownerId;
+      const caller = flags.workflow === undefined ? undefined : { repository: flags.github!, workflow: flags.workflow };
+      return { ...githubReusable({ ...called, caller, repositoryId: null, ownerId }), issuer: null };
     }
-    const { repositoryId, ownerId } = await ids();
-    return { ...githubReusable({ ...called, repositoryId, ownerId }), issuer: null };
+    const { github: name, repositoryId, ownerId } = await repository();
+    const caller = flags.workflow === undefined ? undefined : { repository: name, workflow: flags.workflow };
+    return { ...githubReusable({ ...called, caller, repositoryId, ownerId }), issuer: null };
   }
   if (flags.workflow === undefined) throw new Error('name the workflow file: --workflow deploy.yml');
-  const { repositoryId, ownerId } = await ids();
-  return { ...githubWorkflow({ repository, repositoryId, ownerId, workflow: flags.workflow, ref, events }), issuer: null };
+  const { github: name, repositoryId, ownerId } = await repository();
+  return { ...githubWorkflow({ repository: name, repositoryId, ownerId, workflow: flags.workflow, ref, events, environment }), issuer: null };
 }
 
 async function gitlab(flags: TrustFlags, sources: string[], lookup: Lookup): Promise<BindingRequest> {
@@ -266,7 +280,11 @@ export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims
   const claims = binding.claims as Record<string, string | undefined>;
   const on = (ref: string | undefined, how: ClaimValue | undefined) => {
     const into = claimValues(how).includes('pull_request') ? ' or a pull request into it' : '';
-    return [ref === undefined ? null : `on ${refName(ref)}${into}`, how === undefined ? null : `by ${listing(claimValues(how), 'or')}`].filter(Boolean).join(', ');
+    return [
+      ref === undefined ? null : `on ${refName(ref)}${into}`,
+      how === undefined ? null : `by ${listing(claimValues(how), 'or')}`,
+      claims.environment === undefined || binding.profile === 'custom' ? null : `in environment ${claims.environment}`,
+    ].filter(Boolean).join(', ');
   };
   /** `acme/api/.github/workflows/deploy.yml@refs/heads/main` as its repository and workflow file. */
   const workflow = (ref: string) => /^([^/]+\/[^/]+)\/(?:\.github\/workflows\/)?(.+)@/.exec(ref);

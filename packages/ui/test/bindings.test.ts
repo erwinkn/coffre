@@ -1,15 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { CoffreError } from '@coffre/client';
 import { checkBinding } from '@coffre/core/workloads';
 
-import { askedScope, bindingOf, EMPTY_FORM, planned, summary, type Form, type ScopeChoice } from '../src/lib/bindings.ts';
+import {
+  askedScope,
+  bindingOf,
+  EMPTY_FORM,
+  githubTarget,
+  lookupable,
+  lookupFailure,
+  planned,
+  summary,
+  type Form,
+  type GitHubIds,
+  type ScopeChoice,
+} from '../src/lib/bindings.ts';
 
 const SHA = 'c'.repeat(40);
 const form = (changes: Partial<Form>): Form => ({ ...EMPTY_FORM, ...changes });
+/** `acme/api` as GitHub's lookup finds it, and its owner. */
+const API: GitHubIds = { github: 'acme/api', repositoryId: '41532', ownerId: '9919' };
+const ACME: GitHubIds = { github: 'acme', ownerId: '9919' };
 
 test('the GitHub form fills in a workflow of the repository, or a reusable workflow at its commit', () => {
-  const workflow = bindingOf(form({ repository: 'acme/api', repositoryId: '41532', ownerId: '9919', workflow: 'deploy.yml' }));
+  const workflow = bindingOf(form({ repository: 'acme/api', workflow: 'deploy.yml' }), API);
   assert.deepEqual(workflow, {
     profile: 'github',
     issuer: null,
@@ -23,21 +39,69 @@ test('the GitHub form fills in a workflow of the repository, or a reusable workf
   });
   checkBinding(workflow);
   // Several events, one binding.
-  const ci = bindingOf(form({ repository: 'acme/api', repositoryId: '41532', ownerId: '9919', workflow: 'ci.yml', events: ['push', 'pull_request'] }));
+  const ci = bindingOf(form({ repository: 'acme/api', workflow: 'ci.yml', events: ['push', 'pull_request'] }), API);
   assert.deepEqual(checkBinding(ci).claims.event_name, ['push', 'pull_request']);
-  assert.throws(() => bindingOf(form({ repository: 'acme/api', repositoryId: '41532', ownerId: '9919', workflow: 'ci.yml', events: [] })), /Choose at least one event/);
+  assert.throws(() => bindingOf(form({ repository: 'acme/api', workflow: 'ci.yml', events: [] }), API), /Choose at least one event/);
 
   const called = 'acme/deploy/.github/workflows/release.yml@refs/heads/main';
-  const reusable = bindingOf(form({ reusable: true, repositoryId: '41532', ownerId: '9919', called, sha: SHA, refKind: 'tag', refName: 'v3', events: ['release'] }));
+  const reusable = bindingOf(form({ reusable: true, repository: 'acme/api', called, sha: SHA, refKind: 'tag', refName: 'v3', events: ['release'] }), API);
   assert.equal(reusable.profile, 'github-reusable');
   assert.deepEqual([reusable.claims.ref, reusable.claims.event_name, reusable.claims.workflow_ref], ['refs/tags/v3', ['release'], undefined]);
   checkBinding(reusable);
-  const anywhere = bindingOf(form({ reusable: true, anyRepository: true, ownerId: '9919', called, sha: SHA }));
+  // Called from any repository of the organization: the owner's ID alone, and no calling workflow, which would name one repository.
+  const anywhere = bindingOf(form({ reusable: true, anyRepository: true, owner: 'acme', repository: 'acme/api', workflow: 'ship.yml', called, sha: SHA }), ACME);
   assert.equal(anywhere.profile, 'github-reusable-organization');
+  assert.deepEqual([anywhere.claims.repository_owner_id, anywhere.claims.workflow_ref], ['9919', undefined]);
   checkBinding(anywhere);
 
-  assert.throws(() => bindingOf(form({ repository: 'acme/api', ownerId: '9919', workflow: 'deploy.yml' })), /The repository's ID is needed/);
-  assert.throws(() => bindingOf(form({ reusable: true, repositoryId: '1', ownerId: '9919', called })), /The called workflow's commit is needed/);
+  assert.throws(() => bindingOf(form({ reusable: true, repository: 'acme/api', called }), API), /The called workflow's commit is needed/);
+});
+
+test('the GitHub form takes the IDs GitHub found for the name in the field, or those typed in for a private repository', () => {
+  // Typed in another case: the workflow is named as GitHub names it, as its tokens do.
+  assert.equal(bindingOf(form({ repository: 'Acme/API', workflow: 'deploy.yml' }), API).claims.workflow_ref, 'acme/api/.github/workflows/deploy.yml@refs/heads/main');
+  // Not found yet, or found for a name since changed: no IDs.
+  assert.throws(() => bindingOf(form({ repository: 'acme/api', workflow: 'deploy.yml' })), /The repository's IDs are needed: wait for GitHub to find acme\/api, or enter them/);
+  assert.throws(() => bindingOf(form({ repository: 'acme/web', workflow: 'deploy.yml' }), API), /wait for GitHub to find acme\/web/);
+  assert.throws(() => bindingOf(form({ repository: '', workflow: 'deploy.yml' }), API), /The repository is needed/);
+  assert.throws(() => bindingOf(form({ reusable: true, anyRepository: true, owner: 'acme' }), API), /The organization's IDs are needed/);
+
+  // Typed in: they win over any lookup, and a repository needs both.
+  const typed = bindingOf(form({ repository: 'acme/secret', typedIds: true, repositoryId: '7', ownerId: '9919', workflow: 'deploy.yml' }), null);
+  assert.deepEqual([typed.claims.repository_id, typed.claims.workflow_ref], ['7', 'acme/secret/.github/workflows/deploy.yml@refs/heads/main']);
+  assert.throws(() => bindingOf(form({ repository: 'acme/secret', typedIds: true, ownerId: '9919', workflow: 'deploy.yml' })), /The repository's ID is needed/);
+  const organization = bindingOf(form({ reusable: true, anyRepository: true, owner: 'acme', typedIds: true, ownerId: '9919', called: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', sha: SHA }));
+  assert.equal(organization.claims.repository_owner_id, '9919');
+
+  // What the dialog looks up: the repository, or the organization; only once it reads as one.
+  assert.deepEqual(githubTarget(form({ repository: ' acme/api ', owner: 'acme' })), { kind: 'repository', name: 'acme/api' });
+  assert.deepEqual(githubTarget(form({ reusable: true, anyRepository: true, repository: 'acme/api', owner: 'acme' })), { kind: 'owner', name: 'acme' });
+  for (const name of ['acme/api', 'Acme-Inc/api.js', 'a/b_c']) assert.equal(lookupable({ kind: 'repository', name }), true, name);
+  for (const name of ['', 'acme', 'acme/', '/api', 'acme/api/x', '../users', 'acme/a b']) assert.equal(lookupable({ kind: 'repository', name }), false, name);
+  assert.equal(lookupable({ kind: 'owner', name: 'acme' }), true);
+  assert.equal(lookupable({ kind: 'owner', name: 'acme/api' }), false);
+});
+
+test('a GitHub environment narrows the binding, left out when empty', () => {
+  assert.equal(bindingOf(form({ repository: 'acme/api', workflow: 'deploy.yml' }), API).claims.environment, undefined);
+  const deploy = bindingOf(form({ repository: 'acme/api', workflow: 'deploy.yml', environment: ' production ' }), API);
+  assert.equal(deploy.claims.environment, 'production');
+  checkBinding(deploy);
+  const reusable = bindingOf(form({ reusable: true, repository: 'acme/api', called: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', sha: SHA, environment: 'prod/eu' }), API);
+  assert.equal(checkBinding(reusable).claims.environment, 'prod/eu');
+});
+
+test("a lookup that fails says why: nothing public there, final; the hour's lookups spent, or no answer, worth asking again", () => {
+  assert.deepEqual(lookupFailure('acme/secret', new CoffreError(404, 'not_found', 'api.github.com did not find it')), {
+    state: 'missing',
+    message: 'GitHub shows nothing public at acme/secret.',
+  });
+  assert.deepEqual(lookupFailure('acme/api', new CoffreError(429, 'too_many_requests', "this hour's are spent")), {
+    state: 'failed',
+    message: "GitHub's hourly limit on lookups without signing in is spent. Enter the IDs, or try again later.",
+  });
+  assert.deepEqual(lookupFailure('acme/api', new CoffreError(503, 'unavailable', 'api.github.com did not answer')), { state: 'failed', message: 'api.github.com did not answer' });
+  assert.deepEqual(lookupFailure('acme/api', 'boom'), { state: 'failed', message: 'GitHub could not be asked.' });
 });
 
 test('the GitLab form names the namespace and the project, and the other issuer its subject and claims', () => {
@@ -58,8 +122,12 @@ test('the GitLab form names the namespace and the project, and the other issuer 
 test('a binding reads in a line: what it trusts, and at which ref', () => {
   const issuer = 'https://token.actions.githubusercontent.com';
   assert.deepEqual(
-    summary({ profile: 'github', issuer, claims: bindingOf(form({ repository: 'acme/api', repositoryId: '1', ownerId: '2', workflow: 'deploy.yml' })).claims }),
+    summary({ profile: 'github', issuer, claims: bindingOf(form({ repository: 'acme/api', workflow: 'deploy.yml' }), API).claims }),
     { title: 'acme/api · deploy.yml', detail: 'push at main' },
+  );
+  assert.deepEqual(
+    summary({ profile: 'github', issuer, claims: { workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', event_name: 'push', environment: 'production' } }),
+    { title: 'acme/api · deploy.yml', detail: 'push at main, in environment production' },
   );
   assert.deepEqual(
     summary({ profile: 'github', issuer, claims: { workflow_ref: 'acme/api/.github/workflows/ci.yml@refs/heads/main', event_name: ['push', 'pull_request'] } }),

@@ -2,17 +2,19 @@ import type { BindingPlan, BindingView } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { Fragment, useState } from 'react';
-import { askedScope, bindingOf, EMPTY_FORM, planned, summary, type Form, type RefKind, type ScopeChoice } from '../lib/bindings';
+import { askedScope, bindingOf, EMPTY_FORM, githubTarget, planned, summary, type Form, type GitHubLookup, type RefKind, type ScopeChoice } from '../lib/bindings';
 import { removeBinding } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
+import { useGitHubLookup } from '../lib/use-github-lookup';
+import { MultiCombobox } from './multi-combobox';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { Card } from './page';
 import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
-import { GitHub, Link, Plus, X } from './icons';
+import { CheckCircle, GitHub, Link, Plus, X } from './icons';
 
 /**
  * The CI runs that may sign in as a service, by the ID token their platform
@@ -155,27 +157,41 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
   );
 }
 
-/** Checkboxes for what may start a run: GitHub's events, or GitLab's pipeline sources. */
-function Choices(props: { label: string; options: readonly string[]; chosen: string[]; onChange: (chosen: string[]) => void; hint?: string }) {
-  const { options, chosen } = props;
+/** Beside `pull_request` and `workflow_run` in the events' list: they run code nobody reviewed, said in full once chosen. */
+function exposureNote(event: string) {
+  return EVENT_EXPOSURE[event] === undefined ? null : <span className="tag tag-amber">unreviewed code</span>;
+}
+
+/**
+ * What GitHub said of the repository or owner the form names: who it is,
+ * as confirmation, or why it could not say, with the way to type its IDs.
+ */
+function GitHubFound({ lookup, kind }: { lookup: GitHubLookup | null; kind: 'repository' | 'owner' }) {
+  if (lookup === null) return null;
+  if (lookup.state === 'looking') {
+    return (
+      <p className="lookup" role="status">
+        <Spinner size={13} />
+        Looking it up on GitHub…
+      </p>
+    );
+  }
+  if (lookup.state === 'found') {
+    const { github, repositoryId, ownerId } = lookup.ids;
+    return (
+      <p className="lookup lookup-found" role="status">
+        <CheckCircle size={14} />
+        <span>
+          <span className="mono lookup-name">{github}</span>
+          {kind === 'repository' ? ` · ID ${repositoryId}, owned by ${github.split('/')[0]} (ID ${ownerId})` : ` · ID ${ownerId}`}
+        </span>
+      </p>
+    );
+  }
   return (
-    <fieldset className="field checks">
-      <legend className="label">{props.label}</legend>
-      <div className="checks-row">
-        {options.map((option) => (
-          <label key={option} className="check mono">
-            <input
-              type="checkbox"
-              checked={chosen.includes(option)}
-              // Kept in the options' order, as the server stores them.
-              onChange={(event) => props.onChange(options.filter((each) => (each === option ? event.target.checked : chosen.includes(each))))}
-            />
-            {option}
-          </label>
-        ))}
-      </div>
-      {props.hint !== undefined && <span className="hint">{props.hint}</span>}
-    </fieldset>
+    <p className="lookup lookup-failed" role="status">
+      {lookup.message}
+    </p>
   );
 }
 
@@ -215,11 +231,15 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   const member = memberRef('service', serviceId);
   const { pending, error, setError, run } = useAction();
   const lookup = useAction();
+  const target = githubTarget(form);
+  // Not asked while IDs are typed in: the name is then a private repository's, which GitHub would not show.
+  const github = useGitHubLookup(form.typedIds ? { ...target, name: '' } : target);
+  const found = github.lookup?.state === 'found' ? github.lookup.ids : null;
   const set = (changes: Partial<Form>) => {
     setForm((current) => ({ ...current, ...changes }));
     setPlan(null);
   };
-  const input = () => ({ ...bindingOf(form), ...askedScope(choice), label: form.label.trim() === '' ? null : form.label.trim(), replaces: [] });
+  const input = () => ({ ...bindingOf(form, found), ...askedScope(choice), label: form.label.trim() === '' ? null : form.label.trim(), replaces: [] });
 
   function close() {
     setOpen(false);
@@ -248,17 +268,48 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
     });
   }
 
-  const field = (label: string, key: keyof Form, props: { placeholder?: string; mono?: boolean; hint?: string } = {}) => (
+  const field = (label: string, key: keyof Form, props: { placeholder?: string; mono?: boolean; hint?: string; onBlur?: () => void } = {}) => (
     <label className="field">
       <span className="label">{label}</span>
       <input
         className={`input${props.mono ? ' mono' : ''}`}
         value={form[key] as string}
         placeholder={props.placeholder}
+        spellCheck={props.mono ? false : undefined}
         onChange={(event) => set({ [key]: event.target.value } as Partial<Form>)}
+        onBlur={props.onBlur}
       />
       {props.hint !== undefined && <span className="hint">{props.hint}</span>}
     </label>
+  );
+
+  // The repository, or the organization, its IDs looked up as it settles; typed in only where GitHub shows nothing.
+  const owner = target.kind === 'owner';
+  const lookedUp = github.lookup;
+  const githubIds = (
+    <div className="lookup-group">
+      {owner
+        ? field('Organization', 'owner', { placeholder: 'acme', mono: true, onBlur: github.settle })
+        : field('Repository', 'repository', { placeholder: 'acme/api', mono: true, onBlur: github.settle })}
+      {!form.typedIds && <GitHubFound lookup={lookedUp} kind={target.kind} />}
+      {(form.typedIds || lookedUp?.state === 'missing' || lookedUp?.state === 'failed') && (
+        <details className="disclosure" open={form.typedIds} onToggle={(event) => set({ typedIds: event.currentTarget.open })}>
+          <summary>{owner ? 'Enter its ID' : 'Private repository? Enter IDs'}</summary>
+          <div className="disclosure-body">
+            <div className="form-row">
+              {!owner && field('Repository ID', 'repositoryId', { mono: true })}
+              {field('Owner ID', 'ownerId', { mono: true })}
+            </div>
+            <p className="hint">
+              Bindings use IDs, since a name can pass to someone else. Get them with{' '}
+              <span className="mono">
+                {owner ? `gh api users/${target.name || 'acme'} --jq .id` : `gh api repos/${target.name || 'acme/api'} --jq '.id, .owner.id'`}
+              </span>
+            </p>
+          </div>
+        </details>
+      )}
+    </div>
   );
 
   const ref = (
@@ -315,55 +366,40 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
                     A reusable workflow
                   </button>
                 </nav>
-                <div className="form-row">
-                  {field('Repository', 'repository', { placeholder: 'acme/api', mono: true })}
-                  <div className="field" style={{ flex: '0 0 auto', alignSelf: 'end' }}>
-                    <button
-                      className="btn"
-                      type="button"
-                      disabled={lookup.pending || form.repository.trim() === ''}
-                      onClick={() =>
-                        void lookup.run(() => coffre.bindings.lookup({ github: form.repository.trim() }), {
-                          affects: [],
-                          onSuccess: (ids) => 'repositoryId' in ids && set({ repositoryId: ids.repositoryId, ownerId: ids.ownerId }),
-                        })
-                      }
-                    >
-                      {lookup.pending && <Spinner />}
-                      Look up IDs
-                    </button>
-                  </div>
-                </div>
-                <div className="form-row">
-                  {!(form.reusable && form.anyRepository) && field('Repository ID', 'repositoryId', { mono: true })}
-                  {field('Owner ID', 'ownerId', { mono: true })}
-                </div>
-                <p className="hint">
-                  Bindings use IDs, since a name can pass to someone else. For a private repository:{' '}
-                  <span className="mono">gh api repos/{form.repository.trim() || 'acme/api'} --jq '.id, .owner.id'</span>
-                </p>
-                <ErrorLine error={lookup.error} />
                 {form.reusable ? (
                   <>
                     {field('Called workflow', 'called', { placeholder: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', mono: true })}
                     {field("Its commit", 'sha', { placeholder: 'the full SHA it is trusted at', mono: true, hint: 'A new version of the workflow needs a new binding.' })}
-                    {field('Calling workflow (optional)', 'workflow', { placeholder: 'deploy.yml', mono: true, hint: 'Left out, every workflow of the repository at the ref below may call it.' })}
                     <label className="check">
                       <input type="checkbox" checked={form.anyRepository} onChange={(event) => set({ anyRepository: event.target.checked })} />
                       Called from any repository of the organization
                     </label>
+                    {githubIds}
+                    {!form.anyRepository &&
+                      field('Calling workflow (optional)', 'workflow', { placeholder: 'deploy.yml', mono: true, hint: 'Left out, every workflow of the repository at the ref below may call it.' })}
                   </>
                 ) : (
-                  field('Workflow file', 'workflow', { placeholder: 'deploy.yml', mono: true })
+                  <>
+                    {githubIds}
+                    {field('Workflow file', 'workflow', { placeholder: 'deploy.yml', mono: true })}
+                  </>
                 )}
                 {ref}
-                <Choices
+                <MultiCombobox
                   label="Events"
                   options={githubEventsAt(form.refKind)}
-                  chosen={form.events}
+                  value={form.events}
                   onChange={(events) => set({ events })}
+                  placeholder="push, workflow_dispatch…"
+                  note={exposureNote}
+                  mono
                   hint={form.events.includes('pull_request') ? `A pull request matches by the branch it merges into: ${form.refName.trim() || 'main'}.` : undefined}
                 />
+                {field('GitHub environment (optional)', 'environment', {
+                  placeholder: 'production',
+                  mono: true,
+                  hint: 'Only jobs that run in this environment sign in, once its protection rules, such as required reviewers, let them.',
+                })}
                 <Exposure events={form.events} />
               </>
             )}
@@ -396,11 +432,13 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
                 </div>
                 <ErrorLine error={lookup.error} />
                 {ref}
-                <Choices
+                <MultiCombobox
                   label="Pipeline sources"
                   options={GITLAB_PIPELINE_SOURCES}
-                  chosen={form.sources}
+                  value={form.sources}
                   onChange={(sources) => set({ sources })}
+                  placeholder="push, web, schedule"
+                  mono
                   hint="Merge-request pipelines are never trusted: they name another project."
                 />
               </>

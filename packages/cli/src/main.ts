@@ -1171,6 +1171,7 @@ async function trust(args: string[]): Promise<void> {
       reusable: { type: 'string' },
       sha: { type: 'string' },
       'any-repository': { type: 'boolean' },
+      'github-environment': { type: 'string' },
       gitlab: { type: 'string' },
       'gitlab-url': { type: 'string' },
       source: { type: 'string', multiple: true },
