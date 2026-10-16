@@ -328,19 +328,23 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
     : { label: 'Repository', key: 'repository' as const, placeholder: 'acme/api' };
   const githubIds = (
     <div className="lookup-group">
-      {listed === null ? (
-        field(named.label, named.key, { placeholder: named.placeholder, mono: true, onBlur: github.settle })
-      ) : (
-        <GitHubPicker
-          label={named.label}
-          value={form[named.key]}
-          onChange={(name) => set({ [named.key]: name })}
-          onBlur={github.settle}
-          options={owner ? listed.installations.map((name): Listed => ({ name })) : listed.repositories.map((each): Listed => ({ name: each.github, private: each.private }))}
-          placeholder={named.placeholder}
-          empty={`None of ${listed.app.name}'s ${owner ? 'accounts' : 'repositories'} match: type the whole name.`}
-        />
-      )}
+      <GitHubPicker
+        label={named.label}
+        value={form[named.key]}
+        onChange={(name) => set({ [named.key]: name })}
+        // Its IDs are the list's, never IDs typed for another name.
+        onPick={(name) => set({ [named.key]: name, typedIds: false, repositoryId: '', ownerId: '' })}
+        onBlur={github.settle}
+        options={
+          listed === null
+            ? null
+            : owner
+              ? listed.installations.map((name): Listed => ({ name }))
+              : listed.repositories.map((each): Listed => ({ name: each.github, private: each.private }))
+        }
+        placeholder={named.placeholder}
+        empty={listed === null ? '' : `None of ${listed.app.name}'s ${owner ? 'accounts' : 'repositories'} match: type the whole name.`}
+      />
       <Listing listing={listing} owner={owner} />
       {!form.typedIds && <GitHubFound lookup={lookedUp} kind={target.kind} />}
       {(form.typedIds || lookedUp?.state === 'missing' || lookedUp?.state === 'failed') && (

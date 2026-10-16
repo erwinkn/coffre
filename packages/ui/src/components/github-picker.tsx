@@ -1,5 +1,5 @@
 import { Autocomplete } from '@base-ui/react/autocomplete';
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import { usePreferences } from '../lib/preferences';
 
 /** The most the list shows at once: typing narrows it. */
@@ -12,14 +12,18 @@ export type Listed = { name: string; private?: boolean };
  * The Trust dialog's repository or organization field, offering what the
  * deployment's GitHub App is installed on as the name is typed. It stays a
  * text field: a name the list lacks is typed whole, and looked up as
- * without the app. Base UI's autocomplete does the keyboard and ARIA: Down
- * Arrow opens the list, arrows move through it, Enter takes one, Escape
- * closes it.
+ * without the app. With nothing to offer (`options` null: no app, or its
+ * list not there yet) its list never opens, and it is the same input
+ * either way, so that the list arriving mid-word moves neither focus nor
+ * caret. Base UI's autocomplete does the keyboard and ARIA: Down Arrow
+ * opens the list, arrows move through it, Enter takes one, Escape closes
+ * it.
  */
 export function GitHubPicker({
   label,
   value,
   onChange,
+  onPick,
   onBlur,
   options,
   placeholder,
@@ -27,23 +31,37 @@ export function GitHubPicker({
 }: {
   label: string;
   value: string;
+  /** The name as typed. */
   onChange: (value: string) => void;
+  /** A name taken from the list: its IDs are the list's. */
+  onPick: (value: string) => void;
   onBlur: () => void;
-  options: readonly Listed[];
+  options: readonly Listed[] | null;
   placeholder?: string;
   /** Said in the list when nothing matches the name typed. */
   empty: string;
 }) {
   const { portal } = usePreferences();
   const id = useId();
-  const hidden = new Set(options.filter((option) => option.private === true).map((option) => option.name));
+  const labelId = useId();
+  const [open, setOpen] = useState(false);
+  const hidden = new Set((options ?? []).filter((option) => option.private === true).map((option) => option.name));
   return (
-    <Autocomplete.Root items={options.map((option) => option.name)} value={value} onValueChange={(next) => onChange(next)} openOnInputClick limit={LIMIT}>
+    <Autocomplete.Root
+      items={(options ?? []).map((option) => option.name)}
+      value={value}
+      onValueChange={(next, details) => (details.reason === 'item-press' ? onPick(next) : onChange(next))}
+      open={open && options !== null}
+      onOpenChange={setOpen}
+      openOnInputClick
+      limit={LIMIT}
+    >
       <div className="field">
-        <label className="label" htmlFor={id}>
+        {/* Named by id: Base UI hides what lies beside its input while the list is open. */}
+        <label className="label" id={labelId} htmlFor={id}>
           {label}
         </label>
-        <Autocomplete.Input id={id} className="input mono" placeholder={placeholder} spellCheck={false} onBlur={onBlur} />
+        <Autocomplete.Input id={id} aria-labelledby={labelId} className="input mono" placeholder={placeholder} spellCheck={false} onBlur={onBlur} />
       </div>
       <Autocomplete.Portal container={portal}>
         <Autocomplete.Positioner className="menu-positioner" sideOffset={4} align="start">
