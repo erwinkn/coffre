@@ -1349,6 +1349,15 @@ a.crumb-link:hover {
   padding-left: 2rem;
 }
 
+/* A secret's value field holds two buttons, Generate and Show, side by side. */
+.input-group.has-generate .input {
+  padding-right: 3.875rem;
+}
+
+.input-group .input-addon-generate {
+  right: calc(0.1875rem + 1.75rem);
+}
+
 /* The engine's clear button for a search field, drawn in the field's own ink
    rather than the bright system glyph. */
 .input[type='search']::-webkit-search-cancel-button {
@@ -3771,6 +3780,40 @@ a.env-card-name:hover {
 
 .dialog-confirm .dialog-title {
   margin-bottom: 0.5rem;
+}
+
+/* Generate a value: its length as a slider and a number of bytes, side by side. */
+.generate-length {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.generate-length .range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.input.generate-bytes {
+  flex: none;
+  width: 4.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.generate-unit {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.label-note {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+/* Generate again sits apart from the two that close the dialog. */
+.generate-actions > :first-child {
+  margin-right: auto;
 }
 
 .menu-positioner {
