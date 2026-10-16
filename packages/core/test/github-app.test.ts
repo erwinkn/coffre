@@ -170,6 +170,7 @@ test("a repository by name: its IDs when the app is installed on it, private or 
   assert.deepEqual(await app.repository('ACME/api'), { github: 'acme/api', repositoryId: '41532', ownerId: '9919', private: false });
   assert.equal(await app.repository('acme/nothing'), null);
   assert.equal(await app.repository('someone/else'), null);
+  assert.equal(await app.repository('old-co/legacy'), null, 'suspended');
 });
 
 test('GitHub down, or refusing the app, says so, and neither the key nor a token is ever in a message or the object', async () => {

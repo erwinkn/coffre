@@ -115,11 +115,10 @@ export class GitHubApp {
     };
   }
 
-  /** `owner/name`'s IDs, when the app is installed on it; null when it is not, or GitHub knows no such repository. */
+  /** `owner/name`'s IDs, when the app is installed on it; null when it is not, its installation is suspended, or GitHub knows no such repository. */
   async repository(fullName: string): Promise<GitHubRepository | null> {
-    const installation = await this.#asApp(`/repos/${fullName}/installation`, { missing: true });
-    const id = record(installation).id;
-    if (installation === null || typeof id !== 'number') return null;
+    const { id, suspended_at: suspended } = record(await this.#asApp(`/repos/${fullName}/installation`, { missing: true }));
+    if (typeof id !== 'number' || (suspended !== null && suspended !== undefined)) return null;
     return repository(await this.#asInstallation(id, `/repos/${fullName}`, { missing: true }));
   }
 
