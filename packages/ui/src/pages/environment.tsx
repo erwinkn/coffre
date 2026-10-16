@@ -29,6 +29,7 @@ import {
   type SecretChange,
   type SecretDraft,
 } from '../lib/secret-edit-batch';
+import { ValueUnavailable } from '../lib/clipboard';
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { sortKeys, type Sort } from '../lib/secret-order';
 import { inDialog } from '../lib/shortcuts';
@@ -979,10 +980,11 @@ function SecretRow({
   async function readValue({ show = true } = {}): Promise<string | null> {
     if (shown !== null) return shown.value;
     setRevealing(true);
+    // Cleared as the read starts, not as it ends: a copy refused meanwhile has its say.
+    setError(null);
     try {
       const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
       const value = values[entry.key];
-      setError(null);
       if (show) setReveal({ value, version: readVersion, at: Date.now() });
       return value;
     } catch (failure) {
@@ -1000,6 +1002,21 @@ function SecretRow({
   function toggleReveal() {
     if (shown !== null) setReveal(null);
     else void readValue();
+  }
+
+  // Copy on a hidden value reads it the way Reveal does (the same audited read)
+  // and hands it to the clipboard, never to the screen or to state.
+  const [copying, setCopying] = useState(false);
+  async function readForCopy(): Promise<string> {
+    setCopying(true);
+    try {
+      const value = await readValue({ show: false });
+      // readValue has said why on the row.
+      if (value === null) throw new ValueUnavailable();
+      return value;
+    } finally {
+      setCopying(false);
+    }
   }
 
   // An edit starts from the current value, read the way Reveal reads it, so
@@ -1162,10 +1179,22 @@ function SecretRow({
                   </>
                 ) : (
                   <>
-                    {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
-                    {shown !== null && (
-                      <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
-                    )}
+                    {/* Copy sits left of Reveal, hidden or shown, so Hide stays where
+                        Reveal was clicked. Hidden, it copies without showing the value;
+                        as for Reveal, it takes secret.read, and a reference copies the
+                        value it reads through. */}
+                    <SecretReadOnly canReveal={canReveal}>
+                      <CopyButton
+                        variant="act"
+                        value={shown !== null ? shown.value : readForCopy}
+                        label={`Copy ${entry.key}`}
+                        onError={() =>
+                          setError(
+                            'The browser did not allow copying to the clipboard. Reveal the value and copy it by hand.',
+                          )
+                        }
+                      />
+                    </SecretReadOnly>
                     <SecretReadOnly canReveal={canReveal}>
                       <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                         <button
@@ -1174,7 +1203,7 @@ function SecretRow({
                           disabled={revealing}
                           aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                         >
-                          {revealing && !opening ? (
+                          {revealing && !opening && !copying ? (
                             <Spinner size={13} />
                           ) : shown === null ? (
                             <Eye size={15} />

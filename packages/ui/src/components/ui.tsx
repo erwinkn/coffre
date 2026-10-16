@@ -5,6 +5,7 @@ import { Menu } from '@base-ui/react/menu';
 import { Popover } from '@base-ui/react/popover';
 import { Tooltip } from '@base-ui/react/tooltip';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
+import { copyText, ValueUnavailable } from '../lib/clipboard';
 import { usePreferences } from '../lib/preferences';
 
 /* -------------------------------------------------------------------------- */
@@ -240,47 +241,76 @@ export function breakAfterUnderscores(text: string): ReactNode {
  *
  * The glyph turns into a check, and screen readers hear "Copied", for 1.4s --
  * long enough to be noticed after the eye has moved on, short enough not to
- * look stuck.
+ * look stuck. A copy that fails says so the same way, in red, rather than
+ * leaving the click looking ignored.
+ *
+ * `value` may be a function that fetches the text (Copy on a hidden secret).
+ * It is called inside the click, so the clipboard write keeps its user
+ * gesture; see `copyText`. A function that throws `ValueUnavailable` has
+ * already reported why, so `onError` is not told.
  */
 export function CopyButton({
   value,
   label = 'Copy',
   variant = 'icon',
+  onError,
 }: {
-  value: string;
+  value: string | (() => Promise<string>);
   label?: string;
   /** `act` sits among a table row's actions; `icon` anywhere else. */
   variant?: 'icon' | 'act';
+  /** Called with whatever made the copy fail, apart from `ValueUnavailable`. */
+  onError?: (failure: unknown) => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<'idle' | 'pending' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
     if (timer.current !== null) clearTimeout(timer.current);
   }, []);
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      return; // Clipboard denied; say nothing rather than claim success.
-    }
-    setCopied(true);
+  function settle(next: 'copied' | 'failed') {
+    setState(next);
     if (timer.current !== null) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setCopied(false), 1400);
+    timer.current = setTimeout(() => setState('idle'), next === 'copied' ? 1400 : 3000);
   }
 
+  async function copy() {
+    // Nothing is awaited before `copyText` is called: the click's gesture is still live.
+    const source = typeof value === 'string' ? value : value();
+    if (typeof source !== 'string') setState('pending');
+    try {
+      await copyText(source);
+    } catch (failure) {
+      settle('failed');
+      if (!(failure instanceof ValueUnavailable)) onError?.(failure);
+      return;
+    }
+    settle('copied');
+  }
+
+  const text = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : label;
   return (
-    <Tip label={copied ? 'Copied' : label}>
+    <Tip label={text}>
       <button
         type="button"
         className={variant === 'act' ? 'act act-icon' : 'btn btn-quiet btn-sm btn-icon'}
         aria-label={label}
+        aria-busy={state === 'pending'}
+        disabled={state === 'pending'}
         onClick={copy}
       >
-        {copied ? <Check size={14} className="copied" /> : <Copy size={14} />}
+        {state === 'pending' ? (
+          <Spinner size={13} />
+        ) : state === 'copied' ? (
+          <Check size={14} className="copied" />
+        ) : state === 'failed' ? (
+          <AlertCircle size={14} className="copy-failed" />
+        ) : (
+          <Copy size={14} />
+        )}
         <span className="visually-hidden" aria-live="polite">
-          {copied ? 'Copied' : ''}
+          {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : ''}
         </span>
       </button>
     </Tip>

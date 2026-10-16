@@ -154,6 +154,8 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
         createElement(
           SecretReadOnly,
           { canReveal: canRevealSecrets(persona.environmentPermissions) },
+          // Copy on a hidden secret takes the same permission as Reveal.
+          createElement('button', null, 'Copy secret'),
           createElement('button', null, 'Reveal secret'),
         ),
       ),
@@ -166,8 +168,9 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
         audit: affordances.includes('Audit log'),
         newProject: affordances.includes('New project'),
         revealSecret: affordances.includes('Reveal secret'),
+        copySecret: affordances.includes('Copy secret'),
       },
-      persona.expected,
+      { ...persona.expected, copySecret: persona.expected.revealSecret },
     );
   });
 }
