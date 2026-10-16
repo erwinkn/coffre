@@ -91,6 +91,30 @@ export type Form = typeof EMPTY_FORM;
  */
 export type GitHubIds = { github: string; repositoryId?: string; ownerId: string };
 
+/** What a GitHub App's listing tells of names' IDs: each repository's, and its owner's, once each. */
+export function listedIds(repositories: readonly { github: string; repositoryId: string; ownerId: string }[]): GitHubIds[] {
+  const owners = new Map(repositories.map(({ github, ownerId }) => [github.split('/')[0]!, ownerId]));
+  return [
+    ...repositories.map(({ github, repositoryId, ownerId }) => ({ github, repositoryId, ownerId })),
+    ...[...owners].map(([github, ownerId]) => ({ github, ownerId })),
+  ];
+}
+
+/**
+ * What a GitHub App's listing lacks, as the dialog says it under the field:
+ * it stopped short (`partial`), which comes first since an empty partial
+ * list may only lack what it did not reach; or, whole, the app is installed
+ * on no account, or, for a repository, reaches none of theirs.
+ */
+export function listingGap(
+  listed: { installations: readonly string[]; repositories: readonly unknown[]; truncated: boolean },
+  owner: boolean,
+): 'partial' | 'not_installed' | 'no_repositories' | null {
+  if (listed.truncated) return 'partial';
+  if (listed.installations.length === 0) return 'not_installed';
+  return !owner && listed.repositories.length === 0 ? 'no_repositories' : null;
+}
+
 /** Who the GitHub form names: a repository, or for a reusable workflow called from any of its repositories, an owner. */
 export function githubTarget(form: Form): { kind: 'repository' | 'owner'; name: string } {
   return form.reusable && form.anyRepository ? { kind: 'owner', name: form.owner.trim() } : { kind: 'repository', name: form.repository.trim() };

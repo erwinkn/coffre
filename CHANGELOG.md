@@ -184,23 +184,29 @@ Owner picked from a list where before they typed a name.
 - **CLI.** `coffre admit api-deploy --service --grant market/prod=viewer`,
   repeated or a comma list.
 - **MCP.** `admit_member` takes `access`; its approval page shows each grant.
-**A private repository's IDs, from a GitHub App of the deployment's own.**
-A trust binding names a repository by its IDs, and coffre looked up only
-a public one's: a private one's were typed, from `gh api`. Now a
-deployment may pass a GitHub App, installed on its organizations, as
-`workloads.githubApp`, and a name typed in "Trust a workload" or given
-to `coffre trust` resolves through it, private or not; a public one
-outside it still resolves through GitHub's public API.
-`GET /api/workloads/repositories` lists every repository the app is
-installed on, `{ "app": null }` without one, for whoever may set up a
-service account: what the pages' repository picker, next, shows. The app needs
+
+**Pick a repository, private ones too, where a CI run is trusted.** A
+trust binding names a repository by its IDs, and coffre looked up only a
+public one's: a private one's were typed, from `gh api`. Now a deployment
+may pass a GitHub App, installed on its organizations, as
+`workloads.githubApp`. In "Trust a workload", the Repository field then
+offers every repository the app is installed on, private ones marked, as
+the name is typed; picking one fills in its IDs at once, with no lookup.
+For a reusable workflow called from any repository, the Organization
+field offers the accounts it is installed on. A name the list lacks is
+typed whole, and resolves through the app, or through GitHub's public API
+outside it, as does a name given to `coffre trust`. Installed nowhere
+yet, or reaching no repository, the dialog says so and links to the app's
+installation page; GitHub down, it says so and the name can still be
+typed. `GET /api/workloads/repositories` is the list, `{ "app": null }`
+without an app, for whoever may set up a service account. The app needs
 Metadata: read-only, which every GitHub App has, and no one's personal
 token. A deployment `coffre init` writes reads `GITHUB_APP_ID`, a var,
 and `GITHUB_APP_PRIVATE_KEY`, a secret of the app Worker; without them,
 nothing changes. [docs/github-app.md](docs/github-app.md) registers,
 installs and passes it. The key stays in the app's configuration and
 memory, beside the GitHub sign-in's secret, never in the vault, the
-database, a log line or an answer. GitHub down is a 503 that says so.
+database, a log line or an answer.
 
 **The add-person dialog says what it asks.** Its field is "Email", not
 "Cloudflare Access email", whichever way people sign in, and its description

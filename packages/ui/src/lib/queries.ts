@@ -55,6 +55,7 @@ export const keys = {
   memberAccess: (member: string) => ['member-access', member],
   credentials: (member: string) => ['credentials', member],
   bindings: (member: string) => ['bindings', member],
+  githubRepositories: ['github-repositories'],
   identities: ['identities'],
   sessions: ['sessions'],
   apps: ['apps'],
@@ -141,6 +142,19 @@ export const queries = {
   /** The projects you can see, each with its distinct secret count. */
   projects: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.projects, queryFn: () => readProjects(client) }),
+
+  /**
+   * The repositories the deployment's GitHub App is installed on, for the
+   * Trust dialog's picker; `{ app: null }` without one. Each listing asks
+   * GitHub, so it is kept a minute, and not asked again on focus.
+   */
+  githubRepositories: (client: CoffreClient) =>
+    queryOptions({
+      queryKey: keys.githubRepositories,
+      queryFn: () => client.bindings.repositories(),
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
+    }),
 
   /** Who holds what in a project, for those who manage its access. */
   grants: (client: CoffreClient, project: string) =>
