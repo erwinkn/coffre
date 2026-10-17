@@ -179,6 +179,8 @@ coffre tokens issue api-deploy --output-file token   # a new 0600 file, reaching
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
                                             # the CI runs trusted to sign in as service:api-deploy, by OIDC;
                                             # previews the claims, --apply saves (docs/design/oidc.md)
+coffre trust api-deploy --issuer <iss> --jwks-file jwks.json --claim sub=…
+                                            # an issuer coffre cannot reach, by its keys: a Kubernetes cluster (docs/kubernetes.md)
 coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --apply removes it
                                             # anyone with access does these for what they hold, where
 coffre settings service-accounts --except-environments prod   # this lets them: prod's take an Admin

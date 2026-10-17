@@ -383,6 +383,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /members/:member/tokens/:id': { commands: ['tokens revoke'] },
   'GET /members/:member/bindings': { commands: ['trust'] },
   'POST /members/:member/bindings': { commands: ['trust'] },
+  'POST /members/:member/bindings/keys': { commands: ['trust'] },
   'DELETE /members/:member/bindings/:id': { commands: ['untrust'] },
   'GET /workloads/lookup': { commands: ['trust'] },
   'GET /workloads/repositories': {

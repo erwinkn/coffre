@@ -27,7 +27,16 @@ export function summary(binding: Pick<BindingView, 'profile' | 'issuer' | 'claim
   if (binding.profile === 'gitlab') {
     return { title: `GitLab project ${claims.project_id}`, detail: `${claimValues(binding.claims.pipeline_source).join(', ')} at ${claims.ref_type} ${claims.ref}` };
   }
-  return { title: new URL(binding.issuer).host, detail: `sub ${claims.sub}` };
+  return { title: issuerName(binding.issuer), detail: `sub ${claims.sub}` };
+}
+
+/** An issuer as a title: its host, when it is a URL; a binding that carries its keys may name any string. */
+function issuerName(issuer: string): string {
+  try {
+    return new URL(issuer).host || issuer;
+  } catch {
+    return issuer;
+  }
 }
 
 /**
@@ -80,6 +89,8 @@ export const EMPTY_FORM = {
   issuer: '',
   sub: '',
   extra: '',
+  // Its keys, a JWKS pasted, for an issuer coffre cannot fetch them from; empty, they are fetched.
+  jwks: '',
 };
 
 export type Form = typeof EMPTY_FORM;
@@ -176,7 +187,10 @@ export function lookupFailure(name: string, failure: unknown): GitHubLookup {
  * server checks the rest. A GitHub binding takes its IDs, and its
  * repository's name as GitHub spells it, from `found`, unless typed in.
  */
-export function bindingOf(form: Form, found: GitHubIds | null = null): { profile: BindingPlan['profile']; issuer: string | null; claims: BindingClaims } {
+export function bindingOf(
+  form: Form,
+  found: GitHubIds | null = null,
+): { profile: BindingPlan['profile']; issuer: string | null; claims: BindingClaims; jwks?: KeySet } {
   const needed = (value: string, what: string) => {
     if (value.trim() === '') throw new Error(`${what} is needed`);
     return value.trim();
@@ -240,6 +254,30 @@ export function bindingOf(form: Form, found: GitHubIds | null = null): { profile
     if (at <= 0) throw new Error(`"${line}" is not <claim>=<value>`);
     claims[line.slice(0, at).trim()] = line.slice(at + 1).trim();
   }
-  return { profile: 'custom', issuer: needed(form.issuer, 'The issuer'), claims };
+  const jwks = keySetOf(form.jwks);
+  return { profile: 'custom', issuer: needed(form.issuer, 'The issuer'), claims, ...(jwks === undefined ? {} : { jwks }) };
+}
+
+/** A JWKS, as the API takes it: each key the server checks. */
+export type KeySet = { keys: Record<string, unknown>[] };
+
+/** The key set pasted in a field, or undefined for none; throws a sentence when it is not one. */
+export function keySetOf(text: string): KeySet | undefined {
+  if (text.trim() === '') return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error('The keys are not JSON: paste the issuer\'s key set, { "keys": [ … ] }');
+  }
+  const keys = (value as { keys?: unknown } | null)?.keys;
+  if (!Array.isArray(keys)) throw new Error('The keys are a key set, { "keys": [ … ] }, as kubectl get --raw /openid/v1/jwks prints it');
+  return { keys: keys as Record<string, unknown>[] };
+}
+
+/** Where a binding's keys come from, in a line: the URL coffre fetches, or the keys uploaded with it, by `kid` or thumbprint. */
+export function keysOf(binding: Pick<BindingPlan, 'jwksUri' | 'keys'>): string {
+  if (binding.keys === null) return binding.jwksUri;
+  return `Uploaded: ${binding.keys.map((key) => `${key.kid ?? key.thumbprint} (${key.alg})`).join(', ')}`;
 }
 

@@ -135,6 +135,12 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: 'Trust a workload › Trust', in: 'components/trusted-workloads.tsx', call: 'bindings.create' },
     ],
   },
+  'POST /members/:member/bindings/keys': {
+    ui: [
+      { does: 'a trust binding with uploaded keys › Claims › Replace keys: the bindings replaced reviewed first', in: 'components/trusted-workloads.tsx', call: 'bindings.previewKeys' },
+      { does: 'Replace keys › Save keys', in: 'components/trusted-workloads.tsx', call: 'bindings.replaceKeys' },
+    ],
+  },
   'DELETE /members/:member/bindings/:id': { ui: [{ does: 'a trust binding › Remove', in: 'components/trusted-workloads.tsx', call: 'bindings.remove' }] },
   'GET /workloads/lookup': { ui: [{ does: 'Trust a workload: a repository named, its IDs looked up', in: 'components/trusted-workloads.tsx', call: 'bindings.lookup' }] },
   'GET /workloads/repositories': { ui: [{ does: "Trust a workload: the repositories the deployment's GitHub App is installed on, offered as the name is typed", in: 'lib/queries.ts', call: 'bindings.repositories' }] },

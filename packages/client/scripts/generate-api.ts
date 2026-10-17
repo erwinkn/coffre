@@ -29,6 +29,7 @@ const NAMED = {
   BindingPlan: 'api/workloads.ts',
   BindingView: 'api/workloads.ts',
   ConnectedApp: 'mcp/service.ts',
+  KeysPlan: 'api/workloads.ts',
   Deletion: 'api/projects.ts',
   Decision: 'mcp/approvals.ts',
   DeletionResult: 'api/projects.ts',

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decodeWorkloadToken, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
+import { decodeWorkloadToken, keySummaries, KeysInvalid, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -97,4 +97,40 @@ test('the shape is checked before anything is trusted', () => {
   }
   assert.throws(() => decodeWorkloadToken('a.b'), /not a compact JWS/);
   assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /longer than 8192 bytes/);
+});
+
+test('with a lifetime given, a token that lives longer, iat to exp, is refused, however recently issued', async () => {
+  const { jwk, sign } = await signer('RS256', 'k8s');
+  const within = { issuer: ISSUER, audience: AUDIENCE, now: NOW, maxLifetime: 3600 };
+  await verifyWorkloadToken(await sign({ iat: at(-10), exp: at(3590) }), { keys: [jwk] }, within);
+  await refused(verifyWorkloadToken(await sign({ iat: at(-10), exp: at(3591) }), { keys: [jwk] }, within), 'too_long');
+  // Without one, as for an issuer whose keys coffre fetches, only the age counts.
+  await verify(await sign({ iat: at(-10), exp: at(86_400) }), [jwk]);
+});
+
+test('an uploaded key set keeps the public keys that sign, written one way, and its digest names it', async () => {
+  const rsa = await signer('RS256', 'rs');
+  const ec = await signer('ES256', 'es');
+  const set = await uploadedKeys({ keys: [{ ...rsa.jwk, x5c: ['MIIB'] }, ec.jwk, { ...ec.jwk, kid: 'enc', use: 'enc' }] });
+  assert.deepEqual(set.keys.map(({ kid, alg }) => [kid, alg]), [['rs', 'RS256'], ['es', 'ES256']]);
+  assert.match(set.digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(keySummaries(set.jwks), set.keys);
+  assert.equal(JSON.parse(set.jwks).keys[0].x5c, undefined);
+  const reordered = await uploadedKeys({ keys: [Object.fromEntries(Object.entries(rsa.jwk).reverse()), ec.jwk] });
+  assert.equal(reordered.digest, set.digest);
+  // The thumbprint is RFC 7638's: the same as jose's.
+  const { calculateJwkThumbprint } = await import('jose');
+  assert.equal(set.keys[0]!.thumbprint, await calculateJwkThumbprint(rsa.jwk));
+  // What it keeps verifies.
+  await verify(await rsa.sign({}), JSON.parse(set.jwks).keys);
+
+  const invalid = (value: unknown, message: RegExp) => assert.rejects(uploadedKeys(value), (error: unknown) => error instanceof KeysInvalid && message.test(error.message));
+  await invalid([rsa.jwk], /a JWKS/);
+  await invalid({ keys: [] }, /no key that signs/);
+  await invalid({ keys: Array.from({ length: 33 }, () => rsa.jwk) }, /at most 32/);
+  await invalid({ keys: [{ ...rsa.jwk, d: 'x' }] }, /private or a secret key/);
+  await invalid({ keys: [{ ...rsa.jwk, alg: 'RS512' }] }, /RS256 or a P-256 key/);
+  await invalid({ keys: [{ ...rsa.jwk, n: 'AQAB' }] }, /under 2048 bits/);
+  await invalid({ keys: [{ ...ec.jwk, x: 'AQAB' }] }, /not a valid EC key/);
+  await invalid({ keys: [rsa.jwk, { ...ec.jwk, kid: 'rs' }] }, /two keys are key rs/);
 });

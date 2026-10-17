@@ -540,6 +540,7 @@ const BINDING = {
   profile: 'github',
   issuer: 'https://token.actions.githubusercontent.com',
   jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
+  keys: null,
   claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' },
   scope: { 'market/dev': 'viewer', 'market/prod': 'viewer' },
   label: 'deploys',
