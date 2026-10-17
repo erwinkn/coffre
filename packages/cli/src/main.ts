@@ -970,7 +970,7 @@ async function run(args: string[]): Promise<void> {
   const command = args.slice(separator + 1);
 
   const values = Object.fromEntries(await readEnvironments(paths));
-  // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and is in the audit log).
+  // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
   const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
   for (const key of kept) delete values[key];
   if (kept.length > 0) {

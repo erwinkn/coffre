@@ -6,7 +6,7 @@
   environments it names over a variable of the same name in your shell. With
   `--keep-existing`, a variable already set there keeps its value, an empty one
   included, and coffre's is dropped. One line on stderr names the keys kept,
-  never a value. Every value is still read, and is in the audit log.
+  never a value. Every value is still read, and every read is audited.
 
 ## 0.6.2 (2026-10-17)
 

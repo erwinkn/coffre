@@ -85,8 +85,9 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
   return {
     requests,
     environment,
-    async coffre(args: string[], extra: Record<string, string> = {}) {
-      const env = Object.assign(environment(), extra);
+    /** `extra` is set over the caller's environment; a key given as undefined is unset in it. */
+    async coffre(args: string[], extra: Record<string, string | undefined> = {}) {
+      const env: Record<string, string | undefined> = Object.assign(environment(), extra);
       const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
       let stdout = '';
       let stderr = '';
@@ -114,7 +115,9 @@ test('run of several environments injects their union, each read once, after eac
 
 test('run overwrites a variable the shell sets, unless --keep-existing keeps it, empty ones too, and says which by name', async (t) => {
   const coffre = await instance(t, { 'deploy/prod': { values: { STRIPE_KEY: 'coffre-stripe-value', EMPTY_HERE: 'coffre-empty-value', FRESH: 'coffre-fresh-value' } } });
-  const shell = { STRIPE_KEY: 'sk_test_x', EMPTY_HERE: '' };
+  // The caller's own environment may set any of these.
+  const unset = { STRIPE_KEY: undefined, EMPTY_HERE: undefined, FRESH: undefined };
+  const shell = { ...unset, STRIPE_KEY: 'sk_test_x', EMPTY_HERE: '' };
   const show = printing('STRIPE_KEY', 'EMPTY_HERE', 'FRESH');
 
   const overwriting = await coffre.coffre(['run', 'deploy/prod', '--', ...show], shell);
@@ -131,7 +134,7 @@ test('run overwrites a variable the shell sets, unless --keep-existing keeps it,
   }
 
   // Nothing set in the shell, nothing kept, nothing said.
-  const untouched = await coffre.coffre(['run', '--keep-existing', 'deploy/prod', '--', ...show]);
+  const untouched = await coffre.coffre(['run', '--keep-existing', 'deploy/prod', '--', ...show], unset);
   assert.equal(untouched.code, 0, untouched.stderr);
   assert.deepEqual(JSON.parse(untouched.stdout), { STRIPE_KEY: 'coffre-stripe-value', EMPTY_HERE: 'coffre-empty-value', FRESH: 'coffre-fresh-value' });
   assert.equal(untouched.stderr, '');
@@ -143,12 +146,13 @@ test('--keep-existing across several environments keeps the union\'s shell-set k
     'auth/prod': { values: { SECRET: 'auth-secret-value' } },
     'www/prod': { values: { TOKEN: 'www-token-value' } },
   });
-  const merged = await coffre.coffre(['run', '--keep-existing', 'deploy/prod', 'auth/prod', '--', ...printing('TOKEN', 'URL', 'SECRET')], { TOKEN: 'mine' });
+  const unset = { TOKEN: undefined, URL: undefined, SECRET: undefined };
+  const merged = await coffre.coffre(['run', '--keep-existing', 'deploy/prod', 'auth/prod', '--', ...printing('TOKEN', 'URL', 'SECRET')], { ...unset, TOKEN: 'mine' });
   assert.equal(merged.code, 0, merged.stderr);
   assert.deepEqual(JSON.parse(merged.stdout), { TOKEN: 'mine', URL: 'deploy-url-value', SECRET: 'auth-secret-value' });
 
   // The shell's TOKEN settles nothing between two environments that both define it.
-  const clashing = await coffre.coffre(['run', '--keep-existing', 'deploy/prod', 'www/prod', '--', ...printing('TOKEN')], { TOKEN: 'mine' });
+  const clashing = await coffre.coffre(['run', '--keep-existing', 'deploy/prod', 'www/prod', '--', ...printing('TOKEN')], { ...unset, TOKEN: 'mine' });
   assert.equal(clashing.code, 1);
   assert.equal(clashing.stdout, '', 'the command ran');
   assert.equal(clashing.stderr, 'coffre: deploy/prod and www/prod both define TOKEN: a key comes from one environment only. Nothing was read\n');
