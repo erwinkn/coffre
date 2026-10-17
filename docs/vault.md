@@ -148,8 +148,58 @@ Not supported:
 - `dataFrom.find`, which lists paths.
 - `metadataPolicy: Fetch`.
 - `remoteRef.version`.
-- ESO's `kubernetes` and `jwt` auth. These are planned, through trust
-  bindings, so that a cluster stores no coffre token.
+
+### Without a stored token: Kubernetes auth
+
+ESO can sign in with a token Kubernetes signs for a service account of the
+cluster's, through the coffre service account's trust bindings, so the
+cluster stores no coffre token.
+
+1. Trust the cluster's service account, here `eso-reader` in namespace
+   `apps`, as coffre's `eso`. This is [kubernetes.md](kubernetes.md)'s
+   first step, with its keys uploaded:
+
+   ```sh
+   coffre admit eso --service --grant market/prod=viewer
+   coffre trust eso --issuer "$ISSUER" --jwks-file cluster-jwks.json \
+     --claim sub=system:serviceaccount:apps:eso-reader \
+     --claim kubernetes.io.serviceaccount.uid="$UID_"
+   ```
+
+   This previews the binding: its issuer, its keys by `kid` and its claims.
+   Check them, then run it again with `--apply` to save it.
+
+2. Point the SecretStore's auth at it. The role is the coffre service
+   account, and the audience is coffre's URL, which the binding expects:
+
+   ```yaml
+   auth:
+     kubernetes:
+       mountPath: kubernetes
+       role: eso
+       serviceAccountRef:
+         name: eso-reader
+         audiences: [https://secrets.acme.example]
+   ```
+
+   ESO's own service account needs RBAC to `create` `serviceaccounts/token`
+   for `eso-reader`.
+
+On each sign-in, ESO asks Kubernetes for a new ten-minute token for
+`eso-reader` and sends it as `PUT /v1/auth/kubernetes/login`. coffre trades
+it as `coffre login --service` would: it checks it against the bindings,
+spends it, and issues a credential of five minutes. ESO reads with that
+credential, then ends it with `revoke-self`.
+
+The token is spent at its first sign-in, so give ESO `serviceAccountRef`,
+which gets a new one each time. A `secretRef` or a mounted token signs in
+once, and is then refused as `replayed`. Unless ESO runs with
+`--enable-vault-token-cache`, each refresh signs in and out again, so the
+audit log shows a `token.exchange` and a sign-out beside each read.
+
+ESO's `jwt` auth sends the same login to its own mount:
+`auth: { jwt: { path: jwt, role: eso, kubernetesServiceAccountToken: {
+serviceAccountRef: { name: eso-reader }, audiences: [https://secrets.acme.example] } } }`.
 
 ## Other tools
 
@@ -199,6 +249,9 @@ separates entries with `;`:
 ```
  In a GitHub workflow, coffre's own Action and its OIDC sign-in
 need no stored token ([ci.md](ci.md)), which is the better choice there.
+vault-action's `method: jwt`, with `role` the coffre service account and
+`jwtGithubAudience` coffre's URL, signs in with the run's ID token through
+the account's GitHub binding, as coffre's Action does.
 
 **consul-template and envconsul.** Set `renew_token = false`: coffre's
 tokens are not renewed.

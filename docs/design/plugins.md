@@ -1,7 +1,7 @@
 # Plugins, and coffre as a Vault KV store
 
 A design for 0.7.0, written on 2026-10-17 (W119). The mechanism and the
-Vault adapter are built (PR 1 of section 7). The decisions in section 6
+Vault adapter are built, its sign-in included (PRs 1 and 2 of section 7). The decisions in section 6
 were taken on the recommended option while Erwin was away (R10), and each
 is his to revisit. User docs: [vault.md](../vault.md). Erwin asked for a read-only HashiCorp Vault KV v2 API, so that
 off-the-shelf tools, External Secrets Operator (ESO) first, can pull
@@ -97,8 +97,27 @@ type PluginContext = {
   publicUrl: string;
   /** The API as whoever `token` names, checked once at the first call. */
   api(token: string): CoffreClient;
+  /**
+   * The request as a workload's sign-in, for a 5-minute credential: `POST
+   * /api/auth/oidc` on it, in process. `asked` says what its body asks for,
+   * `{ service, token }`, read once admission passed.
+   */
+  exchange(asked: (body: unknown) => { service: unknown; token: unknown }): Promise<{ token: string; expiresAt: string }>;
+  /** End the credential `token` is: `POST /api/auth/logout`, in process. */
+  signOut(token: string): Promise<void>;
 };
 ```
+
+The Vault adapter's login, for example, says `exchange((body) => ({ service:
+'token:' + body.role, token: body.jwt }))`, with the checks left out. The
+route admits the request first, then reads the body, so a caller past the
+limits costs no read.
+
+`exchange` and `signOut` run coffre's own routes in process, with their
+limits and audit, as `api` runs the API. A plugin that signs a workload in
+only passes its token on. It never sees a key, and never calls the
+bindings' `verify` alone: spending the token and issuing the credential
+are what make the exchange safe, and they stay in core.
 
 That is the whole v1 mechanism, about 80 lines in
 `packages/server/src/plugins.ts`. **A plugin holds no authority of its own.**
@@ -159,10 +178,6 @@ else is needed.
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):
 
-- `exchange({ service, token })`: a workload's ID token for a short-lived
-  coffre token, through the trust bindings: the in-process form of
-  `POST /api/auth/oidc`, with its rate limits. The Vault adapter's
-  Kubernetes login needs it (section 5).
 - `events.committed()`: a wake-up after a commit that wrote audit entries.
   Change notifications need it (section 4).
 - `scheduled(coffre)`: called from the scheduled job (every 5 minutes on
@@ -349,13 +364,13 @@ with the real client.
 | hashicorp/vault-action (GitHub) | Yes, token auth | Data. It sends an empty namespace |
 | argocd-vault-plugin | Yes, token auth | Data |
 | consul-template, envconsul | Yes, with `renew_token = false` | Data. `renewable: false` stops lease renewal |
-| ESO `kubernetes` / `jwt` auth | Not yet | `auth/<mount>/login` and `revoke-self` (below) |
+| ESO `kubernetes` / `jwt` auth | Yes, with `serviceAccountRef` | `auth/<mount>/login` and `revoke-self` (below) |
 | ESO `dataFrom.find`, `metadataPolicy: Fetch` | No | LIST and metadata (decision 6) |
 | Vault Agent | No | Renewable tokens and `renew-self` |
 | Vault CSI provider | No | Kubernetes auth only |
 | Spring Cloud Vault | Probably | ui/mounts + data. Its startup calls are unconfirmed |
 
-**Kubernetes login, designed and not built.** ESO's Kubernetes auth sends
+**Kubernetes login (PR 2).** ESO's Kubernetes auth sends
 `PUT /v1/auth/kubernetes/login` with `{ "role": "eso", "jwt": "<service
 account token>" }`. It reads `auth.client_token`, and on cleanup calls
 lookup-self and then `PUT /v1/auth/token/revoke-self`.
@@ -373,14 +388,18 @@ lookup-self and then `PUT /v1/auth/token/revoke-self`.
    whose issuer may be any string, such as `https://kubernetes.default.svc`.
    The adapter does no key handling of its own.
 3. The answer is `auth: { client_token: <5-minute coffre token>,
-   lease_duration: 300, renewable: false }`. ESO logs in again when the
-   token runs out.
-4. `revoke-self` is the API's `POST /api/auth/logout`. With it, a token
-   ESO is done with ends early.
+   lease_duration: <seconds left>, renewable: false }`. ESO logs in again
+   when the token runs out.
+4. `revoke-self` is `POST /api/auth/logout`, through `coffre.signOut`.
+   With it, a token ESO is done with ends early.
 
-The interface it needs from core is the existing exchange, unchanged:
-`{ service, token } → { token, expiresAt }`. Since #241, an uploaded key set
-is one more way a binding trusts an issuer, so nothing else is missing.
+Any `auth/<mount>/login` takes the same body, by PUT or POST:
+`kubernetes`, `jwt`, or a mount name the client was given. vault-action's
+`method: jwt` signs in this way with a GitHub run's ID token. The
+interface it needs from core is the existing exchange, unchanged: `{
+service, token } → { token, expiresAt }`. A refusal is Vault's 403 with the
+exchange's reason, a closed limit 429, and an instance that trusts no
+workloads 400, never 404.
 
 ## 6. Decisions
 
@@ -434,7 +453,7 @@ review. Each is reversible.
 | PR | What | Effort |
 |---|---|---|
 | 1 | The plugin mechanism and the read-only Vault adapter. Adds a user doc (`docs/vault.md`: ESO, CLI, Terraform, vals setup), the ESO `webhook` alternative in the same doc, and `expiresAt` in `/api/me` (decision 4) | 1 to 2 days |
-| 2 | `exchange`, Kubernetes and JWT login, and `revoke-self`, on uploaded key sets (#241, in main) | 1 day |
+| 2 | `exchange`, Kubernetes and JWT login, and `revoke-self`, on uploaded key sets (#241). Done | 1 day |
 | 3 | `events` and `scheduled`, and the `notify` plugin | 3 days |
 | 4 | LIST, if wanted (decision 6) | Half a day |
 | 5 | Rotation plugins on `scheduled`, from W108 and W109's prototypes | Per provider |

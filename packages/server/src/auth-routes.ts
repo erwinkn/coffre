@@ -120,9 +120,17 @@ const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'u
  *
  * Admission comes before anything else: both limits, one per source address
  * and one for all, then the body, read only to its limit. A limiter that
- * fails refuses, and never lets a request through.
+ * fails refuses, and never lets a request through. `asked` says what the
+ * body asks for, for a plugin whose clients write it in their own words, a
+ * Vault login's `{ role, jwt }` (`PluginContext.exchange`): read past
+ * admission too, and checked as the route's own.
  */
-export async function exchangeWorkloadToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
+export async function exchangeWorkloadToken(
+  request: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  asked: (body: unknown) => unknown = (body) => body,
+) {
   const workloads = runtime.workloads;
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
   const refuse = (error: ExchangeRefused) =>
@@ -142,7 +150,7 @@ export async function exchangeWorkloadToken(request: Request, runtime: CoffreRun
     return refuse(new ExchangeRefused('busy', 'coffre cannot count exchanges right now: try again shortly', 503));
   }
   try {
-    const body = exchangeBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
+    const body = exchangeBody.parse(asked(await readLimitedJson(request, EXCHANGE_BODY_BYTES)));
     return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
   } catch (error) {
     if (error instanceof ExchangeRefused) return refuse(error);
