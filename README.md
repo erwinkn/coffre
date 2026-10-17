@@ -130,6 +130,7 @@ coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a r
 coffre references market/prod               # what reads it through references; references break ends one
 coffre run      market/dev -- printenv
 coffre run      market/prod auth/prod -- ./deploy   # several: their keys together; a key in two of them stops it
+coffre run --keep-existing market/dev -- ./app      # a variable already set in your shell (empty too) wins over coffre's
 coffre export   market/dev --format dotenv  # or json, shell, github; several environments, as run
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
