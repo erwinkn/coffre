@@ -74,7 +74,7 @@ coffre fork market/prod staging --reference  # each key a reference to prod's
 ```
 
 ```
-PUT /api/projects/market/staging {"name": "Staging", "from": "prod", "references": false}
+PUT /api/projects/market/staging {"from": "prod", "references": false}
 ```
 
 Forking takes what creating an environment takes, `environment.manage`

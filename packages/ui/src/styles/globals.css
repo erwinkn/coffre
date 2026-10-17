@@ -526,7 +526,8 @@ kbd {
   white-space: nowrap;
 }
 
-.crumb-link > span:last-child {
+.crumb-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -536,28 +537,45 @@ a.crumb-link:hover {
   text-decoration: none;
 }
 
+/* A short label, kept whole: the slugs after it give way. */
 .crumb-root {
+  flex: none;
   color: var(--ink-3);
   font-weight: 500;
 }
 
+/*
+ * A crumb that switches: its name and chevron, one button. However long the
+ * slugs, it keeps what is not its name (padding, gap, chevron, and the
+ * project's tile): only the names give way.
+ */
 .crumb-switch {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 1.5rem;
-  height: 2rem;
-  margin-left: -0.25rem;
-  padding: 0;
+  gap: 0.375rem;
+  min-width: calc(0.5rem + 0.375rem + 14px + 0.375rem);
+  padding-right: 0.375rem;
   border: 0;
-  border-radius: var(--radius);
   background: transparent;
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.crumb-project {
+  min-width: calc(0.5rem + 1.375rem + 2 * 0.375rem + 14px + 0.375rem);
+}
+
+.crumb-chevron {
+  flex: none;
   color: var(--ink-3);
 }
 
 .crumb-switch:hover,
 .crumb-switch[data-popup-open] {
   background: var(--nav-hover);
+}
+
+.crumb-switch:hover .crumb-chevron,
+.crumb-switch[data-popup-open] .crumb-chevron {
   color: var(--ink);
 }
 
@@ -751,14 +769,6 @@ a.crumb-link:hover {
 .page-title-aside {
   color: var(--ink-3);
   font-weight: 450;
-}
-
-/* A project's slug beside its name: the address, set as code and quieter. */
-.page-title-slug {
-  font-family: var(--font-mono);
-  font-size: 0.875rem;
-  font-weight: 450;
-  letter-spacing: 0;
 }
 
 .page-desc {
@@ -2976,10 +2986,6 @@ tr.row-failure > td:first-child {
   width: 34%;
 }
 
-.dt.projects .cell-stack small {
-  font-size: 0.71875rem;
-}
-
 .dt.projects .col-secrets {
   text-align: right;
 }
@@ -3149,11 +3155,6 @@ span.env-link {
 .env-card-change {
   color: var(--ink-3);
   font-size: 0.8125rem;
-}
-
-.env-card-slug {
-  color: var(--ink-3);
-  font-size: 0.75rem;
 }
 
 .env-card-facts {
@@ -4038,6 +4039,11 @@ a.env-card-name:hover {
 
 .menu-item[data-highlighted] {
   background: var(--subtle);
+}
+
+/* A menu entry that is a link reads as any other entry. */
+a.menu-item:hover {
+  text-decoration: none;
 }
 
 .menu-item[data-disabled] {

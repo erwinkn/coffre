@@ -296,7 +296,7 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
                           to={people ? '/projects/$project/users' : '/projects/$project/service-accounts'}
                           params={{ project: project.slug }}
                         >
-                          {project.name}
+                          {project.slug}
                         </Link>
                         {project.archivedAt !== null && <span className="tag tag-red">Archived</span>}
                       </span>
@@ -469,7 +469,7 @@ function EditAccess({
                   <label className="plan-project" htmlFor={id}>
                     <Tile name={project.slug} />
                     <span className="plan-project-text">
-                      <span className="plan-project-name">{project.name}</span>
+                      <span className="plan-project-name">{project.slug}</span>
                       {held.level === 'custom' && (
                         <span className="plan-project-held">
                           Holds {grants.map((grant) => projectAccessLabel(grant)).join(', ')}
@@ -498,14 +498,14 @@ function EditAccess({
                     plan.level === 'viewer' ||
                     plan.level === 'developer') && (
                     <ExpiryField
-                      label={`${project.name} expires`}
+                      label={`${project.slug} expires`}
                       expiresAt={plan.expiresAt}
                       onChange={(expiresAt) => edit({ ...plan, expiresAt })}
                     />
                   )}
 
                   {plan.level === 'env' && (
-                    <ul className="plan-envs" aria-label={`Environments of ${project.name}`}>
+                    <ul className="plan-envs" aria-label={`Environments of ${project.slug}`}>
                       {environments.map((slug) => {
                         const current = environmentAccess(plan, slug);
                         return (
@@ -536,7 +536,7 @@ function EditAccess({
                             </select>
                             {current !== null && (
                               <ExpiryField
-                                label={`${slug} of ${project.name} expires`}
+                                label={`${slug} of ${project.slug} expires`}
                                 expiresAt={current.expiresAt}
                                 onChange={(expiresAt) =>
                                   edit(withEnvironment(plan, slug, { ...current, expiresAt }))
@@ -550,7 +550,7 @@ function EditAccess({
                   )}
 
                   {changes.length > 0 && (
-                    <ul className="plan-changes" aria-label={`Changes to ${project.name}`}>
+                    <ul className="plan-changes" aria-label={`Changes to ${project.slug}`}>
                       {changes.map((change) => (
                         <li
                           key={

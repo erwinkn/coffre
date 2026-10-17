@@ -14,10 +14,10 @@ import { DEV, type Person, PROJECT, signIn } from './people.ts';
 /** Each page, the heading it shows, and the tab it is, for a page with tabs. */
 const PAGES: [path: string, heading: string, tab: string | null][] = [
   ['/projects', 'Projects', null],
-  [`/projects/${PROJECT}`, 'Conformance', 'Environments'],
-  [`/projects/${PROJECT}/users`, 'Conformance', 'Users'],
-  [`/projects/${PROJECT}/service-accounts`, 'Conformance', 'Service accounts'],
-  [`/projects/${PROJECT}/settings`, 'Conformance', 'Settings'],
+  [`/projects/${PROJECT}`, PROJECT, 'Environments'],
+  [`/projects/${PROJECT}/users`, PROJECT, 'Users'],
+  [`/projects/${PROJECT}/service-accounts`, PROJECT, 'Service accounts'],
+  [`/projects/${PROJECT}/settings`, PROJECT, 'Settings'],
   ['/audit', 'Audit', null],
 ];
 
@@ -117,7 +117,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
       const then = path === account ? openFromMenu('button[aria-label^="Actions for"]', 'Remove') : undefined;
       const loaded = await chrome.load(new URL(path, deployment.origin).href, admin.browser.cookies(), undefined, then);
       expect(loaded.errors.length === 0, `${path}, signed in, reported errors in the browser`, loaded.errors.join('\n'));
-      // The heading, then what may follow it in the h1, such as a project's slug.
+      // The heading, then what may follow it in the h1.
       expect(loaded.heading?.startsWith(heading), `${path}, signed in, shows ${JSON.stringify(loaded.heading)}, not the heading ${JSON.stringify(heading)}`);
       expect(loaded.tab === tab, `${path}, signed in, shows the tab ${JSON.stringify(loaded.tab)}, not ${JSON.stringify(tab)}`);
       if (path.startsWith('/service-accounts')) expect(!/(?<![\w-])token:[A-Za-z0-9]/.test(loaded.text), `${path} shows a service account as token:<name>`, loaded.text);

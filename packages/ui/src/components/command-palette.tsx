@@ -92,7 +92,7 @@ export function CommandPalette({
       value: 'Environments',
       items: active.flatMap((project) =>
         project.environments.filter(isActiveAccessibleEnvironment).map((environment) => ({
-          value: `${project.slug}/${environment.slug} ${environment.name}`,
+          value: `${project.slug}/${environment.slug}`,
           icon: <Layers size={15} />,
           label: (
             <span className="mono">
@@ -115,10 +115,9 @@ export function CommandPalette({
     {
       value: 'Projects',
       items: active.map((project) => ({
-        value: `${project.slug} ${project.name}`,
+        value: project.slug,
         icon: <Folder size={15} />,
         label: <span className="mono">{project.slug}</span>,
-        hint: project.name,
         path: '/projects/$project',
         run: closing(() =>
           navigate({ to: '/projects/$project', params: { project: project.slug } }),

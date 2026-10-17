@@ -67,6 +67,7 @@ export type Me = {
 
 export type ProjectEnvironmentSummary = {
   slug: string;
+  /** @deprecated A place goes by its slug since 0.6.2; kept for older CLIs, which print it. */
   name: string;
   /** True when the caller may open the environment's secret metadata page. */
   accessible: boolean;
@@ -76,6 +77,7 @@ export type ProjectEnvironmentSummary = {
 
 export type ProjectSummary = {
   slug: string;
+  /** @deprecated A place goes by its slug since 0.6.2; kept for older CLIs, which print it. */
   name: string;
   archivedAt: string | null;
   /** The folder it is listed in, or null for none. */
@@ -188,7 +190,12 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   return { projects: summaries };
 }
 
-export type PlaceView = { slug: string; name: string; archivedAt: string | null };
+export type PlaceView = {
+  slug: string;
+  /** @deprecated A place goes by its slug since 0.6.2; kept for older CLIs, which print it. */
+  name: string;
+  archivedAt: string | null;
+};
 export type ProjectView = PlaceView & { folder: string | null };
 
 function slugTaken(what: 'project' | 'environment', slug: string): Error {
@@ -204,8 +211,10 @@ export async function putProject(
   ctx: ApiContext,
   place: ResolvedPath | null,
   slug: string,
-  input: { name: string },
+  input: { name?: string },
 ): Promise<{ project: PlaceView; created: boolean }> {
+  // A place goes by its slug. Its name, which releases before 0.6.2 show, is the slug unless an older client sends one.
+  const name = input.name ?? slug;
   const put = await audited(ctx, async (tx, log) => {
     requireProjectMaker(ctx, 'project.create', { metadata: { slug } });
     if (place !== null) {
@@ -214,13 +223,13 @@ export async function putProject(
     }
     const id = randomUUID();
     try {
-      await insert(tx, projects, { id, slug, name: input.name });
+      await insert(tx, projects, { id, slug, name });
     } catch (error) {
       if (isUniqueViolation(error)) throw slugTaken('project', slug);
       throw error;
     }
-    log.push(allowed(ctx, 'project.create', { projectId: id, metadata: { slug, name: input.name } }));
-    return { id, project: { slug, name: input.name, archivedAt: null }, created: true };
+    log.push(allowed(ctx, 'project.create', { projectId: id, metadata: { slug, name } }));
+    return { id, project: { slug, name, archivedAt: null }, created: true };
   });
   const { id: _, ...made } = put;
   return made;
@@ -326,10 +335,11 @@ export async function putEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   slug: string,
-  input: { name: string },
+  input: { name?: string },
   { from }: { from?: string } = {},
 ): Promise<{ environment: PlaceView; created: boolean }> {
   const { project, environment } = place;
+  const name = input.name ?? slug;
   if (environment !== null) {
     const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt) };
     return { environment: existing, created: false };
@@ -347,7 +357,7 @@ export async function putEnvironment(
     }
     const id = randomUUID();
     try {
-      await insert(tx, environments, { id, projectId: project.id, slug, name: input.name });
+      await insert(tx, environments, { id, projectId: project.id, slug, name });
     } catch (error) {
       if (isUniqueViolation(error)) throw slugTaken('environment', slug);
       throw error;
@@ -355,9 +365,9 @@ export async function putEnvironment(
     log.push(allowed(ctx, 'environment.create', {
       projectId: project.id,
       environmentId: id,
-      metadata: { slug, name: input.name, ...(from === undefined ? {} : { from }) },
+      metadata: { slug, name, ...(from === undefined ? {} : { from }) },
     }));
-    return { environment: { slug, name: input.name, archivedAt: null }, created: true };
+    return { environment: { slug, name, archivedAt: null }, created: true };
   });
 }
 

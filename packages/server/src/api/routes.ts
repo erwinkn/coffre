@@ -72,6 +72,8 @@ function route<
   return { [key]: def } as { [K in Key]: Route<Key, S, Output, Q> };
 }
 
+// `name` is a label from before 0.6.2, when a place had one beside its
+// slug: still taken from older CLIs, stored, and shown nowhere.
 const placePatch = z
   .object({ name: displayName, slug, archived: z.boolean() })
   .partial()
@@ -145,7 +147,7 @@ export const routes = {
   // Places
   ...route('GET /projects', { run: (ctx) => listProjects(ctx) }),
   ...route('PUT /projects/:project', {
-    input: z.object({ name: displayName }),
+    input: z.object({ name: displayName.optional() }),
     creates: true,
     run: (ctx, { params, place, input }) => putProject(ctx, place, params.project, input),
   }),
@@ -164,7 +166,7 @@ export const routes = {
   ...route('PUT /projects/:project/:environment', {
     // `from` forks a sibling: its keys, values and folders, without history.
     // With `references`, each key a reference to its parent's instead of a copy.
-    input: z.object({ name: displayName, from: slug.optional(), references: z.boolean().optional() }),
+    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional() }),
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,

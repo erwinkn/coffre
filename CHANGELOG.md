@@ -29,6 +29,23 @@
   account page drops the explanations under its sign-in sections, its
   access and its activity, and an empty activity log, a person's too, says
   "Nothing yet".
+- **The header's project and environment are each one button.** The project's
+  tile, slug and chevron open the list of projects; the environment's slug and
+  chevron open its siblings. The project's own page, all its environments, is
+  the project ticked in its list, archived or not. Each entry in the two lists
+  starts loading its page as it is pointed at or reached by keyboard.
+- **Projects and environments go by their slug alone.** Pages, lists, the
+  command palette and the CLI show the slug; New project, Add environment,
+  Rename and a project's Settings no longer ask for a display name. Renaming
+  is now giving a new slug, which changes the path: `coffre projects rename
+  market --slug marketplace`. The API's `name` stays, for older CLIs:
+  optional on `PUT /projects/:project` and `PUT /projects/:project/:environment`,
+  where it defaults to the slug, still taken by `PATCH`, and still returned,
+  though nothing shows it. The CLI still takes `--name` and says it ignores
+  it; `rename` with `--name` alone changes nothing. The MCP tools
+  `create_project` and `create_environment` ignore a `name`, so a call
+  approved before the upgrade still matches its approval. The column goes in
+  a later release.
 
 ## 0.6.1 (2026-10-16)
 

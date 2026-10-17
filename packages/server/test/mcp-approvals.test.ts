@@ -360,12 +360,26 @@ test('a 2025-era client makes changes through the link, as any client without UR
     await legacy.close();
   }
   for (let index = 0; index < 5; index += 1) {
-    const asked = await callRaw(token, 'create_environment', { environment: `market/env${index}`, name: `Env ${index}` });
+    const asked = await callRaw(token, 'create_environment', { environment: `market/env${index}` });
     assert.equal(asked.body.result!.structuredContent!.status, 'pending');
   }
-  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9', name: 'Env 9' });
+  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9' });
   assert.equal(sixth.body.result!.isError, true);
   assert.match(sixth.body.result!.content[0]!.text!, /5 changes are waiting/);
+});
+
+test('a create call that names its environment, as before 0.6.2, still matches its approval, and the name is not shown', async () => {
+  const token = await connect(DEV, 'read write');
+  const args = { environment: 'market/stage', name: 'Stage' };
+  const asked = (await callRaw(token, 'create_environment', args)).body.result!;
+  const { id } = asked.structuredContent!.approval as { id: string };
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.summary, 'create the environment market/stage');
+  assert.deepEqual(shown.details.map((line) => line.label), ['Environment']);
+  assert.equal((await decide(id, true)).body.status, 'approved');
+  assert.equal((await callRaw(token, 'create_environment', args)).body.result!.structuredContent!.status, 'approved');
+  const market = (await clientFor(deps, ROOT).projects.list()).projects.find((project) => project.slug === 'market')!;
+  assert.equal(market.environments.find((environment) => environment.slug === 'stage')?.name, 'stage');
 });
 
 test('a disconnected app’s approvals can no longer be decided', async () => {
@@ -480,7 +494,7 @@ test('identical calls at once open one approval, logged once, and a burst gets n
   assert.equal((await approvalRows()).length, 1);
   assert.equal((await entries('mcp.call')).length, 1);
 
-  const burst = await Promise.all(Array.from({ length: 8 }, (_, index) => callRaw(token, 'create_environment', { environment: `market/burst${index}`, name: `Burst ${index}` })));
+  const burst = await Promise.all(Array.from({ length: 8 }, (_, index) => callRaw(token, 'create_environment', { environment: `market/burst${index}` })));
   assert.equal(burst.filter((result) => result.body.result!.structuredContent?.status === 'pending').length, 4);
   assert.equal(burst.filter((result) => /5 changes are waiting/.test(result.body.result!.content[0]!.text!)).length, 4);
   assert.equal((await approvalRows()).filter((row) => row.status === 'pending').length, 5);
@@ -511,10 +525,10 @@ test('Approve refuses a change whose page is stale: a version set, or a role cha
 
 test('approvals asked too long ago to rejoin are not read again, so they never count toward the five (L5)', async () => {
   const token = await connect(DEV, 'read write');
-  for (let index = 0; index < 5; index += 1) await callRaw(token, 'create_environment', { environment: `market/env${index}`, name: `Env ${index}` });
+  for (let index = 0; index < 5; index += 1) await callRaw(token, 'create_environment', { environment: `market/env${index}` });
   // Rows that still say pending, as if their expiry were far off, but asked eleven minutes ago.
   await db.owner.update(mcpApprovals).set({ createdAt: new Date(Date.now() - 11 * 60_000), expiresAt: new Date(Date.now() + 60_000) });
-  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9', name: 'Env 9' });
+  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9' });
   assert.equal(sixth.body.result!.structuredContent!.status, 'pending');
 });
 
@@ -572,7 +586,7 @@ test('the decision reads the approval and its connection again as it commits: ex
 test('a change the person could not make is refused before anyone is asked, for every tool: admins and owners only, and access where they manage it (I3)', async () => {
   const dev = await connect(DEV, 'read write manage-access');
   const owners: [string, Record<string, unknown>][] = [
-    ['create_project', { project: 'shop', name: 'Shop' }],
+    ['create_project', { project: 'shop' }],
     ['admit_member', { member: 'user:new@acme.example' }],
     ['offboard_member', { member: `user:${OTHER}` }],
   ];
@@ -596,7 +610,7 @@ test('a change the person could not make is refused before anyone is asked, for 
   const viewer = await connect(OTHER, 'read write manage-access');
   const access = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { market: 'viewer' } })).body.result!;
   assert.match(access.content[0]!.text!, /you need grant\.manage on market/);
-  const environment = (await callRaw(viewer, 'create_environment', { environment: 'market/stage', name: 'Stage' })).body.result!;
+  const environment = (await callRaw(viewer, 'create_environment', { environment: 'market/stage' })).body.result!;
   assert.match(environment.content[0]!.text!, /you need environment\.manage on market/);
   assert.equal((await approvalRows()).length, 0);
 });

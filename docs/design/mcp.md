@@ -442,8 +442,8 @@ coffre's page (section 7).
 | `archive_secret {secret}` | write | ✗ ✓ ✓ | ✓ | `PATCH …/:key {archived: true}` |
 | `unarchive_secret {secret}` | write | ✗ ✗ ✓ | ✓ | `PATCH …/:key {archived: false}` |
 | `restore_secret_version {secret, version}` | write | ✗ ✓ ✗ | ✓ | `POST …/:key/restore` |
-| `create_project {project, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p` |
-| `create_environment {environment, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
+| `create_project {project}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p` |
+| `create_environment {environment}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
 | `reveal_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
 | `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
 | `admit_member {member, role?, scope?, access?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m`; `access`, a service account's first grants, in the same call |

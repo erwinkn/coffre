@@ -58,7 +58,7 @@ function EnvironmentsPanel({
     (environment) => environment.details === null || environment.details.archivedAt === null,
   );
   const { failedAdds, dismiss } = useChangeStatus(keys.projects);
-  const refused = failedAdds<{ slug: string; name: string }>(
+  const refused = failedAdds<{ slug: string }>(
     project.environments.map((environment) => environmentId(project.slug, environment.slug)),
   ).filter(({ ids }) => ids.every((id) => id.startsWith(`${project.slug}/`)));
 
@@ -88,10 +88,7 @@ function EnvironmentsPanel({
             <li key={mutationId}>
               <div className="env-card is-muted is-failed">
                 <div className="env-card-text">
-                  <span className="env-card-name">{vars.name}</span>
-                  <span className="env-card-meta">
-                    <span className="mono">{vars.slug}</span>
-                  </span>
+                  <span className="env-card-name">{vars.slug}</span>
                 </div>
                 <ItemFailure status={status} onDismiss={() => dismiss(mutationId)}>
                   Not added.
@@ -182,7 +179,6 @@ function EnvironmentCard({
   const [deleting, setDeleting] = useState(false);
   const { capabilities } = useShell();
   const [slug, setSlug] = useState(environment.slug);
-  const [name, setName] = useState(environment.name);
   const coffre = useCoffre();
   const rename = useChange(renameEnvironment(coffre, project));
   const archive = useChange(archiveEnvironment(coffre, project));
@@ -220,12 +216,11 @@ function EnvironmentCard({
               to="/projects/$project/$environment"
               params={{ project, environment: environment.slug }}
             >
-              {environment.name}
+              {environment.slug}
             </Link>
           ) : (
-            <span className="env-card-name">{environment.name}</span>
+            <span className="env-card-name">{environment.slug}</span>
           )}
-          <span className="env-card-slug mono">{environment.slug}</span>
         </span>
 
         {isArchived ? (
@@ -288,7 +283,6 @@ function EnvironmentCard({
               className="menu-item"
               onClick={() => {
                 setSlug(environment.slug);
-                setName(environment.name);
                 setRenaming(true);
               }}
             >
@@ -332,7 +326,7 @@ function EnvironmentCard({
               onSubmit={(event) => {
                 event.preventDefault();
                 // Shown on the card at once; the card says if the server refuses.
-                rename({ from: environment.slug, slug, name: name.trim() });
+                rename({ from: environment.slug, slug });
                 setRenaming(false);
               }}
             >
@@ -351,15 +345,6 @@ function EnvironmentCard({
                     `Anything running coffre run ${project}/${environment.slug} will need the new path.`}
                 </span>
               </label>
-              <label className="field">
-                <span className="label">Display name</span>
-                <input
-                  className="input"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                />
-              </label>
-
               {reslugged && (
                 <Notice tone="info">
                   Instance roles scoped to <span className="mono">{environment.slug}</span> stop reaching it; those scoped
@@ -374,7 +359,7 @@ function EnvironmentCard({
                 <button
                   className="btn btn-primary"
                   type="submit"
-                  disabled={slug === '' || slugError !== null || name.trim() === ''}
+                  disabled={slug === environment.slug || slug === '' || slugError !== null}
                 >
                   Save
                 </button>
@@ -451,7 +436,6 @@ function EnvironmentCard({
 function NewEnvironment({ project, sources }: { project: string; sources: string[] }) {
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
-  const [name, setName] = useState('');
   // '' for empty, 'copy:prod' for a copy, 'ref:prod' for references to prod.
   const [start, setStart] = useState('');
   const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['copy' | 'ref', string]);
@@ -489,9 +473,8 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
           onSubmit={(event) => {
             event.preventDefault();
             // Listed at once, as saving; the list says if the server refuses.
-            create({ slug, name: name.trim(), ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}) });
+            create({ slug, ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}) });
             setSlug('');
-            setName('');
             setStart('');
             close();
           }}
@@ -519,15 +502,6 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
                 </>
               )}
             </span>
-          </label>
-          <label className="field">
-            <span className="label">Display name</span>
-            <input
-              className="input"
-              placeholder="Staging"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
           </label>
           {sources.length > 0 && (
             <label className="field">
@@ -567,7 +541,7 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={slug === '' || slugError !== null || name.trim() === ''}
+              disabled={slug === '' || slugError !== null}
             >
               Add environment
             </button>
