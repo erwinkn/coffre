@@ -5,7 +5,7 @@ import { CoffreError, type CoffreClient } from '@coffre/client';
 import { MutationObserver, QueryObserver, type QueryClient } from '@tanstack/react-query';
 
 import { announcements } from '../src/lib/announce.ts';
-import { grantAccess, grantId, revokeGrant, type GrantVars } from '../src/lib/changes.ts';
+import { grantAccess, grantId, invite, revokeGrant, type GrantVars } from '../src/lib/changes.ts';
 import { changeKey, changeOptions, failedAdds, itemStatus, type ChangeContext } from '../src/lib/optimistic.ts';
 import { createQueryClient, keys, queries } from '../src/lib/queries.ts';
 import type { GrantRow } from '../src/shared/models.ts';
@@ -267,4 +267,41 @@ test('an add refused twice is listed once, as its latest refusal', async () => {
   const refused = failedAdds<GrantVars>(changes(queryClient), listed(queryClient).map(grantId));
   assert.deepEqual(refused.map((entry) => entry.status.error), ['second']);
   stop();
+});
+
+test('a service account added is read again once made: what was asked of it before is not kept', async () => {
+  // Its row shows at once and asks how it signs in, before the server has
+  // made it: "not found". Its page, opened next, must not show that answer.
+  let made = false;
+  const added = later<unknown>();
+  const asked: string[] = [];
+  const client = {
+    members: {
+      list: async () => ({ members: [], removed: [] }),
+      add: () => added.promise.then(() => (made = true)),
+    },
+    bindings: {
+      list: async (member: string) => {
+        asked.push(member);
+        if (!made) throw new CoffreError(404, 'not_found', 'Not found. It may have been renamed or archived.');
+        return { bindings: [] };
+      },
+    },
+  } as unknown as CoffreClient;
+  const queryClient = createQueryClient();
+  await queryClient.fetchQuery(queries.directory(client, true));
+  const add = new MutationObserver(queryClient, changeOptions(queryClient, invite(client)));
+
+  const done = add.mutate({ principalType: 'service', principalId: 'ci-new', role: 'member', scope: { projects: 'all', environments: 'all' } });
+  await settle();
+  const early = await queryClient.fetchQuery(queries.bindings(client, 'token:ci-new', true));
+  assert.equal(early?.ok, false);
+
+  added.resolve(undefined);
+  await done;
+  await settle();
+  // Off screen, it is read again on its next use, as the page's loader reads it.
+  const after = await queryClient.fetchQuery(queries.bindings(client, 'token:ci-new', true));
+  assert.deepEqual(after, { ok: true, bindings: [] });
+  assert.deepEqual(asked, ['token:ci-new', 'token:ci-new']);
 });

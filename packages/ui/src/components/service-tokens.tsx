@@ -26,18 +26,9 @@ export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string
 
   return (
     <>
-      <Card
-        labelledBy="service-tokens"
-        title="Bearer tokens"
-        description={
-          <>
-            A long-lived secret, for CI that can't use OIDC. For example, a cron job on your own server runs{' '}
-            <span className="mono nowrap">coffre login &lt;url&gt; --token</span> with one. coffre shows it once.
-          </>
-        }
-      >
+      <Card labelledBy="service-tokens" title="Bearer tokens">
         {tokens.length === 0 ? (
-          <EmptyState title="No bearer tokens">CI that signs in with OIDC needs none.</EmptyState>
+          <EmptyState title="No bearer tokens" />
         ) : (
           <div className="dt-wrap">
             <table className="dt">

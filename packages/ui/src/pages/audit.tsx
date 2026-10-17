@@ -12,7 +12,7 @@ import {
   who,
   type Part,
 } from '../lib/audit-sentences';
-import { EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
+import { absolute, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
 import { memberName, Sentence } from '../components/audit-sentence';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
@@ -87,7 +87,7 @@ export function AuditPage() {
                     ; <code>coffre audit</code> lists them all.
                   </>
                 ) : (
-                  ': it may be detail, which Show detail lists.'
+                  ': it may be detail, which Everything lists.'
                 )}
               </>
             )}
@@ -96,16 +96,18 @@ export function AuditPage() {
       )}
 
       <div className="toolbar">
-        <nav className="segmented" aria-label="Filter by decision">
-          {/* `exact` compares the whole search, not a subset of it: otherwise
-              "All events" for one actor also counts as active while that
-              actor's denials are showing, and both halves light up. */}
-          <Link to="/audit" search={{ ...filters, decision: undefined, detail: search.detail }} activeOptions={{ exact: true, includeSearch: false }}>
-            All events
+        {/* One control for what the log lists. `exact` holds each link to the
+            whole search, so only the view shown lights up. */}
+        <nav className="segmented" aria-label="Show">
+          <Link to="/audit" search={{ actorId }} activeOptions={{ exact: true }}>
+            Actions
           </Link>
-          <Link to="/audit" search={{ ...filters, decision: 'deny', detail: search.detail }} activeOptions={{ exact: true, includeSearch: false }}>
+          <Link to="/audit" search={{ actorId, detail: '1' }} activeOptions={{ exact: true }}>
+            Everything
+          </Link>
+          <Link to="/audit" search={{ actorId, decision: 'deny', detail: '1' }} activeOptions={{ exact: true }}>
             <SlashCircle size={13} />
-            Denials only
+            Denials
           </Link>
         </nav>
 
@@ -120,16 +122,6 @@ export function AuditPage() {
             <X size={13} />
           </Link>
         )}
-
-        <Link
-          className="detail-toggle"
-          to="/audit"
-          search={{ ...filters, detail: detail ? undefined : '1' }}
-          aria-pressed={detail}
-        >
-          <span className="switch" aria-hidden="true" />
-          Show detail
-        </Link>
       </div>
 
       <section className="card card-wide" aria-label="Audit entries">
@@ -431,10 +423,9 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
       <Toggletip
         align="end"
         label={
-          `Every entry through ${chain.through ?? 0} holds, under the app's key and the vault's.` +
-          (chain.checkpoint === null
-            ? ' Not checkpointed yet: the vault signs the log every few minutes.'
-            : ` The vault last signed it through entry ${chain.checkpoint.seq}, at ${chain.checkpoint.signedAt}.`)
+          chain.checkpoint === null
+            ? 'Audit log verified by the app and vault keys, not signed yet.'
+            : `Audit log verified by the app and vault keys, last signature at ${absolute(chain.checkpoint.signedAt, false)} UTC.`
         }
       >
         <button type="button" className="chain-seal">
