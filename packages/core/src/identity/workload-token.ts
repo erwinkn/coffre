@@ -221,7 +221,9 @@ export async function uploadedKeys(value: unknown): Promise<UploadedKeys> {
     if (jwk.kty === 'RSA' && (jwk.alg === undefined || jwk.alg === 'RS256')) {
       alg = 'RS256';
       if (typeof jwk.n !== 'string' || typeof jwk.e !== 'string') throw new KeysInvalid(`${named} is an RSA key without n and e`);
-      if (Buffer.from(jwk.n, 'base64url').toString('hex').replace(/^(00)+/, '').length * 4 < 2048) throw new KeysInvalid(`${named} is an RSA key under 2048 bits`);
+      // The modulus's bits, counted from its highest set bit, as jose counts them when it verifies.
+      const modulus = Buffer.from(jwk.n, 'base64url').toString('hex');
+      if (modulus === '' || BigInt(`0x${modulus}`).toString(2).length < 2048) throw new KeysInvalid(`${named} is an RSA key under 2048 bits`);
       key = { kty: 'RSA', ...kidAndUse(jwk), alg, n: jwk.n, e: jwk.e };
     } else if (jwk.kty === 'EC' && jwk.crv === 'P-256' && (jwk.alg === undefined || jwk.alg === 'ES256')) {
       alg = 'ES256';

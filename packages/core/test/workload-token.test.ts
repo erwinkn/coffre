@@ -131,6 +131,10 @@ test('an uploaded key set keeps the public keys that sign, written one way, and 
   await invalid({ keys: [{ ...rsa.jwk, d: 'x' }] }, /private or a secret key/);
   await invalid({ keys: [{ ...rsa.jwk, alg: 'RS512' }] }, /RS256 or a P-256 key/);
   await invalid({ keys: [{ ...rsa.jwk, n: 'AQAB' }] }, /under 2048 bits/);
+  // 256 bytes, but its first holds a single bit: 2041 bits, which jose would refuse to verify with.
+  const short = Buffer.from(rsa.jwk.n!, 'base64url');
+  short[0] = 0x01;
+  await invalid({ keys: [{ ...rsa.jwk, n: short.toString('base64url') }] }, /under 2048 bits/);
   await invalid({ keys: [{ ...ec.jwk, x: 'AQAB' }] }, /not a valid EC key/);
   await invalid({ keys: [rsa.jwk, { ...ec.jwk, kid: 'rs' }] }, /two keys are key rs/);
 });

@@ -174,7 +174,10 @@ test('uploaded keys show by kid, or by thumbprint without one; replacing them na
       '',
     ].join('\n'),
   );
-  assert.match(describeKeys('token:api', plan, [{ id: 'new-1' }, { id: 'new-2' }] as BindingView[]), /\n  new-1 replaces old-1\n  new-2 replaces old-2\n/);
+  assert.match(describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }, { id: 'new-2' }] as BindingView[], replaced: ['old-1', 'old-2'] }), /\n  new-1 replaces old-1\n  new-2 replaces old-2\n/);
+  // One of those planned was removed before the save: what the server answered, not the plan.
+  const raced = describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }] as BindingView[], replaced: ['old-1'] });
+  assert.match(raced, /^Gave service:api's binding on .*\n  keys .*\n  new-1 replaces old-1\nCredentials/);
 });
 
 test('--jwks-file takes a key set, as kubectl prints it', () => {

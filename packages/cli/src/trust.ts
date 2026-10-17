@@ -287,16 +287,21 @@ export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' 
   return [`  profile  ${binding.profile}`, `  issuer   ${binding.issuer}`, `  keys     ${keysLine(binding)}`, ...claims, `  reaches  ${reaches(binding.scope)}`];
 }
 
-/** What `coffre trust --replace-keys` would do, or did: the keys, and each binding on the issuer a new one replaces. */
-export function describeKeys(member: string, plan: KeysPlan, made: BindingView[] | null): string {
-  const count = plan.replaces.length === 1 ? 'binding' : `${plan.replaces.length} bindings`;
+/**
+ * What `coffre trust --replace-keys` would do, or did: the keys, and each
+ * binding on the issuer a new one replaces, as the server planned it or, once
+ * saved, as it answered, whatever changed between the two.
+ */
+export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: BindingView[]; replaced: string[] } | null): string {
+  const replaced = saved?.replaced ?? plan.replaces;
+  const count = replaced.length === 1 ? 'binding' : `${replaced.length} bindings`;
   const lines = [
-    made === null
+    saved === null
       ? `Would give ${shownMember(member)}'s ${count} on ${plan.issuer} these keys, each replaced by a binding the same but for them:`
       : `Gave ${shownMember(member)}'s ${count} on ${plan.issuer} these keys:`,
     `  keys     ${keysLine(plan)}`,
-    ...plan.replaces.map((id, i) => (made === null ? `  replaces ${id}` : `  ${made[i]!.id} replaces ${id}`)),
-    made === null
+    ...replaced.map((id, i) => (saved === null ? `  replaces ${id}` : `  ${saved.bindings[i]!.id} replaces ${id}`)),
+    saved === null
       ? 'Credentials those bindings issued, five minutes each at most, would end at once.'
       : 'Credentials the bindings replaced issued have ended.',
   ];

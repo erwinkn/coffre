@@ -16,6 +16,7 @@ import {
   summary,
   type Form,
   type GitHubLookup,
+  type KeySet,
   type RefKind,
   type ScopeChoice,
 } from '../lib/bindings';
@@ -174,7 +175,9 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
 function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issuer: string; bindings: BindingView[] }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
-  const [plan, setPlan] = useState<KeysPlan | null>(null);
+  // The plan, with the keys it was made for: Save sends those, whatever the field says by then.
+  const [preview, setPreview] = useState<{ plan: KeysPlan; jwks: KeySet } | null>(null);
+  const plan = preview?.plan ?? null;
   const coffre = useCoffre();
   const member = memberRef('service', serviceId);
   const { pending, error, setError, run } = useAction();
@@ -183,20 +186,21 @@ function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issue
   function close() {
     setOpen(false);
     setText('');
-    setPlan(null);
+    setPreview(null);
     setError(null);
   }
 
   function review() {
-    let jwks: ReturnType<typeof keySetOf>;
+    let jwks: KeySet;
     try {
-      jwks = keySetOf(text);
-      if (jwks === undefined) throw new Error("Paste the issuer's key set");
+      const pasted = keySetOf(text);
+      if (pasted === undefined) throw new Error("Paste the issuer's key set");
+      jwks = pasted;
     } catch (problem) {
       setError((problem as Error).message);
       return;
     }
-    void run(() => coffre.bindings.previewKeys(member, { issuer, jwks: jwks! }), { affects: [], onSuccess: setPlan });
+    void run(() => coffre.bindings.previewKeys(member, { issuer, jwks }), { affects: [], onSuccess: (next) => setPreview({ plan: next, jwks }) });
   }
 
   return (
@@ -205,8 +209,8 @@ function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issue
         <Key size={13} />
         Replace keys
       </button>
-      <Modal open={open} onOpenChange={(next) => (next ? setOpen(true) : close())} title={plan === null ? 'Replace keys' : 'Review the keys'}>
-        {plan === null ? (
+      <Modal open={open} onOpenChange={(next) => (next ? setOpen(true) : close())} title={preview === null ? 'Replace keys' : 'Review the keys'}>
+        {preview === null || plan === null ? (
           <form
             className="form"
             onSubmit={(event) => {
@@ -266,14 +270,14 @@ function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issue
             </table>
             <ErrorLine error={error} />
             <div className="dialog-actions">
-              <button className="btn" type="button" onClick={() => setPlan(null)}>
+              <button className="btn" type="button" onClick={() => setPreview(null)}>
                 Back
               </button>
               <button
                 className="btn btn-primary"
                 type="button"
                 disabled={pending}
-                onClick={() => void run(() => coffre.bindings.replaceKeys(member, { issuer, jwks: keySetOf(text)! }), { affects: affects.bindings(member), onSuccess: close })}
+                onClick={() => void run(() => coffre.bindings.replaceKeys(member, { issuer, jwks: preview.jwks }), { affects: affects.bindings(member), onSuccess: close })}
               >
                 {pending && <Spinner />}
                 Save keys
@@ -386,6 +390,8 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   const whole = (): ScopeChoice => ({ scope: wholeScope(grants), chosen: false });
   const [choice, setChoice] = useState(whole);
   const [plan, setPlan] = useState<BindingPlan | null>(null);
+  // What the plan was made from: Save sends it, whatever the form says by then.
+  const [reviewed, setReviewed] = useState<ReturnType<typeof input> | null>(null);
   const coffre = useCoffre();
   const member = memberRef('service', serviceId);
   const { pending, error, setError, run } = useAction();
@@ -429,6 +435,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
       // One that replaces bindings reaches what they did unless told: the picker says so, should the person go back.
       onSuccess: (next) => {
         setPlan(next);
+        setReviewed(request);
         setChoice((current) => planned(current, next));
       },
     });
@@ -710,7 +717,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
                 type="button"
                 disabled={pending}
                 // What the review said it reaches, whatever the account holds by now.
-                onClick={() => void run(() => coffre.bindings.create(member, { ...input(), scope: plan.scope }), { affects: affects.bindings(member), onSuccess: close })}
+                onClick={() => void run(() => coffre.bindings.create(member, { ...reviewed!, scope: plan.scope }), { affects: affects.bindings(member), onSuccess: close })}
               >
                 {pending && <Spinner />}
                 Save binding

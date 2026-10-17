@@ -1281,7 +1281,7 @@ async function trust(args: string[]): Promise<void> {
       return;
     }
     const saved = await coffre.bindings.replaceKeys(member, { issuer, jwks });
-    process.stdout.write(describeKeys(member, plan, saved.bindings));
+    process.stdout.write(describeKeys(member, plan, saved));
     return;
   }
   // A repository or project the lookup cannot see comes back here, for bindingFrom to say how to give its IDs.
