@@ -323,7 +323,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
 | what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["read"]}` |
 | the MCP clients I connected, and disconnecting one | `GET /api/apps`, `DELETE /api/apps/:id` |
-| the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
+| the audit log, and verifying it | `GET /api/audit?path=market/prod/DATABASE_URL` → `{entries, more}`, `GET /api/audit/verification` |
 
 Three conventions carry it:
 
@@ -563,7 +563,7 @@ wrap its new data keys first, outside any transaction, then stores the
 versions and its `secret.write` entries together in one short transaction
 that checks nothing changed meanwhile, and starts again, under a new
 operation id, if something did. A reveal needs no app transaction at all: the
-vault has committed its `secret.read` entries before it returns a key. A wrap
+vault has committed its `secret.read` entry before it returns a key. A wrap
 whose write then failed stays in the log, under an operation no
 `secret.write` shares; it records the attempt, not a value stored.
 
@@ -571,7 +571,8 @@ The vault locks affected members before the shared audit head. Its member
 and grant changes commit with their audit entries. With a local vault key, a read
 is one short transaction. With AWS KMS, the intent commits first; the member
 row stays locked across the KMS calls, which settle within five seconds,
-and each key's outcome is logged. Removal waits for a read already in
+and each key's outcome is logged: the keys of a place that came out alike in
+one entry, each its item of the intent. Removal waits for a read already in
 flight; the next read is refused before KMS is called.
 
 ### The bulk limit
@@ -580,7 +581,7 @@ At most `bulkLimit` data keys unwrapped per principal in any rolling window,
 `{ count: 1000, windowMinutes: 15 }` by default: twenty `coffre run`s of a 50-key environment
 back to back, which no person or pipeline does, while a script pulling every
 value it can reach stops within seconds. Each unwrapped key counts, so one
-50-key run is 50. A refusal is logged and answers 403 `bulk_limit`; the
+50-key run is 50, though it is one entry in the log. A refusal is logged and answers 403 `bulk_limit`; the
 principal reads again as the window rolls on.
 
 ### One log, two authors
@@ -645,7 +646,22 @@ by replay. The answer is the entry verified through, or the entry where it
 breaks and whose check found it.
 
 **One entry per human action.** A read is the vault's `secret.read`, one
-per secret, with its purpose (`reveal`, `run`, `compare`); a
+per place it read at (and per outcome, where a refused or failed call's keys
+came out differently), with its purpose (`reveal`, `run`, `compare`,
+`copy`). A read of one secret names it as any entry does; a read of
+several lists them in `secrets`, each with its id, path and version, so a
+machine polling an environment of a hundred keys every 15 minutes writes
+one entry per poll, not a hundred. The place is the environment read and,
+through a reference, the holder's too: a run of `market/prod` that reads
+three values through references into `shared/prod` is two entries, one
+for each environment the values came from. `GET /api/audit` gives a read
+of several as one entry with its `secrets` (each key and version), and a
+filter on a secret (`path=market/prod/DATABASE_URL`) finds the reads that
+list it. A page, and each batch of a verification, holds no more than 8 MiB
+of what its entries list (`BATCH_BYTES`), so a page of reads of thousands
+of secrets each comes back short of its `limit`, with `more` saying to page
+back. Entries written before 0.7.0, one per secret, read and verify as
+they always did. A
 write is the app's `secret.write`, naming the vault's `key.wrap` by
 `related_seq`; access and membership changes are the vault's
 (`access.grant`, `access.revoke`, `member.*`), and the app keeps no copy.

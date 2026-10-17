@@ -38,7 +38,7 @@ export function further(a: Anchor, b: Anchor): Anchor {
   return b.nextSeq > a.nextSeq ? b : a;
 }
 
-/** Entries read at once: a few megabytes, well within a Worker's memory, and a fifth of the round trips of 1000. */
+/** Entries read at once, at most, and no more than `BATCH_BYTES` of what they say: well within a Worker's memory, and a fifth of the round trips of 1000. */
 export const VERIFY_BATCH = 5000;
 
 type Verified = { verification: LogVerification; anchor: Anchor };
@@ -96,7 +96,6 @@ export async function verifyChain(
       vaultEntries: verified.vaultEntries + result.authenticated,
       vaultKeys: moved.keys,
     };
-    if (batch.length < VERIFY_BATCH) break;
   }
   return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
 }

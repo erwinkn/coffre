@@ -11,7 +11,11 @@ import { expect, until } from '../report.ts';
 import { appendOnlyLifted, entryFields, insertRow, LOG_REFUSAL, logRefuses, query } from './storage.ts';
 import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 
-/** One read per returned value, committed by the vault under the response's operation. */
+/**
+ * Every returned value read, committed by the vault under the response's
+ * operation: one entry for the place, which lists each secret of a read of
+ * several, and which a look for any one of them finds.
+ */
 export async function revealAudited(deployment: Deployment, { admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run'): Promise<string> {
   const path = purpose === 'reveal' ? `${DEV}/API_KEY` : DEV;
   const { operationId, values } = await reader.api.secrets.reveal(path);
@@ -20,29 +24,34 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
   expect(JSON.stringify(Object.entries(values).sort()) === JSON.stringify(Object.entries(expected).sort()), 'the read returned different values', values);
   const entries = await everyAuditEntry(admin.api);
   const bundle = entries.filter((entry) => entry.operationId === operationId);
-  const keys = bundle.map((entry) => entry.key).sort();
-  expect(JSON.stringify(keys) === JSON.stringify(Object.keys(expected).sort()), 'the read is not logged once per value', bundle);
-  expect(bundle.every((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.decision === 'allow'),
-    "the read's entries are not the vault's allowed reads", bundle);
-  expect(bundle.every((entry) => entry.metadata.purpose === purpose && entry.requestId !== null && entry.requestId === bundle[0]!.requestId),
-    'the reads do not name one request and its purpose', bundle);
+  expect(bundle.length === 1, 'the read of one place is not logged as one entry', bundle);
+  const [entry] = bundle as [AuditEntryView];
+  const read = entry.secrets ?? [{ key: entry.key, version: entry.version }];
+  expect(JSON.stringify(read.map((secret) => secret.key).sort()) === JSON.stringify(Object.keys(expected).sort()), 'the read does not list each value once', entry);
+  expect(entry.author === 'vault' && entry.action === 'secret.read' && entry.decision === 'allow', "the read's entry is not the vault's allowed read", entry);
+  expect(entry.metadata.purpose === purpose && entry.requestId !== null, 'the read does not name its request and its purpose', entry);
   const { keys: listed } = await admin.api.secrets.list(DEV);
-  for (const entry of bundle) {
-    expect(entry.version === listed.find((key) => key.key === entry.key)?.version, `the entry for ${String(entry.key)} names another version`, entry);
+  for (const secret of read) {
+    expect(secret.version === listed.find((key) => key.key === secret.key)?.version, `the entry for ${String(secret.key)} names another version`, entry);
+    // Who read this key: the entry of the place's read is among the key's own.
+    const own = await admin.api.audit.list({ path: `${DEV}/${String(secret.key)}`, limit: 200 });
+    expect(own.entries.some((found) => found.seq === entry.seq), `the read is not in ${String(secret.key)}'s log`, own.entries.slice(0, 5));
   }
   await using(deployment.database(), async (sql) => {
-    const rows = await query<{ author: string; action: string; decision: string; request_id: string | null; key: string; current_version: number; metadata: string }>(sql,
-      `SELECT l.author, l.action, l.decision, l.request_id, l.metadata, s.key, s.current_version
-       FROM audit_log l LEFT JOIN secrets s ON s.id = l.secret_id WHERE l.operation_id = $1`, [operationId]);
-    expect(JSON.stringify(rows.map((row) => row.key).sort()) === JSON.stringify(Object.keys(expected).sort()), 'the committed read is not once per value', rows);
-    for (const row of rows) {
-      const metadata = JSON.parse(row.metadata) as { purpose: string; version: number };
-      expect(row.author === 'vault' && row.action === 'secret.read' && row.decision === 'allow', 'the committed read is not the vault release', row);
-      expect(row.request_id !== null && row.request_id === rows[0].request_id && metadata.purpose === purpose, 'the committed reads have different requests or purposes', rows);
-      expect(metadata.version === row.current_version, 'the committed read names another version', row);
+    const rows = await query<{ author: string; action: string; decision: string; request_id: string | null; secret_id: string | null; metadata: string }>(sql,
+      'SELECT author, action, decision, request_id, secret_id, metadata FROM audit_log WHERE operation_id = $1', [operationId]);
+    expect(rows.length === 1, 'the committed read is not one entry', rows);
+    const [row] = rows as [(typeof rows)[number]];
+    expect(row.author === 'vault' && row.action === 'secret.read' && row.decision === 'allow' && row.request_id !== null, 'the committed read is not the vault release', row);
+    const metadata = JSON.parse(row.metadata) as { purpose: string; version?: number; secrets?: { secretId: string; version: number }[] };
+    const committed = metadata.secrets ?? [{ secretId: row.secret_id!, version: metadata.version! }];
+    expect(metadata.purpose === purpose && committed.length === Object.keys(expected).length, 'the committed read does not name its purpose and each secret', row);
+    for (const secret of committed) {
+      const [current] = await query<{ current_version: number }>(sql, 'SELECT current_version FROM secrets WHERE id = $1', [secret.secretId]);
+      expect(current?.current_version === secret.version, 'the committed read names another version', row);
     }
   });
-  return `${bundle.length} values, each read once by the vault for ${purpose}, under ${operationId}`;
+  return `${read.length} values read by the vault for ${purpose}, in one entry under ${operationId}`;
 }
 
 /** Full verification must reach the stored head, not just some intact prefix. */
@@ -259,9 +268,9 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
 export async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: number | undefined; ; ) {
-    const { entries } = await api.audit.list({ before, limit: 500, detail: '1' });
+    const { entries, more } = await api.audit.list({ before, limit: 500, detail: '1' });
     all.push(...entries);
-    if (entries.length < 500) return all;
+    if (!more || entries.length === 0) return all;
     before = entries.at(-1)!.seq;
   }
 }

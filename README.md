@@ -58,9 +58,9 @@ Workers or two Node processes:
 Both use one Postgres database, each through its own login, and both write
 to one audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app
 checks her session and asks the vault for the data keys of
-`market/prod`'s nine secrets. The vault checks her grants, logs nine
-`secret.read` entries in her name, commits them, and only then hands the keys
-back. If the log cannot be written, she gets nothing.
+`market/prod`'s nine secrets. The vault checks her grants, logs one
+`secret.read` entry in her name listing the nine, commits it, and only then
+hands the keys back. If the log cannot be written, she gets nothing.
 
 [docs/architecture.md](docs/architecture.md) explains the whole design, and
 its [limits](docs/architecture.md#limits). [docs/deploy.md](docs/deploy.md)
@@ -195,6 +195,7 @@ coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --ap
 coffre settings service-accounts --except-environments prod   # this lets them: prod's take an Admin
 
 coffre audit --denied
+coffre audit market/prod/DATABASE_URL       # who read or changed it, a run of all of market/prod included
 coffre verify                               # asks which: instance, keys or log; admins and owners
 coffre verify log                           # checks the whole log, as an auditor, admin or owner of all of it
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
@@ -322,7 +323,7 @@ import { createClient } from '@coffre/client';
 
 const coffre = createClient({ url: 'https://secrets.acme.example', headers: () => ({ authorization: `Bearer ${token}` }) });
 await coffre.secrets.set('market/prod', { DATABASE_URL: 'postgres://…', OLD_KEY: null });
-const { values } = await coffre.secrets.reveal('market/prod');   // logged, one entry per secret
+const { values } = await coffre.secrets.reveal('market/prod');   // logged: one entry, naming each secret and version
 await coffre.access.set('user:ada@acme.example', { market: 'developer', 'market/prod': null });
 ```
 
@@ -417,10 +418,10 @@ the instance bring back.
 writes a read's entry in the transaction that decides it, before any key
 leaves; if the entry cannot be written, the read does not happen.
 
-**One entry per human action.** Ada's `coffre run` of nine secrets is nine
-`secret.read` entries sharing one operation id: "she read these nine values,
-at these versions", not "she read the environment", which is true and
-useless.
+**One entry per human action.** Ada's `coffre run` of nine secrets is one
+`secret.read` entry that lists them: "she read these nine values, at these
+versions", not "she read the environment", which is true and useless. Ask
+the log about any one of the nine and that entry answers.
 
 **Gaps mean tampering.** An entry's number comes from a locked head row, not
 a sequence, because a rolled-back transaction would burn a sequence value,

@@ -1534,7 +1534,7 @@ function roles(args: string[]): void {
 }
 
 async function audit(args: string[]): Promise<void> {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
     args,
     options: {
       limit: { type: 'string', default: '20' },
@@ -1544,12 +1544,14 @@ async function audit(args: string[]): Promise<void> {
       detail: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
     },
-    allowPositionals: false,
+    allowPositionals: true,
   });
 
   const limit = Number(values.limit);
   if (!Number.isInteger(limit) || limit < 1) fail(`--limit takes a positive number, not "${values.limit}"`);
+  if (positionals.length > 1) fail('usage: coffre audit [<project>[/<environment>[/<KEY>]]] [--limit N] [--actor <id>] [--denied] [--detail] [--json]');
   const result = await client().audit.list({
+    path: positionals[0],
     limit,
     // `service:deploy` as people write it, `token:deploy` as the log keeps it.
     actor: values.actor === undefined ? undefined : apiMember(values.actor),
@@ -1562,7 +1564,9 @@ async function audit(args: string[]): Promise<void> {
   }
 
   for (const entry of result.entries.reverse()) {
-    const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
+    // A read of several secrets at one place is one entry: its place and how many it read. A server before 0.7 says nothing of them.
+    const read = entry.secrets == null ? '' : ` (${entry.secrets.length} secrets)`;
+    const place = ([entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-') + read;
     // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
     // An instance before 0.7 sends no `token`.
     const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}`;
