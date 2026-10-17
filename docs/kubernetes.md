@@ -7,6 +7,9 @@ not be reachable from coffre: its keys are uploaded with the trust binding
 private cluster works, such as a Scaleway Kapsule cluster whose issuer is a
 `.local` name or an address on a private network.
 
+To sync coffre's values into Kubernetes Secrets with External Secrets
+Operator instead, see [vault.md](vault.md).
+
 Say the pod runs as Kubernetes service account `deploy`, in namespace `ci`,
 and reads `market/prod` as coffre's `service:api-deploy`.
 

@@ -53,6 +53,7 @@ export type Api = {
           [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
         };
       };
+      credentialExpiresAt: string | null;
       environments: {
         project: string;
         environment: string;
@@ -1634,6 +1635,7 @@ export type Me = {
       [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
     };
   };
+  credentialExpiresAt: string | null;
   environments: {
     project: string;
     environment: string;

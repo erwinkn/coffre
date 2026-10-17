@@ -48,8 +48,11 @@ test("ESO's store check and reads: lookup-self, then an environment, logged as o
   // SecretStore validation: ESO's checkToken asserts `type` is a string and `ttl` a number, and reads `expire_time`.
   const self = await body(await vault('auth/token/lookup-self'));
   assert.equal(self.data.type, 'service');
-  assert.equal(self.data.ttl, 0);
-  assert.equal(self.data.expire_time, null);
+  // What the token has left, as `GET /api/me` says it: 30 days, less the moments the test took.
+  const me = (await (await route('/api/me', { headers: { authorization: `Bearer ${eso}` } })).json()) as { credentialExpiresAt: string };
+  assert.equal(self.data.expire_time, me.credentialExpiresAt);
+  assert.ok(Math.abs(Date.parse(me.credentialExpiresAt) - Date.now() - 30 * 86_400_000) < 60_000);
+  assert.ok(Math.abs((self.data.ttl as number) - 30 * 86_400) < 60);
   assert.equal(self.data.display_name, 'token:eso');
   assert.equal('namespace_path' in self.data, false, "Terraform refuses a token in a namespace");
 
@@ -180,6 +183,10 @@ test("behind Cloudflare Access, a plugin's token is Access's assertion, which th
   const ask = (token: string) =>
     coffreRoute(new Request('https://secrets.acme.example/v1/secret/data/market/prod', { headers: { 'x-vault-token': token } }), access, null).then((response) => response!);
   assert.deepEqual((await body(await ask('assertion-for-eso'))).data.data, PROD);
+  // Access's assertion is not coffre's credential: no expiry to say, as Vault says of a token that never expires.
+  const self = await coffreRoute(new Request('https://secrets.acme.example/v1/auth/token/lookup-self', { headers: { 'x-vault-token': 'assertion-for-eso' } }), access, null);
+  const { data } = await body(self!);
+  assert.deepEqual([data.ttl, data.expire_time], [0, null]);
   assert.equal((await ask('forged')).status, 403);
 });
 

@@ -308,6 +308,7 @@ async function call(
     requestId,
     sourceIp,
     credentialId: null,
+    credentialExpiresAt: null,
     provenance: connection.id,
     personalToken: null,
     via,

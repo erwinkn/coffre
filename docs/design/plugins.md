@@ -1,7 +1,9 @@
 # Plugins, and coffre as a Vault KV store
 
-A proposal for 0.7.0, written on 2026-10-17 (W119), with a prototype on its
-branch. Erwin asked for a read-only HashiCorp Vault KV v2 API, so that
+A design for 0.7.0, written on 2026-10-17 (W119). The mechanism and the
+Vault adapter are built (PR 1 of section 7). The decisions in section 6
+were taken on the recommended option while Erwin was away (R10), and each
+is his to revisit. User docs: [vault.md](../vault.md). Erwin asked for a read-only HashiCorp Vault KV v2 API, so that
 off-the-shelf tools, External Secrets Operator (ESO) first, can pull
 coffre's secrets. That API is optional: a deployment adds it in its
 configuration. coffre has no plugin mechanism yet, so this proposes a
@@ -68,7 +70,7 @@ What ESO then sends, and what coffre does for each request:
 
 | ESO sends | coffre does |
 |---|---|
-| `GET /v1/auth/token/lookup-self` (once, to mark the store Ready) | Checks the token and answers who it is: `display_name: token:eso`, `type: service`, `ttl: 0` |
+| `GET /v1/auth/token/lookup-self` (once, to mark the store Ready) | Checks the token and answers who it is: `display_name: token:eso`, `type: service`, and the seconds it has left as `ttl` |
 | `GET /v1/secret/data/market/prod` (every 15 min) | Runs the API's reveal of `market/prod` as `token:eso`: the same checks, the same vault call, one `secret.read` entry naming the keys it opened. It answers `{ data: { data: { DATABASE_URL: …, STRIPE_KEY: … } } }` |
 | `GET /v1/secret/data/market/staging` | 403 `permission denied`, logged as a refusal, as `coffre export market/staging` would be |
 | `GET /v1/secret/data/market/gone` | 404 `{"errors":[]}`, which ESO reads as the secret deleted |
@@ -276,7 +278,7 @@ plugins: [
 |---|---|
 | `GET /v1/<mount>/data/<project>/<env>` | Every value of the environment, as `data.data`. This is the API's reveal, purpose `run` |
 | `GET /v1/<mount>/data/<project>/<env>/<KEY>` | `{ KEY: value }`. The API's reveal of one key, purpose `reveal` |
-| `GET /v1/auth/token/lookup-self` | Who the token is: `type: "service"`, `ttl: 0`, `expire_time: null`, no `namespace_path` |
+| `GET /v1/auth/token/lookup-self` | Who the token is: `type: "service"`, `ttl` the seconds it has left and `expire_time` when it ends, as `GET /api/me` says (both 0 and null behind Cloudflare Access), no `namespace_path` |
 | `GET /v1/sys/internal/ui/mounts/<mount>[/…]` | The mount, KV version `"2"`. No token is needed: it holds no secret, and Vault's UI asks for it unauthenticated too |
 | Any other method (PUT, POST, PATCH, DELETE) | 405 `coffre's Vault API is read only` |
 | Any query on a read: `?version=N`, `?read_snapshot_id=…` | 400 before anything is read: coffre serves current values only |
@@ -377,9 +379,12 @@ The interface it needs from core is the existing exchange, unchanged:
 `{ service, token } → { token, expiresAt }`. Since #241, an uploaded key set
 is one more way a binding trusts an issuer, so nothing else is missing.
 
-## 6. Decisions for Erwin
+## 6. Decisions
 
-1. **Where the adapter lives: `/v1` or `/vault/v1`.** The prototype takes
+Each was taken on its recommendation on 2026-10-17 under R10, for Erwin to
+review. Each is reversible.
+
+1. **Where the adapter lives: `/v1` or `/vault/v1`.** The adapter takes
    `/v1`, so `VAULT_ADDR` is coffre's own origin. HashiCorp's Go client
    keeps a path in its address (`VAULT_ADDR=https://secrets.acme.example/vault`
    requests `/vault/v1/…`), so `/vault/v1` would work for Go tools. Other
@@ -394,11 +399,11 @@ is one more way a binding trusts an issuer, so nothing else is missing.
    `?version=N` refused, against inventing a counter for Vault's numeric
    version. *Recommendation: keep it.* ESO never reads the version, and
    refusing beats serving a version that means something else.
-4. **The token's expiry in lookup-self.** Today it reports `ttl: 0`, no
-   expiry, as Vault does for tokens that never expire. That means ESO
-   cannot warn before a 30-day token runs out. The fix is small: add the
-   credential's `expiresAt` to `GET /api/me`, which `coffre whoami` could
-   show too. *Recommendation: add it in the PR that ships this.*
+4. **The token's expiry in lookup-self.** The prototype reported `ttl: 0`,
+   no expiry, as Vault does for tokens that never expire, so ESO could not
+   warn before a 30-day token ran out. *Done in PR 1:* `GET /api/me` says
+   `credentialExpiresAt`, and lookup-self derives `ttl` and `expire_time`
+   from it.
 5. **Which tokens count as a Vault token.** Any token the API accepts
    counts: service tokens, a person's personal token (`coffre_pat_`,
    #239), or their CLI session. So `vault kv get` works for a developer as
@@ -425,13 +430,13 @@ is one more way a binding trusts an issuer, so nothing else is missing.
 
 | PR | What | Effort |
 |---|---|---|
-| 1 | The plugin mechanism and the read-only Vault adapter, from this prototype. Adds a user doc (`docs/vault.md`: ESO, CLI, Terraform, vals setup), the ESO `webhook` alternative in the same doc, and `expiresAt` in `/api/me` (decision 4) | 1 to 2 days |
+| 1 | The plugin mechanism and the read-only Vault adapter. Adds a user doc (`docs/vault.md`: ESO, CLI, Terraform, vals setup), the ESO `webhook` alternative in the same doc, and `expiresAt` in `/api/me` (decision 4) | 1 to 2 days |
 | 2 | `exchange`, Kubernetes and JWT login, and `revoke-self`, on uploaded key sets (#241, in main) | 1 day |
 | 3 | `events` and `scheduled`, and the `notify` plugin | 3 days |
 | 4 | LIST, if wanted (decision 6) | Half a day |
 | 5 | Rotation plugins on `scheduled`, from W108 and W109's prototypes | Per provider |
 
-The prototype covers PR 1's code:
+PR 1's code:
 
 - `packages/server/src/plugins.ts`: the types, `checkPlugins` and the
   dispatch.
@@ -440,9 +445,9 @@ The prototype covers PR 1's code:
 - `packages/server/test/vault-kv.test.ts`: ESO's requests as its Go client
   sends them, on Postgres and SQLite.
 
-The prototype was also run against `pnpm dev` with HashiCorp's Go client
+It was also run against `pnpm dev` with HashiCorp's Go client
 v1.22.0 making ESO's calls (`dev/vault-kv/main.go` reproduces it), and with
-the Vault 1.21 CLI.
+the Vault 1.21 CLI. That check is manual, and the suite does not run it.
 
 The examples and `coffre init` are unchanged: the adapter is opt-in, so a
 deployment adds it by hand, following the docs. A `coffre init --vault-kv`

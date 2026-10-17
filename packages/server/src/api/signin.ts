@@ -167,6 +167,8 @@ export type CredentialPrincipal = Principal & {
   exchanged: boolean;
   /** A personal token, which acts as its person within its scope: the request's entries name it too. Null for anything else. */
   personalToken: PersonalToken | null;
+  /** When the credential ends, ISO 8601. */
+  expiresAt: string;
 };
 
 export type ClientMeta = {
@@ -635,6 +637,7 @@ export class SigninService {
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
           personalToken: null,
+          expiresAt: row.expiresAt.toISOString(),
         }
       : {
           type: 'user',
@@ -648,6 +651,7 @@ export class SigninService {
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
           credentialScope: row.kind === 'personal' ? readScope(row.scope) ?? [] : null,
           personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,
+          expiresAt: row.expiresAt.toISOString(),
         };
   }
 

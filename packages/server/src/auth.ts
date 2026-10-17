@@ -19,6 +19,8 @@ export type AuthenticatedIdentity = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
+  /** When that credential ends, ISO 8601; null without one. */
+  credentialExpiresAt: string | null;
   /** That credential, when a trust binding issued it for a CI run, or it is a personal token: every entry the request writes names it. */
   provenance: string | null;
   /** The personal token the request came in on, which acts as its person within its scope; null for anything else. */
@@ -129,6 +131,7 @@ export async function authenticateRequest(
 
   let principal: Principal;
   let credentialId: string | null = null;
+  let credentialExpiresAt: string | null = null;
   let credentialGeneration: number | undefined;
   let exchanged = false;
   let credentialScope: CredentialScope | null = null;
@@ -142,8 +145,9 @@ export async function authenticateRequest(
       exchanged?: boolean;
       credentialScope?: CredentialScope | null;
       personalToken?: PersonalToken | null;
+      expiresAt?: string;
     };
-    ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, ...principal } = verified);
+    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
@@ -168,6 +172,7 @@ export async function authenticateRequest(
       requestId,
       sourceIp,
       credentialId,
+      credentialExpiresAt,
       provenance: exchanged || personalToken !== null ? credentialId : null,
       personalToken,
       via: null,

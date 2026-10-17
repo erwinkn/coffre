@@ -131,11 +131,11 @@ function mountInfo(mount: string) {
  * `auth/token/lookup-self`, which ESO asks to check its store, and
  * Terraform before every plan. ESO reads `type`, a string, `ttl`, a number,
  * and `expire_time`, which may be null; Terraform needs no `namespace_path`.
- * The token's expiry is not in `me`: a ttl of 0 and no expire time say it
- * does not expire, as Vault's own non-expiring tokens do, and coffre refuses
- * it once it has.
+ * The ttl is the seconds the token has left, which ESO takes for expired
+ * under 60. A credential that is not coffre's, Access's assertion, says
+ * none: a ttl of 0 and no expire time, as Vault's tokens that never expire.
  */
-function lookupSelf(me: Me) {
+function lookupSelf(me: Me, now = Date.now()) {
   if (!me.registered) throw new CoffreError(403, 'registration_required', 'you are signed in, but not a member here');
   return {
     accessor: '',
@@ -143,7 +143,7 @@ function lookupSelf(me: Me) {
     creation_ttl: 0,
     display_name: `${me.principal.type === 'service' ? 'token' : 'user'}:${me.principal.id}`,
     entity_id: '',
-    expire_time: null,
+    expire_time: me.credentialExpiresAt,
     explicit_max_ttl: 0,
     id: '',
     meta: null,
@@ -152,7 +152,7 @@ function lookupSelf(me: Me) {
     path: 'auth/token/create',
     policies: ['default'],
     renewable: false,
-    ttl: 0,
+    ttl: me.credentialExpiresAt === null ? 0 : Math.max(0, Math.floor((Date.parse(me.credentialExpiresAt) - now) / 1000)),
     type: 'service',
   };
 }

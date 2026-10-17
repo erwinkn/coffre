@@ -74,6 +74,12 @@ export type Me = {
    * `environments` and the rest are already what it reaches.
    */
   personalToken: { id: string; label: string; expiresAt: string; scope: ScopeByPath } | null;
+  /**
+   * When the credential this request came in on ends, ISO 8601: a session,
+   * a service or personal token, or one a trust binding issued. Null behind
+   * Cloudflare Access, whose assertion is not coffre's, and through MCP.
+   */
+  credentialExpiresAt: string | null;
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
@@ -139,6 +145,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
     serviceSetup: setting === null ? null : scopeView(setting, runsInstance(caller) ? known : known.filter((project) => seesProject(caller, project))),
     features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
     personalToken: ctx.personalToken === null ? null : { ...ctx.personalToken, scope: scopeByPath(caller.credentialScope ?? [], known)! },
+    credentialExpiresAt: ctx.credentialExpiresAt,
     environments: reachable,
   };
 }

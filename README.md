@@ -68,6 +68,9 @@ walks through a deployment.
 
 [Secrets in CI and deploys](docs/ci.md) covers the GitHub Action and pulling
 values into Cloudflare, Vercel and other deploy pipelines.
+[Read coffre from tools that speak Vault](docs/vault.md) covers External
+Secrets Operator, the `vault` CLI, vals and Terraform, through an optional,
+read-only Vault KV v2 API.
 
 ## Running it locally
 
