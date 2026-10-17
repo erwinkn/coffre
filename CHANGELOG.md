@@ -24,7 +24,8 @@
 - **Add secret, and Add folder beside it.** New secret is now Add secret, a
   split button whose chevron opens a menu with Add folder: name a folder and
   pick the secrets to file in it. A folder exists while it holds a secret, so
-  it is made with its first ones.
+  it is made with its first ones. A refused move, from here or from Move to
+  folder…, now says why beneath its row; it only turned the row red.
 - **Switching environments takes one round trip.** The page asked for an
   environment's secrets, then for its references and missing keys. It now asks
   all three at once wherever the project list already says you read the

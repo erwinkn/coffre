@@ -34,6 +34,7 @@ function listOf<TItem, TData extends { ok: boolean } | null>(
 const ARCHIVING: Words = { pending: 'Archiving…', done: 'archived', failed: 'Not archived.' };
 const REVOKING: Words = { pending: 'Revoking…', done: 'revoked', failed: 'Not revoked.' };
 const DISCONNECTING: Words = { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' };
+const MOVING: Words = { pending: 'Moving…', done: 'moved', failed: 'Not moved.' };
 
 const saving = (id: string): Target => ({ id, kind: 'saving' });
 const removing = (id: string): Target => ({ id, kind: 'removing' });
@@ -560,6 +561,7 @@ export function moveSecret(
 ): Change<Secrets, SecretKey, { key: string; folder: string | null }, unknown> {
   return {
     list: secretsList(place),
+    saving: MOVING,
     label: (vars) => vars.key,
     targets: (vars) => [saving(vars.key)],
     apply: (entries, vars) => entries.map((entry) => (entry.key === vars.key ? { ...entry, folder: vars.folder } : entry)),

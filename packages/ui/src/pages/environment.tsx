@@ -199,6 +199,8 @@ function EnvironmentLedger({
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
   const folders = foldersOf(active);
+  // What can be filed now: not a secret whose save is still on its way, which may not exist yet.
+  const settled = active.filter((entry) => status(entry.key).state !== 'pending');
   // Renaming or removing a folder: everything in it at once, the keys staying where they are.
   const refile = useAction();
   const place = `${project}/${environment}`;
@@ -543,6 +545,7 @@ function EnvironmentLedger({
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
+                      onDismiss={dismiss}
                       columns={columns}
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
@@ -610,15 +613,16 @@ function EnvironmentLedger({
 
       {canWrite && (
         <div className="table-actions">
-          <AddButton onAddSecret={() => addDraft()} onAddFolder={() => setAddingFolder(true)} canAddFolder={active.length > 0} />
+          <AddButton onAddSecret={() => addDraft()} onAddFolder={() => setAddingFolder(true)} canAddFolder={settled.length > 0} />
           {canReveal && <ImportEnv project={project} environment={environment} />}
           <AddFolder
             open={addingFolder}
             onOpenChange={setAddingFolder}
-            keys={active.map((entry) => entry.key)}
+            keys={settled.map((entry) => entry.key)}
             folders={folders}
             onAdd={(folder, keys) => {
-              for (const entry of active) {
+              // As things stand on submit: a secret whose save started since the dialog opened is left out, not raced.
+              for (const entry of settled) {
                 if (keys.includes(entry.key) && entry.folder !== folder) move({ key: entry.key, folder });
               }
             }}
@@ -1060,6 +1064,7 @@ function SecretRow({
   environments,
   status,
   disabled,
+  onDismiss,
   columns,
   onEdit,
   onPatch,
@@ -1089,6 +1094,8 @@ function SecretRow({
   /** A save of this row on its way, or refused. */
   status: ItemStatus;
   disabled: boolean;
+  /** Forget a refused change once its row has said so. */
+  onDismiss: (mutationId: number) => void;
   columns: number;
   onEdit: () => void;
   onPatch: (patch: Partial<SecretChange>) => void;
@@ -1584,6 +1591,17 @@ function SecretRow({
           </td>
         </tr>
       ) : null}
+
+      {/* A refused change made outside the pending edits, a move for one,
+          says why here. A refused save puts its edit back on the row, and
+          the bar under the table says why. */}
+      {!editing && !leaving && (
+        <RowFailure
+          status={status}
+          columns={columns}
+          onDismiss={() => status.state === 'failed' && onDismiss(status.mutationId)}
+        />
+      )}
     </>
   );
 }
