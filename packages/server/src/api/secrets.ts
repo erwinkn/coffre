@@ -787,11 +787,9 @@ async function renameBelow(
     const taken = rows.find((row) => row.key === nextKey);
     // A personal config is named to nobody but its owner: its own key of the new name moves aside, `NEXT_KEY_2`, rather than stop the rename.
     if (taken !== undefined && fork.owner !== null) {
-      const held = new Set((await environmentSecrets(tx, fork.id)).map((row) => row.key));
-      let n = 2;
-      while (held.has(`${nextKey}_${n}`)) n++;
-      await update(tx, secrets, { id: taken.id }, { key: `${nextKey}_${n}`, updatedAt: new Date() });
-      log.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: `${nextKey}_${n}`, parent, aside: true } }));
+      const aside = await asideKey(tx, fork.id, nextKey);
+      await update(tx, secrets, { id: taken.id }, { key: aside, updatedAt: new Date() });
+      log.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: aside, parent, aside: true } }));
     } else if (taken !== undefined) {
       throw new Refusal(
         conflict(`${place.project.slug}/${fork.slug} inherits ${key} and holds a ${nextKey} of its own: rename or archive that one first`),
@@ -819,6 +817,21 @@ async function renameBelow(
       await update(tx, dismissedKeys, { environmentId: fork.id, key: nextKey }, { restoredAt: now, restoredBy: by });
       log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: nextKey, renamed: key, parent } }));
     }
+  }
+}
+
+/**
+ * A name for a personal config's key moved out of a rename's way:
+ * `NEXT_KEY_2`, `_3` and on, held by nothing the config reads, its own
+ * keys or those it inherits, and within the 128 characters a key takes.
+ */
+async function asideKey(tx: Transaction, environmentId: string, key: string): Promise<string> {
+  const inherited = await inheritedRows(tx, environmentId);
+  const taken = new Set([...(await environmentSecrets(tx, environmentId)).map((row) => row.key), ...(inherited?.held.keys() ?? [])]);
+  for (let n = 2; ; n++) {
+    const suffix = `_${n}`;
+    const name = `${key.slice(0, 128 - suffix.length)}${suffix}`;
+    if (!taken.has(name)) return name;
   }
 }
 

@@ -182,7 +182,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
         const personal = environment.owner !== null;
         const slug = listedSlug(environment);
         if (!manages && !secretAccess) {
-          return { slug, name: slug, accessible: false, parent: parent(environment), personal, details: null };
+          return { slug, name: personal ? slug : environment.name, accessible: false, parent: parent(environment), personal, details: null };
         }
         return {
           slug,
@@ -663,11 +663,19 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
     if (forks.length > 0) throw parentOf(forks);
 
     const [scope, references] = await Promise.all([deletionScope(ctx.db, doomed), referencesAt(ctx.db, doomed)]);
-    const deletion = (tombstone: string, versions = scope.versions): Deletion => ({
+    // An environment's personal configs go with it: what they erase is counted with it, each named by whose it is.
+    const personal = environment === null ? [] : (await forksOf(ctx.db, environment.id, { archived: true })).filter((fork) => fork.owner !== null);
+    const personalScopes = await Promise.all(personal.map((config) => deletionScope(ctx.db, { projectId: project.id, environmentId: config.id })));
+    const personalKeys = personalScopes.reduce((sum, each) => sum + each.keys, 0);
+    const personalVersions = personalScopes.reduce((sum, each) => sum + each.versions, 0);
+    const deletion = (tombstone: string, versions = scope.versions + personalVersions): Deletion => ({
       path,
       tombstone,
-      environments: scope.environments.map((candidate) => candidate.slug),
-      keys: scope.keys,
+      environments: [
+        ...scope.environments.map((candidate) => candidate.slug),
+        ...personal.map((config) => `${environment!.slug}@${config.owner!.replace(/^user:/, '')}`),
+      ],
+      keys: scope.keys + personalKeys,
       versions,
       grants: scope.grants.map((grant) => ({
         member: grant.principal,
@@ -732,19 +740,21 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         );
       }
       const tombstone = await tombstoneSlug(tx, slug, new Date(), within);
-      const versions = await eraseVersions(tx, doomed);
+      let versions = await eraseVersions(tx, doomed);
       if (environment === null) await update(tx, projects, { id: project.id }, { slug: tombstone });
       else await update(tx, environments, { id: environment.id }, { slug: tombstone });
       // Its personal configs with it: none outlives the environment it is a config of.
-      for (const config of environment === null ? [] : await forksOf(tx, environment.id, { archived: true })) {
-        if (config.owner === null) continue;
-        log.push((await erasePersonal(ctx, tx, { projectId: project.id, environmentId: config.id }, config.slug, operationId, { path, with: environment!.slug })).entry);
+      const configs = environment === null ? [] : (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null);
+      for (const config of configs) {
+        const erased = await erasePersonal(ctx, tx, { projectId: project.id, environmentId: config.id }, config.slug, operationId, { path, with: environment!.slug });
+        versions += erased.versions;
+        log.push(erased.entry);
       }
       const done = deletion(tombstone, versions);
       log.push(allowed(ctx, action, {
         ...doomed,
         operationId,
-        metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length },
+        metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length, ...(configs.length === 0 ? {} : { personal: configs.length }) },
       }));
       return { dryRun: false, deletion: done };
     });

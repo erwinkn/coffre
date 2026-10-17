@@ -213,3 +213,39 @@ test("a rename in dev renames a personal config's override too; a key of its own
   await root.secrets.update('market/dev/STRIPE_KEY', { key: 'STRIPE_SECRET_KEY' });
   assert.deepEqual(await values(ada, 'market/dev@me'), { DATABASE_URL: 'postgres://dev', STRIPE_SECRET_KEY: 'sk_ada', STRIPE_SECRET_KEY_2: 'ada-own' });
 });
+
+test("a key moved aside takes a name nothing in the personal config reads, inherited ones included, within a key's length", async () => {
+  await root.secrets.set('market/dev', { OLD: 'old', NEXT_2: 'inherited' });
+  await ada.secrets.set('market/dev@me', { NEXT: 'ada-own' });
+  await root.secrets.update('market/dev/OLD', { key: 'NEXT' });
+  const read = await values(ada, 'market/dev@me');
+  assert.deepEqual([read.NEXT, read.NEXT_2, read.NEXT_3], ['old', 'inherited', 'ada-own']);
+
+  const long = `K${'A'.repeat(127)}`;
+  await root.secrets.set('market/dev', { SHORT: 'short' });
+  await ada.secrets.set('market/dev@me', { [long]: 'ada-long' });
+  await root.secrets.update('market/dev/SHORT', { key: long });
+  const after = await values(ada, 'market/dev@me');
+  assert.deepEqual([after[long], after[`${long.slice(0, 126)}_2`]], ['short', 'ada-long']);
+});
+
+test("deleting dev counts what its personal configs erase with it", async () => {
+  await ada.secrets.set('market/dev@me', { A: '1', B: '2' });
+  await root.environments.update('market/dev', { archived: true });
+  const preview = await root.environments.previewDelete('market/dev');
+  assert.deepEqual([preview.deletion.keys, preview.deletion.versions, preview.deletion.environments], [4, 4, ['dev', `dev@${ADA}`]]);
+  const done = await root.environments.delete('market/dev');
+  assert.deepEqual([done.deletion.keys, done.deletion.versions], [4, 4]);
+});
+
+test('asking again for a personal config you have answers that it exists, with no more than read on dev', async () => {
+  const first = await ada.environments.create('market/dev@me');
+  const again = await ada.environments.create('market/dev@me');
+  assert.deepEqual([first.created, again.created], [true, false]);
+});
+
+test("your own personal config's log is found by dev@me", async () => {
+  await root.secrets.set('market/dev@me', { ROOT_ONLY: 'x' });
+  const { entries } = await root.audit.list({ path: 'market/dev@me' });
+  assert.ok(entries.some((entry) => entry.action === 'secret.write'));
+});

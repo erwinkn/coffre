@@ -183,9 +183,9 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
         : def.query.parse(Object.fromEntries(url.searchParams));
 
     const place = await locate(ctx, def, found.params, query);
-    // A personal config yet to be made: its handler checks what making one takes.
-    const unmade = place?.personal !== undefined && place.environment === null;
-    for (const check of unmade ? [] : checks(def, input, query)) {
+    // `dev@me` for a route that handles it, made or not: its handler checks what that takes.
+    const handled = place?.personal !== undefined && def.personal === 'handles';
+    for (const check of handled ? [] : checks(def, input, query)) {
       const permission = typeof check === 'string' ? check : check.permission;
       const scope = placeOf(place!.project, typeof check === 'string' ? place!.environment : null);
       if (can(ctx.caller, permission, scope)) continue;

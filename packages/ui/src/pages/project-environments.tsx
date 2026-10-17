@@ -103,7 +103,8 @@ function EnvironmentsPanel({
         <div className="table-actions">
           <NewEnvironment
             project={project.slug}
-            sources={current.filter(isActiveAccessibleEnvironment).map((environment) => environment.slug)}
+            // Your personal config is nobody's source: its values are yours alone.
+            sources={current.filter((environment) => isActiveAccessibleEnvironment(environment) && !environment.personal).map((environment) => environment.slug)}
           />
         </div>
       )}

@@ -19,6 +19,7 @@ import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
 import { forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
+import { ownerOf } from './personal.ts';
 
 /** Entries the full check reads at once: some ten megabytes, within a Worker's memory, and few round trips. */
 const VERIFY_BATCH = 10_000;
@@ -189,7 +190,8 @@ export async function listAudit(
   }
   if (query.path !== undefined) {
     // A deleted place's entries stay readable by its tombstone's slug.
-    const place = await resolvePath(ctx.db, query.path, { tombstones: true });
+    // `market/dev@me`: the caller's own personal config of dev.
+    const place = await resolvePath(ctx.db, query.path, { tombstones: true, owner: ownerOf(ctx) });
     if (place === null) throw notFound('no such project');
     filter.projectId = place.project.id;
     if (query.path.environment !== undefined) {
