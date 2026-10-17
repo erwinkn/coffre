@@ -51,6 +51,7 @@ export const keys = {
   secrets: ({ project, environment }: Place) => ['secrets', project, environment],
   references: (path: string) => ['references', path],
   missing: ({ project, environment }: Place) => ['missing', project, environment],
+  personal: (project: string) => ['personal', project],
   directory: ['directory'],
   report: (member: string) => ['report', member],
   memberAccess: (member: string) => ['member-access', member],
@@ -176,6 +177,13 @@ export const queries = {
     queryOptions({
       queryKey: keys.missing(place),
       queryFn: () => uiResult(() => client.environments.missing(`${place.project}/${place.environment}`)),
+    }),
+
+  /** A project's personal configs, for whoever manages its environments: whose, of what, and their key names. */
+  personal: (client: CoffreClient, project: string) =>
+    queryOptions({
+      queryKey: keys.personal(project),
+      queryFn: () => uiResult(() => client.environments.personal(project)),
     }),
 
   /** The live references into and out of a place, and who reads through them, for whoever manages its access. */

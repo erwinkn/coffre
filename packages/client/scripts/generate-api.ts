@@ -44,6 +44,7 @@ const NAMED = {
   SettingsView: 'api/settings.ts',
   MissingKey: 'api/missing.ts',
   OffboardingReport: 'api/members.ts',
+  PersonalConfig: 'api/personal.ts',
   ListedReference: 'api/references.ts',
   ProjectSummary: 'api/projects.ts',
   ReferenceView: 'api/references.ts',

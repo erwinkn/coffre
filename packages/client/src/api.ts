@@ -509,6 +509,11 @@ export type Api = {
         endedBy: string | null;
         endedAt: string | null;
       }[];
+      personal: {
+        project: string;
+        of: string;
+        slug: string;
+      }[];
     };
   };
   "PUT /members/:member": {
@@ -632,6 +637,11 @@ export type Api = {
           createdAt: string;
           endedBy: string | null;
           endedAt: string | null;
+        }[];
+        personal: {
+          project: string;
+          of: string;
+          slug: string;
         }[];
       };
     };
@@ -1660,6 +1670,20 @@ export type OffboardingReport = {
     endedBy: string | null;
     endedAt: string | null;
   }[];
+  personal: {
+    project: string;
+    of: string;
+    slug: string;
+  }[];
+};
+
+export type PersonalConfig = {
+  owner: string;
+  of: string;
+  slug: string;
+  keys: string[];
+  archived: boolean;
+  createdAt: string;
 };
 
 export type ListedReference = {

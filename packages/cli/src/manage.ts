@@ -188,6 +188,23 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
   if (values.reference && references > 0) io.out.write(`  whoever reads ${project}/${made.environment.slug} reads those values through them, as they change\n`);
 }
 
+/**
+ * `coffre personal market`: its members' personal configs, for whoever
+ * manages its environments: whose, of what, and their key names, never a
+ * value. Each slug is what `coffre environments delete` takes.
+ */
+export async function personal(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, json, ['<project>']);
+  const { project } = place(positionals[0]!, false);
+  const { configs } = await connect().environments.personal(project);
+  if (values.json) return asJson(io, configs);
+  if (configs.length === 0) return void io.out.write(`no personal config in ${project}\n`);
+  for (const config of configs) {
+    const keys = config.keys.length === 0 ? 'no keys' : config.keys.join(', ');
+    io.out.write(`${project}/${config.of}@${shownMember(config.owner).replace(/^user:/, '')}\t${project}/${config.slug}${config.archived ? '\t(archived)' : ''}\n  ${keys}\n`);
+  }
+}
+
 /** The patch `--slug` makes, or null for `--name` alone, which a script from before 0.6.2 may pass: nothing to change. */
 function renamed(values: { name?: string; slug?: string }, what: 'project' | 'environment', io: Io): { slug: string } | null {
   nameIgnored(values, what, io);

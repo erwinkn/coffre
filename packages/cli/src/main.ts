@@ -828,6 +828,10 @@ async function list(args: string[]): Promise<void> {
   const olderThanDays = values['older-than'] === undefined ? null : days(values['older-than']);
   const { project, environment } = parsePath(positionals[0]!);
   const result = await client().secrets.list(`${project}/${environment}`);
+  // `dev@me` while you have no personal dev: dev's own keys, said on stderr so the list stays as it is.
+  if (result.personal?.fallback === true) {
+    process.stderr.write(`coffre: you have no personal config of ${project}/${result.personal.of}: these are its own keys; a write to ${project}/${environment} makes one\n`);
+  }
   // An instance before 0.6 does not say: it flags nothing, and has nothing for --stale.
   const told: number | null | undefined = result.rotateAfterDays;
   if (values.stale && told === undefined) {
@@ -1556,6 +1560,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   references: (args) => manage.references(connect, args),
   'references break': (args) => manage.referencesBreak(connect, args),
   fork: (args) => manage.fork(connect, args),
+  personal: (args) => manage.personal(connect, args),
   'environments rename': (args) => manage.environmentsRename(connect, args),
   'environments archive': (args) => manage.environmentsArchive(connect, args, true),
   'environments unarchive': (args) => manage.environmentsArchive(connect, args, false),

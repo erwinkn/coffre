@@ -369,6 +369,15 @@ test("reset and remove, in a fork: back to the parent's value, or without its ke
   await assert.rejects(manage.removeSecret(connect, ['market/prod/SENTRY_DSN'], io), /market\/prod inherits from no environment: `coffre archive market\/prod\/SENTRY_DSN`/);
 });
 
+test("personal lists a project's personal configs, whose and of what, with their key names and the slug that deletes each", async () => {
+  const { connect, calls, written, io } = fixture(() => ({
+    configs: [{ owner: 'user:ada@acme.example', of: 'dev', slug: 'dev-p-3f9c2a1b', keys: ['DATABASE_URL'], archived: false, createdAt: '2026-10-17T00:00:00.000Z' }],
+  }));
+  await manage.personal(connect, ['market'], io);
+  assert.deepEqual(calls, [{ method: 'GET', path: '/personal/market', body: undefined }]);
+  assert.equal(written.out, 'market/dev@ada@acme.example\tmarket/dev-p-3f9c2a1b\n  DATABASE_URL\n');
+});
+
 test('missing lists what siblings have, and dismiss --all dismisses each in one call', async () => {
   const listing = { missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }, { key: 'STRIPE_KEY', in: ['staging'], folder: 'stripe' }], dismissed: [] };
   const { connect, calls, written, io } = fixture(({ method, body }) =>

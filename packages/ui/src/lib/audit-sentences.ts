@@ -189,7 +189,17 @@ function readVerb({ entry }: Facts): [string, string] {
 }
 
 const placeTemplates = (kind: 'project' | 'environment'): Record<string, Template> => {
-  const what = (facts: Facts): Part[] => [`${kind} `, ...(kind === 'project' ? place({ ...facts.entry, environment: null, key: null }) : environmentOf(facts.entry))];
+  // A personal config by what it is a config of, `market/dev`: its own slug is generated, and shown nowhere else.
+  const of = (entry: AuditEntry): string | null => {
+    const parent = text(entry.metadata.personal) ?? text(entry.metadata.with);
+    return parent === null || entry.project === null ? null : `${entry.project}/${parent}`;
+  };
+  const what = (facts: Facts): Part[] => {
+    const personal = kind === 'environment' ? of(facts.entry) : null;
+    if (personal !== null) return ['a personal config of ', { place: personal }];
+    if (kind === 'environment' && facts.entry.metadata.personal === true) return [`a personal config, ${text(facts.entry.metadata.path) ?? ''}`];
+    return [`${kind} `, ...(kind === 'project' ? place({ ...facts.entry, environment: null, key: null }) : environmentOf(facts.entry))];
+  };
   return {
     [`${kind}.create`]: {
       did: 'created',

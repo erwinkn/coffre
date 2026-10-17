@@ -37,6 +37,7 @@ export type {
   MemberAccess,
   MissingKey,
   OffboardingReport,
+  PersonalConfig,
   ProjectSummary,
   ReferenceView,
   RemovedMember,

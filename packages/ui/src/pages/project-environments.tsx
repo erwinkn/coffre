@@ -222,7 +222,9 @@ function EnvironmentCard({
             <span className="env-card-name">{environment.slug}</span>
           )}
           {/* A fork: its keys are its parent's, but for those it sets or removes. An instance before 0.7 says nothing. */}
-          {environment.parent != null && <span className="tag tag-outline">inherits {environment.parent}</span>}
+          {environment.personal === true
+            ? <span className="tag tag-blue">yours alone</span>
+            : environment.parent != null && <span className="tag tag-outline">inherits {environment.parent}</span>}
         </span>
 
         {isArchived ? (
@@ -272,7 +274,8 @@ function EnvironmentCard({
 
       {pending && <RowPending status={state} />}
 
-      {manageable && !pending && (
+      {/* Your personal config is deleted from its own page; it is no environment of the team's to rename or archive. */}
+      {manageable && !pending && environment.personal !== true && (
         <Menu.Root>
           <Menu.Trigger
             className="act act-quiet env-card-menu"
