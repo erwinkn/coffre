@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
-import { auditChainHead, auditLog, environments, projects, secretVersions } from './db/tables.ts';
+import { auditChainHead, auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**
@@ -405,4 +405,30 @@ test("a fork the vault refuses is named in the refusal, never filed under: anoth
   ]);
   const { entries: billingLog } = await root.audit.list({ path: 'billing/dev' });
   assert.equal(billingLog.filter((entry) => entry.action === 'secret.read').length, 0);
+});
+
+test('a fork is filed under only for a read whose reference holds: a forged pairing is refused, and named nowhere else', async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'Prod' });
+  await root.secrets.set('billing/prod', { LENT: 'lent', PRIVATE_SOURCE: 'private' });
+  await root.secrets.set('market/prod', { SHARED: { ref: 'billing/prod/LENT' } });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  const [reference] = await db.owner.select({ id: secretReferences.id, seq: secretReferences.createdSeq }).from(secretReferences);
+  const [unrelated] = await db.owner
+    .select({ id: secretVersions.id })
+    .from(secretVersions)
+    .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+    .where(eq(secrets.key, 'PRIVATE_SOURCE'));
+  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  const eu = await environmentId('prod-eu');
+  const claimed = await deps.vault.unwrap({
+    principal: `user:${ROOT}`,
+    purpose: 'run',
+    items: [{ secretVersionId: unrelated.id, via: { reference: reference.id, seq: Number(reference.seq) }, through: eu }],
+  });
+  assert.deepEqual(claimed.ok ? null : claimed.refusal.code, 'bad_claim');
+  const refusals = await entries('vault', 'secret.read');
+  assert.deepEqual(refusals.map((entry) => [entry.decision, entry.metadata.through]), [['deny', { environmentId: eu, refused: true }]]);
+  const { entries: forkLog } = await root.audit.list({ path: 'market/prod-eu' });
+  assert.equal(forkLog.filter((entry) => entry.action === 'secret.read').length, 0);
 });

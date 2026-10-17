@@ -793,11 +793,15 @@ class VaultService implements Vault {
     validateItems(items, 'wrapped');
     const sealed = await this.#referencesAt(vias);
     const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])));
-    // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own.
-    // Checked once, not again under the log's head: it decides nothing, so a fork archived meanwhile only names a read.
+    // A reference reads only the current version of the source its entry names.
+    const viaOk = items.map((item, i) => vias[i] === null || (sealed[i] !== null && sealed[i]!.source.secretId === item.secret.secretId && item.current));
+    // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own,
+    // for a read whose reference, if any, holds. Checked once, not again under the log's head: it decides nothing, so a
+    // fork archived meanwhile only names a read.
     const throughOk = items.map((item, i) => {
       const through = throughs[i];
       if (through === null) return true;
+      if (!viaOk[i]) return false;
       const fork = forks.get(through);
       const decidedAt = sealed[i]?.holder ?? item.secret;
       return fork !== undefined && !fork.deleted && !fork.archived && fork.projectId === decidedAt.projectId && through !== decidedAt.environmentId;
@@ -816,8 +820,7 @@ class VaultService implements Vault {
         secretVersionId: versionIds.get(secret),
       };
     };
-    // A reference reads only the current version of the source its entry names.
-    if (items.some((item, i) => vias[i] !== null && (sealed[i] === null || sealed[i]!.source.secretId !== item.secret.secretId || !item.current))) {
+    if (viaOk.includes(false)) {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
     }
     if (throughOk.includes(false)) {
