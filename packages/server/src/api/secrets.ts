@@ -82,6 +82,9 @@ export type SecretVersion = {
 /** A value, or a reference to another secret by path. */
 export type SecretValue = string | { ref: string };
 
+/** A reset in a fork, or its undoing: the key as it is now, and the environment that holds the parent's. */
+export type InheritResult = { key: string; archived: boolean; folder: string | null; from: string };
+
 export type SetOutcome = { version: number } | { archived: true } | { reference: string };
 export type SetResult = { operationId: string; keys: Record<string, SetOutcome> };
 
@@ -762,11 +765,7 @@ async function renameBelow(
  * neither loses a value; so either needs a parent that holds the key, or
  * it would be archiving, which takes more.
  */
-export async function inheritSecret(
-  ctx: ApiContext,
-  place: ResolvedPath,
-  inherit: boolean,
-): Promise<{ key: string; archived: boolean; folder: string | null; from: string }> {
+export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inherit: boolean): Promise<InheritResult> {
   const environment = requireLive(place);
   const secret = place.secret!;
   const here = `${place.project.slug}/${place.environment!.slug}`;

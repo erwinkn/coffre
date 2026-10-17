@@ -1435,6 +1435,13 @@ export type IdentityRow = {
   lastSignInAt: string | null;
 };
 
+export type InheritResult = {
+  key: string;
+  archived: boolean;
+  folder: string | null;
+  from: string;
+};
+
 export type Me = {
   principal: {
     type: "service" | "user";

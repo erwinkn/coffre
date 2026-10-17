@@ -382,6 +382,18 @@ test('a create call that names its environment, as before 0.6.2, still matches i
   assert.equal(market.environments.find((environment) => environment.slug === 'stage')?.name, 'stage');
 });
 
+test('create_environment with `inherits` makes a fork, its page saying what it inherits from', async () => {
+  const token = await connect(DEV, 'read write');
+  const args = { environment: 'market/prod-eu', inherits: 'prod' };
+  const { id } = (await callRaw(token, 'create_environment', args)).body.result!.structuredContent!.approval as { id: string };
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.summary, 'create the environment market/prod-eu, inheriting market/prod');
+  assert.deepEqual(shown.details.map((line) => [line.label, line.value]), [['Environment', 'market/prod-eu'], ['Inherits from', 'market/prod']]);
+  assert.match((await decide(id, true)).body.outcome.text, /is created, inheriting market\/prod/);
+  const listed = await clientFor(deps, ROOT).secrets.list('market/prod-eu');
+  assert.deepEqual([listed.parents, listed.keys.map((key) => [key.key, key.parent?.state])], [['prod'], [['API_KEY', 'inherited'], ['OLD_KEY', 'inherited']]]);
+});
+
 test('a disconnected app’s approvals can no longer be decided', async () => {
   const token = await connect(DEV, 'read write');
   const id = ((await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })).body.result!.structuredContent!.approval as { id: string }).id;

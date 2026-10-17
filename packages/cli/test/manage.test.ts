@@ -317,6 +317,46 @@ test('fork --reference makes references, and names the keys it copied instead', 
   assert.equal(written.out, 'created market/qa from market/staging: 3 keys, 2 references, and 1 copied: STRIPE_KEY, whose source you read only through staging\n  whoever reads market/qa reads those values through them, as they change\n');
 });
 
+test('fork --inherit copies nothing, says what its readers need, and is no fork as references', async () => {
+  const { connect, calls, written, io } = fixture(() => ({
+    environment: { slug: 'prod-eu', name: 'prod-eu', archivedAt: null }, created: true, forked: { from: 'prod', keys: 0, references: 0, copied: [], inherits: true },
+  }));
+  await manage.fork(connect, ['market/prod', 'prod-eu', '--inherit'], io);
+  assert.deepEqual(calls, [{ method: 'PUT', path: '/projects/market/prod-eu', body: { name: 'prod-eu', from: 'prod', inherit: true } }]);
+  assert.equal(written.out, "created market/prod-eu, inheriting market/prod: nothing copied\n  it reads prod's keys as they change, but for those it sets or removes; its readers need read on prod for those\n");
+  await assert.rejects(manage.fork(connect, ['market/prod', 'x', '--inherit', '--reference'], io), /--reference or --inherit, not both/);
+  assert.equal(calls.length, 1);
+});
+
+test("reset and remove, in a fork: back to the parent's value, or without its key, and --undo for each", async () => {
+  const { connect, calls, written, io } = fixture(({ method, path, body }) => {
+    if (method === 'GET') return { permissions: [], keys: [], parents: path.includes('prod-eu') ? ['prod'] : [], rotateAfterDays: null };
+    if (path.startsWith('/secrets/')) return { key: 'DATABASE_URL', archived: (body as { inherit: boolean }).inherit, folder: null, from: 'prod' };
+    return { operationId: 'op', keys: { SENTRY_DSN: (body as Record<string, unknown>).SENTRY_DSN === true ? 'dismissed' : 'restored' } };
+  });
+  await manage.resetSecret(connect, ['market/prod-eu/DATABASE_URL'], io);
+  await manage.resetSecret(connect, ['market/prod-eu/DATABASE_URL', '--undo'], io);
+  assert.deepEqual(calls.map((call) => call.body), [{ inherit: true }, { inherit: false }]);
+  assert.equal(written.out, [
+    "market/prod-eu/DATABASE_URL reads market/prod's value again; its own is kept: `coffre reset market/prod-eu/DATABASE_URL --undo` serves it again",
+    'market/prod-eu/DATABASE_URL overrides market/prod again, with the value it had',
+    '',
+  ].join('\n'));
+
+  written.out = '';
+  await manage.removeSecret(connect, ['market/prod-eu/SENTRY_DSN'], io);
+  await manage.removeSecret(connect, ['market/prod-eu/SENTRY_DSN', '--undo'], io);
+  assert.deepEqual(calls.slice(2).map((call) => [call.method, call.path, call.body]), [
+    ['GET', '/secrets/market/prod-eu', undefined],
+    ['PATCH', '/projects/market/prod-eu/dismissals', { SENTRY_DSN: true }],
+    ['GET', '/secrets/market/prod-eu', undefined],
+    ['PATCH', '/projects/market/prod-eu/dismissals', { SENTRY_DSN: null }],
+  ]);
+  assert.match(written.out, /^market\/prod-eu does without its parent's SENTRY_DSN: `coffre remove market\/prod-eu\/SENTRY_DSN --undo` inherits it again\nmarket\/prod-eu inherits SENTRY_DSN again/);
+  // Outside a fork, remove is no dismissal: archive is what takes a key out.
+  await assert.rejects(manage.removeSecret(connect, ['market/prod/SENTRY_DSN'], io), /market\/prod inherits from no environment: `coffre archive market\/prod\/SENTRY_DSN`/);
+});
+
 test('missing lists what siblings have, and dismiss --all dismisses each in one call', async () => {
   const listing = { missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }, { key: 'STRIPE_KEY', in: ['staging'], folder: 'stripe' }], dismissed: [] };
   const { connect, calls, written, io } = fixture(({ method, body }) =>

@@ -856,14 +856,23 @@ async function list(args: string[]): Promise<void> {
       const written = age === null ? '-' : age === 0 ? 'today' : `${age} day${age === 1 ? '' : 's'} ago`;
       const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: rotate it)` : '';
       const archived = entry.archived ? '  (archived)' : '';
+      // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
+      const parent = entry.parent ?? null;
+      const standing = parent === null
+        ? ''
+        : parent.state === 'inherited'
+          ? `  (from ${parent.from})`
+          : parent.state === 'removed'
+            ? `  (removed: ${parent.from} has it)`
+            : `  (overrides ${parent.from}${parent.changed ? `; ${parent.from} changed since` : ''})`;
       const { reference } = entry;
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
         continue;
       }
-      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${due}${archived}\n`);
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${due}${archived}${standing}\n`);
     }
   }
 }
@@ -1515,6 +1524,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   rename: (args) => manage.renameSecret(connect, args),
   archive: (args) => manage.archiveSecret(connect, args, true),
   unarchive: (args) => manage.archiveSecret(connect, args, false),
+  reset: (args) => manage.resetSecret(connect, args),
+  remove: (args) => manage.removeSecret(connect, args),
   move: (args) => manage.move(connect, args),
   folders: (args) => manage.folders(connect, args),
   'folders rename': (args) => manage.foldersRename(connect, args),

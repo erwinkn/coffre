@@ -546,21 +546,33 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     name: 'create_environment',
     needs: 'environment.manage',
     title: 'Create an environment',
-    description: `Create an environment in a project, with no secrets yet. ${approved}`,
+    description: `Create an environment in a project, with no secrets yet; or, with \`inherits\`, a fork that reads another environment's keys live, but for those it sets or removes. ${approved}`,
     scope: 'write',
     idempotent: true,
     destructive: false,
-    input: z.object({ environment, name }).strict(),
-    names: ({ environment }) => [environment],
+    input: z.object({
+      environment,
+      name,
+      inherits: slug.optional().describe("An environment of the same project, by slug, whose keys it inherits: prod for market/prod-eu. Its readers need read on that one for those keys"),
+    }).strict(),
+    names: ({ environment, inherits }) => [environment, ...(inherits === undefined ? [] : [`${splitEnvironment(environment).project}/${inherits}`])],
     change: {
-      summary: ({ environment }) => `create the environment ${environment}`,
+      summary: ({ environment, inherits }) => `create the environment ${environment}${inherits === undefined ? '' : `, inheriting ${splitEnvironment(environment).project}/${inherits}`}`,
       check: async ({ api }, { environment }) => needsOn(api, [splitEnvironment(environment).project], 'environment.manage'),
-      preview: async (_api, { environment }) => [{ label: 'Environment', value: environment, kind: 'mono' }],
-      apply: async (api, { environment }) => {
-        const made = await api.environments.create(environment);
+      preview: async (_api, { environment, inherits }) => [
+        { label: 'Environment', value: environment, kind: 'mono' },
+        ...(inherits === undefined ? [] : [{ label: 'Inherits from', value: `${splitEnvironment(environment).project}/${inherits}`, kind: 'mono' as const }]),
+      ],
+      apply: async (api, { environment, inherits }) => {
+        const made = await api.environments.create(environment, inherits === undefined ? {} : { from: inherits, inherit: true });
+        const parent = inherits === undefined ? '' : `${splitEnvironment(environment).project}/${inherits}`;
         return {
-          result: { environment, created: made.created },
-          text: made.created ? `The environment ${environment} is created, with no secrets yet.` : `The environment ${environment} existed already: nothing changed.`,
+          result: { environment, created: made.created, ...(inherits === undefined ? {} : { inherits: parent }) },
+          text: !made.created
+            ? `The environment ${environment} existed already: nothing changed.`
+            : inherits === undefined
+              ? `The environment ${environment} is created, with no secrets yet.`
+              : `The environment ${environment} is created, inheriting ${parent}: it reads ${parent}'s keys as they change, but for those it sets or removes.`,
         };
       },
     },
