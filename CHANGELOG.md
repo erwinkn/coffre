@@ -16,6 +16,15 @@
     only ever means the place is not there, so that ESO never deletes a
     target over anything else.
   - Setup for each tool is in docs/vault.md.
+- **ESO signs in to the Vault adapter with Kubernetes auth**, so a cluster
+  stores no coffre token.
+  - `PUT /v1/auth/kubernetes/login { role, jwt }` trades the service
+    account's token through the coffre service account's trust bindings,
+    keys uploaded included, as `coffre login --service` would, for a
+    credential of five minutes.
+  - `revoke-self` ends that credential.
+  - `jwt` auth and vault-action's `method: jwt` work the same way.
+  - Setup is in docs/vault.md.
 - **Plugins.** `createCoffre({ plugins: […] })` takes optional
   integrations. A plugin answers paths of its own and reaches coffre only
   through the API, as whoever a request's token names, so it can do no

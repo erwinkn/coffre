@@ -3,11 +3,13 @@
 // authority of its own. It answers paths of its own, and reaches coffre only
 // as whoever a request's credential names, through the API: the same route
 // table, checks, vault and audit log as the CLI.
-import { createClient, type CoffreClient } from '@coffre/client';
+import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { ACCESS_JWT_HEADER } from '@coffre/core/identity';
 
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
+import { exchangeWorkloadToken, logout } from './auth-routes.ts';
 import { fetchApi } from './fetch-api.ts';
+import { readLimitedJson } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** One plugin, as its constructor returns it: `vaultKv({ mount: 'secret' })`. */
@@ -33,6 +35,17 @@ export type PluginContext = {
    * refusal, the token's included, throws a `CoffreError`.
    */
   api(token: string): CoffreClient;
+  /**
+   * A workload's ID token for a credential of the service account it names
+   * that lasts five minutes, through that account's trust bindings: what
+   * `POST /api/auth/oidc` does, in process, with its limits, the token spent
+   * so that it signs in once, and its audit. A refusal throws a `CoffreError`.
+   */
+  exchange(input: { service: string; token: string }): Promise<{ token: string; expiresAt: string }>;
+  /** End the credential `token` is, as `POST /api/auth/logout` with it does. A refusal throws a `CoffreError`. */
+  signOut(token: string): Promise<void>;
+  /** The request's JSON body, read only to `max` bytes. Throws when it is larger, or not JSON. */
+  json(max: number): Promise<unknown>;
 };
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
@@ -68,8 +81,21 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
   if (routes === undefined) return null;
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
+  // One of coffre's own routes outside the API, in process: its answer, or its refusal as the client throws one.
+  const ask = async (path: string, init: RequestInit, route: typeof logout): Promise<unknown> => {
+    const response = await route(new Request(`${runtime.publicUrl}${path}`, { method: 'POST', ...init }), runtime, sourceIp);
+    const body = (await response.json()) as { error?: string; message?: string; reason?: string };
+    if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
+    return body;
+  };
   return routes.fetch(request, {
     publicUrl: runtime.publicUrl,
+    exchange: async (input) =>
+      (await ask('/api/auth/oidc', { headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }, exchangeWorkloadToken)) as { token: string; expiresAt: string },
+    signOut: async (token) => {
+      await ask('/api/auth/logout', { headers: carrying(token) }, logout);
+    },
+    json: (max) => readLimitedJson(request, max),
     api: (token) => {
       let checked: Promise<AuthenticatedIdentity | Response> | undefined;
       return createClient({

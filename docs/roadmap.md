@@ -151,10 +151,6 @@ ends. Passkeys would make a good recent sign-in for revealing.
   archived project or environment by hand: values erased on a schedule.
 - Import from other secret managers such as Infisical, after settling how
   nested folders map to coffre's flat `project/environment/key` model.
-- External Secrets Operator signing in by its Kubernetes auth, through
-  trust bindings, so that a cluster stores no coffre token. Its read side,
-  the Vault KV adapter, is in ([vault.md](vault.md)); so is ESO's `webhook`
-  provider against the API.
 - An external review of the cryptography and the sign-in boundary.
 
 ## Decided

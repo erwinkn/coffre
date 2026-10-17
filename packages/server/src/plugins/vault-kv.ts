@@ -16,12 +16,18 @@
  *   GET /v1/auth/token/lookup-self          who the token is
  *   GET /v1/sys/internal/ui/mounts/secret   that `secret` is KV v2, for `vault kv get`
  *
+ * or, for a workload that holds no coffre token, its platform's ID token,
+ * through the service account's trust bindings:
+ *
+ *   PUT /v1/auth/kubernetes/login { role, jwt }   a token for service account `role`, five minutes
+ *   PUT /v1/auth/token/revoke-self                that token, ended
+ *
  * Read only, and current values only: anything else is refused, never with
- * 404, which only says that the place a read names is not there. The token comes from `X-Vault-Token`
- * alone, never a cookie, and no CORS answer lets another site's page send
- * one, so these GETs can reveal what coffre's own API reveals only to a POST.
- * Each read is the API's reveal, as the token's holder: the same checks, the
- * same vault, the same `secret.read` entry.
+ * 404, which only says that the place a read names is not there. The token
+ * comes from `X-Vault-Token` alone, never a cookie, and no CORS answer lets
+ * another site's page send one, so these GETs can reveal what coffre's own
+ * API reveals only to a POST. Each read is the API's reveal, as the token's
+ * holder: the same checks, the same vault, the same `secret.read` entry.
  */
 import { CoffreError, type Me } from '@coffre/client';
 
@@ -53,7 +59,13 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
   } catch {
     return failure(400, 'the path is not valid percent-encoding');
   }
-  if (request.method !== 'GET' && request.method !== 'HEAD') return failure(405, "coffre's Vault API is read only");
+  // The writes it takes: signing in, at any auth mount's `login` (`kubernetes`, `jwt` or the deployment's own name), and out.
+  const writes = request.method === 'PUT' || request.method === 'POST';
+  const signing = (/^auth\/[^/]+\/login$/.test(path) && path !== 'auth/token/login') || path === 'auth/token/revoke-self';
+  if (signing && !writes) return failure(405, 'sign in and out with PUT or POST');
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !signing) return failure(405, "coffre's Vault API is read only");
+  const login = signing && path !== 'auth/token/revoke-self';
+  const revoke = signing && !login;
   // HashiCorp's client sends LIST as `GET …?list=true`, on any path: ESO's `dataFrom.find` asks it of `<mount>/metadata/`.
   if (url.searchParams.has('list')) return failure(405, 'coffre does not list environments through its Vault API');
   // Vault Enterprise's namespaces: an empty header is what some clients always send.
@@ -68,10 +80,15 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
     return asked === mount || asked.startsWith(`${mount}/`) ? success(mountInfo(mount)) : failure(403, 'permission denied');
   }
 
+  if (login) return logIn(coffre);
   const token = request.headers.get('x-vault-token') ?? '';
   if (token === '') return failure(403, 'permission denied: send a coffre token as X-Vault-Token');
   const api = coffre.api(token);
   try {
+    if (revoke) {
+      await coffre.signOut(token);
+      return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } });
+    }
     if (path === 'auth/token/lookup-self') return success(lookupSelf(await api.me()));
     const data = `${mount}/data/`;
     if (path.startsWith(data)) {
@@ -85,10 +102,57 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
       return success({ data: values, metadata: metadata(version) });
     }
     // Only a read of a place that is not there is 404, which ESO reads as the secret gone: anything else coffre does not serve is 400.
-    return failure(400, `coffre's Vault API serves ${data}<project>/<environment>[/<KEY>] and auth/token/lookup-self`);
+    return failure(400, `coffre's Vault API serves ${data}<project>/<environment>[/<KEY>], auth/token/lookup-self, auth/<mount>/login and auth/token/revoke-self`);
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
     return refused(error);
+  }
+}
+
+/** What a login's body holds, as Vault's Kubernetes and JWT auth both take it: no larger than a token's exchange takes. */
+const LOGIN_BYTES = 16 * 1024;
+
+/**
+ * `auth/<mount>/login`, as ESO's Kubernetes and JWT auth send it: the role
+ * names a coffre service account, and the JWT is a workload's ID token,
+ * which the exchange takes through that account's trust bindings: a
+ * Kubernetes service account's projected token, a GitHub run's. The
+ * exchange checks it, spends it and issues a credential of five minutes,
+ * never this plugin: it holds no key of any issuer's, and sees no token
+ * but the one it passes on. The answer is Vault's `auth` block, not
+ * renewable: ESO signs in again for its next read.
+ */
+async function logIn(coffre: PluginContext): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await coffre.json(LOGIN_BYTES);
+  } catch {
+    return failure(400, `a login's body is JSON of at most ${LOGIN_BYTES} bytes: { "role", "jwt" }`);
+  }
+  const { role, jwt } = (body ?? {}) as { role?: unknown; jwt?: unknown };
+  if (typeof role !== 'string' || role === '' || typeof jwt !== 'string' || jwt === '') {
+    return failure(400, 'a login names its role, the coffre service account, and its jwt, the workload\'s ID token');
+  }
+  try {
+    const issued = await coffre.exchange({ service: `token:${role}`, token: jwt });
+    const left = Math.max(0, Math.floor((Date.parse(issued.expiresAt) - Date.now()) / 1000));
+    return success(null, {
+      client_token: issued.token,
+      accessor: '',
+      policies: ['default'],
+      token_policies: ['default'],
+      metadata: { role },
+      lease_duration: left,
+      renewable: false,
+      entity_id: '',
+      token_type: 'service',
+      orphan: true,
+      num_uses: 0,
+    });
+  } catch (error) {
+    if (!(error instanceof CoffreError)) throw error;
+    // An instance that trusts no workloads says 404: no place a read names, so not Vault's 404 either.
+    return error.status === 404 ? failure(400, error.message) : refused(error);
   }
 }
 
@@ -157,10 +221,10 @@ function lookupSelf(me: Me, now = Date.now()) {
   };
 }
 
-/** Vault's envelope around `data`: no lease, nothing to renew. */
-function success(data: unknown): Response {
+/** Vault's envelope around `data`, and a login's `auth`: no lease, nothing to renew. */
+function success(data: unknown, auth: Record<string, unknown> | null = null): Response {
   return Response.json(
-    { request_id: crypto.randomUUID(), lease_id: '', renewable: false, lease_duration: 0, data, wrap_info: null, warnings: null, auth: null, mount_type: 'kv' },
+    { request_id: crypto.randomUUID(), lease_id: '', renewable: false, lease_duration: 0, data, wrap_info: null, warnings: null, auth, mount_type: 'kv' },
     { headers: { 'cache-control': 'no-store' } },
   );
 }
