@@ -61,9 +61,13 @@ example, ESO in a cluster reading `market/prod`:
 ```sh
 coffre admit eso --service --grant market/prod=viewer
 coffre tokens issue eso --label external-secrets --expires-in 90 --output-file eso-token
-kubectl create secret generic coffre-token -n apps --from-file=token=eso-token
+tr -d '\n' < eso-token | kubectl create secret generic coffre-token -n apps --from-file=token=/dev/stdin
 rm eso-token
 ```
+
+The file ends with a newline. ESO hands the token to Vault's client as it
+is, and the client refuses a token with a newline in it, so `tr` drops the
+newline first.
 
 The token reaches what the account held when it was issued, never more.
 `vault token lookup` (Vault's `auth/token/lookup-self`) shows how long it
@@ -104,13 +108,26 @@ spec:
       remoteRef: { key: market/prod, property: STRIPE_KEY }
 ```
 
-Each refresh is one read of the environment, which shows in the audit log
-once, naming the keys it opened.
+The two entries are alternatives, shown together. `dataFrom` takes every
+value, and `data` takes the ones it names. Each entry is a read of its own,
+so this manifest reads `market/prod` twice per refresh. Each read shows in
+the audit log once, naming the keys it opened.
 
 A secret that is not there answers 404. That happens for an environment or
 a key that does not exist, or one that was archived or deleted. ESO reads a
 404 as the secret gone, and with `deletionPolicy: Delete` it deletes its
-target. Nothing else answers 404. A wrong path, a query, or anything coffre
+target. A `property` the environment lacks is different: the read of
+`market/prod` succeeds, and ESO reports that the property is missing and
+keeps the target. To have a key's archiving remove it from the target,
+read the key by its own path, so that its absence is the 404:
+
+```yaml
+  data:
+    - secretKey: stripe
+      remoteRef: { key: market/prod/STRIPE_KEY, property: STRIPE_KEY }
+```
+
+Nothing else answers 404. A wrong path, a query, or anything coffre
 does not serve answers 400 or 405, and an outage answers 503, so ESO
 reports an error and keeps what it has.
 
@@ -155,8 +172,20 @@ data "vault_kv_secret_v2" "market" {
 ```
 
 **GitHub's vault-action** (`hashicorp/vault-action`) with `method: token`.
-It takes paths as Vault does, `data/` included, one per line of its
-`secrets` input: `secret/data/market/prod STRIPE_KEY`. In a GitHub workflow, coffre's own Action and its OIDC sign-in
+It takes paths as Vault does, `data/` included. Its `secrets` input
+separates entries with `;`:
+
+```yaml
+- uses: hashicorp/vault-action@v3
+  with:
+    url: https://secrets.acme.example
+    method: token
+    token: ${{ secrets.COFFRE_TOKEN }}
+    secrets: |
+      secret/data/market/prod STRIPE_KEY ;
+      secret/data/market/prod DATABASE_URL
+```
+ In a GitHub workflow, coffre's own Action and its OIDC sign-in
 need no stored token ([ci.md](ci.md)), which is the better choice there.
 
 **consul-template and envconsul.** Set `renew_token = false`: coffre's
