@@ -28,6 +28,11 @@
 (* when its slug,                                                          *)
 (* or its project's, is a tombstone's: "tomb" here,                        *)
 (* `market~deleted-2026-10-05` in coffre.                                  *)
+(*                                                                         *)
+(* The environment's secret has a key name, "k1" until a rename, and a     *)
+(* fork of the environment inherits it, which a regenerate there replaces  *)
+(* with an override of its own: the fork is no place of the model, only    *)
+(* whether it holds its own row under "k1".                                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -100,7 +105,12 @@ CONSTANTS
     ReferenceRereadInDeletion,
     \* Demoting or removing an Owner counts the other Owners under the head,
     \* not only under the rows it locks (vault vault.ts, #keepAnOwner).
-    LastOwnerCheckUnderHead
+    LastOwnerCheckUnderHead,
+    \* A regenerate in a fork resolves each key it replaces again under the
+    \* head, the parent's rows included, and refuses if the name no longer
+    \* resolves to the version it was listed with (server api/secrets.ts,
+    \* setSecrets, `regenerated`), not only before the vault wraps.
+    InheritedRecheckUnderHead
 
 None == "none"
 \* No reference. A reference is named by the operation that made it, as
@@ -122,6 +132,8 @@ VARIABLES
     grants,         \* a set of [who, at]
     owners,         \* the members whose instance role is Owner, everywhere
     refRow,         \* the holder's newest reference row (secret_references), or NoRef
+    keyName,        \* the secret's key name: "k1", or "k2" once renamed
+    forkOwn,        \* the fork holds a row of its own under "k1": an override
     \* both
     log,            \* the audit log, in seq order: the entries the invariants read
     creds,          \* credentials sign-in issued
@@ -135,12 +147,13 @@ VARIABLES
     deletions,      \* a record per deletion that committed
     everDeleted,    \* everDeleted[x]: a deletion of x committed
     excused,        \* the reference whose holder was archived when its source last was
-    declared        \* those the vault has made Owners as the deployment names them
+    declared,       \* those the vault has made Owners as the deployment names them
+    regens          \* a record per regenerate that committed in the fork
 
-rows == <<slug, archived, held, version, status, gen, grants, owners, refRow>>
+rows == <<slug, archived, held, version, status, gen, grants, owners, refRow, keyName, forkOwn>>
 locks == <<memberLock, head>>
 procs == <<pc, op, l, left>>
-history == <<revealed, deletions, everDeleted, excused, declared>>
+history == <<revealed, deletions, everDeleted, excused, declared, regens>>
 vars == <<rows, log, creds, locks, procs, history>>
 
 -----------------------------------------------------------------------------
@@ -315,6 +328,8 @@ FirstLabel(kind) ==
       [] kind = "rotate"    -> "rotate.read"
       [] kind = "refer"     -> "refer.resolve"
       [] kind = "break"     -> "break.resolve"
+      [] kind = "regenerate" -> "regen.resolve"
+      [] kind = "override"  -> "override.head"
 
 Begin(p) ==
     /\ pc[p] = "idle"
@@ -398,7 +413,7 @@ ReadAnswer(p) ==
     /\ pc[p] = "read.answer"
     /\ revealed' = revealed \cup {l[p].id}
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<rows, log, creds, locks, op, l, left, deletions, everDeleted, excused, declared>>
+    /\ UNCHANGED <<rows, log, creds, locks, op, l, left, deletions, everDeleted, excused, declared, regens>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -445,7 +460,7 @@ WriteStore(p) ==
               /\ log' = Append(log, Entry("secret.write", "env", p))
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, slug, archived, status, gen, grants, owners, creds, op, l, left, history>>
+              /\ UNCHANGED <<refRow, slug, archived, status, gen, grants, owners, creds, op, l, left, history, keyName, forkOwn>>
          ELSE Refuse(p)
 
 -----------------------------------------------------------------------------
@@ -509,7 +524,7 @@ CallCommit(p) ==
                  ELSE grants \ {[who |-> c.who, at |-> x] : x \in c.at}
     /\ log' = log \o [i \in 1..Len(changed) |-> entry(changed[i])]
     /\ Return(p, TRUE)
-    /\ UNCHANGED <<refRow, slug, archived, held, version, status, gen, owners, creds, op, left, history>>
+    /\ UNCHANGED <<refRow, slug, archived, held, version, status, gen, owners, creds, op, left, history, keyName, forkOwn>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -574,7 +589,7 @@ DeleteCommit(p) ==
               /\ everDeleted' = [everDeleted EXCEPT ![x] = TRUE]
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, owners, creds, op, l, left, revealed, excused, declared>>
+              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, owners, creds, op, l, left, revealed, excused, declared, keyName, forkOwn, regens>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -613,7 +628,7 @@ PatchCommit(p) ==
                                ELSE excused
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, held, version, status, gen, grants, owners, log, creds, op, l, left, revealed, deletions, everDeleted, declared>>
+              /\ UNCHANGED <<refRow, held, version, status, gen, grants, owners, log, creds, op, l, left, revealed, deletions, everDeleted, declared, keyName, forkOwn, regens>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -655,9 +670,10 @@ RenameKeyCommit(p) ==
     /\ IF SecretPatchRecheckUnderHead /\ ~(Resolves("env", l[p].named) /\ AppLive)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, Entry("secret.rename", "env", p))
+              /\ keyName' = IF keyName = "k1" THEN "k2" ELSE "k1"
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<rows, creds, op, l, left, history>>
+              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, owners, refRow, forkOwn, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -721,7 +737,7 @@ ReferCommit(p) ==
          ELSE /\ refRow' = l[p].id
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, owners, log, creds, op, l, left, history>>
+              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, owners, keyName, forkOwn, log, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -831,7 +847,7 @@ RemoveCommit(p) ==
               /\ log' = Append(log, Entry("member.remove", "*", p))
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, slug, archived, held, version, creds, op, l, left, history>>
+              /\ UNCHANGED <<refRow, slug, archived, held, version, creds, op, l, left, history, keyName, forkOwn>>
          ELSE Refuse(p)
 
 -----------------------------------------------------------------------------
@@ -861,7 +877,7 @@ DemoteCommit(p) ==
               /\ log' = Append(log, Entry("member.role", "*", p))
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, refRow, creds, op, l, left, history>>
+              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, refRow, creds, op, l, left, history, keyName, forkOwn>>
          ELSE Refuse(p)
 
 -----------------------------------------------------------------------------
@@ -884,7 +900,7 @@ DeclareCommit(p) ==
     /\ declared' = declared \cup {m}
     /\ Release(p)
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<slug, archived, held, version, gen, grants, refRow, creds, op, l, left, revealed, deletions, everDeleted, excused>>
+    /\ UNCHANGED <<slug, archived, held, version, gen, grants, refRow, creds, op, l, left, revealed, deletions, everDeleted, excused, keyName, forkOwn, regens>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -907,6 +923,52 @@ RotateCommit(p) ==
     /\ UNCHANGED <<rows, log, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
+(***************************************************************************)
+(* Regenerating, in a fork, the key it inherits (server api/secrets.ts,    *)
+(* setSecrets with `replaces`): the listing names the version "k1"         *)
+(* resolves to, the app checks it again before the vault wraps, then once  *)
+(* more under the head, where it writes the fork's override. A value typed *)
+(* in the fork is an override too, written under the head.                 *)
+(***************************************************************************)
+
+\* The version the fork's "k1" resolves to, as the listing gives it: the
+\* parent's, while the fork holds none of its own; 0 for none.
+Inherited == IF keyName = "k1" /\ ~forkOwn THEN version ELSE 0
+
+\* Listed, and checked before the vault wraps, outside any transaction.
+RegenResolve(p) ==
+    /\ pc[p] = "regen.resolve"
+    /\ IF Inherited # 0
+         THEN Read(p, "regen.tx", [l[p] EXCEPT !.nver = Inherited])
+         ELSE Refuse(p)
+
+RegenTx(p) == pc[p] = "regen.tx" /\ TakeHead(p, "regen.store")
+
+\* Under the head: the fork's own rows as prepared (PrepareAgain), and the
+\* parent's resolved again. Without that, a rename or a write in the parent
+\* since leaves an override under a name that no longer holds what it
+\* replaced.
+RegenStore(p) ==
+    /\ pc[p] = "regen.store"
+    /\ IF forkOwn \/ (InheritedRecheckUnderHead /\ Inherited # l[p].nver)
+         THEN Refuse(p)
+         ELSE /\ regens' = regens \cup {[listed |-> l[p].nver, key |-> keyName, version |-> version]}
+              /\ forkOwn' = TRUE
+              /\ Release(p)
+              /\ Goto(p, "idle")
+              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, owners, refRow, keyName,
+                             log, creds, op, l, left, revealed, deletions, everDeleted, excused, declared>>
+
+OverrideHead(p) == pc[p] = "override.head" /\ TakeHead(p, "override.commit")
+
+OverrideCommit(p) ==
+    /\ pc[p] = "override.commit"
+    /\ forkOwn' = TRUE
+    /\ Release(p)
+    /\ Goto(p, "idle")
+    /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, owners, refRow, keyName, log, creds, op, l, left, history>>
+
+-----------------------------------------------------------------------------
 
 Init ==
     /\ slug = [x \in Places |-> "s1"]
@@ -918,6 +980,8 @@ Init ==
     /\ grants = InitGrants
     /\ owners = InitOwners
     /\ refRow = InitRef
+    /\ keyName = "k1"
+    /\ forkOwn = FALSE
     /\ log = <<>>
     /\ creds = {}
     /\ memberLock = [m \in Members |-> None]
@@ -931,6 +995,7 @@ Init ==
     /\ everDeleted = [x \in Places |-> FALSE]
     /\ excused = {}
     /\ declared = {}
+    /\ regens = {}
 
 Step(p) ==
     \/ Begin(p)
@@ -952,6 +1017,7 @@ Step(p) ==
     \/ ReferResolve(p) \/ ReferLock(p) \/ ReferCheck(p) \/ ReferHead(p) \/ ReferSeal(p)
     \/ ReferTx(p) \/ ReferCommit(p)
     \/ BreakResolve(p) \/ EndLock(p) \/ EndCheck(p) \/ EndHead(p) \/ EndCommit(p)
+    \/ RegenResolve(p) \/ RegenTx(p) \/ RegenStore(p) \/ OverrideHead(p) \/ OverrideCommit(p)
 
 \* Every process has run its operations: the run is over. Without this
 \* step a finished run would look like a deadlock to TLC.
@@ -981,7 +1047,8 @@ TypeOK ==
 LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
 HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
                "delete.head", "patch.head", "addenv.head", "renamekey.head",
-               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head"}
+               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
+               "regen.tx", "override.head"}
 WaitsFor(p) ==
     IF pc[p] \in LockLabels /\ l[p].toLock # <<>> /\ memberLock[Head(l[p].toLock)] \notin {None, p}
       THEN {memberLock[Head(l[p].toLock)]}
@@ -1081,5 +1148,11 @@ OwnerStays ==
 \* Someone the deployment names, once made an Owner, stays one: nobody
 \* demotes or removes them, themselves included.
 DeclaredStay == declared \subseteq ActiveOwners
+
+\* A regenerate in a fork commits only over what it was listed with: the
+\* parent's key still under the name it regenerates, at the version it
+\* replaces. Otherwise the fork would hold an override named after a key
+\* the parent no longer has, beside the renamed one it still inherits.
+RegeneratesReplaceWhatTheyListed == \A r \in regens : r.key = "k1" /\ r.version = r.listed
 
 =============================================================================

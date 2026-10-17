@@ -50,6 +50,7 @@ counterexamples is printed in CI's log.
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
 | A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
 | Demoting or removing an Owner of the whole instance counts the others under the head (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or stepping down at once, under rows the other does not lock: none left (`OwnerStays`) | |
+| A regenerate in a fork resolves each key it replaces again under the head, the parent's rows included (`secrets.ts`, `setSecrets`, `regenerated`) | an override written under a key name the parent renamed meanwhile, beside the renamed key the fork still inherits (`RegeneratesReplaceWhatTheyListed`) | #244's review |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
 re-read turned off:
@@ -125,6 +126,7 @@ Traces are shortened here; the script prints every step.
 | `EveryReferenceBreakable` | A reference that has not ended is held in a standing place, where the API can name its holder, and so break it |
 | `OwnerStays` | Once the instance has an active Owner of all of it, it always has one |
 | `DeclaredStay` | Someone the deployment names, once the vault made them an Owner, stays one: nobody demotes or removes them, themselves included |
+| `RegeneratesReplaceWhatTheyListed` | A regenerate in a fork commits only over what it was listed with: the parent's key still under the name it regenerates, at the version it replaces |
 | `ReferencedSourcesStayLive` | And if it is held in a live place, its source is neither archived nor deleted. The exception is a holder that was archived when its source was archived, and has been restored since: its reads refuse, as any broken reference's |
 
 ## The model
@@ -149,7 +151,9 @@ Traces are shortened here; the script prints every step.
   - remove a member, or take away their Owner role;
   - make someone the deployment names an Owner;
   - rotate the vault's key;
-  - make a reference, or break one.
+  - make a reference, or break one;
+  - in a fork of the environment, regenerate the key it inherits, or type
+    a value over it.
 - **Each operation** follows its code path. For example, a read takes these
   steps:
   - the app resolves the path outside any transaction;
@@ -183,10 +187,11 @@ Traces are shortened here; the script prints every step.
 | `References` | A member reads through a reference while an owner breaks it, makes it again, or revokes or removes the reader, and either place is archived, then deleted | 113 thousand |
 | `Referencing` | An owner makes a reference while another archives, restores and archives again either place, and a third deletes one | 13 thousand |
 | `Owners` | Two Owners of the whole instance each leave, step down, or take the other's role, while an Admin, who is no Owner, tries to demote or remove either | 3 thousand |
+| `Regenerating` | A fork regenerates the key it inherits while, in the parent, an owner renames or writes it, and a value is typed in the fork | 1 thousand |
 | `Declare` | Two people the deployment names are made Owners at once on an instance nobody owns, while one tries to leave or step down, the other, an Owner once made one, to demote them, and an Admin, no Owner, to demote or remove one | 13 thousand |
 
 Every scenario starts from one project and its one environment, holding one
-secret. A third environment, in another project, holds a key that is a
+secret, under the key name `k1`, which a fork of the environment inherits. A third environment, in another project, holds a key that is a
 reference to that secret in `References`, and none yet elsewhere.
 
 ## What it abstracts
