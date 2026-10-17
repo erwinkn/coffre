@@ -1,6 +1,6 @@
 import type { AuthInfo, CoffreClient, Member } from '@coffre/client';
 import { EVERYWHERE, INSTANCE_ROLES } from '@coffre/core/access';
-import { QueryClient, queryOptions, type QueryKey } from '@tanstack/react-query';
+import { QueryClient, queryOptions, type FetchQueryOptions, type QueryKey } from '@tanstack/react-query';
 
 import { deriveUiCapabilities } from './capabilities.ts';
 import { memberRef, statusOf, uiResult } from './coffre.ts';
@@ -394,14 +394,36 @@ export function shellOf(
 export type Shell = ReturnType<typeof shellOf>;
 
 /**
+ * How a loader reads. `fresh`, a page's own reads: the cached answer within
+ * `FRESH_MS`, else the network's, waited for. `cached`, a tab's: its page's
+ * layout has read the same, so it takes the cached answer at once, however
+ * old, and refetches behind it, and switching tabs never waits on the
+ * network. A read the cache lacks is waited for either way.
+ */
+export type Freshness = 'fresh' | 'cached';
+
+function read<T, TKey extends QueryKey>(queryClient: QueryClient, options: FetchQueryOptions<T, Error, T, TKey>, freshness: Freshness): Promise<T> {
+  return freshness === 'fresh' ? queryClient.fetchQuery(options) : queryClient.ensureQueryData({ ...options, revalidateIfStale: true });
+}
+
+/**
+ * Whether a tab may open: from the cache, and where the cache says no, from
+ * the network, which a no needs before the tab sends anyone away. A stale
+ * no could be an account since added back, or a role since given.
+ */
+export async function tabOpens(opens: (freshness: Freshness) => Promise<boolean>): Promise<boolean> {
+  return (await opens('cached')) || opens('fresh');
+}
+
+/**
  * The shell, as every loader reads it: from the cache while fresh, so a
  * child route never asks again for what the root has.
  */
-export async function loadShell(queryClient: QueryClient, client: CoffreClient): Promise<Shell> {
+export async function loadShell(queryClient: QueryClient, client: CoffreClient, freshness: Freshness = 'fresh'): Promise<Shell> {
   const [auth, me, projects] = await Promise.all([
-    queryClient.fetchQuery(queries.auth(client)),
-    queryClient.fetchQuery(queries.me(client)),
-    queryClient.fetchQuery(queries.projects(client)),
+    read(queryClient, queries.auth(client), freshness),
+    read(queryClient, queries.me(client), freshness),
+    read(queryClient, queries.projects(client), freshness),
   ]);
   return shellOf(auth, me, projects);
 }
@@ -480,9 +502,9 @@ export async function loadServiceDirectory(queryClient: QueryClient, client: Cof
 }
 
 /** Who a user or service account is to the instance, its pages' header: null to anyone who does not run it. */
-export async function loadMember(queryClient: QueryClient, client: CoffreClient, member: string) {
-  const shell = await loadShell(queryClient, client);
-  return queryClient.fetchQuery(queries.report(client, member, shell.capabilities.runsInstance));
+export async function loadMember(queryClient: QueryClient, client: CoffreClient, member: string, freshness: Freshness = 'fresh') {
+  const shell = await loadShell(queryClient, client, freshness);
+  return read(queryClient, queries.report(client, member, shell.capabilities.runsInstance), freshness);
 }
 
 export type MemberReport = Awaited<ReturnType<typeof loadMember>>;
@@ -492,9 +514,42 @@ export type MemberReport = Awaited<ReturnType<typeof loadMember>>;
  * and the grants you manage, in one request, which the server answers in
  * one query, however many projects they hold grants in.
  */
-export async function loadAccess(queryClient: QueryClient, client: CoffreClient, member: string) {
-  const shell = await loadShell(queryClient, client);
-  return queryClient.fetchQuery(queries.memberAccess(client, member, listsAccess(shell)));
+export async function loadAccess(queryClient: QueryClient, client: CoffreClient, member: string, freshness: Freshness = 'fresh') {
+  const shell = await loadShell(queryClient, client, freshness);
+  return read(queryClient, queries.memberAccess(client, member, listsAccess(shell)), freshness);
+}
+
+/**
+ * A user's or service account's page: what every tab but Activity shows,
+ * read once by its layout, so its tabs open at once. Who they are, what they
+ * hold and, for a service account, how it signs in.
+ */
+export async function loadPrincipal(queryClient: QueryClient, client: CoffreClient, principalType: 'user' | 'service', principalId: string) {
+  const member = memberRef(principalType, principalId);
+  await Promise.all([
+    loadMember(queryClient, client, member),
+    principalType === 'service' ? loadSignIn(queryClient, client, member) : loadAccess(queryClient, client, member),
+  ]);
+}
+
+/**
+ * A service account's Sign-in tab: its bearer tokens and trust bindings, as
+ * far as its page shows them (`signInWays`), which it returns: null where it
+ * shows neither.
+ */
+export async function loadSignIn(queryClient: QueryClient, client: CoffreClient, member: string, freshness: Freshness = 'fresh') {
+  const [shell, access] = await Promise.all([
+    loadShell(queryClient, client, freshness),
+    loadAccess(queryClient, client, member, freshness),
+  ]);
+  const ways = signInWays(shell, access);
+  if (ways !== null) {
+    await Promise.all([
+      read(queryClient, queries.credentials(client, member, ways.tokens), freshness),
+      read(queryClient, queries.bindings(client, member, ways.workloads), freshness),
+    ]);
+  }
+  return ways;
 }
 
 /**
@@ -556,8 +611,18 @@ export const affects = {
     keys.projects,
     keys.me,
   ],
-  /** Someone let in: the directory. */
-  admission: (): QueryKey[] => [keys.directory],
+  /**
+   * Someone let in: the directory, and whatever was read of them before
+   * they were there, which said there was no such member: a new service
+   * account's row asks how it signs in as soon as it shows.
+   */
+  admission: (member: string): QueryKey[] => [
+    keys.directory,
+    keys.report(member),
+    keys.memberAccess(member),
+    keys.credentials(member),
+    keys.bindings(member),
+  ],
   /**
    * An instance role changed: the directory, their report, and, as it may be
    * your own, what you can see and do.

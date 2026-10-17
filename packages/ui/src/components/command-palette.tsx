@@ -164,9 +164,9 @@ export function CommandPalette({
             {
               value: 'audit denials denied refused',
               icon: <SlashCircle size={15} />,
-              label: 'Audit, denials only',
+              label: 'Audit, denials',
               path: '/audit',
-              run: closing(() => navigate({ to: '/audit', search: { decision: 'deny' } })),
+              run: closing(() => navigate({ to: '/audit', search: { decision: 'deny', detail: '1' } })),
             },
           ],
         }),

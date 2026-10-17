@@ -31,18 +31,9 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
 
   return (
     <>
-      <Card
-        labelledBy="trusted-workloads"
-        title="Sign in with OIDC"
-        description={
-          <>
-            A CI run signs in with the ID token GitHub Actions or GitLab gives it, so there is no secret to store. For example,{' '}
-            <span className="mono">deploy.yml</span> in <span className="mono">acme/api</span>, on pushes to <span className="mono">main</span>.
-          </>
-        }
-      >
+      <Card labelledBy="trusted-workloads" title="Sign in with OIDC">
         {bindings.length === 0 ? (
-          <EmptyState title="No trust bindings">Trust a workflow to let its runs sign in.</EmptyState>
+          <EmptyState title="No trust bindings" />
         ) : (
           <div className="dt-wrap">
             <table className="dt">
