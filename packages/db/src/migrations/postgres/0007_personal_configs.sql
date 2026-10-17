@@ -1,0 +1,4 @@
+-- The app sets owner when it makes a personal config, and never after: it gets no UPDATE grant, so an owner cannot change. The vault binds each value to it, so a forged owner opens nothing.
+ALTER TABLE "environments" ADD COLUMN "owner" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "environments_parent_id_owner_key" ON "environments" USING btree ("parent_id","owner") WHERE strpos("environments"."slug", '~') = 0;--> statement-breakpoint
+ALTER TABLE "environments" ADD CONSTRAINT "environments_owner_check" CHECK ("environments"."owner" IS NULL OR ("environments"."parent_id" IS NOT NULL AND "environments"."owner" LIKE 'user:_%'));

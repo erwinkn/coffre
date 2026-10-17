@@ -60,6 +60,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /personal/:project': {
     ui: [{ does: "a project › Environments › Personal configs: whose, of what, and their key names", in: 'pages/project-environments.tsx', call: 'environments.personal' }],
   },
+  'GET /projects/:project/:environment/version': {
+    not: 'for programs that poll an environment before reading it, `coffre export --watch` first; a page has its listing, which it reloads',
+  },
   'PATCH /projects/:project/:environment/dismissals': {
     ui: [
       { does: 'an environment › Missing keys › Dismiss, Dismiss all, and Undo after either', in: 'components/missing.tsx', call: 'environments.dismiss' },
@@ -136,6 +139,12 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [
       { does: 'Trust a workload: the binding reviewed first', in: 'components/trusted-workloads.tsx', call: 'bindings.preview' },
       { does: 'Trust a workload › Trust', in: 'components/trusted-workloads.tsx', call: 'bindings.create' },
+    ],
+  },
+  'POST /members/:member/bindings/keys': {
+    ui: [
+      { does: 'a trust binding with uploaded keys › Claims › Replace keys: the bindings replaced reviewed first', in: 'components/trusted-workloads.tsx', call: 'bindings.previewKeys' },
+      { does: 'Replace keys › Save keys', in: 'components/trusted-workloads.tsx', call: 'bindings.replaceKeys' },
     ],
   },
   'DELETE /members/:member/bindings/:id': { ui: [{ does: 'a trust binding › Remove', in: 'components/trusted-workloads.tsx', call: 'bindings.remove' }] },

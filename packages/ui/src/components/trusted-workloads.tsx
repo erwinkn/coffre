@@ -1,9 +1,25 @@
-import type { BindingPlan, BindingView, CoffreClient } from '@coffre/client';
+import type { BindingPlan, BindingView, CoffreClient, KeysPlan } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useState } from 'react';
-import { askedScope, bindingOf, EMPTY_FORM, githubTarget, listedIds, listingGap, planned, summary, type Form, type GitHubLookup, type RefKind, type ScopeChoice } from '../lib/bindings';
+import {
+  askedScope,
+  bindingOf,
+  EMPTY_FORM,
+  githubTarget,
+  keySetOf,
+  keysOf,
+  listedIds,
+  listingGap,
+  planned,
+  summary,
+  type Form,
+  type GitHubLookup,
+  type KeySet,
+  type RefKind,
+  type ScopeChoice,
+} from '../lib/bindings';
 import { removeBinding } from '../lib/changes';
 import { memberRef, statusOf, useCoffre } from '../lib/coffre';
 import { affects, queries } from '../lib/queries';
@@ -16,7 +32,7 @@ import { RowFailure, RowPending, rowClass } from './row-state';
 import { Card } from './page';
 import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
-import { CheckCircle, GitHub, Link, Plus, X } from './icons';
+import { CheckCircle, GitHub, Key, Link, Plus, X } from './icons';
 
 /**
  * The CI runs that may sign in as a service, by the ID token their platform
@@ -64,6 +80,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
                               <details className="claims">
                                 <summary>Claims</summary>
                                 <Claims binding={binding} />
+                                {binding.keys !== null && <ReplaceKeys serviceId={serviceId} issuer={binding.issuer} bindings={bindings} />}
                               </details>
                             </span>
                           </span>
@@ -127,7 +144,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
   );
 }
 
-function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' | 'claims'> }) {
+function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' | 'keys' | 'claims'> }) {
   return (
     <table className="claims-table">
       <tbody>
@@ -143,10 +160,133 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
         ))}
         <tr>
           <th>keys</th>
-          <td className="mono">{binding.jwksUri}</td>
+          <td className="mono">{keysOf(binding)}</td>
         </tr>
       </tbody>
     </table>
+  );
+}
+
+/**
+ * New keys, pasted, for the service's bindings on an issuer whose keys they
+ * carry: when the issuer rotates its keys. Each binding is replaced by one
+ * the same but for them, as the review says before anything is saved.
+ */
+function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issuer: string; bindings: BindingView[] }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  // The plan, with the keys it was made for: Save sends those, whatever the field says by then.
+  const [preview, setPreview] = useState<{ plan: KeysPlan; jwks: KeySet } | null>(null);
+  const plan = preview?.plan ?? null;
+  const coffre = useCoffre();
+  const member = memberRef('service', serviceId);
+  const { pending, error, setError, run } = useAction();
+  const on = bindings.filter((binding) => binding.issuer === issuer).length;
+
+  function close() {
+    setOpen(false);
+    setText('');
+    setPreview(null);
+    setError(null);
+  }
+
+  function review() {
+    let jwks: KeySet;
+    try {
+      const pasted = keySetOf(text);
+      if (pasted === undefined) throw new Error("Paste the issuer's key set");
+      jwks = pasted;
+    } catch (problem) {
+      setError((problem as Error).message);
+      return;
+    }
+    void run(() => coffre.bindings.previewKeys(member, { issuer, jwks }), { affects: [], onSuccess: (next) => setPreview({ plan: next, jwks }) });
+  }
+
+  return (
+    <>
+      <button className="act" type="button" onClick={() => setOpen(true)}>
+        <Key size={13} />
+        Replace keys
+      </button>
+      <Modal open={open} onOpenChange={(next) => (next ? setOpen(true) : close())} title={preview === null ? 'Replace keys' : 'Review the keys'}>
+        {preview === null || plan === null ? (
+          <form
+            className="form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              review();
+            }}
+          >
+            <p>
+              The {on === 1 ? 'binding' : `${on} bindings`} of <span className="mono">service:{serviceId}</span> on{' '}
+              <span className="mono">{issuer}</span> will verify tokens with these keys alone. While the issuer rotates, paste a set that
+              holds the old key and the new, and tokens signed with either sign in.
+            </p>
+            <label className="field">
+              <span className="label">Keys</span>
+              <textarea
+                className="input mono"
+                rows={6}
+                value={text}
+                spellCheck={false}
+                placeholder='{ "keys": [ … ] }'
+                onChange={(event) => {
+                  setText(event.target.value);
+                  setError(null);
+                }}
+              />
+              <span className="hint">
+                From a Kubernetes cluster: <span className="mono">kubectl get --raw /openid/v1/jwks</span>
+              </span>
+            </label>
+            <ErrorLine error={error} />
+            <div className="dialog-actions">
+              <button className="btn" type="button" onClick={close}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" type="submit" disabled={pending}>
+                {pending && <Spinner />}
+                Review
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="form">
+            <p>
+              {plan.replaces.length === 1 ? 'Its binding' : `Its ${plan.replaces.length} bindings`} on <span className="mono">{issuer}</span>{' '}
+              {plan.replaces.length === 1 ? 'is' : 'are'} replaced by {plan.replaces.length === 1 ? 'one' : 'ones'} the same but for these keys.
+              Credentials {plan.replaces.length === 1 ? 'it' : 'they'} issued, five minutes each at most, end at once.
+            </p>
+            <table className="claims-table">
+              <tbody>
+                {plan.keys.map((key) => (
+                  <tr key={key.thumbprint}>
+                    <th className="mono">{key.alg}</th>
+                    <td className="mono">{key.kid ?? key.thumbprint}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <ErrorLine error={error} />
+            <div className="dialog-actions">
+              <button className="btn" type="button" onClick={() => setPreview(null)}>
+                Back
+              </button>
+              <button
+                className="btn btn-primary"
+                type="button"
+                disabled={pending}
+                onClick={() => void run(() => coffre.bindings.replaceKeys(member, { issuer, jwks: preview.jwks }), { affects: affects.bindings(member), onSuccess: close })}
+              >
+                {pending && <Spinner />}
+                Save keys
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </>
   );
 }
 
@@ -250,6 +390,8 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   const whole = (): ScopeChoice => ({ scope: wholeScope(grants), chosen: false });
   const [choice, setChoice] = useState(whole);
   const [plan, setPlan] = useState<BindingPlan | null>(null);
+  // What the plan was made from: Save sends it, whatever the form says by then.
+  const [reviewed, setReviewed] = useState<ReturnType<typeof input> | null>(null);
   const coffre = useCoffre();
   const member = memberRef('service', serviceId);
   const { pending, error, setError, run } = useAction();
@@ -293,6 +435,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
       // One that replaces bindings reaches what they did unless told: the picker says so, should the person go back.
       onSuccess: (next) => {
         setPlan(next);
+        setReviewed(request);
         setChoice((current) => planned(current, next));
       },
     });
@@ -494,11 +637,37 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
 
             {form.platform === 'other' && (
               <>
-                {field('Issuer', 'issuer', { placeholder: 'https://accounts.google.com' })}
+                {field('Issuer', 'issuer', {
+                  placeholder: 'https://accounts.google.com',
+                  hint: form.jwks.trim() === '' ? undefined : 'Exactly as its tokens name it in iss: with its keys pasted below, coffre asks it nothing.',
+                })}
                 {field('Subject (sub)', 'sub', { mono: true, hint: "You vouch for what this issuer's subject means: a Google service account's unique ID, say." })}
                 <label className="field">
                   <span className="label">Other claims, one <span className="mono">name=value</span> a line</span>
-                  <textarea className="input mono" rows={3} value={form.extra} onChange={(event) => set({ extra: event.target.value })} />
+                  <textarea
+                    className="input mono"
+                    rows={3}
+                    value={form.extra}
+                    spellCheck={false}
+                    placeholder="kubernetes.io.serviceaccount.uid=…"
+                    onChange={(event) => set({ extra: event.target.value })}
+                  />
+                  <span className="hint">A nested claim goes by its path, its names joined by dots.</span>
+                </label>
+                <label className="field">
+                  <span className="label">Keys (optional)</span>
+                  <textarea
+                    className="input mono"
+                    rows={3}
+                    value={form.jwks}
+                    spellCheck={false}
+                    placeholder='{ "keys": [ … ] }'
+                    onChange={(event) => set({ jwks: event.target.value })}
+                  />
+                  <span className="hint">
+                    Left empty, coffre fetches the issuer's keys. Paste them for one it cannot reach, such as a private Kubernetes cluster:{' '}
+                    <span className="mono">kubectl get --raw /openid/v1/jwks</span>
+                  </span>
                 </label>
               </>
             )}
@@ -548,7 +717,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
                 type="button"
                 disabled={pending}
                 // What the review said it reaches, whatever the account holds by now.
-                onClick={() => void run(() => coffre.bindings.create(member, { ...input(), scope: plan.scope }), { affects: affects.bindings(member), onSuccess: close })}
+                onClick={() => void run(() => coffre.bindings.create(member, { ...reviewed!, scope: plan.scope }), { affects: affects.bindings(member), onSuccess: close })}
               >
                 {pending && <Spinner />}
                 Save binding

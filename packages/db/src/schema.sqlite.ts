@@ -493,8 +493,11 @@ export const serviceBindings = sqliteTable(
     generation: integer().notNull(),
     profile: text().notNull(),
     issuer: text().notNull(),
-    // From the issuer's discovery when the binding was made, never refetched.
+    // From the issuer's discovery when the binding was made, never refetched;
+    // or, for keys uploaded with the binding, `sha256:<hex>` of `jwks`.
     jwksUri: text('jwks_uri').notNull(),
+    // The issuer's public keys, uploaded with the binding (`uploadedKeys`), JSON; null when they are fetched.
+    jwks: text(),
     // JSON, sorted by claim name.
     claims: text().notNull(),
     // What the credentials it issues reach (`CredentialScope`), JSON; null on a binding of 0.4 the app has not sealed yet.

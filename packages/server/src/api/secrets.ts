@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
@@ -31,14 +31,14 @@ import {
   secretFolderOf,
 } from '../db/queries.ts';
 import { can, permissionsAt, placeOf } from './caller.ts';
-import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { resolveRead } from './personal.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type ReferenceView, type Resolved } from './references.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -1004,7 +1004,7 @@ export async function restoreVersion(
 export async function reveal(
   ctx: ApiContext,
   path: Path,
-): Promise<{ operationId: string; values: Record<string, string> }> {
+): Promise<{ operationId: string; values: Record<string, string>; version: string | null }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1064,6 +1064,46 @@ export async function reveal(
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
-    return { operationId, values: { ...values } };
+    // An environment's version, of exactly what was read: what a watch compares the next one with.
+    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null };
   });
+}
+
+/**
+ * A version of what a read of the environment would open, for whoever
+ * polls it before reading (`coffre export --watch`): it changes whenever
+ * that does, and opens nothing, so it is not logged. Each key counts with
+ * the version it resolves to, its own, its reference's source's or a
+ * parent's, and each key that cannot be read with why; never a value or
+ * its ciphertext. It hashes the read's own resolution (`readableValues`),
+ * so whatever a read comes to resolve through changes it too. Inherited
+ * keys need read on their parent, as a read does: their version would
+ * say when the parent's value changed, which the listing tells only
+ * that parent's readers.
+ */
+export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): Promise<{ version: string }> {
+  const environment = requireLive(place);
+  const read = await readableValues(ctx.db, place, environment);
+  const unread = unreadParents(ctx, environment.projectId, read);
+  if (unread.size > 0) {
+    const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
+    await refuse(ctx, new Refusal(
+      forbidden(`${place.project.slug}/${place.environment!.slug} inherits ${which.join('; ')}, which you cannot read`),
+      denied(ctx, 'secret.version', 'parent_unreadable', { ...environment, metadata: { parents: [...unread.keys()] } }),
+    ));
+  }
+  return { version: versionOf(read) };
+}
+
+/**
+ * A read's version: each key with the version it resolves to, and each key
+ * that cannot be read with why. A whole environment's read answers it too
+ * (`reveal`), of what it opened.
+ */
+function versionOf(read: { items: readonly Readable[]; unreadable: readonly Unreadable[] }): string {
+  // Key names hold no NUL or newline (`secretKey`), and every reason comes last on its line.
+  const hash = createHash('sha256');
+  for (const item of read.items) hash.update(`${item.key}\0${item.secretVersionId}\n`);
+  for (const unreadable of read.unreadable) hash.update(`!${unreadable.key ?? ''}\0${unreadable.reason}\n`);
+  return hash.digest('base64url');
 }

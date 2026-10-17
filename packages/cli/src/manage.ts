@@ -451,6 +451,19 @@ export async function missingDismiss(connect: () => CoffreClient, args: string[]
   }
 }
 
+/**
+ * `coffre version market/prod`: a version of what reading it would open,
+ * which changes whenever a read would. No value is read and nothing is
+ * logged, so a script may poll it, and read only once it changed.
+ */
+export async function version(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, json, ['<project>/<environment>']);
+  const { project, environment } = place(positionals[0]!, true);
+  const result = await connect().environments.version(`${project}/${environment}`);
+  if (values.json) return asJson(io, result);
+  io.out.write(`${result.version}\n`);
+}
+
 // --- folders -----------------------------------------------------------------
 
 /** `coffre move acme Clients`, `coffre move market/prod/STRIPE_KEY stripe`, or `--none` for out of its folder. */

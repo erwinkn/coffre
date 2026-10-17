@@ -603,6 +603,7 @@ const BINDING = {
   profile: 'github',
   issuer: 'https://token.actions.githubusercontent.com',
   jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
+  keys: null,
   claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' },
   scope: { 'market/dev': 'viewer', 'market/prod': 'viewer' },
   label: 'deploys',
@@ -629,4 +630,13 @@ test('untrust shows the binding and the runs it would cut off, and removes it on
 
   await assert.rejects(manage.untrust(preview.connect, ['api-deploy', 'bnd-9'], preview.io), /service:api-deploy has no trust binding bnd-9: `coffre trust api-deploy` lists them/);
   await assert.rejects(manage.untrust(() => assert.fail('no session is asked for'), ['api-deploy'], preview.io), /name <binding-id>/);
+});
+
+test('version prints the version alone, or the JSON answer, and asks nothing else', async () => {
+  const { connect, calls, written, io } = fixture(() => ({ version: 'u0Hq2bWk1M6l0j3t5rH4dQyT1vXJ9n0dD8c2F7k3pZa' }));
+  await manage.version(connect, ['market/prod'], io);
+  await manage.version(connect, ['market/prod', '--json'], io);
+  assert.deepEqual(calls.map((call) => [call.method, call.path]), [['GET', '/projects/market/prod/version'], ['GET', '/projects/market/prod/version']]);
+  assert.equal(written.out, 'u0Hq2bWk1M6l0j3t5rH4dQyT1vXJ9n0dD8c2F7k3pZa\n{\n  "version": "u0Hq2bWk1M6l0j3t5rH4dQyT1vXJ9n0dD8c2F7k3pZa"\n}\n');
+  await assert.rejects(manage.version(connect, ['market/prod/KEY'], io), /expected <project>\/<environment>/);
 });

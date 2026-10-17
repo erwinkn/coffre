@@ -15,12 +15,12 @@ export type AuthTable = keyof Rows;
 
 // IDs and userCode bind a MAC to the row an approval or revocation selects.
 // decidedAt also matters: clearing it would make a device decidable again.
-// A binding's policy is all of it but its label and last use. A registered
-// client is its name and redirects; a connection, everything that grants,
-// proves or names something: who, which client and how it is shown (its
-// name, host, and whether it registered itself, which Connected apps and
-// the log say), what scopes, where codes go, its code and refresh token,
-// and how long it lasts.
+// A binding's policy is all of it but its label and last use, its keys too
+// when it carries them (`kindOf`). A registered client is its name and
+// redirects; a connection, everything that grants, proves or names
+// something: who, which client and how it is shown (its name, host, and
+// whether it registered itself, which Connected apps and the log say), what
+// scopes, where codes go, its code and refresh token, and how long it lasts.
 const FIELDS = {
   identities: ['id', 'provider', 'issuerHash', 'subject', 'principal', 'generation', 'revokedAt'],
   credentials: ['id', 'tokenHash', 'kind', 'principal', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
@@ -54,17 +54,19 @@ export function issuingBinding(createdBy: unknown): string | null {
 }
 
 /**
- * The tuple's kind and fields: an exchanged credential's are its own. A
+ * The tuple's kind and fields: an exchanged credential's are its own, and
+ * so are a binding's that carries its issuer's keys, which covers them. A
  * token's or a binding's scope makes another kind again, which covers it:
  * the rows of 0.4 had none, and still check as they were sealed until the
  * app seals them with one (`sealScopes`); a scope cleared or changed fails
  * either way.
  */
 function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
-  const { createdBy, scope } = row as { createdBy?: unknown; scope?: unknown };
+  const { createdBy, scope, jwks } = row as { createdBy?: unknown; scope?: unknown; jwks?: unknown };
   const exchanged = table === 'credentials' && issuingBinding(createdBy) !== null;
-  const kind = exchanged ? 'exchanged_credentials' : table;
-  const fields = exchanged ? [...FIELDS.credentials, 'createdBy'] : FIELDS[table];
+  const uploaded = table === 'service_bindings' && jwks != null;
+  const kind = exchanged ? 'exchanged_credentials' : uploaded ? 'uploaded_service_bindings' : table;
+  const fields = exchanged ? [...FIELDS.credentials, 'createdBy'] : uploaded ? [...FIELDS.service_bindings, 'jwks'] : FIELDS[table];
   return scope == null ? { kind, fields } : { kind: `scoped_${kind}`, fields: [...fields, 'scope'] };
 }
 

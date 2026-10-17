@@ -22,6 +22,8 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /projects/:project/:environment/missing': true,
   // Whose personal configs a project holds names people: theirs to look up, signed in as themselves.
   'GET /personal/:project': false,
+  // A poller's question before it reads (`coffre export --watch`): what a read would open, which the token may read.
+  'GET /projects/:project/:environment/version': true,
   'PATCH /projects/:project/:environment/dismissals': true,
   'GET /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment': true,
@@ -46,6 +48,7 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'DELETE /members/:member/tokens/:id': false,
   'GET /members/:member/bindings': false,
   'POST /members/:member/bindings': false,
+  'POST /members/:member/bindings/keys': false,
   'GET /workloads/lookup': false,
   'GET /workloads/repositories': false,
   'DELETE /members/:member/bindings/:id': false,

@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CoffreError } from '@coffre/client';
+import { CoffreError, type BindingView } from '@coffre/client';
 import { checkBinding } from '@coffre/core/workloads';
 
-import { bindingFrom, describeBindings, describeEvents, describePlan, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, keysLine, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
 
 const SHA = 'b'.repeat(40);
 
@@ -127,6 +127,7 @@ test('a plan and a list show every claim in full', () => {
     issuer: 'https://token.actions.githubusercontent.com',
     jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
     claims: { event_name: 'push', ref: 'refs/heads/main' },
+    keys: null,
     scope: { 'market/dev': 'developer' as const, 'market/prod': 'viewer' as const, 'api/dev': 'developer' as const },
     replaces: [{ id: 'old', why: 'keys_moved' as const }],
   };
@@ -151,6 +152,38 @@ test('a plan and a list show every claim in full', () => {
   ]);
   assert.match(listed, /^b1  prod  \(added by lead@acme.example 2026-10-03, never used\)\n  profile  github\n/);
   assert.match(listed, /\n  reaches  all its account holds\n$/, 'one of 0.4 the app has not sealed yet');
+});
+
+test('uploaded keys show by kid, or by thumbprint without one; replacing them names each binding replaced', () => {
+  const ISSUER = 'https://kubernetes.default.svc.cluster.local';
+  const keys = [
+    { kid: 'k8s-2026', alg: 'RS256' as const, thumbprint: 'tp1' },
+    { kid: null, alg: 'ES256' as const, thumbprint: 'tp2' },
+  ];
+  assert.equal(keysLine({ jwksUri: `sha256:${'a'.repeat(64)}`, keys }), 'uploaded: k8s-2026 (RS256), thumbprint tp2 (ES256)');
+  assert.equal(keysLine({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');
+  const plan = { issuer: ISSUER, jwksUri: `sha256:${'b'.repeat(64)}`, keys: keys.slice(0, 1), replaces: ['old-1', 'old-2'] };
+  assert.equal(
+    describeKeys('token:api', plan, null),
+    [
+      "Would give service:api's 2 bindings on https://kubernetes.default.svc.cluster.local these keys, each replaced by a binding the same but for them:",
+      '  keys     uploaded: k8s-2026 (RS256)',
+      '  replaces old-1',
+      '  replaces old-2',
+      'Credentials those bindings issued, five minutes each at most, would end at once.',
+      '',
+    ].join('\n'),
+  );
+  assert.match(describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }, { id: 'new-2' }] as BindingView[], replaced: ['old-1', 'old-2'] }), /\n  new-1 replaces old-1\n  new-2 replaces old-2\n/);
+  // One of those planned was removed before the save: what the server answered, not the plan.
+  const raced = describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }] as BindingView[], replaced: ['old-1'] });
+  assert.match(raced, /^Gave service:api's binding on .*\n  keys .*\n  new-1 replaces old-1\nCredentials/);
+});
+
+test('--jwks-file takes a key set, as kubectl prints it', () => {
+  assert.deepEqual(keySetFrom('{"keys":[{"kty":"RSA","kid":"a"}]}', 'jwks.json'), { keys: [{ kty: 'RSA', kid: 'a' }] });
+  assert.throws(() => keySetFrom('nope', 'jwks.json'), /jwks.json is not JSON/);
+  assert.throws(() => keySetFrom('{"kty":"RSA"}', 'jwks.json'), /jwks.json is no key set/);
 });
 
 test('a binding says, in a sentence, which CI runs it lets sign in: platform, repository or project, workflow, ref', () => {

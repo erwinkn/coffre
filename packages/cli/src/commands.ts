@@ -125,7 +125,21 @@ export const SECTIONS = [
           'personal config of it, or it while you have none',
         ],
       },
-      { command: 'export', usage: [`export    ${P}... [--format dotenv|json|shell|github]`], about: ['several, as run takes them'] },
+      {
+        command: 'export',
+        usage: [`export    ${P}... [--format dotenv|json|shell|github]`, '          [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]'],
+        about: [
+          'several, as run takes them; --output-file writes them to a',
+          'file only you can read, which --watch keeps current: it',
+          'asks their version each interval, reads only once it',
+          'changed, and runs --on-change after each new file',
+        ],
+      },
+      {
+        command: 'version',
+        usage: [`version   ${P} [--json]`],
+        about: ['what reading it would open, as a version that changes', 'whenever a read would; it reads no value, and is not logged'],
+      },
       { command: 'history', usage: [`history   ${P}/<KEY> [--json]`] },
       { command: 'rollback', usage: [`rollback  ${P}/<KEY> <version>`] },
       { command: 'import', usage: [`import    ${P} [--file .env] [--apply]`] },
@@ -381,6 +395,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'PUT /projects/:project/:environment': { commands: ['environments create', 'fork'] },
   'GET /projects/:project/:environment/missing': { commands: ['missing'] },
   'GET /personal/:project': { commands: ['personal'] },
+  'GET /projects/:project/:environment/version': { commands: ['version', 'export'] },
   'PATCH /projects/:project/:environment/dismissals': { commands: ['missing dismiss', 'missing restore', 'remove'] },
   'PATCH /projects/:project/:environment': { commands: ['environments rename', 'environments archive', 'environments unarchive'] },
   'DELETE /projects/:project/:environment': { commands: ['environments delete'] },
@@ -406,6 +421,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /members/:member/tokens/:id': { commands: ['tokens revoke'] },
   'GET /members/:member/bindings': { commands: ['trust'] },
   'POST /members/:member/bindings': { commands: ['trust'] },
+  'POST /members/:member/bindings/keys': { commands: ['trust'] },
   'DELETE /members/:member/bindings/:id': { commands: ['untrust'] },
   'GET /workloads/lookup': { commands: ['trust'] },
   'GET /workloads/repositories': {
