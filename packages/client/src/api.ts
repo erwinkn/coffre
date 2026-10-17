@@ -45,6 +45,14 @@ export type Api = {
         mcp: string | null;
         workloads: boolean;
       };
+      personalToken: null | {
+        id: string;
+        label: string;
+        expiresAt: string;
+        scope: {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
+      };
       environments: {
         project: string;
         environment: string;
@@ -493,6 +501,19 @@ export type Api = {
         lastUsedIp: string | null;
         expiresAt: string;
       }[];
+      personalTokens: {
+        id: string;
+        label: string | null;
+        hint: string;
+        createdAt: string;
+        createdBy: string;
+        expiresAt: string;
+        lastUsedAt: string | null;
+        lastUsedIp: string | null;
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
+      }[];
       references: {
         id: string;
         holder: string;
@@ -617,6 +638,19 @@ export type Api = {
           lastUsedIp: string | null;
           expiresAt: string;
         }[];
+        personalTokens: {
+          id: string;
+          label: string | null;
+          hint: string;
+          createdAt: string;
+          createdBy: string;
+          expiresAt: string;
+          lastUsedAt: string | null;
+          lastUsedIp: string | null;
+          scope: null | {
+            [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          };
+        }[];
         references: {
           id: string;
           holder: string;
@@ -651,8 +685,9 @@ export type Api = {
   };
   "POST /members/:member/tokens": {
     input: {
-      expiresInDays: number;
       label?: string | null;
+      expiresInDays?: number;
+      expiresInMinutes?: number;
       scope?: {
         [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
       };
@@ -989,6 +1024,10 @@ export type Api = {
             [key: string]: string | number;
           };
         };
+        token: null | {
+          id: string;
+          label: string;
+        };
         metadata: {
           [key: string]: unknown;
         };
@@ -1318,6 +1357,10 @@ export type AuditEntryView = {
       [key: string]: string | number;
     };
   };
+  token: null | {
+    id: string;
+    label: string;
+  };
   metadata: {
     [key: string]: unknown;
   };
@@ -1567,6 +1610,14 @@ export type Me = {
     mcp: string | null;
     workloads: boolean;
   };
+  personalToken: null | {
+    id: string;
+    label: string;
+    expiresAt: string;
+    scope: {
+      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    };
+  };
   environments: {
     project: string;
     environment: string;
@@ -1715,6 +1766,19 @@ export type OffboardingReport = {
     lastUsedIp: string | null;
     expiresAt: string;
   }[];
+  personalTokens: {
+    id: string;
+    label: string | null;
+    hint: string;
+    createdAt: string;
+    createdBy: string;
+    expiresAt: string;
+    lastUsedAt: string | null;
+    lastUsedIp: string | null;
+    scope: null | {
+      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    };
+  }[];
   references: {
     id: string;
     holder: string;
@@ -1816,20 +1880,6 @@ export type SecretVersion = {
   kek: string;
 };
 
-export type ServiceTokenRow = {
-  id: string;
-  label: string | null;
-  hint: string;
-  createdAt: string;
-  createdBy: string;
-  expiresAt: string;
-  lastUsedAt: string | null;
-  lastUsedIp: string | null;
-  scope: null | {
-    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-  };
-};
-
 export type SessionRow = {
   id: string;
   kind: "browser" | "cli";
@@ -1858,6 +1908,20 @@ export type SetResult = {
 
 export type TokenPlan = {
   scope: {
+    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+  };
+};
+
+export type TokenRow = {
+  id: string;
+  label: string | null;
+  hint: string;
+  createdAt: string;
+  createdBy: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  scope: null | {
     [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
   };
 };

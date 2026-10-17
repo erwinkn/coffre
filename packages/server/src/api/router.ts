@@ -9,6 +9,7 @@ import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts'
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
+import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
@@ -124,7 +125,8 @@ export function routeParts(pathname: string): string[] {
 /**
  * Serve one API request for an authenticated caller:
  *
- *   1. match `METHOD /route`; no route is 404, a route without this method 405
+ *   1. match `METHOD /route`; no route is 404, a route without this method 405;
+ *      a route an MCP connection's scopes or a personal token do not reach is refused
  *   2. check the path's segments and parse the input (a GET's query, or the body
  *      and any flags in the query string)
  *   3. resolve the path in one query; a missing place is 404, not logged
@@ -156,6 +158,16 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
       if (!ctx.via.scopes.includes(needed)) {
         throw new ApiError('insufficient_scope', `this needs the ${MCP_SCOPE_INFO[needed].label} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed);
       }
+    }
+    if (ctx.personalToken !== null && !PERSONAL_TOKEN_ROUTES[`${route.method} ${route.shape}` as keyof typeof PERSONAL_TOKEN_ROUTES]) {
+      // A token reaches its person's secrets and places, never their access or sign-in: logged, as a token tried it.
+      await refuse(
+        ctx,
+        new Refusal(
+          forbidden('a personal token cannot do this: only its person can, signed in as themselves'),
+          denied(ctx, 'token.use', 'personal_token', { metadata: { route: `${route.method} ${route.shape}` } }),
+        ),
+      );
     }
 
     for (const [name, value] of Object.entries(found.params)) {

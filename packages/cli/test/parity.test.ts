@@ -119,7 +119,8 @@ test('--version prints the version; help and --help the commands', async () => {
     assert.match(run.stdout, /^coffre - secrets, with an audit log\n/);
   }
   const named = await coffre(['help', 'tokens']);
-  assert.match(named.stdout, /^usage:\n {4}coffre tokens <service>.*\n {4}coffre tokens issue/);
+  assert.match(named.stdout, /^usage:\n {4}coffre tokens \[--json\].*\n {4}coffre tokens issue --label/);
+  assert.match(named.stdout, /\n {4}coffre tokens <service>.*\n {4}coffre tokens issue <service>/);
   const none = await coffre(['nope']);
   assert.equal(none.code, 1);
   assert.match(none.stderr, /^coffre: no command nope\n/);

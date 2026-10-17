@@ -122,6 +122,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     credentialId: identity.credentialId,
     provenance: identity.provenance,
     via: identity.via,
+    personalToken: identity.personalToken,
     rotateAfterDays: runtime.rotateAfterDays,
   };
 }

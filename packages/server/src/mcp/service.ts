@@ -224,7 +224,8 @@ export class McpService {
    */
   async decide(asker: Asker, request: AuthorizationRequest, answer: { approve: boolean; scopes: string[] }): Promise<{ redirect: string }> {
     const { principal } = asker.caller;
-    if (principal.type !== 'user') throw forbidden('only people connect apps');
+    // A personal token connecting one would make a connection with all its person holds.
+    if (principal.type !== 'user' || asker.caller.credentialScope !== null) throw forbidden('only people connect apps, signed in as themselves');
     const checked = await this.#check(request, asker.sourceIp);
     if (checked.status === 'invalid') throw new ApiError('bad_request', checked.message);
     if (checked.status === 'refused') return { redirect: checked.redirect };

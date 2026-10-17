@@ -9,7 +9,7 @@ import { can, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
-import type { SigninService } from './signin.ts';
+import type { PersonalToken, SigninService } from './signin.ts';
 import type { WorkloadService } from './workloads.ts';
 import type { McpService } from '../mcp/service.ts';
 
@@ -40,9 +40,10 @@ export type ApiContext = {
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
   /**
-   * That credential, when a trust binding issued it for a CI run: every
-   * entry the request writes names it, the vault's through its calls'
-   * correlation, so that each leads back to the run (`token.exchange`).
+   * That credential, when a trust binding issued it for a CI run, or it is
+   * a personal token: every entry the request writes names it, the vault's
+   * through its calls' correlation, so that each leads back to the run
+   * (`token.exchange`) or the token (`token.create`).
    */
   provenance: string | null;
   /**
@@ -51,6 +52,13 @@ export type ApiContext = {
    * Its `provenance` is the connection, which the vault's entries carry.
    */
   via: McpVia | null;
+  /**
+   * The personal token the request came in on: it acts as its person,
+   * within its scope, and only on the routes a token may reach
+   * (`PERSONAL_TOKEN_ROUTES`). Its `provenance` is the token, which every
+   * entry the request writes names, for "ada via token 'cursor-agent'".
+   */
+  personalToken: PersonalToken | null;
   /** Days a value may go unchanged before it is flagged for rotation (`rotateAfterDays`), or null for no flag. */
   rotateAfterDays: number | null;
 };

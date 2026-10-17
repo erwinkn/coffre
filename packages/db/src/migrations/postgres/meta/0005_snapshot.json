@@ -1,5 +1,5 @@
 {
-  "id": "b20beccc-edff-4615-b584-d879134818c5",
+  "id": "033b31db-8acc-46e1-8e55-577387444ff4",
   "prevId": "bb1f5bf0-5e72-4375-8fac-8fbda2a9cf92",
   "version": "7",
   "dialect": "postgresql",
@@ -409,6 +409,22 @@
           ],
           "isUnique": false,
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.exchange' AND \"audit_log\".\"decision\" = 'allow'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_token_create_idx": {
+          "name": "audit_log_token_create_idx",
+          "columns": [
+            {
+              "expression": "((\"metadata\")::jsonb ->> 'targetCredentialId')",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.create' AND \"audit_log\".\"decision\" = 'allow'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -856,7 +872,7 @@
       "checkConstraints": {
         "credentials_kind_check": {
           "name": "credentials_kind_check",
-          "value": "\"credentials\".\"kind\" IN ('browser', 'cli', 'service')"
+          "value": "\"credentials\".\"kind\" IN ('browser', 'cli', 'service', 'personal')"
         },
         "credentials_principal_check": {
           "name": "credentials_principal_check",
@@ -2478,12 +2494,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "jwks": {
-          "name": "jwks",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "claims": {
           "name": "claims",

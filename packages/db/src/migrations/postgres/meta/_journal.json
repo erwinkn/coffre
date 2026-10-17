@@ -40,8 +40,15 @@
     {
       "idx": 5,
       "version": "7",
-      "when": 1792252041267,
-      "tag": "0005_uploaded_keys",
+      "when": 1792250909587,
+      "tag": "0005_personal_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792252693050,
+      "tag": "0006_uploaded_keys",
       "breakpoints": true
     }
   ]

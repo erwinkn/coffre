@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "28bab33d-aec2-4e8a-b3bd-1cbb0ea1484f",
+  "id": "7f73c44d-14f3-4fe7-8d90-c8a32688734e",
   "prevId": "6c8539b6-8306-405b-848a-18716ed0faf1",
   "tables": {
     "audit_chain_head": {
@@ -287,6 +287,14 @@
           ],
           "isUnique": false,
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.exchange' AND \"audit_log\".\"decision\" = 'allow'"
+        },
+        "audit_log_token_create_idx": {
+          "name": "audit_log_token_create_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.targetCredentialId')"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.create' AND \"audit_log\".\"decision\" = 'allow'"
         },
         "audit_log_reference_end_idx": {
           "name": "audit_log_reference_end_idx",
@@ -650,7 +658,7 @@
       "checkConstraints": {
         "credentials_kind_check": {
           "name": "credentials_kind_check",
-          "value": "\"credentials\".\"kind\" IN ('browser', 'cli', 'service')"
+          "value": "\"credentials\".\"kind\" IN ('browser', 'cli', 'service', 'personal')"
         },
         "credentials_principal_check": {
           "name": "credentials_principal_check",
@@ -2202,13 +2210,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "jwks": {
-          "name": "jwks",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "claims": {
           "name": "claims",
           "type": "text",
@@ -2618,6 +2619,13 @@
       "audit_log_exchange_idx": {
         "columns": {
           "json_extract(\"metadata\", '$.credentialId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_token_create_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.targetCredentialId')": {
             "isExpression": true
           }
         }

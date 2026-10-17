@@ -1,13 +1,13 @@
 // The commands that manage an instance, beside its secrets: projects and
-// environments, members, bearer tokens, a secret's key, and your own
-// sessions and accounts. Each takes the API and where to write, so a test
+// environments, members, bearer tokens and personal tokens, a secret's key,
+// and your own sessions and accounts. Each takes the API and where to write, so a test
 // drives it with a client of its own; each reads its arguments before it
 // asks for one, so a mistyped command needs no session to be told so. A refusal says what to type instead;
 // what would end something for good is shown first, and done with --apply.
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { INSTANCE_ROLES, isInstanceRole, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
+import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion } from '@coffre/client';
 
 import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
@@ -640,51 +640,98 @@ export async function revoke(connect: () => CoffreClient, args: string[], io: Io
   io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${scope}\n` : `${shownMember(who)} held no grant on ${scope}: nothing changed\n`);
 }
 
-// --- bearer tokens ----------------------------------------------------------
+// --- bearer tokens and personal tokens ---------------------------------------
+
+/**
+ * Whose tokens a command is about: a service account's, named, or, with no
+ * name, the person's own personal tokens, which act as them.
+ */
+async function tokenHolder(api: CoffreClient, named: string | undefined): Promise<{ member: string; personal: boolean }> {
+  if (named !== undefined) return { member: serviceMember(named), personal: false };
+  const { principal } = await api.me();
+  if (principal.type !== 'user') throw new UsageError('a service account holds no personal token: name the service, coffre tokens <service>');
+  return { member: `user:${principal.id}`, personal: true };
+}
+
+/** When a token ends: its day for a service's, which last days; to the minute, in UTC, for a personal one, which lasts hours. */
+function ends(iso: string, personal: boolean): string {
+  return personal ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : day(iso);
+}
 
 export async function tokens(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, json, ['<service>']);
-  const service = serviceMember(positionals[0]!);
+  const { values, positionals } = parse(args, json, ['<service>'], 1);
   const api = connect();
-  const { tokens: list } = await api.tokens.list(service);
+  const { member, personal } = await tokenHolder(api, positionals[0]);
+  const { tokens: list } = await api.tokens.list(member);
   if (values.json) return asJson(io, list);
-  if (list.length === 0) io.out.write(`${shownMember(service)} holds no bearer token: coffre tokens issue ${serviceName(service)}\n`);
+  if (list.length === 0) {
+    io.out.write(personal
+      ? 'you hold no personal token: coffre tokens issue --label <label> --scope <project>/<environment>=<role>\n'
+      : `${shownMember(member)} holds no bearer token: coffre tokens issue ${serviceName(member)}\n`);
+  }
   for (const token of list) {
     io.out.write(
-      `${token.id}  …${token.hint}  ${(token.label ?? '-').padEnd(16)}  expires ${day(token.expiresAt)}  last used ${day(token.lastUsedAt)}  reaches ${reaches(token.scope)}\n`,
+      `${token.id}  …${token.hint}  ${(token.label ?? '-').padEnd(16)}  expires ${ends(token.expiresAt, personal)}  last used ${day(token.lastUsedAt)}  reaches ${reaches(token.scope)}\n`,
     );
   }
 }
 
-/** A day count `--expires-in` takes: what the API takes, 1 to 366. */
-function days(text: string | undefined): number {
-  if (text === undefined) return 90;
-  const count = Number(text);
-  if (!Number.isInteger(count) || count < 1 || count > 366) throw new UsageError(`--expires-in takes a number of days, 1 to 366, not "${text}"`);
-  return count;
+/** A personal token's lifetime when `--expires-in` is left out: an hour. */
+const PERSONAL_MINUTES = 60;
+
+/**
+ * What `--expires-in` takes: `30m`, `4h`, `2d`, or a number alone, which
+ * is days, as a service token's always was. A service token lasts whole
+ * days, 1 to 366, 90 unless told; a personal token a minute to a week, an
+ * hour unless told. In days for a service token, in minutes for a personal one.
+ */
+export function lifetime(text: string | undefined, personal: boolean): number {
+  if (text === undefined) return personal ? PERSONAL_MINUTES : 90;
+  const match = /^(\d+)([mhd]?)$/.exec(text.trim());
+  const count = match === null ? NaN : Number(match[1]);
+  const unit = match?.[2] || 'd';
+  if (!personal) {
+    if (unit !== 'd' || !Number.isInteger(count) || count < 1 || count > 366) throw new UsageError(`--expires-in takes days for a service token, 1 to 366, as 90 or 90d; not "${text}"`);
+    return count;
+  }
+  const minutes = count * { m: 1, h: 60, d: 1440 }[unit as 'm' | 'h' | 'd'];
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_PERSONAL_TOKEN_MINUTES) {
+    throw new UsageError(`--expires-in takes a personal token's lifetime, a minute to ${MAX_PERSONAL_TOKEN_MINUTES / 1440} days, as 30m, 4h or 2d; not "${text}"`);
+  }
+  return minutes;
 }
 
 /**
  * A new token, once: on stdout, or written to a file made for it, 0600, and
  * never one already there. The file is made before the token is, so a path
- * that cannot be written costs no token.
+ * that cannot be written costs no token. With no service named, a personal
+ * token, acting as you within `--scope`, which it must say, as `--label`
+ * must: every entry it makes names it.
  */
 export async function tokensIssue(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(
     args,
     { 'expires-in': { type: 'string' }, label: { type: 'string' }, scope: { type: 'string', multiple: true }, 'output-file': { type: 'string' } },
     ['<service>'],
+    1,
   );
-  const service = serviceMember(positionals[0]!);
-  const expiresInDays = days(values['expires-in']);
+  const personal = positionals[0] === undefined;
+  const expiresIn = lifetime(values['expires-in'], personal);
   let scope: ReturnType<typeof scopeFrom>;
   try {
     scope = scopeFrom(values.scope);
   } catch (error) {
     throw new UsageError((error as Error).message);
   }
+  if (personal && (values.label === undefined || values.label.trim() === '')) {
+    throw new UsageError('a personal token needs --label, which every entry it makes names: --label cursor-agent');
+  }
+  if (personal && scope === undefined) {
+    throw new UsageError('a personal token needs --scope, what it reaches of what you hold: --scope market/dev=viewer');
+  }
   const path = values['output-file'];
   const api = connect();
+  const { member } = await tokenHolder(api, positionals[0]);
   let fd: number | null = null;
   if (path !== undefined) {
     try {
@@ -704,14 +751,21 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   process.once('exit', unmake);
   let issued: Awaited<ReturnType<CoffreClient['tokens']['issue']>>;
   try {
-    issued = await api.tokens.issue(service, { expiresInDays, label: values.label ?? null, ...(scope === undefined ? {} : { scope }) });
+    issued = await api.tokens.issue(
+      member,
+      personal
+        ? { label: values.label!.trim(), expiresInMinutes: expiresIn, scope }
+        : { expiresInDays: expiresIn, label: values.label ?? null, ...(scope === undefined ? {} : { scope }) },
+    );
   } catch (error) {
     unmake();
     throw error;
   } finally {
     process.off('exit', unmake);
   }
-  const about = `${shownMember(service)}'s bearer token ${issued.id}, reaching ${reaches(issued.scope)}, until ${day(issued.expiresAt)}`;
+  const about = personal
+    ? `your personal token ${issued.id} "${values.label!.trim()}", acting as you on ${reaches(issued.scope)}, until ${ends(issued.expiresAt, true)}`
+    : `${shownMember(member)}'s bearer token ${issued.id}, reaching ${reaches(issued.scope)}, until ${day(issued.expiresAt)}`;
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
     closeSync(fd);
@@ -723,18 +777,24 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
 }
 
 export async function tokensRevoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<service>', '<id>']);
-  const service = serviceMember(positionals[0]!);
-  const id = positionals[1]!;
+  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<service>', '<id>'], 1);
+  // One argument is the id of a personal token of yours; two, a service and one of its tokens.
+  const [named, id] = positionals.length === 1 ? [undefined, positionals[0]!] : [positionals[0]!, positionals[1]!];
   const api = connect();
-  const token = (await api.tokens.list(service)).tokens.find((entry) => entry.id === id);
-  if (token === undefined) throw new Error(`${shownMember(service)} holds no bearer token ${id}: \`coffre tokens ${serviceName(service)}\` lists them`);
-  const what = `${shownMember(service)}'s bearer token ${id}, …${token.hint}${token.label === null ? '' : ` "${token.label}"`}, last used ${day(token.lastUsedAt)}`;
+  const { member, personal } = await tokenHolder(api, named);
+  const token = (await api.tokens.list(member)).tokens.find((entry) => entry.id === id);
+  if (token === undefined) {
+    throw new Error(personal
+      ? `you hold no personal token ${id}: \`coffre tokens\` lists them`
+      : `${shownMember(member)} holds no bearer token ${id}: \`coffre tokens ${serviceName(member)}\` lists them`);
+  }
+  const whose = personal ? 'your personal token' : `${shownMember(member)}'s bearer token`;
+  const what = `${whose} ${id}, …${token.hint}${token.label === null ? '' : ` "${token.label}"`}, last used ${day(token.lastUsedAt)}`;
   if (!values.apply) {
     io.out.write(`would revoke ${what}: whatever uses it stops at once.\nNothing changed. Re-run with --apply to revoke it.\n`);
     return;
   }
-  await api.tokens.revoke(service, id);
+  await api.tokens.revoke(member, id);
   io.out.write(`revoked ${what}\n`);
 }
 
