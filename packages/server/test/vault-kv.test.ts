@@ -223,6 +223,9 @@ test('plugins are checked at configuration: names, prefixes, and paths coffre or
   assert.throws(() => checkPlugins([at('a', '/v1/')]), /without a trailing slash/);
   assert.throws(() => checkPlugins([at('Vault', '/v1')]), /lowercase/);
   assert.throws(() => vaultKv({ mount: 'kv/team' }), /one path segment/);
+  // Vault's own roots: `auth/data/market/prod/login` would be a login.
+  assert.throws(() => vaultKv({ mount: 'auth' }), /Vault's own path/);
+  assert.throws(() => vaultKv({ mount: 'sys' }), /Vault's own path/);
   assert.equal(checkPlugins([at('a', '/v1'), at('b', '/v10'), { name: 'quiet' }]).length, 3);
 });
 

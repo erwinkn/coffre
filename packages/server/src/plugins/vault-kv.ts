@@ -44,6 +44,8 @@ const MOUNT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export function vaultKv(options: VaultKvOptions = {}): CoffrePlugin {
   const mount = options.mount ?? 'secret';
   if (!MOUNT.test(mount)) throw new Error(`vaultKv: a mount is one path segment, such as secret; got ${JSON.stringify(mount)}`);
+  // Vault's own roots, where no secrets engine mounts: `auth/<mount>/login` and `sys/…` are paths of their own here too.
+  if (mount === 'auth' || mount === 'sys') throw new Error(`vaultKv: ${mount} is Vault's own path, where no secrets mount; name another, such as secret`);
   return {
     name: 'vault-kv',
     routes: { prefix: '/v1', fetch: (request, coffre) => serve(request, coffre, mount) },

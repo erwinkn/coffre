@@ -97,14 +97,21 @@ type PluginContext = {
   publicUrl: string;
   /** The API as whoever `token` names, checked once at the first call. */
   api(token: string): CoffreClient;
-  /** A workload's ID token for a 5-minute credential: `POST /api/auth/oidc`, in process. */
-  exchange(input: { service: string; token: string }): Promise<{ token: string; expiresAt: string }>;
+  /**
+   * The request as a workload's sign-in, for a 5-minute credential: `POST
+   * /api/auth/oidc` on it, in process. `asked` says what its body asks for,
+   * `{ service, token }`, read once admission passed.
+   */
+  exchange(asked: (body: unknown) => { service: unknown; token: unknown }): Promise<{ token: string; expiresAt: string }>;
   /** End the credential `token` is: `POST /api/auth/logout`, in process. */
   signOut(token: string): Promise<void>;
-  /** The request's JSON body, read only to `max` bytes. */
-  json(max: number): Promise<unknown>;
 };
 ```
+
+The Vault adapter's login, for example, says `exchange((body) => ({ service:
+'token:' + body.role, token: body.jwt }))`, with the checks left out. The
+route admits the request first, then reads the body, so a caller past the
+limits costs no read.
 
 `exchange` and `signOut` run coffre's own routes in process, with their
 limits and audit, as `api` runs the API. A plugin that signs a workload in
