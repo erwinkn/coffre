@@ -4,11 +4,12 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -730,21 +731,17 @@ export async function members(
 }
 
 /**
- * Every allowed read, write and import of a secret by these actors, the
- * restores of the secrets they touched, and every removal from the
- * instance, oldest first. Each row that names a secret carries it as it is
- * now: its key, current version, and whether it or its place is archived.
+ * Every allowed read, write and import of a secret by these actors, a read
+ * of several once per secret it lists, then every restore, oldest first.
+ * Each row that names a secret carries it as it is now: its key, current
+ * version, and whether it or its place is archived. Several reads, so the
+ * caller runs them in one snapshot (`SNAPSHOT`): a restore committed between
+ * two would show its version without the one it restored.
  */
 export async function memberActivity(db: Queryable, actorIds: string[]) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
   const allowed = eq(auditLog.decision, 'allow');
-  const seen = and(
-    allowed,
-    inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
-    inArray(auditLog.action, ['secret.read', 'secret.write']),
-  );
-  const touched = db.select({ id: auditLog.secretId }).from(auditLog).where(seen);
-  const rows = await db
+  const entries = (where: SQL | undefined) => db
     .select({
       actor: auditLog.actor,
       action: auditLog.action,
@@ -761,14 +758,40 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
     .leftJoin(environments, eq(environments.id, secrets.environmentId))
     .leftJoin(projects, eq(projects.id, secrets.projectId))
-    .where(
-      or(
-        seen,
-        and(allowed, eq(auditLog.action, 'secret.restore'), inArray(auditLog.secretId, touched)),
-      ),
-    )
+    .where(where)
     .orderBy(asc(auditLog.seq));
-  return rows.map(shown);
+  const seen = await entries(and(
+    allowed,
+    inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
+    inArray(auditLog.action, ['secret.read', 'secret.write']),
+  ));
+  // Few, each someone's choice: all of them, for whichever secrets were seen.
+  const restores = await entries(and(allowed, eq(auditLog.action, 'secret.restore')));
+  const listedOf = (row: (typeof seen)[number]) => {
+    const { secrets: listed } = JSON.parse(row.metadata) as { secrets?: unknown };
+    return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
+  };
+  const ids = seen.flatMap((row) => (listedOf(row) ?? []).flatMap(({ secretId }) => (typeof secretId === 'string' ? [secretId] : [])));
+  const now = await secretPlaces(db, ids);
+  const rows = seen.flatMap((row) => {
+    const listed = listedOf(row);
+    if (listed === null) return [row];
+    return listed.flatMap((secret) => {
+      const found = typeof secret.secretId === 'string' ? now.get(secret.secretId) : undefined;
+      if (found === undefined) return [];
+      return [{
+        ...row,
+        secretId: found.id,
+        metadata: JSON.stringify(secret),
+        key: found.key,
+        currentVersion: found.currentVersion,
+        archived: found.archivedAt !== null || found.environmentArchivedAt !== null || found.projectArchivedAt !== null,
+        project: found.project,
+        environment: found.environment,
+      }];
+    });
+  });
+  return [...rows, ...restores].map(shown);
 }
 
 /** The person an account at a provider is bound to, if it is. */
@@ -1589,30 +1612,39 @@ export type SecretPlaceRow = {
   currentVersionAt: Date | null;
 };
 
+/**
+ * These secrets, where they are now, by id: any number of them, a thousand
+ * a query, within every engine's bound on a statement's parameters (an
+ * offboarding report asks for each secret a member's reads listed).
+ */
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
-  if (ids.length === 0) return new Map();
   const { secrets, secretVersions, environments, projects } = tablesOf(db);
-  const rows = await db
-    .select({
-      id: secrets.id,
-      key: secrets.key,
-      projectId: secrets.projectId,
-      project: projects.slug,
-      environmentId: secrets.environmentId,
-      environment: environments.slug,
-      archivedAt: secrets.archivedAt,
-      projectArchivedAt: projects.archivedAt,
-      environmentArchivedAt: environments.archivedAt,
-      currentVersionId: secrets.currentVersionId,
-      currentVersion: secrets.currentVersion,
-      currentVersionAt: secretVersions.createdAt,
-    })
-    .from(secrets)
-    .innerJoin(environments, eq(environments.id, secrets.environmentId))
-    .innerJoin(projects, eq(projects.id, secrets.projectId))
-    .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-    .where(inArray(secrets.id, [...new Set(ids)]));
-  return new Map(rows.map((row) => [row.id, row]));
+  const unique = [...new Set(ids)];
+  const found = new Map<string, SecretPlaceRow>();
+  for (let start = 0; start < unique.length; start += 1000) {
+    const rows = await db
+      .select({
+        id: secrets.id,
+        key: secrets.key,
+        projectId: secrets.projectId,
+        project: projects.slug,
+        environmentId: secrets.environmentId,
+        environment: environments.slug,
+        archivedAt: secrets.archivedAt,
+        projectArchivedAt: projects.archivedAt,
+        environmentArchivedAt: environments.archivedAt,
+        currentVersionId: secrets.currentVersionId,
+        currentVersion: secrets.currentVersion,
+        currentVersionAt: secretVersions.createdAt,
+      })
+      .from(secrets)
+      .innerJoin(environments, eq(environments.id, secrets.environmentId))
+      .innerJoin(projects, eq(projects.id, secrets.projectId))
+      .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+      .where(inArray(secrets.id, unique.slice(start, start + 1000)));
+    for (const row of rows) found.set(row.id, row);
+  }
+  return found;
 }
 
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
@@ -1669,15 +1701,16 @@ function shown<Row extends { occurredAt: number }>(row: Row): Omit<Row, 'occurre
   return { ...row, occurredAt: new Date(row.occurredAt).toISOString() };
 }
 
-/** Rows in chain order from `fromSeq`, with every field as it was hashed. */
+/** Rows in chain order from `fromSeq`, with every field as it was hashed: a batch of a full check, at most `limit` and `BATCH_BYTES` of metadata. */
 export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
   const { auditLog } = tablesOf(db);
+  const batch = await withinBytes(db, gte(auditLog.seq, fromSeq), limit);
+  if (batch === null) return [];
   const rows = await db
     .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
     .from(auditLog)
-    .where(gte(auditLog.seq, fromSeq))
-    .orderBy(asc(auditLog.seq))
-    .limit(limit);
+    .where(and(gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
+    .orderBy(asc(auditLog.seq));
   return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
 }
 
@@ -1714,8 +1747,26 @@ function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', 
 }
 
 /**
+ * A read of several secrets at one place that lists one of these among its
+ * `secrets`, read there or through it, as a holder (`readsByPlace` in the
+ * vault). Its entry names no secret of its own; its place's filters narrow
+ * the entries this reads.
+ */
+function listed(db: Queryable, ids: readonly string[]): SQL {
+  const { auditLog } = tablesOf(db);
+  const named = (secret: SQL) => or(...ids.map((id) => sql`${secret} = ${id}`))!;
+  const among = dialect.engineOf(db) === 'postgres'
+    ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
+        WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`
+    : sql`EXISTS (SELECT 1 FROM json_each(${auditLog.metadata}, '$.secrets') AS listed
+        WHERE ${named(sql`json_extract(listed.value, '$.secretId')`)} OR ${named(sql`json_extract(listed.value, '$.also.secretId')`)})`;
+  return and(eq(auditLog.action, 'secret.read'), isNull(auditLog.secretId), among)!;
+}
+
+/**
  * The conditions of `filter`, as a WHERE clause on the log. A place matches
- * the entries about it, and those about a reference into or out of it.
+ * the entries about it, and those about a reference into or out of it; a
+ * secret, too, the reads of several that list it.
  */
 function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
   const { auditLog } = tablesOf(db);
@@ -1729,7 +1780,7 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
       : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
     filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
     filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
-    filter.secretId === undefined ? undefined : at('secretId', [filter.secretId]),
+    filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),
     filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
     filter.excludeActions === undefined || filter.excludeActions.length === 0
@@ -1741,20 +1792,24 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
 
 /**
  * A page of the log, both authors, newest first, with the slugs of the
- * places each entry names and the key of its secret.
+ * places each entry names and the key of its secret: up to `limit` entries,
+ * fewer where they list more than a page holds (`withinBytes`). `more`
+ * when older entries may match: the page was full, or cut short.
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
+  const where = auditWhere(db, filter);
+  const page = await withinBytes(db, where, filter.limit, 'desc');
+  if (page === null) return { rows: [], more: false };
   const rows = await db
     .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })
     .from(auditLog)
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
-    .where(auditWhere(db, filter))
-    .orderBy(desc(auditLog.seq))
-    .limit(filter.limit);
-  return rows.map(shown);
+    .where(and(where, lte(auditLog.seq, page.from), gte(auditLog.seq, page.to)))
+    .orderBy(desc(auditLog.seq));
+  return { rows: rows.map(shown), more: page.cut || page.count === filter.limit };
 }
 
 /** The newest of one author's allowed entries of `action`, with the database's clock beside it. */

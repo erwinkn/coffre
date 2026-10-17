@@ -26,6 +26,7 @@ export type AuditEntry = Pick<
   | 'environment'
   | 'key'
   | 'version'
+  | 'secrets'
   | 'operationId'
   | 'metadata'
 >;
@@ -42,7 +43,7 @@ export type Sentence = { parts: Part[]; refused: boolean };
 /** What one template needs: the line's leading entry, its batch, and how it was decided. */
 type Facts = {
   entry: AuditEntry;
-  /** Every entry of the batch, the lead included. */
+  /** Every entry of the batch, the lead included, a read of several once per secret (`perSecret`). */
   batch: AuditEntry[];
   /** Secrets the batch was about. */
   count: number;
@@ -642,10 +643,32 @@ export function leadOf(batch: AuditEntry[]): AuditEntry {
   return batch[0]!;
 }
 
+/**
+ * A read of several secrets, logged once for its place, as the entries it
+ * would be about one secret each: its key and version, and what its own
+ * part of the metadata says, such as the reference it went through. Any
+ * other entry as it is.
+ */
+export function perSecret<T extends AuditEntry>(entry: T): T[] {
+  const listed = entry.metadata.secrets;
+  // One whose list was emptied or mangled, which verification would flag, still reads as itself.
+  if (entry.secrets === null || entry.secrets.length === 0 || !Array.isArray(listed)) return [entry];
+  return entry.secrets.map(({ key, version }, i) => {
+    const own = listed[i];
+    return {
+      ...entry,
+      key,
+      version,
+      secrets: null,
+      metadata: { ...entry.metadata, secrets: undefined, ...(typeof own === 'object' && own !== null && !Array.isArray(own) ? own : {}) },
+    };
+  });
+}
+
 /** What a line says: one entry, or a batch that shares an operation. */
 export function describe(batch: AuditEntry[]): Sentence {
-  const entry = leadOf(batch);
-  const same = batch.filter((other) => other.action === entry.action);
+  const entry = perSecret(leadOf(batch))[0]!;
+  const same = batch.filter((other) => other.action === entry.action).flatMap(perSecret);
   const denied = same.filter((other) => other.decision === 'deny');
   const refused = denied.length === same.length;
   const facts: Facts = {

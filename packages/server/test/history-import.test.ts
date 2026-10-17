@@ -210,11 +210,11 @@ test('a dry run is spelled one way; anything else is refused before it writes', 
 test('a preview logs a read of every existing secret it compares', async () => {
   await root.secrets.set('market/dev', { A: 'one', B: 'two' });
   await importText('A=one\nB=changed\nC=new', true);
-  // The vault's, one per value it opened to compare, in one operation.
+  // The vault's, one listing each value it opened to compare.
   const reads = await auditRows('secret.read', 'allow');
-  assert.deepEqual(reads.map((row) => row.metadata.subject).sort(), ['market/dev/A', 'market/dev/B']);
-  assert.ok(reads.every((row) => row.metadata.purpose === 'compare'));
-  assert.equal(new Set(reads.map((row) => row.operationId)).size, 1);
+  assert.equal(reads.length, 1);
+  assert.deepEqual((reads[0]!.metadata.secrets as { subject: string }[]).map((secret) => secret.subject).sort(), ['market/dev/A', 'market/dev/B']);
+  assert.equal(reads[0]!.metadata.purpose, 'compare');
 });
 
 test('import creates every secret, one audit entry per key in one bundle', async () => {

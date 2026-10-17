@@ -1,5 +1,5 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { and, desc, eq, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, lt, sql, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
@@ -216,6 +216,45 @@ export function entryColumns(db: Queryable) {
     mac: auditLog.mac,
     hash: auditLog.hash,
   };
+}
+
+/**
+ * Metadata a reader of many entries holds at once, at most: an entry about
+ * a read of several secrets lists them, a thousand some 150 kilobytes, so a
+ * count of entries alone does not bound a batch's or a page's memory within
+ * a Worker's 128 megabytes.
+ */
+export const BATCH_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Of the entries `where` matches, in `order` of seq, the first `limit` or
+ * fewer that hold no more than `BATCH_BYTES` of metadata between them, but
+ * always the first: the seqs they run from and to, and whether the bytes
+ * cut the run short of `limit`. Null when none matches. A reader asks this
+ * first, then reads `where` between the two.
+ */
+export async function withinBytes(
+  db: Queryable,
+  where: SQL | undefined,
+  limit: number,
+  order: 'asc' | 'desc' = 'asc',
+): Promise<{ from: bigint; to: bigint; cut: boolean; count: number } | null> {
+  const { auditLog } = tablesOf(db);
+  const sizes = await db
+    .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
+    .from(auditLog)
+    .where(where)
+    .orderBy(order === 'asc' ? asc(auditLog.seq) : desc(auditLog.seq))
+    .limit(limit);
+  let held = 0;
+  let count = 0;
+  for (const { bytes } of sizes) {
+    held += Number(bytes);
+    if (count > 0 && held > BATCH_BYTES) break;
+    count += 1;
+  }
+  if (count === 0) return null;
+  return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count };
 }
 
 /**

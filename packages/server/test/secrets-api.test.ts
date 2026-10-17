@@ -248,7 +248,7 @@ test('a service read is attributed to the service principal', async () => {
   assert.equal(read?.actorId, CI);
 });
 
-test('revealing an environment returns every secret and logs one entry per secret', async () => {
+test('revealing an environment returns every secret and logs one entry listing each', async () => {
   await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y', JWT_SECRET: 'shhh' });
   firstSeq = await nextSeq();
   const result = await reader.secrets.reveal('market/dev');
@@ -258,11 +258,37 @@ test('revealing an environment returns every secret and logs one entry per secre
     REDIS_URL: 'redis://y',
   });
   const rows = await auditRows('vault');
-  assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map((row) => row.metadata.subject).sort(), ['market/dev/DATABASE_URL', 'market/dev/JWT_SECRET', 'market/dev/REDIS_URL']);
-  assert.ok(rows.every((row) => row.metadata.purpose === 'run'));
-  assert.deepEqual([...new Set(rows.map((row) => row.operationId))], [result.operationId]);
+  assert.equal(rows.length, 1);
+  const [row] = rows as [(typeof rows)[number]];
+  const listed = row.metadata.secrets as { subject: string; version: number }[];
+  assert.deepEqual(listed.map((secret) => [secret.subject, secret.version]).sort(), [
+    ['market/dev/DATABASE_URL', 1], ['market/dev/JWT_SECRET', 1], ['market/dev/REDIS_URL', 1],
+  ]);
+  assert.equal(row.metadata.purpose, 'run');
+  assert.equal(row.operationId, result.operationId);
   assert.deepEqual(await auditRows(), []);
+});
+
+test('the log of one key finds the read of its environment, which lists it, and the log of a key it did not read does not', async () => {
+  await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y' });
+  const { operationId } = await reader.secrets.reveal('market/dev');
+  await root.secrets.set('market/dev', { LATER: 'z' });
+  const read = async (path: string) => (await root.audit.list({ path, limit: 50 })).entries.find((entry) => entry.operationId === operationId && entry.action === 'secret.read');
+  const found = await read('market/dev/REDIS_URL');
+  assert.deepEqual([found?.key, found?.version, found?.secrets], [null, null, [{ key: 'DATABASE_URL', version: 1 }, { key: 'REDIS_URL', version: 1 }]]);
+  assert.equal((await read('market/dev/LATER')), undefined);
+  assert.equal((await read('market/prod')), undefined);
+});
+
+test('the log of a key is asked for by its full path, the longest slugs and key included', async () => {
+  const [project, environment, key] = [`p${'r'.repeat(62)}`, `e${'n'.repeat(62)}`, `K${'E'.repeat(127)}`];
+  await root.projects.create(project, { name: 'Long' });
+  await root.environments.create(`${project}/${environment}`, { name: 'Long' });
+  await root.secrets.set(`${project}/${environment}`, { [key]: 'value' });
+  const path = `${project}/${environment}/${key}`;
+  assert.equal(path.length, 256);
+  const { entries } = await root.audit.list({ path, limit: 10 });
+  assert.deepEqual(entries.filter((found) => found.action === 'secret.write').map((found) => found.key), [key]);
 });
 
 test('keys that are also Object prototype property names survive a round trip', async () => {

@@ -8,6 +8,7 @@ import {
   decidedBy,
   describe,
   lines,
+  perSecret,
   runLabel,
   who,
   type Part,
@@ -182,7 +183,11 @@ export function AuditPage() {
 type Entry = AuditEntryView;
 type Filters = { decision?: 'deny'; actorId?: string };
 
-/** One action: an entry, or a batch of them under one operation, which opens to each. */
+/**
+ * One action: an entry, or a batch of them under one operation, which opens
+ * to each; a read of several secrets, logged as one entry, opens to each
+ * secret, under its entry's number.
+ */
 function Line({
   batch,
   filters,
@@ -199,13 +204,18 @@ function Line({
   const lead = batch[0]!;
   const sentence = describe(batch);
   const seqs = batch.map((entry) => entry.seq);
-  const grouped = batch.length > 1;
+  const each = batch.flatMap(perSecret);
+  const grouped = each.length > 1;
+  const [unit, units] = each.length === batch.length ? ['entry', 'entries'] : ['secret', 'secrets'];
+  // A read of several breaks at its first secret's row.
+  const breakRow = each.findIndex((entry) => entry.seq === breakAt);
+  const [first, last] = [Math.min(...seqs), Math.max(...seqs)];
 
   return (
     <>
       <Row
         entry={lead}
-        seq={grouped ? `${Math.min(...seqs)}–${Math.max(...seqs)}` : String(lead.seq)}
+        seq={first === last ? String(first) : `${first}–${last}`}
         parts={sentence.parts}
         refused={sentence.refused}
         decided={decidedBy(batch)}
@@ -219,7 +229,7 @@ function Line({
               type="button"
               className="batch-toggle"
               aria-expanded={open}
-              aria-label={open ? 'Hide each entry' : `Show each of ${batch.length} entries`}
+              aria-label={open ? `Hide each ${unit}` : `Show each of ${each.length} ${units}`}
               onClick={() => setOpen(!open)}
             >
               <ChevronRight size={14} />
@@ -229,11 +239,11 @@ function Line({
       />
       {grouped &&
         open &&
-        batch.map((entry) => {
+        each.map((entry, i) => {
           const one = describe([entry]);
           return (
             <Row
-              key={entry.seq}
+              key={`${entry.seq}:${i}`}
               entry={entry}
               seq={String(entry.seq)}
               parts={one.parts}
@@ -241,7 +251,7 @@ function Line({
               decided={decidedBy([entry])}
               filters={filters}
               detail={detail}
-              breaks={entry.seq === breakAt}
+              breaks={i === breakRow}
               marked={false}
               child
             />

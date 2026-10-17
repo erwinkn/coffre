@@ -57,11 +57,12 @@ async function entries(author: 'app' | 'vault', action: string) {
 test('a fork copies each live key, with its value and folder, and none of its history', async () => {
   const made = await maintainer.environments.create('market/staging', { name: 'Staging', from: 'prod' });
   assert.deepEqual([made.created, made.forked], [true, { from: 'prod', keys: 2, references: 0, copied: [], inherits: false }]);
-  // Copying is reading: one entry per key, by the forker, to copy; then a write per key.
+  // Copying is reading: one entry listing each key, by the forker, to copy; then a write per key.
   const reads = await entries('vault', 'secret.read');
-  assert.deepEqual(reads.map((read) => [read.actor, read.decision, read.metadata.subject, read.metadata.purpose]), [
-    [`user:${MAINTAINER}`, 'allow', 'market/prod/DATABASE_URL', 'copy'],
-    [`user:${MAINTAINER}`, 'allow', 'market/prod/STRIPE_KEY', 'copy'],
+  assert.deepEqual(reads.map((read) => [read.actor, read.decision, read.metadata.purpose]), [[`user:${MAINTAINER}`, 'allow', 'copy']]);
+  assert.deepEqual((reads[0]!.metadata.secrets as { subject: string }[]).map((secret) => secret.subject), [
+    'market/prod/DATABASE_URL',
+    'market/prod/STRIPE_KEY',
   ]);
   assert.equal((await entries('app', 'secret.write')).length, 2);
   assert.deepEqual((await maintainer.secrets.reveal('market/staging')).values, { DATABASE_URL: 'postgres://prod', STRIPE_KEY: 'sk_live_2' });

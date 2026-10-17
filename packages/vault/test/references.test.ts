@@ -107,6 +107,24 @@ test("a reader of the holder's environment reads the source through a reference,
   assert.deepEqual(entry!.metadata.also, { projectId: w.billing, environmentId: w.billingProd, secretId: holder.secretId });
 });
 
+test('a read through several references held in one environment is one entry of the source\'s place, naming each holder', async () => {
+  const w = await world();
+  const first = await made(w, ADA, w.holder('FIRST'));
+  const second = await made(w, ADA, w.holder('SECOND'));
+  const through = await w.vault.unwrap({ principal: BO, purpose: 'run', items: [first, second].map(({ via }) => ({ secretVersionId: w.secretVersionId, via })) });
+  assert.ok(through.ok, JSON.stringify(through));
+
+  const reads = (await vaultEntries('secret.read')).filter((entry) => entry.decision === 'allow');
+  assert.equal(reads.length, 1);
+  const [entry] = reads;
+  // The source's place, and the holders' environment as `also`: both logs find it.
+  assert.deepEqual([entry!.projectId, entry!.environmentId, entry!.secretId], [w.market.project, w.market.prod, null]);
+  assert.deepEqual(entry!.metadata.also, { projectId: w.billing, environmentId: w.billingProd });
+  const listed = entry!.metadata.secrets as { secretId: string; via: { reference: string; path: string }; also: { secretId: string } }[];
+  assert.deepEqual(listed.map((secret) => [secret.secretId, secret.via.reference, secret.via.path, secret.also.secretId]), [first, second].map(({ via, holder }) =>
+    [w.source.secretId, via.reference, holder.path, holder.secretId]));
+});
+
 test('making a reference takes read on the source and write on the holder, by your own grants', async () => {
   const w = await world();
   const ask = (principal: string) => w.vault.reference({ principal, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });
