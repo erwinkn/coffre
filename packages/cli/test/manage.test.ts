@@ -167,10 +167,10 @@ test("a grant is on a project or an environment: '*' says what reaches every pro
 test('giving an environment a new slug says who its instance roles reach now', async () => {
   const { connect, written, io } = fixture(() => ({ environment: { slug: 'dev', name: 'dev', archivedAt: null } }));
   await manage.environmentsRename(connect, ['slides/staging', '--slug', 'dev'], io);
-  assert.equal(written.out, 'slides/staging is now slides/dev, "dev"\n  instance roles scoped to staging no longer reach it; those scoped to dev do\n');
+  assert.equal(written.out, 'slides/staging is now slides/dev\n  instance roles scoped to staging no longer reach it; those scoped to dev do\n');
 });
 
-test('projects and environments: create, rename and archive, each one request', async () => {
+test('projects and environments: create, rename and archive, each one request, by slug alone', async () => {
   const project = { slug: 'slides', name: 'Slides', archivedAt: null };
   const { connect, calls, written, io } = fixture(({ method, path }) =>
     path.split('/').length === 4
@@ -187,20 +187,28 @@ test('projects and environments: create, rename and archive, each one request', 
   await manage.environmentsRename(connect, ['deck/prod', '--slug', 'production', '--name', 'Production'], io);
   await manage.projectsArchive(connect, ['deck'], true, io);
   await manage.environmentsArchive(connect, ['deck/production'], false, io);
+  // A name only as an instance before 0.6.2 wants one: the slug, whatever --name says.
   assert.deepEqual(calls, [
-    { method: 'PUT', path: '/projects/slides', body: { name: 'Slides' } },
+    { method: 'PUT', path: '/projects/slides', body: { name: 'slides' } },
     { method: 'PUT', path: '/projects/slides/prod', body: { name: 'prod' } },
     { method: 'PATCH', path: '/projects/slides', body: { slug: 'deck' } },
-    { method: 'PATCH', path: '/projects/deck/prod', body: { name: 'Production', slug: 'production' } },
+    { method: 'PATCH', path: '/projects/deck/prod', body: { slug: 'production' } },
     { method: 'PATCH', path: '/projects/deck', body: { archived: true } },
     { method: 'PATCH', path: '/projects/deck/production', body: { archived: false } },
   ]);
   assert.equal(
     written.out,
-    'created slides, "Slides"\ncreated slides/prod, "prod"\nslides is now deck, "Slides"\ndeck/prod is now deck/production, "Production"\n  instance roles scoped to prod no longer reach it; those scoped to production do\n' +
+    'created slides\ncreated slides/prod\nslides is now deck\ndeck/prod is now deck/production\n  instance roles scoped to prod no longer reach it; those scoped to production do\n' +
       'archived deck: `coffre projects unarchive deck` brings it back\nunarchived deck/production\n',
   );
-  await assert.rejects(manage.projectsRename(connect, ['deck'], io), /give it a new --name, a new --slug, or both/);
+  assert.equal(written.err, 'coffre: --name is ignored: a project goes by its slug\ncoffre: --name is ignored: an environment goes by its slug\n');
+  await assert.rejects(manage.projectsRename(connect, ['deck'], io), /give it a new --slug/);
+  // --name alone, as a script from before 0.6.2 passes it: said to be ignored, and nothing sent.
+  const sent = calls.length;
+  await manage.projectsRename(connect, ['deck', '--name', 'Deck'], io);
+  await manage.environmentsRename(connect, ['deck/production', '--name', 'Production'], io);
+  assert.equal(calls.length, sent);
+  assert.match(written.err, /--name is ignored: a project goes by its slug\ncoffre: --name is ignored: an environment goes by its slug\n$/);
   await assert.rejects(manage.environmentsCreate(connect, ['deck'], io), /expected <project>\/<environment>, not "deck"/);
 });
 

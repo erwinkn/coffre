@@ -443,11 +443,7 @@ function EnvironmentLedger({
 
   return (
     <>
-      <PageHeader
-        tile={project}
-        title={environment}
-        aside={<EnvironmentName project={project} environment={environment} />}
-      />
+      <PageHeader tile={project} title={environment} />
 
       {(active.length > 0 || drafts.length > 0) && (
         <div className="toolbar">
@@ -698,15 +694,6 @@ function EnvironmentLedger({
 
     </>
   );
-}
-
-/** The display name sits beside the slug; it comes from the shell's project tree. */
-function EnvironmentName({ project, environment }: { project: string; environment: string }) {
-  const { projects } = useShell();
-  const name = projects
-    .find((entry) => entry.slug === project)
-    ?.environments.find((entry) => entry.slug === environment)?.name;
-  return name === undefined ? null : <>{name}</>;
 }
 
 /**

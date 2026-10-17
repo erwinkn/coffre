@@ -32,6 +32,42 @@
   environment; elsewhere it still asks the secrets first, so a refused visit
   is logged once. The missing-keys read lost a query per sibling environment,
   and the secrets list a second query for folders.
+- **A new service account's page opens without an error.** Its row in the
+  list asked how it signs in before the server had made it, and its page
+  then showed that "Not found" until a refresh. The row now waits for the
+  account to be made, and making it reads again whatever was asked of it.
+- **A user's or service account's tabs switch at once.** The page reads
+  what every tab shows but the activity log when it opens, and each tab
+  takes it from there, refreshing it behind the page, rather than waiting
+  for the network. The activity log loads in place.
+- **The audit page has one control for what it lists: Actions, Everything
+  or Denials.** It replaces "All events / Denials only", whose two halves
+  both showed as selected, and the "Show detail" switch. Everything adds
+  sign-ins, tokens and the vault's key operations; Denials lists every
+  refusal, those included, so a refused sign-in now shows there.
+- **Shorter copy.** The Verified badge says "Audit log verified by the app
+  and vault keys, last signature at …". A deployment-declared Owner's lock
+  says "Owner defined by the deployment configuration." The service
+  account page drops the explanations under its sign-in sections, its
+  access and its activity, and an empty activity log, a person's too, says
+  "Nothing yet".
+- **The header's project and environment are each one button.** The project's
+  tile, slug and chevron open the list of projects; the environment's slug and
+  chevron open its siblings. The project's own page, all its environments, is
+  the project ticked in its list, archived or not. Each entry in the two lists
+  starts loading its page as it is pointed at or reached by keyboard.
+- **Projects and environments go by their slug alone.** Pages, lists, the
+  command palette and the CLI show the slug; New project, Add environment,
+  Rename and a project's Settings no longer ask for a display name. Renaming
+  is now giving a new slug, which changes the path: `coffre projects rename
+  market --slug marketplace`. The API's `name` stays, for older CLIs:
+  optional on `PUT /projects/:project` and `PUT /projects/:project/:environment`,
+  where it defaults to the slug, still taken by `PATCH`, and still returned,
+  though nothing shows it. The CLI still takes `--name` and says it ignores
+  it; `rename` with `--name` alone changes nothing. The MCP tools
+  `create_project` and `create_environment` ignore a `name`, so a call
+  approved before the upgrade still matches its approval. The column goes in
+  a later release.
 
 ## 0.6.1 (2026-10-16)
 

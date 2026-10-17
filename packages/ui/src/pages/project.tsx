@@ -48,11 +48,7 @@ export function ProjectLayout() {
   const params = { project: found.slug };
   return (
     <>
-      <PageHeader
-        tile={found.slug}
-        title={found.name}
-        aside={<span className="page-title-slug">{found.slug}</span>}
-      />
+      <PageHeader tile={found.slug} title={found.slug} />
 
       {found.archivedAt !== null && (
         <div style={{ marginBottom: '1.25rem' }}>

@@ -143,7 +143,7 @@ export function DirectoryTable({
                             <InstanceRole principal={principal} />
                           </td>
                         ) : (
-                          <ServiceCells principal={principal} />
+                          <ServiceCells principal={principal} adding={state.state === 'pending' && state.kind === 'saving'} />
                         )}
                         <td className="col-actions">
                           {state.state === 'pending' ? (
@@ -198,15 +198,15 @@ const PLATFORM: Record<string, string> = {
  * it reaches, and whether it is still in use. Access comes with the list; the
  * bindings and tokens are read per row, as its own page reads them.
  */
-function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
+function ServiceCells({ principal, adding }: { principal: DirectoryPrincipal; adding: boolean }) {
   const client = useCoffre();
   const shell = useShell();
   const member = memberOf(principal);
   // As `loadServiceDirectory` read them, so these come from its cache; an account just added is yours.
   const ways = waysFor(shell, principal.managed !== false);
-  // Not suspended: an account added here is shown at once, its facts when they come.
-  const { data: bindings } = useQuery(queries.bindings(client, member, ways.workloads));
-  const { data: credentials } = useQuery(queries.credentials(client, member, ways.tokens));
+  // Not suspended: an account added here is shown at once, its facts once it is made, and not asked for before.
+  const { data: bindings } = useQuery({ ...queries.bindings(client, member, ways.workloads), enabled: !adding });
+  const { data: credentials } = useQuery({ ...queries.credentials(client, member, ways.tokens), enabled: !adding });
 
   const platforms = new Map<string, number>();
   const bindingList = bindings?.ok === true ? bindings.bindings : [];
@@ -345,15 +345,7 @@ export function PrincipalActions({
   if (!(capabilities.runsInstance || yours)) return null;
   if (principal.declared === true) {
     return (
-      <Toggletip
-        label={
-          <>
-            The deployment names them an Owner: <span className="mono">owners</span> in the vault's configuration. To
-            change or remove them, take them off that list and deploy.
-          </>
-        }
-        align="end"
-      >
+      <Toggletip label="Owner defined by the deployment configuration." align="end">
         <button type="button" className={trigger} aria-label={`Why ${principal.principalId} can't be changed`}>
           <Lock size={14} />
         </button>

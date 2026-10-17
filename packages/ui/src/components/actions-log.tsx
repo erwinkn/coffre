@@ -41,7 +41,7 @@ export function ActionsLog({ member }: { member: string }) {
     <>
       <section className="card" aria-label="Actions log">
         {shown.length === 0 ? (
-          <EmptyState title="Nothing done yet">Every read, write and change they make is listed here.</EmptyState>
+          <EmptyState title="Nothing yet" />
         ) : (
           <div className="dt-wrap">
             <table className="dt actions-log stacks stacks-inline">

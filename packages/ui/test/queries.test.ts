@@ -9,13 +9,17 @@ import {
   createQueryClient,
   FRESH_MS,
   keys,
+  loadAccess,
   loadDirectory,
   loadEnvironment,
+  loadPrincipal,
   loadProject,
   loadShell,
+  loadSignIn,
   queries,
   refresh,
   shellOf,
+  tabOpens,
 } from '../src/lib/queries.ts';
 
 const market = {
@@ -107,6 +111,59 @@ test('past the fresh window, a navigation reads again', async (t) => {
   t.mock.timers.tick(FRESH_MS + 1);
   await navigate.projects(queryClient, client);
   assert.deepEqual(calls.sort(), ['GET /auth', 'GET /me', 'GET /projects']);
+});
+
+test('a tab opens from what its page read, however old, and refreshes it behind the page', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const calls: string[] = [];
+  let offline = false;
+  // Every read answers at once, until the network stops answering at all.
+  const answer = <T>(route: string, value: T) => () => {
+    calls.push(route);
+    return offline ? new Promise<T>(() => {}) : Promise.resolve(value);
+  };
+  const access = { member: 'token:ci-deploy', principalType: 'service', principalId: 'ci-deploy', status: 'active', instanceRole: 'member', scope: null, managed: true, grants: [] };
+  const client = {
+    auth: answer('GET /auth', { mode: 'signin', signin: null, access: null }),
+    me: answer('GET /me', me),
+    projects: { list: answer('GET /projects', { projects: [market] }) },
+    members: { get: answer('GET /members/token:ci-deploy', {}), access: answer('GET /members/token:ci-deploy/access', access) },
+  } as unknown as CoffreClient;
+  const queryClient = createQueryClient();
+  await loadPrincipal(queryClient, client, 'service', 'ci-deploy');
+  calls.length = 0;
+
+  t.mock.timers.tick(FRESH_MS + 1);
+  offline = true;
+  const [shell, held] = await Promise.all([
+    loadShell(queryClient, client, 'cached'),
+    loadAccess(queryClient, client, 'token:ci-deploy', 'cached'),
+  ]);
+  assert.equal(shell.capabilities.canReadAudit, true);
+  assert.deepEqual(held, { ok: true, ...access });
+  // Asked again all the same, behind the page.
+  assert.deepEqual(calls.sort(), ['GET /auth', 'GET /me', 'GET /members/token:ci-deploy/access', 'GET /projects']);
+});
+
+test('a tab sends nobody away on a stale no: a service account added back opens on its sign-in', async () => {
+  let status = 'removed';
+  const client = {
+    auth: async () => ({ mode: 'signin', signin: { providers: [] }, access: null }),
+    me: async () => me,
+    projects: { list: async () => ({ projects: [market] }) },
+    members: {
+      access: async () => ({ member: 'token:ci-deploy', principalType: 'service', principalId: 'ci-deploy', status, instanceRole: 'member', scope: null, managed: true, grants: [] }),
+    },
+    tokens: { list: async () => ({ tokens: [] }) },
+  } as unknown as CoffreClient;
+  const queryClient = createQueryClient();
+  const shows = async (freshness: 'fresh' | 'cached') => (await loadSignIn(queryClient, client, 'token:ci-deploy', freshness)) !== null;
+  assert.equal(await tabOpens(shows), false, 'removed: nothing to issue');
+
+  // Added back here: the change marks what was read of it stale, and the cache still says removed.
+  status = 'active';
+  await refresh(queryClient, affects.admission('token:ci-deploy'));
+  assert.equal(await tabOpens(shows), true);
 });
 
 test('the audit log and its verification are read on every visit', () => {

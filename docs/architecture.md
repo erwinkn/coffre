@@ -296,7 +296,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
 | delete an archived project or environment for good, owners only (`?dryRun=1` says what it would take) | `DELETE /api/projects/market`, `DELETE /api/projects/market/prod` |
 | the keys an environment lacks of those its siblings have, read or not, by name; dismiss or restore them | `GET /api/projects/market/dev/missing`, `PATCH /api/projects/market/dev/dismissals {"SENTRY_DSN": true, "OLD": null}` |
-| fork an environment: a new one with each key's current value and folder, read and written in the caller's name | `PUT /api/projects/market/staging {"name": "Staging", "from": "prod"}` |
+| fork an environment: a new one with each key's current value and folder, read and written in the caller's name | `PUT /api/projects/market/staging {"from": "prod"}` |
 | list an environment's secrets, never their values: who wrote each value and when (a reference's, its source's current version), and the deployment's `rotateAfterDays` | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
 | what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |

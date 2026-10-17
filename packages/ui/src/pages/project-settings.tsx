@@ -19,7 +19,7 @@ import type { projectSettings } from '../options';
 
 const Route = pageRoute<typeof projectSettings>();
 
-/** A project's settings: its slug, name and folder, and archiving or deleting it. */
+/** A project's settings: its slug and folder, and archiving or deleting it. */
 export function ProjectSettingsPage() {
   const { project } = useProject(Route.useParams().project);
   return (
@@ -31,7 +31,7 @@ export function ProjectSettingsPage() {
 }
 
 /**
- * The project's name and slug, as a form on the page.
+ * The project's slug and folder, as a form on the page.
  *
  * Renaming changes paths other people and scripts use, so it is laid out in
  * plain sight with what it does and does not affect, rather than tucked
@@ -40,22 +40,20 @@ export function ProjectSettingsPage() {
 function GeneralSettings({ project }: { project: ProjectSummary }) {
   const router = useRouter();
   const [slug, setSlug] = useState(project.slug);
-  const [name, setName] = useState(project.name);
   const [folder, setFolder] = useState(project.folder ?? '');
   const coffre = useCoffre();
   const { pending, error, run } = useAction();
   const slugError = slug === '' ? null : slugProblem(slug);
   const folderError = folderProblem(folder);
   const nextFolder = folder === '' ? null : folder;
-  const dirty = slug !== project.slug || name.trim() !== project.name || nextFolder !== project.folder;
+  const dirty = slug !== project.slug || nextFolder !== project.folder;
 
   // Follow a rename made elsewhere (another tab, another person) rather than
   // keep offering the old values back.
   useEffect(() => {
     setSlug(project.slug);
-    setName(project.name);
     setFolder(project.folder ?? '');
-  }, [project.slug, project.name, project.folder]);
+  }, [project.slug, project.folder]);
 
   // Two fields and their Save need no card: the tab already says what they are.
   return (
@@ -66,14 +64,13 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
           run(
             () => coffre.projects.update(project.slug, {
               slug,
-              name,
               // Only when it moves: a move is logged, as `project.move`.
               ...(nextFolder === project.folder ? {} : { folder: nextFolder }),
             }),
             {
               affects: affects.places(),
               onSuccess: async () => {
-                toast.success(slug === project.slug && name.trim() === project.name ? 'Project moved' : 'Project saved');
+                toast.success(slug === project.slug ? 'Project moved' : 'Project saved');
                 // The slug is part of the URL, so a rename has to navigate.
                 if (slug !== project.slug) {
                   await router.navigate({ to: '/projects/$project/settings', params: { project: slug } });
@@ -98,14 +95,6 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
             </span>
           </label>
           <label className="field">
-            <span className="label">Display name</span>
-            <input
-              className="input"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-          <label className="field">
             <span className="label">Folder</span>
             <input
               className="input"
@@ -124,7 +113,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
           <button
             className="btn btn-primary"
             type="submit"
-            disabled={!dirty || pending || slug === '' || slugError !== null || name.trim() === '' || folderError !== null}
+            disabled={!dirty || pending || slug === '' || slugError !== null || folderError !== null}
           >
             {pending && <Spinner />}
             Save
@@ -183,7 +172,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           ) : (
             <Archive size={14} />
           )}
-          {isArchived ? `Restore ${project.name}` : `Archive ${project.name}…`}
+          {isArchived ? `Restore ${project.slug}` : `Archive ${project.slug}…`}
         </button>
       </div>
 
@@ -197,7 +186,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           </div>
           <button className="btn btn-danger-outline" onClick={() => setDeleting(true)}>
             <Trash size={14} />
-            {`Delete ${project.name}…`}
+            {`Delete ${project.slug}…`}
           </button>
         </div>
       )}
@@ -235,7 +224,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           )
         }
         detail={<ArchiveBlocked references={blockers} />}
-        confirmLabel={isArchived ? `Restore ${project.name}` : `Archive ${project.name}`}
+        confirmLabel={isArchived ? `Restore ${project.slug}` : `Archive ${project.slug}`}
         confirmDisabled={asking || blockers.length > 0}
         destructive={!isArchived}
         onConfirm={() =>

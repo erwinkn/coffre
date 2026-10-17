@@ -150,7 +150,7 @@ coffre folders remove market/dev stripe     # every key out of it, each staying 
 
 coffre projects
 coffre projects create market
-coffre projects rename market --name "Market place"   # --slug changes its path
+coffre projects rename market --slug marketplace   # a new path: scripts naming market need it
 coffre projects archive market              # every environment out of reach, nothing deleted
 coffre projects unarchive market
 coffre projects delete market               # an archived one, for good: previews; --apply deletes

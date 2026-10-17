@@ -24,18 +24,20 @@ import { memberRef, uiResult } from './lib/coffre';
 import { stringsOf } from './lib/search';
 import {
   hasAppsTab,
-  loadAccess,
   loadDirectory,
   loadEnvironment,
   loadMember,
+  loadPrincipal,
   loadProject,
   loadServiceDirectory,
   loadSettings,
+  loadSignIn,
   loadShell,
   projectOf,
   queries,
-  signInWays,
+  tabOpens,
   type AuditSearch,
+  type Freshness,
 } from './lib/queries';
 import type { Permission } from './shared/models';
 import { loginSearch } from './lib/signin-errors';
@@ -164,10 +166,11 @@ export const environment = {
 /** `/audit`. */
 export const audit = {
   // Filters live in the URL so a finding can cite the exact view it came from.
+  // Denials always include detail: a refused sign-in is one.
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
     decision: search.decision === 'deny' ? 'deny' : undefined,
     actorId: typeof search.actorId === 'string' && search.actorId !== '' ? search.actorId : undefined,
-    detail: search.detail === '1' ? '1' : undefined,
+    detail: search.detail === '1' || search.decision === 'deny' ? '1' : undefined,
   }),
   loaderDeps: ({ search }: { search: AuditSearch }) => search,
   // The entries only: the verification is asked for once the page is up
@@ -186,28 +189,27 @@ export const users = {
   },
 };
 
-/** `/users/$user`, the layout of a user's tabs: who they are to the instance, for owners. */
+/**
+ * `/users/$user`, the layout of a user's tabs: who they are to the instance,
+ * for owners, and their access, for whoever manages it. Its tabs read what
+ * it read from the cache (`Freshness`), so each opens at once.
+ */
 export const user = {
   loader: ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadMember(queryClient, coffre, memberRef('user', params.user));
+    return loadPrincipal(queryClient, coffre, 'user', params.user);
   },
 };
 
-/** `/users/$user/`, their access on every project where you manage it. */
-export const userAccess = {
-  loader: ({ context, params }: Loader<{ user: string }>) => {
-    const { coffre, queryClient } = coffreOf(context);
-    return loadAccess(queryClient, coffre, memberRef('user', params.user));
-  },
-};
+/** `/users/$user/`, their access on every project where you manage it, which its layout reads. */
+export const userAccess = {};
 
 /** `/users/$user/activity`, for whoever reads the audit log; the others are sent to the first tab. */
 export const userActivity = {
   loader: async ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const shell = await loadShell(queryClient, coffre);
-    if (!shell.capabilities.canReadAudit) throw redirect({ to: '/users/$user', params });
+    const reads = async (freshness: Freshness) => (await loadShell(queryClient, coffre, freshness)).capabilities.canReadAudit;
+    if (!(await tabOpens(reads))) throw redirect({ to: '/users/$user', params });
   },
 };
 
@@ -220,9 +222,14 @@ export const userActivity = {
 export const userApps = {
   loader: async ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const shell = await loadShell(queryClient, coffre);
-    const report = await loadMember(queryClient, coffre, memberRef('user', params.user));
-    if (!hasAppsTab(shell, report)) throw redirect({ to: '/users/$user', params });
+    const has = async (freshness: Freshness) => {
+      const [shell, report] = await Promise.all([
+        loadShell(queryClient, coffre, freshness),
+        loadMember(queryClient, coffre, memberRef('user', params.user), freshness),
+      ]);
+      return hasAppsTab(shell, report);
+    };
+    if (!(await tabOpens(has))) throw redirect({ to: '/users/$user', params });
   },
 };
 
@@ -236,13 +243,14 @@ export const serviceAccounts = {
 
 /**
  * `/service-accounts/$account`, the layout of a service account's tabs: who
- * it is to the instance, for owners, and what it holds, for whoever manages it.
+ * it is to the instance, for owners, what it holds, and how it signs in, for
+ * whoever manages it. Its tabs read what it read from the cache
+ * (`Freshness`), so each opens at once.
  */
 export const serviceAccount = {
-  loader: async ({ context, params }: Loader<{ account: string }>) => {
+  loader: ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const member = memberRef('service', params.account);
-    await Promise.all([loadMember(queryClient, coffre, member), loadAccess(queryClient, coffre, member)]);
+    return loadPrincipal(queryClient, coffre, 'service', params.account);
   },
 };
 
@@ -254,31 +262,20 @@ export const serviceAccount = {
 export const serviceAccountSignIn = {
   loader: async ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const member = memberRef('service', params.account);
-    const [shell, access] = await Promise.all([loadShell(queryClient, coffre), loadAccess(queryClient, coffre, member)]);
-    const ways = signInWays(shell, access);
-    if (ways === null) throw redirect({ to: '/service-accounts/$account/access', params });
-    await Promise.all([
-      queryClient.fetchQuery(queries.credentials(coffre, member, ways.tokens)),
-      queryClient.fetchQuery(queries.bindings(coffre, member, ways.workloads)),
-    ]);
+    const shows = async (freshness: Freshness) => (await loadSignIn(queryClient, coffre, memberRef('service', params.account), freshness)) !== null;
+    if (!(await tabOpens(shows))) throw redirect({ to: '/service-accounts/$account/access', params });
   },
 };
 
-/** `/service-accounts/$account/access`. */
-export const serviceAccountAccess = {
-  loader: ({ context, params }: Loader<{ account: string }>) => {
-    const { coffre, queryClient } = coffreOf(context);
-    return loadAccess(queryClient, coffre, memberRef('service', params.account));
-  },
-};
+/** `/service-accounts/$account/access`, which its layout reads. */
+export const serviceAccountAccess = {};
 
 /** `/service-accounts/$account/activity`, as a user's. */
 export const serviceAccountActivity = {
   loader: async ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const shell = await loadShell(queryClient, coffre);
-    if (!shell.capabilities.canReadAudit) throw redirect({ to: '/service-accounts/$account', params });
+    const reads = async (freshness: Freshness) => (await loadShell(queryClient, coffre, freshness)).capabilities.canReadAudit;
+    if (!(await tabOpens(reads))) throw redirect({ to: '/service-accounts/$account', params });
   },
 };
 

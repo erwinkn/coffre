@@ -38,7 +38,7 @@ export async function forkEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   slug: string,
-  input: { name: string; from: string; references: boolean },
+  input: { name?: string; from: string; references: boolean },
 ): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
   const { project } = place;
   const { from } = input;

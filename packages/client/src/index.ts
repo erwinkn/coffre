@@ -173,7 +173,8 @@ export function createClient(options: ClientOptions) {
     projects: {
       /** With their environments. */
       list: () => call('GET /projects', {}),
-      create: (project: string, input: RouteInput<'PUT /projects/:project'>) =>
+      /** Its `name`, which releases before 0.6.2 show, defaults to the slug. */
+      create: (project: string, input: RouteInput<'PUT /projects/:project'> = {}) =>
         call('PUT /projects/:project', { project }, input),
       update: (project: string, patch: RouteInput<'PATCH /projects/:project'>) =>
         call('PATCH /projects/:project', { project }, patch),
@@ -187,7 +188,8 @@ export function createClient(options: ClientOptions) {
     },
 
     environments: {
-      create: (path: string, input: RouteInput<'PUT /projects/:project/:environment'>) =>
+      /** As a project's: its `name` defaults to the slug. `from` forks a sibling. */
+      create: (path: string, input: RouteInput<'PUT /projects/:project/:environment'> = {}) =>
         call('PUT /projects/:project/:environment', place(path), input),
       update: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment'>) =>
         call('PATCH /projects/:project/:environment', place(path), patch),

@@ -99,7 +99,7 @@ export function grantAccess(client: CoffreClient, project: string): Change<Grant
     },
     affects: (vars) => [
       ...affects.access(project, memberRef(vars.principalType, vars.principalId)),
-      ...(vars.admit === true ? affects.admission() : []),
+      ...(vars.admit === true ? affects.admission(memberRef(vars.principalType, vars.principalId)) : []),
     ],
     run: async (vars) => {
       const place = grantPlace(project, vars.environmentSlug);
@@ -162,7 +162,7 @@ export function invite(client: CoffreClient): Change<Directory, DirectoryPrincip
         scope: vars.principalType === 'user' ? vars.scope : EVERYWHERE,
       },
     ],
-    affects: () => affects.admission(),
+    affects: (vars) => affects.admission(principalId(vars)),
     run: async (vars) => {
       // Adding is an idempotent PUT that would also set the role of someone
       // already here; this is only for someone new.
@@ -297,7 +297,7 @@ type Projects = ({ ok: true; projects: ProjectSummary[] } | Failure);
 
 export const projectsList = listOf<ProjectSummary, Projects>(keys.projects, 'projects', (project) => project.slug);
 
-export function createProject(client: CoffreClient): Change<Projects, ProjectSummary, { slug: string; name: string }, void> {
+export function createProject(client: CoffreClient): Change<Projects, ProjectSummary, { slug: string }, void> {
   return {
     list: projectsList,
     label: (vars) => `project ${vars.slug}`,
@@ -306,7 +306,7 @@ export function createProject(client: CoffreClient): Change<Projects, ProjectSum
       ...projects,
       {
         slug: vars.slug,
-        name: vars.name,
+        name: vars.slug,
         archivedAt: null,
         folder: null,
         // Its maker manages it by their instance role, an Admin's or an Owner's.
@@ -318,7 +318,7 @@ export function createProject(client: CoffreClient): Change<Projects, ProjectSum
     affects: () => affects.places(),
     run: async (vars) => {
       // Creating is an idempotent PUT; a slug that is taken is refused here.
-      const { created } = await client.projects.create(vars.slug, { name: vars.name });
+      const { created } = await client.projects.create(vars.slug);
       if (!created) throw new Refusal(`A project named "${vars.slug}" already exists.`);
     },
   };
@@ -359,19 +359,18 @@ export function environmentId(project: string, environment: string): string {
 }
 
 /** A new environment, empty or, `from` a sibling, forked: each of its keys copied. */
-export function createEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; name: string; from?: string; references?: boolean }, void> {
+export function createEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; from?: string; references?: boolean }, void> {
   return {
     list: environmentsList(project),
     label: (vars) => `environment ${vars.slug}`,
     targets: (vars) => [saving(environmentId(project, vars.slug))],
     apply: (environments, vars) => [
       ...environments,
-      { slug: vars.slug, name: vars.name, accessible: false, details: { archivedAt: null, secretCount: 0 } },
+      { slug: vars.slug, name: vars.slug, accessible: false, details: { archivedAt: null, secretCount: 0 } },
     ],
     affects: () => affects.places(),
     run: async (vars) => {
       const { created } = await client.environments.create(`${project}/${vars.slug}`, {
-        name: vars.name,
         ...(vars.from === undefined ? {} : { from: vars.from }),
         ...(vars.references === true ? { references: true } : {}),
       });
@@ -380,7 +379,7 @@ export function createEnvironment(client: CoffreClient, project: string): Change
   };
 }
 
-export type RenameVars = { from: string; slug: string; name: string };
+export type RenameVars = { from: string; slug: string };
 
 export function renameEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, RenameVars, unknown> {
   return {
@@ -392,10 +391,10 @@ export function renameEnvironment(client: CoffreClient, project: string): Change
         : [saving(environmentId(project, vars.from)), saving(environmentId(project, vars.slug))],
     apply: (environments, vars) =>
       environments.map((environment) =>
-        environment.slug === vars.from ? { ...environment, slug: vars.slug, name: vars.name } : environment,
+        environment.slug === vars.from ? { ...environment, slug: vars.slug } : environment,
       ),
     affects: () => affects.places(),
-    run: (vars) => client.environments.update(`${project}/${vars.from}`, { slug: vars.slug, name: vars.name }),
+    run: (vars) => client.environments.update(`${project}/${vars.from}`, { slug: vars.slug }),
   };
 }
 
