@@ -58,9 +58,41 @@
   key names, never a value; they and the owner may delete one, erasing its
   values. They are archived, restored and deleted with their parent, hold
   no reference, and take no grant.
-- **Migration** `0005_personal_configs` adds `environments.owner`, with its
+- **Migration** `0006_personal_configs` adds `environments.owner`, with its
   check and a unique index. It only adds. A release before 0.7 cannot open
   a personal config's values: their data keys are bound to the owner.
+- **Personal tokens: hand a script or an agent part of what you hold, for
+  an afternoon.** `coffre tokens issue --label cursor-agent --scope
+  market/dev=developer --expires-in 4h` makes a bearer token, `coffre_pat_…`,
+  that acts as you on what its scope names: never more than you held when
+  you made it, and at each request no more than you hold then. Losing a
+  grant narrows it, gaining one widens nothing, and being removed ends it.
+  It lasts a minute to a week, an hour unless told. Its scope names only
+  roles that manage no access (viewer, developer, maintainer, auditor), and
+  it reaches your secrets and places alone: it makes no token, session,
+  connected app, grant, member, service account or trust binding, changes
+  no setting, approves no sign-in, deletes nothing for good, and runs no
+  instance, whatever your role. Every entry it writes, the vault's too,
+  names it, and the audit log shows "ada via token 'cursor-agent'", in the
+  pages and in `coffre audit`. `coffre tokens` lists yours and `coffre
+  tokens revoke <id>` ends one; so does `coffre logout` signed in with it.
+  Your account's Sessions tab lists them, with Revoke; a person's page lists
+  theirs for whoever runs the instance, and their removal revokes them
+  ([docs/design/personal-tokens.md](docs/design/personal-tokens.md)).
+- **A credential with a scope holds nothing of the instance's.** A request
+  on one runs no instance, reads no whole log, makes no project and sets up
+  no service account under the instance's setting. Service accounts' tokens
+  could not before either; an Owner's personal token cannot now.
+- **API.** `GET`, `POST` and `DELETE /api/members/user:<email>/tokens` list,
+  make and revoke personal tokens; a personal token's `POST` takes `label`,
+  `expiresInMinutes` and `scope`, all three required. `GET /api/me` says
+  which personal token a request came in on (`personalToken`), and each
+  audit entry made with one carries it (`token`). The member report lists a
+  person's (`personalTokens`), and `ServiceTokenRow` is now `TokenRow`.
+- **Schema.** `0005_personal_tokens` widens `credentials`' kind check to
+  `personal` and indexes the log's `token.create` entries by the credential
+  they made. Nothing is removed or tightened, and 0.6 refuses a personal
+  token during the deploy, as no token of its own.
 
 ## 0.6.2 (2026-10-17)
 

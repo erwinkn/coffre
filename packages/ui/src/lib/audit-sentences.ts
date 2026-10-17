@@ -83,6 +83,17 @@ function subject(entry: AuditEntry): Part[] {
   return [{ member: `${entry.metadata.principalType === 'service' ? 'token' : 'user'}:${id}` }];
 }
 
+/** Whether a token entry is about a personal token, which acts as its person, rather than a service account's. */
+function personal(entry: AuditEntry): boolean {
+  return entry.metadata.kind === 'personal';
+}
+
+/** A personal token's label, as it was made: ` "cursor-agent"`. */
+function labelled(entry: AuditEntry): Part[] {
+  const label = text(entry.metadata.label);
+  return label === null ? [] : [` “${label}”`];
+}
+
 /** Why the vault made someone an Owner itself, said after it. */
 function owned(entry: AuditEntry): Part[] {
   return entry.metadata.reason === 'owners' ? [': the deployment names them one'] : [];
@@ -424,8 +435,24 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => (text(entry.metadata.provider) === null ? [] : [`with ${text(entry.metadata.provider)}`]),
   },
   sign_out: { did: 'signed out', tried: 'sign out', what: () => [] },
-  'token.create': { did: 'issued a bearer token to', tried: 'issue a bearer token to', what: (facts) => subject(facts.entry), then: ({ entry }) => reaching(entry) },
-  'token.revoke': { did: 'revoked a bearer token of', tried: 'revoke a bearer token of', what: (facts) => subject(facts.entry) },
+  // A personal token is its person's own, and named by its label; a bearer token is a service account's.
+  'token.create': {
+    did: ({ entry }) => (personal(entry) ? 'made a personal token' : 'issued a bearer token to'),
+    tried: ({ entry }) => (personal(entry) ? 'make a personal token' : 'issue a bearer token to'),
+    what: ({ entry }) => (personal(entry) ? labelled(entry) : subject(entry)),
+    then: ({ entry }) => reaching(entry),
+  },
+  'token.revoke': {
+    did: ({ entry }) => (personal(entry) ? 'revoked a personal token of' : 'revoked a bearer token of'),
+    tried: ({ entry }) => (personal(entry) ? 'revoke a personal token of' : 'revoke a bearer token of'),
+    what: (facts) => subject(facts.entry),
+  },
+  // A personal token refused a route only its person reaches: the route, as the API names it.
+  'token.use': {
+    did: 'used a personal token for',
+    tried: 'use a personal token for',
+    what: ({ entry }) => [text(entry.metadata.route) ?? 'something'],
+  },
   'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [] },
   'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [] },
   'mcp.read': { did: 'used', tried: 'use', what: ({ entry }) => tool(entry), then: ({ entry }) => via(entry) },
@@ -591,6 +618,8 @@ const REASONS: Record<string, string> = {
   replaced: 'what it replaces changed since it was shown',
   unconfirmed: 'what it replaces could not be read',
   disconnected: 'the app was disconnected',
+  personal_token: 'only its person can, signed in as themselves',
+  beyond_holder: 'more than they hold',
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

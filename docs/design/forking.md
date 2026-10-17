@@ -606,7 +606,7 @@ Left out, on purpose or for later:
 
 ### What 0.7's second PR built: personal configs
 
-- **Schema.** `0005_personal_configs` adds `environments.owner`, its check
+- **Schema.** `0006_personal_configs` adds `environments.owner`, its check
   (an owner needs a parent, and is a `user:`), and a unique index on
   `(parent_id, owner)` that leaves out tombstones. The app's login has no
   UPDATE on it, so an owner never changes.

@@ -32,14 +32,17 @@ removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account, 1 co
 The vault removes them in one transaction of its own: it revokes every
 grant they hold, on a project or an environment, takes their instance role,
 marks them removed, and moves their *generation* on.
-Every session, CLI login, service account's bearer token, linked account,
+Every session, CLI login, personal token, service account's bearer token, linked account,
 device approval and connected MCP app carries the generation it was issued under, so all of them stop working at
 that moment, whatever happens next. The vault logs one `member.remove`, and
 one `access.revoke` per grant, so each project's log shows who lost access to
 it. Then the app marks the sessions, tokens, linked accounts and connected
 apps revoked, so they no longer list as live. The removal dialog names the
 apps it disconnects, and so does the person's page, for owners, on its
-**Connected apps** tab, where each can be disconnected on its own.
+**Connected apps** tab, where each can be disconnected on its own. Their
+personal tokens ([design](design/personal-tokens.md)) are counted in the
+dialog and listed on their page and in `coffre offboard`, each revocable
+there too.
 
 A sign-in racing a removal either finishes first and is cut off by the new
 generation, or is refused. Every request checks the member, in both sign-in

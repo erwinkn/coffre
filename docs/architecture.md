@@ -312,6 +312,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | a member's instance role and scope, and the grants you manage, in one query | `GET /api/members/user:ada@acme.example/access` |
 | list, issue (`?dryRun=1` to preview what it reaches) or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
+| list, make or revoke your personal tokens, which act as you within their scope ([design](design/personal-tokens.md)); whoever runs the instance lists and revokes anyone's | `GET` / `POST /api/members/user:ada@acme.example/tokens {"label": "cursor-agent", "expiresInMinutes": 240, "scope": {"market/dev": "viewer"}}`, `DELETE …/tokens/:id` |
 | list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
 | a GitHub repository's or GitLab project's IDs, for a binding: a public one, or one the deployment's GitHub App is installed on | `GET /api/workloads/lookup?github=acme/api` |
 | the repositories the deployment's GitHub App is installed on, private ones too ([github-app.md](github-app.md)) | `GET /api/workloads/repositories` |

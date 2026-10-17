@@ -32,7 +32,7 @@ import { can, canAnywhere, permissionsAt, placeOf, seesProject, type Caller } fr
 import { allowed, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
-import { serviceSettingFor, setsUp } from './services.ts';
+import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 import { formatMember } from './paths.ts';
 import { resolveKeys, type Held } from './inheritance.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
@@ -68,6 +68,12 @@ export type Me = {
    * inferred from a route answering 404 or from where a page was served.
    */
   features: { mcp: string | null; workloads: boolean };
+  /**
+   * The personal token the request came in on: its label, when it ends and
+   * what it reaches, by path. Null for a session, or anything else.
+   * `environments` and the rest are already what it reaches.
+   */
+  personalToken: { id: string; label: string; expiresAt: string; scope: ScopeByPath } | null;
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
@@ -140,6 +146,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
     // A scope names projects the caller may not see (D95): those they do, by slug.
     serviceSetup: setting === null ? null : scopeView(setting, runsInstance(caller) ? known : known.filter((project) => seesProject(caller, project))),
     features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
+    personalToken: ctx.personalToken === null ? null : { ...ctx.personalToken, scope: scopeByPath(caller.credentialScope ?? [], known)! },
     environments: reachable,
   };
 }

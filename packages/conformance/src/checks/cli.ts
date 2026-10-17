@@ -249,19 +249,22 @@ export async function verifyKeys(cli: Cli): Promise<string> {
  * service admitted and granted, a token issued into a 0600 file, then
  * piped to `coffre login --token` in a CLI of the service's own, read
  * with, revoked after its preview, and refused from then on; the grant
- * revoked, the secret and the project archived. No token shows in what
- * either prints.
+ * revoked, the secret and the project archived. A personal token too, for
+ * an agent's CLI of its own: it reads within its scope, writes nothing
+ * past it, makes no token, and is refused once revoked. No token shows in
+ * what any prints.
  */
 export async function manageByCli(cli: Cli): Promise<string> {
   const steps: string[] = [];
   const ci = new Cli(cli.origin);
+  const helper = new Cli(cli.origin);
   const as = (who: Cli, label: string) => async (args: string[], input?: string, code = 0): Promise<string> => {
     const run = await who.run(args, {}, input);
     expect(run.code === code, `coffre ${args.join(' ')}${label} exited ${run.code}, not ${code}`, run.output);
     steps.push(`${args.slice(0, 2).join(' ')}${label}`);
     return run.output;
   };
-  const [coffre, service] = [as(cli, ''), as(ci, ', as the service')];
+  const [coffre, service, agent] = [as(cli, ''), as(ci, ', as the service'), as(helper, ', with a personal token')];
   try {
     const value = `cli-value-${randomBytes(8).toString('hex')}`;
     await coffre(['projects', 'create', 'conformance-cli', '--name', 'CLI']);
@@ -295,6 +298,24 @@ export async function manageByCli(cli: Cli): Promise<string> {
     const gone = await service(['get', 'conformance-cli/ci/API_TOKEN'], undefined, 1);
     expect(/does not know this bearer token/.test(gone), 'a revoked token was not refused plainly', gone);
 
+    // A personal token, for an agent with a CLI of its own: it reads as the admin, within its scope, and makes no token.
+    const personal = join(cli.home, 'agent-token');
+    await coffre(['tokens', 'issue', '--label', 'conformance-agent', '--scope', 'conformance-cli/ci=viewer', '--expires-in', '30m', '--output-file', personal]);
+    const pat = readFileSync(personal, 'utf8').trim();
+    expect(/^coffre_pat_/.test(pat) && (statSync(personal).mode & 0o777) === 0o600, 'the personal token file is not a 0600 file holding a personal token', statSync(personal).mode);
+    const loggedIn = await agent(['login', cli.origin, '--token'], `${pat}\n`);
+    expect(!loggedIn.includes(pat), 'coffre login --token printed a personal token');
+    const whoami = await agent(['whoami']);
+    expect(whoami.includes('personal token "conformance-agent"'), 'whoami does not name the personal token it signed in with', whoami);
+    expect((await agent(['get', 'conformance-cli/ci/API_TOKEN'])).trim() === value, 'the personal token did not read within its scope');
+    await agent(['set', 'conformance-cli/ci/OTHER'], 'x\n', 1);
+    const minted = await agent(['tokens', 'issue', '--label', 'again', '--scope', 'conformance-cli/ci=viewer'], undefined, 1);
+    expect(/a personal token cannot do this/.test(minted), 'a personal token made another, or was not refused plainly', minted);
+    const [mine] = JSON.parse(await coffre(['tokens', '--json'])) as { id: string; label: string }[];
+    expect(mine?.label === 'conformance-agent', 'tokens --json does not list the personal token', mine);
+    await coffre(['tokens', 'revoke', mine!.id, '--apply']);
+    await agent(['get', 'conformance-cli/ci/API_TOKEN'], undefined, 1);
+
     await coffre(['revoke', 'conformance-cli', 'conformance-deploy', '--env', 'ci', '--service']);
     await coffre(['archive', 'conformance-cli/ci/API_TOKEN']);
     const keys = JSON.parse(await coffre(['list', 'conformance-cli/ci', '--json'])) as { key: string; archived: boolean }[];
@@ -304,8 +325,9 @@ export async function manageByCli(cli: Cli): Promise<string> {
     expect(projects.find(({ slug }) => slug === 'conformance-cli')?.archivedAt !== null, 'the project is not archived', projects);
     const sessions = JSON.parse(await coffre(['sessions', '--json'])) as { kind: string; current: boolean }[];
     expect(sessions.some(({ kind, current }) => kind === 'cli' && current), "sessions --json does not mark this CLI's session", sessions);
-    return `${steps.length} commands: ${[...new Set(steps)].join(', ')}; the token only in its 0600 file and piped to login, refused once revoked`;
+    return `${steps.length} commands: ${[...new Set(steps)].join(', ')}; each token only in its 0600 file and piped to login, refused once revoked; a personal token reads within its scope and makes no token`;
   } finally {
     ci.remove();
+    helper.remove();
   }
 }

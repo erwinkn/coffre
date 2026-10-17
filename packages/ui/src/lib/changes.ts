@@ -1,4 +1,4 @@
-import type { CoffreClient, ConnectedApp, IdentityRow, MissingKey, OffboardingReport, SecretKey, SessionRow } from '@coffre/client';
+import type { CoffreClient, ConnectedApp, IdentityRow, MissingKey, OffboardingReport, SecretKey, SessionRow, TokenRow } from '@coffre/client';
 import { EVERYWHERE, unscoped, type InstanceRole, type Role, type Scope } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
@@ -201,13 +201,12 @@ export function removeMember(client: CoffreClient): Change<Directory, DirectoryP
 
 // --- credentials, sessions, linked accounts --------------------------------------
 
-type Credential = { id: string; hint: string };
-type Credentials = ({ ok: true; tokens: Credential[] } | Failure) | null;
+type Credentials = ({ ok: true; tokens: TokenRow[] } | Failure) | null;
 
-export function revokeCredential(client: CoffreClient, serviceId: string): Change<Credentials, Credential, Credential, unknown> {
-  const member = memberRef('service', serviceId);
+/** Revoking a member's token: a service account's bearer token, on its page, or a personal token of your own, on your account. */
+export function revokeCredential(client: CoffreClient, member: string): Change<Credentials, TokenRow, TokenRow, unknown> {
   return {
-    list: listOf<Credential, Credentials>([...keys.credentials(member), { allowed: true }], 'tokens', (token) => token.id),
+    list: listOf<TokenRow, Credentials>([...keys.credentials(member), { allowed: true }], 'tokens', (token) => token.id),
     label: (token) => `token ${token.hint}`,
     targets: (token) => [removing(token.id)],
     removing: REVOKING,
@@ -259,6 +258,24 @@ export function disconnectApp(client: CoffreClient): Change<Apps, ConnectedApp, 
 }
 
 type Report = { ok: true; report: OffboardingReport | null } | Failure | null;
+
+/** Whoever runs the instance revoking someone's personal token, on their page: their report lists it, as they read it. */
+export function revokeMemberToken(client: CoffreClient, member: string): Change<Report, TokenRow, TokenRow, unknown> {
+  return {
+    list: {
+      queryKey: [...keys.report(member), { owner: true }],
+      items: (data) => (data?.ok === true ? (data.report?.personalTokens ?? []) : []),
+      withItems: (data, personalTokens) => (data?.ok === true && data.report !== null ? { ...data, report: { ...data.report, personalTokens } } : data),
+      id: (token) => token.id,
+    },
+    label: (token) => `token ${token.hint}`,
+    targets: (token) => [removing(token.id)],
+    removing: REVOKING,
+    // Their report counts what removing them would end; the list on their account is theirs to read again.
+    affects: () => [keys.report(member), keys.credentials(member)],
+    run: (token) => client.tokens.revoke(member, token.id),
+  };
+}
 
 /** An owner disconnecting someone's app, on their page: their report lists it, as the owner reads it. */
 export function disconnectMemberApp(client: CoffreClient, member: string): Change<Report, ConnectedApp, ConnectedApp, unknown> {

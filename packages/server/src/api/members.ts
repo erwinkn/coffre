@@ -45,6 +45,7 @@ import { badRequest, conflict, forbidden, notFound, vaultRefused } from './error
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
+import { tokenRows, type TokenRow } from './signin.ts';
 import { accountOf, managedAccount, notManager, readScope, scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 
 export type MemberGrant = {
@@ -147,6 +148,8 @@ export type OffboardingReport = {
   issuedTokens: IssuedToken[];
   /** A person's connected MCP apps, which removing them disconnects. */
   apps: ConnectedApp[];
+  /** A person's personal tokens, which removing them revokes; none for a service account, whose tokens are on its page. */
+  personalTokens: TokenRow[];
   /**
    * References they made, live ones first, as the log's `reference.create`
    * entries name their actor: each belongs to the environment that holds
@@ -162,8 +165,14 @@ export type OffboardingReport = {
   personal: { project: string; of: string; slug: string }[];
 };
 
-/** What lets a member in, counted: what removing them revokes. */
+/**
+ * What lets a member in, counted: what removing them revokes. `tokens` are
+ * a service account's bearer tokens, or a person's personal tokens.
+ */
 export type WaysIn = { grants: number; sessions: number; tokens: number; identities: number; apps: number };
+
+/** Whether a credential is a session, a browser's or a command line's, rather than a token. */
+const isSession = (credential: { kind: string }) => credential.kind === 'browser' || credential.kind === 'cli';
 
 /** Someone no longer a member, and how many of their report's values are left. */
 export type RemovedMember = {
@@ -496,8 +505,8 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     removedBy: status === 'removed' ? parseGrantee(row!.statusChangedBy).id : null,
     live: {
       grants: listed.grants.length,
-      sessions: held.filter((credential) => credential.kind !== 'service').length,
-      tokens: held.filter((credential) => credential.kind === 'service').length,
+      sessions: held.filter(isSession).length,
+      tokens: held.filter((credential) => !isSession(credential)).length,
       identities: row?.identities.length ?? 0,
       apps: apps.length,
     },
@@ -513,6 +522,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       scope: scopeByPath(readScope(token.scope), known),
     })),
     apps,
+    personalTokens: member.type === 'user' ? tokenRows(held, known) : [],
     references: made,
     personal: known.flatMap((project) => project.environments
       .filter((environment) => environment.owner === formatMember(member))
@@ -774,8 +784,8 @@ export async function removeMember(
 
       return {
         grants: result.revoked.length,
-        sessions: liveCredentials.filter((row) => row.kind !== 'service').length,
-        tokens: liveCredentials.filter((row) => row.kind === 'service').length,
+        sessions: liveCredentials.filter(isSession).length,
+        tokens: liveCredentials.filter((row) => !isSession(row)).length,
         identities: liveIdentities.length,
         // As the report counts them: a code never redeemed was no app yet.
         apps: liveApps.filter((row) => row.refreshHash !== null).length,

@@ -1,6 +1,8 @@
 import {
   allows,
   assignableToEnvironment,
+  delegable,
+  DELEGABLE_ROLES,
   isCredentialScope,
   issuesCredential,
   managesService,
@@ -185,14 +187,7 @@ export async function issuedScope(
   const account = accountOf(standing.grants, standing.by, known);
   let scope: ServiceAccount['grants'];
   if (wanted !== undefined) {
-    scope = parseScope(wanted).map(({ path, role }) => {
-      const project = known.find((candidate) => candidate.slug === path.project);
-      if (project === undefined) throw notFound(`no project "${path.project}"`);
-      if (path.environment === undefined) return { role, place: placeOf(project, null) };
-      const environment = project.environments.find((candidate) => candidate.slug === path.environment);
-      if (environment === undefined) throw notFound(`no environment "${formatPath(path)}"`);
-      return { role, place: placeOf(project, environment) };
-    });
+    scope = placedScope(wanted, known);
   } else if (inherited !== undefined) {
     // What the replaced bindings reached and the account still holds: a place deleted, or a role it lost, drops out.
     const held: Holdings = { ...NOTHING, grants: account.grants.map(asGrant) };
@@ -202,7 +197,6 @@ export async function issuedScope(
   } else {
     scope = account.grants;
   }
-  if (new Set(scope.map(({ place }) => `${place.projectId}/${place.environmentId ?? ''}`)).size !== scope.length) throw badRequest('name each place once');
   if (scope.length === 0) {
     throw badRequest('a credential reaches only what its account holds when it is made: give the account a grant first');
   }
@@ -216,6 +210,58 @@ export async function issuedScope(
     );
   }
   const issued = scope.map(asGrant);
+  return { scope: issued, byPath: scopeByPath(issued, known)! };
+}
+
+/**
+ * A scope asked by path, each place found as it is now: one that is not
+ * there is not found. Each place once.
+ */
+function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[]): ServiceAccount['grants'] {
+  const scope = parseScope(wanted).map(({ path, role }) => {
+    const project = known.find((candidate) => candidate.slug === path.project);
+    if (project === undefined) throw notFound(`no project "${path.project}"`);
+    if (path.environment === undefined) return { role, place: placeOf(project, null) };
+    const environment = project.environments.find((candidate) => candidate.slug === path.environment);
+    if (environment === undefined) throw notFound(`no environment "${formatPath(path)}"`);
+    return { role, place: placeOf(project, environment) };
+  });
+  if (new Set(scope.map(({ place }) => `${place.projectId}/${place.environmentId ?? ''}`)).size !== scope.length) throw badRequest('name each place once');
+  return scope;
+}
+
+/**
+ * The scope a personal token is made with, as its person asked for it, by
+ * path: each role one that manages no access (`delegable`), and one they
+ * hold all of at its place now, by their instance role or a grant
+ * (`holder`, as the vault answers them, with no credential's scope). One
+ * that reaches nothing is refused: a token reaches what it names, and
+ * nothing its person is given later.
+ */
+export async function personalScope(
+  db: Queryable,
+  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>,
+  holder: Holdings,
+  wanted: ScopeByPath,
+  metadata: Record<string, unknown>,
+): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
+  const known = await places(db);
+  const scope = placedScope(wanted, known);
+  if (scope.length === 0) throw badRequest('say what the token reaches: a role on a project or an environment, as --scope market/dev=viewer');
+  const issued = scope.map(asGrant);
+  const named = (grant: ServiceAccount['grants'][number]) => Object.keys(scopeByPath([asGrant(grant)], known)!)[0]!;
+  const managing = scope.find(({ role }) => !delegable(role));
+  if (managing !== undefined) {
+    throw badRequest(`a personal token never manages access: name ${DELEGABLE_ROLES.join(', ')} on ${named(managing)}, not ${managing.role}`);
+  }
+  const beyond = scope.find(({ role, place }) => !ROLES[role].permissions.every((permission) => allows(holder, permission, place)));
+  if (beyond !== undefined) {
+    const path = named(beyond);
+    throw new Refusal(
+      forbidden(`a personal token reaches at most what you hold: not ${beyond.role} on ${path}`),
+      denied(ctx, 'token.create', 'beyond_holder', { metadata: { ...metadata, path } }),
+    );
+  }
   return { scope: issued, byPath: scopeByPath(issued, known)! };
 }
 

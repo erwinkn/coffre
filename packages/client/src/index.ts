@@ -43,10 +43,10 @@ export type {
   RemovedMember,
   SecretKey,
   SecretVersion,
-  ServiceTokenRow,
   SessionRow,
   SetResult,
   TokenPlan,
+  TokenRow,
   WorkloadIds,
 } from './api.ts';
 
@@ -268,6 +268,10 @@ export function createClient(options: ClientOptions) {
       remove: (member: string) => call('DELETE /members/:member', { member }),
     },
 
+    /**
+     * A member's tokens: a service account's bearer tokens, or a person's
+     * personal tokens (`user:<email>`), which act as them within their scope.
+     */
     tokens: {
       list: (member: string) => call('GET /members/:member/tokens', { member }),
       /** What the token would reach, as the server would issue it now; issues nothing. */
