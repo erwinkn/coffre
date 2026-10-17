@@ -815,7 +815,7 @@ class VaultService implements Vault {
           purpose: input.purpose,
           ...(via === null ? {} : viaDetail(via, seal)),
           // A fork that failed the check is named, never filed under: its project's log is no place for this read.
-          ...(through === null ? {} : ok ? throughDetail(through, forks.get(through)) : { through: { environmentId: through, refused: true } }),
+          ...(through === null ? {} : ok ? throughDetail(through, forks.get(through), via !== null) : { through: { environmentId: through, refused: true } }),
         }),
         secretVersionId: versionIds.get(secret),
       };
@@ -2488,14 +2488,18 @@ function validateThrough(through: string | null | undefined): string | null {
 }
 
 /**
- * How a read of an inherited value is logged: the fork it was read in, as
- * `also`, which puts it in the fork's log too. The fork decides nothing:
- * the reader's grants where the value is held do, as for any read.
+ * How a read of an inherited value is logged: the fork it was read in,
+ * `through`, and as `also`, which puts it in the fork's log too, unless it
+ * was read through the parent's reference. The fork decides nothing: the
+ * reader's grants where the value is held do, as for any read.
  */
-function throughDetail(through: string, fork: { projectId: string; slug: string } | undefined): Record<string, unknown> {
+function throughDetail(through: string, fork: { projectId: string; slug: string } | undefined, viaReference: boolean): Record<string, unknown> {
   return {
     through: { environmentId: through, ...(fork === undefined ? {} : { slug: fork.slug }) },
-    also: { projectId: fork?.projectId ?? null, environmentId: through },
+    // Through a reference, the entry is the source's, in another project perhaps, and stays filed where references
+    // file theirs: the source and the holder, the parent. A fork's own log would show a reader of the fork alone
+    // what the parent's reference reads, which is the parent's to tell.
+    ...(viaReference ? {} : { also: { projectId: fork?.projectId ?? null, environmentId: through } }),
   };
 }
 

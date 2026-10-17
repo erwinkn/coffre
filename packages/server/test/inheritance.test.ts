@@ -673,3 +673,40 @@ test('a reset override removed, its key archived in the parent since, is listed 
   await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: null });
   assert.deepEqual((await maintainer.secrets.list('market/prod-eu')).keys.filter((key) => key.key === 'SENTRY_DSN').map((key) => [key.archived, key.parent]), [[true, null]]);
 });
+
+test("a fork's removal stays listed when a parent between removes the key too, its kept override folded in", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.environments.create('market/prod-eu-canary', { from: 'prod-eu', inherit: true });
+  await maintainer.secrets.set('market/prod-eu-canary', { STRIPE_KEY: 'sk_canary' });
+  await maintainer.secrets.inherit('market/prod-eu-canary/STRIPE_KEY', true);
+  await maintainer.environments.dismiss('market/prod-eu-canary', { STRIPE_KEY: true });
+  await maintainer.environments.dismiss('market/prod-eu', { STRIPE_KEY: true });
+  const listed = (await maintainer.secrets.list('market/prod-eu-canary')).keys.filter((key) => key.key === 'STRIPE_KEY');
+  assert.deepEqual(listed.map((key) => [key.archived, key.parent]), [[false, { from: 'prod-eu', state: 'removed', changed: false, reset: true, held: false }]]);
+  // prod-eu inherits it again: canary's removal is one again, of prod's key.
+  await maintainer.environments.dismiss('market/prod-eu', { STRIPE_KEY: null });
+  assert.deepEqual((await maintainer.secrets.list('market/prod-eu-canary')).keys.filter((key) => key.key === 'STRIPE_KEY').map((key) => key.parent),
+    [{ from: 'prod', state: 'removed', changed: false, reset: true, held: true }]);
+  // A missing key's dismissal, of a key no parent has a row of, is no removal: not listed.
+  await root.environments.create('market/dev', { name: 'Dev' });
+  await root.secrets.set('market/dev', { DEV_ONLY: 'x' });
+  await maintainer.environments.dismiss('market/prod-eu-canary', { DEV_ONLY: true });
+  assert.equal((await maintainer.secrets.list('market/prod-eu-canary')).keys.some((key) => key.key === 'DEV_ONLY'), false);
+});
+
+test("a reference a fork inherits is read in its log's terms: filed under its source and prod, never under the fork", async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'Prod' });
+  await root.secrets.set('billing/prod', { PRIVATE_SOURCE: 'billing-secret' });
+  await root.secrets.set('market/prod', { SHARED: { ref: 'billing/prod/PRIVATE_SOURCE' } });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  await root.secrets.reveal('market/prod-eu/SHARED');
+  const [read] = await entries('vault', 'secret.read');
+  assert.deepEqual([read.metadata.subject, read.metadata.through, (read.metadata.also as { environmentId: string }).environmentId],
+    ['billing/prod/PRIVATE_SOURCE', { environmentId: await environmentId('prod-eu'), slug: 'prod-eu' }, await environmentId('prod')]);
+  const { entries: forkLog } = await root.audit.list({ path: 'market/prod-eu' });
+  assert.equal(forkLog.filter((entry) => entry.action === 'secret.read').length, 0);
+  const { entries: prodLog } = await root.audit.list({ path: 'market/prod' });
+  assert.equal(prodLog.filter((entry) => entry.action === 'secret.read').length, 1);
+});

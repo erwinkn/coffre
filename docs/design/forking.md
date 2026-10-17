@@ -227,7 +227,8 @@ derived, not copied, so a move in prod shows in every fork at once.
 **A key is archived in the parent.** Inheriting stops, as archived keys
 are not live. A fork's override of it stays, and now reads as an
 addition. A fork's removal of it does nothing, and the page shows it as
-"removed · prod archived it", which Restore cleans up.
+"removed · prod dropped it", which Restore cleans up. So it is when a
+parent between them removes the key itself.
 
 **The parent is archived or deleted.** Archiving an environment that live
 forks inherit from is refused. The 409 names them: "market/prod is
@@ -346,11 +347,15 @@ a live environment of the same project, other than the value's own. It's
 checked once, not again under the log's head as grants are, because it
 decides nothing: the vault doesn't ask whether the reader reads the fork
 it names. The worst a lying app does is file a read under another live
-environment of the same project, a read the reader was allowed anyway. One gap remains. A read
+environment of the same project, a read the reader was allowed anyway. A read
 of a reference that the fork inherits has three places (the source, the
-holder prod, the fork) and `also` names one, so it goes to the fork, and
-prod's log misses that read. That's acceptable for now. A list-valued
-`also` would close it, at the price of the log's expression indexes.
+holder prod, the fork), and `also` names one: the holder, as for any
+reference read. `through` still names the fork, but the fork's log does
+not list the read: its entry is the source's, perhaps in another project,
+and a fork's log would show an auditor of the fork alone what prod's
+reference reads, which is prod's to tell. A list-valued `also` with a
+redacted fork view could add it, at the price of the log's expression
+indexes.
 
 ## 4. Vault and crypto
 
@@ -488,8 +493,9 @@ fork holds; otherwise `{ from, state, changed, reset, held }`: `state`
 is `inherited`, `overridden` or `removed`, `from` the environment holding
 the parent's key, `changed` that its value is newer than the override,
 `reset` that the fork's own value was reset and is kept, and `held`,
-false for a removal of a key `from` has archived since ("removed · prod
-archived it", with Restore). A fork's folder actions reach only the keys
+false for a removal of a key no parent passes down any more, `from` then
+naming the nearest that archived or removed it ("removed · prod dropped
+it", with Restore). A fork's folder actions reach only the keys
 it holds; an inherited key is filed where its parent files it. A key is
 listed once: a reset override is folded into its inherited entry, not
 listed again as archived.
@@ -597,7 +603,7 @@ Left out, on purpose or for later:
   and preselecting "Inheriting from" in Add environment: an empty
   environment stays the default, as the CLI's copy does;
 - a list-valued `also`, so a read of a reference a fork inherits also
-  reaches the holder's log (section 3).
+  reaches the fork's log, redacted (section 3).
 
 ## 8. Recommendation
 

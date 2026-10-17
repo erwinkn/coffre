@@ -67,8 +67,8 @@ export type SecretKey = {
    * is the environment that holds it, the parent or one above; `changed`
    * says its value is newer than the override; `reset`, that the fork's
    * own value was reset to it and is kept, archived, for `inherit: false`
-   * to serve again; `held`, false for a removal of a key `from` has
-   * archived since. Each key is listed once. Null for a key only this
+   * to serve again; `held`, false for a removal of a key no parent passes
+   * down now, `from` naming the nearest that archived or removed it. Each key is listed once. Null for a key only this
    * environment holds, and outside forks.
    */
   parent: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean; reset: boolean; held: boolean } | null;
@@ -168,7 +168,7 @@ export async function listSecrets(
     const rows = await environmentSecrets(db, environment.environmentId);
     const inherited = fork
       ? await inheritedRows(db, environment.environmentId)
-      : { parents: [], held: new Map<string, InheritedRow>(), removed: new Set<string>(), archived: new Map<string, ParentRow>() };
+      : { parents: [], held: new Map<string, InheritedRow>(), removed: new Set<string>(), cut: new Map<string, ParentRow>() };
     if (inherited === null) throw conflict(`${place.project.slug}/${place.environment!.slug}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre`);
     const references = await currentReferences(db, [...rows, ...[...inherited.held.values()].map((held) => held.row)].filter((row) => row.current === null).map((row) => row.id));
     return { rows, inherited, references };
@@ -201,7 +201,7 @@ export async function listSecrets(
 
   const own = new Set(rows.filter((row) => row.archivedAt === null).map((row) => row.key));
   // An override reset to the parent's: its key is listed once, as inherited or removed, saying its own value is kept.
-  const removedSince = (key: string) => inherited.removed.has(key) && inherited.archived.has(key);
+  const removedSince = (key: string) => inherited.removed.has(key) && inherited.cut.has(key);
   const reset = new Set(rows.filter((row) => row.archivedAt !== null && (inherited.held.has(row.key) || removedSince(row.key))).map((row) => row.key));
   const keys: SecretKey[] = rows.filter((row) => !reset.has(row.key)).map((row) => {
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
@@ -222,9 +222,9 @@ export async function listSecrets(
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
   }
-  // A removal of a key the parent archived since: no longer doing anything, until the parent brings it back. Listed, to be restored.
+  // A removal of a key a parent archived or removed since: doing nothing, until that parent brings it back. Listed, to be restored.
   for (const key of inherited.removed) {
-    const from = inherited.archived.get(key);
+    const from = inherited.cut.get(key);
     if (from === undefined || own.has(key)) continue;
     keys.push({
       key, reference: null, folder: null, archived: false, version: null, updatedAt: null, updatedBy: null,

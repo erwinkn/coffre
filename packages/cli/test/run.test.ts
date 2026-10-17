@@ -219,7 +219,7 @@ test("list of a fork says where each key stands to its parent's: inherited, over
     'DATABASE_URL\tv1\tcy@acme.example\ttoday  (overrides prod; prod changed since)',
     'EU_REGION\tv1\tcy@acme.example\ttoday',
     'SENTRY_DSN\tv-\t-\t-  (removed: prod has it)',
-    'STALE_DSN\tv-\t-\t-  (removed: prod archived it)',
+    'STALE_DSN\tv-\t-\t-  (removed: prod dropped it)',
     'STRIPE_KEY\tv2\tada@acme.example\ttoday  (from prod; its own reset, and kept)',
     '',
   ].join('\n'));

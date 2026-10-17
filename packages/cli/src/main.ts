@@ -863,7 +863,7 @@ async function list(args: string[]): Promise<void> {
         : parent.state === 'inherited'
           ? `  (from ${parent.from}${parent.reset ? '; its own reset, and kept' : ''})`
           : parent.state === 'removed'
-            ? `  (removed: ${parent.from} ${parent.held === false ? 'archived it' : 'has it'})`
+            ? `  (removed: ${parent.from} ${parent.held === false ? 'dropped it' : 'has it'})`
             : `  (overrides ${parent.from}${parent.changed ? `; ${parent.from} changed since` : ''})`;
       const { reference } = entry;
       if (reference !== null) {

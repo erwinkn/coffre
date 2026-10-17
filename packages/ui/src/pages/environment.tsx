@@ -1731,7 +1731,7 @@ function Standing({ project, secretKey, parent }: { project: string; secretKey: 
     case 'inherited':
       return <span className="tag tag-outline">from {from}</span>;
     case 'removed':
-      return <span className="tag tag-outline">removed · {from} {parent.held ? 'has it' : 'archived it'}</span>;
+      return <span className="tag tag-outline">removed · {from} {parent.held ? 'has it' : 'dropped it'}</span>;
     case 'overridden':
       return (
         <>
