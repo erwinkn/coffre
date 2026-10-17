@@ -6,6 +6,7 @@ import { failureMessage, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
+import { renamePairs } from './recipes.ts';
 import { applySecretEditBatch, companionsOf, generationsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
 
@@ -511,12 +512,16 @@ export function saveSecrets(
         updatedBy: author,
         generated: generations.get(key) ?? null,
       });
+      const renames = new Map<string, string>();
       let next = entries.map((entry) => {
         const change = vars.changes[entry.key];
         if (change === undefined || change.archived) return entry;
         const key = change.key.trim();
+        if (key !== entry.key) renames.set(entry.key, key);
         return change.value === null ? { ...entry, key } : bumped(entry, key);
       });
+      // A rename moves no value: a pair it touches names the new key, in both halves.
+      next = renamePairs(next, renames);
       for (const draft of written(vars)) {
         const key = draft.key.trim();
         const existing = next.find((entry) => entry.key === key);

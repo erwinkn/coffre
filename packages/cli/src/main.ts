@@ -1069,7 +1069,8 @@ async function history(args: string[]): Promise<void> {
 
   for (const version of result.versions) {
     process.stdout.write(
-      `v${String(version.version).padEnd(4)} ${version.createdAt.slice(0, 19).replace('T', ' ')}  ${version.createdBy.padEnd(24)}${version.current ? ' (current)' : ''}\n`,
+      // An instance before 0.7 says nothing of recipes.
+      `v${String(version.version).padEnd(4)} ${version.createdAt.slice(0, 19).replace('T', ' ')}  ${version.createdBy.padEnd(24)}${version.current ? ' (current)' : ''}${version.recipe == null ? '' : `  (generated, ${version.recipe})`}\n`,
     );
   }
 }

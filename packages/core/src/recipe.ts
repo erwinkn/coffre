@@ -126,13 +126,13 @@ export function formatRecipe(recipe: Recipe): string {
   }
 }
 
-/** A recipe in words, for a confirmation or a listing: "32 random bytes, hex: 64 characters". */
+/** A recipe in words, for a confirmation or a listing: "32 random bytes as 64 hex characters". */
 export function describeRecipe(recipe: Recipe): string {
   switch (recipe.kind) {
     case 'random': {
-      const name = ENCODINGS.find((each) => each.id === recipe.encoding)!.name;
-      const lowered = recipe.encoding === 'base62' ? name.toLowerCase() : name;
-      return `${recipe.bytes} random ${recipe.bytes === 1 ? 'byte' : 'bytes'}, ${lowered}: ${encodedLength(recipe.encoding, recipe.bytes)} characters`;
+      const characters = { base62: 'letters and digits', hex: 'hex characters', base64: 'base64 characters', base64url: 'base64 URL characters' };
+      const bytes = `${recipe.bytes} random ${recipe.bytes === 1 ? 'byte' : 'bytes'}`;
+      return `${bytes} as ${encodedLength(recipe.encoding, recipe.bytes)} ${characters[recipe.encoding]}`;
     }
     case 'aes':
       return `a ${recipe.size}-bit AES-GCM key, raw, base64`;

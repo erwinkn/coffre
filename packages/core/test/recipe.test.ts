@@ -202,8 +202,9 @@ test('anything else is no recipe, and says what is wrong', () => {
 });
 
 test('a recipe in words says what it makes', () => {
-  assert.equal(describeRecipe(parseRecipe('bytes:32')), '32 random bytes, letters and digits: 43 characters');
-  assert.equal(describeRecipe(parseRecipe('bytes:1:hex')), '1 random byte, Hex: 2 characters');
+  assert.equal(describeRecipe(parseRecipe('bytes:32')), '32 random bytes as 43 letters and digits');
+  assert.equal(describeRecipe(parseRecipe('bytes:1:hex')), '1 random byte as 2 hex characters');
+  assert.equal(describeRecipe(parseRecipe('bytes:16:base64url')), '16 random bytes as 22 base64 URL characters');
   assert.equal(describeRecipe(parseRecipe('aes:128')), 'a 128-bit AES-GCM key, raw, base64');
   assert.equal(describeRecipe(parseRecipe('ecdh:p-384')), 'an ECDH P-384 key pair: the private key PKCS #8, the public key SPKI, both base64');
 });

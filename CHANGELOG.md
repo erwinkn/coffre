@@ -16,8 +16,8 @@
   secret: a new value, made the same way, where you are, never shown. A key
   pair's either key regenerates both. A value typed or pasted over a generated
   one clears its recipe; a rollback brings it back with the value. The row
-  marks a generated key, its version history and `coffre list` name each
-  recipe, and `coffre list` says `coffre regenerate` for a generated value due
+  marks a generated key; its version history, `coffre history` and `coffre
+  list` name each recipe; and `coffre list` says `coffre regenerate` for a generated value due
   for rotation.
 - **One recipe, in `@coffre/core/recipe`.** The page's generator, the CLI and
   the server's checks share it: the server makes no value, and refuses a

@@ -84,7 +84,7 @@ test('set --generate writes a value made here, with its recipe, and shows only t
   const coffre = await instance(t, {});
   const run = await coffre.coffre(['set', 'app/prod/SESSION_SECRET', '--generate', 'bytes:32:hex']);
   assert.equal(run.code, 0, run.stderr);
-  assert.equal(run.stdout, 'SESSION_SECRET generated as version 1: 32 random bytes, Hex: 64 characters (bytes:32:hex)\n');
+  assert.equal(run.stdout, 'SESSION_SECRET generated as version 1: 32 random bytes as 64 hex characters (bytes:32:hex)\n');
   assert.equal(coffre.writes.length, 1);
   const { SESSION_SECRET } = coffre.writes[0]!;
   assert.match(SESSION_SECRET!.value, /^[0-9a-f]{64}$/);
@@ -147,7 +147,7 @@ test('regenerate makes a new value by the recipe the key has, and a key pair who
   });
   const run = await coffre.coffre(['regenerate', 'app/prod/TOKEN']);
   assert.equal(run.code, 0, run.stderr);
-  assert.equal(run.stdout, 'TOKEN regenerated as version 5: 16 random bytes, Base64 URL: 22 characters (bytes:16:base64url)\n');
+  assert.equal(run.stdout, 'TOKEN regenerated as version 5: 16 random bytes as 22 base64 URL characters (bytes:16:base64url)\n');
   assert.match(coffre.writes[0]!.TOKEN!.value, /^[A-Za-z0-9_-]{22}$/);
   assert.deepEqual(coffre.writes[0]!.TOKEN!.generated, { recipe: 'bytes:16:base64url' });
 

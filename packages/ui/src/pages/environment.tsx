@@ -1,6 +1,6 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import { regenerateWrite } from '@coffre/core/recipe';
+import { regenerateWrite, type Generation } from '@coffre/core/recipe';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -54,6 +54,7 @@ import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
 import { RecipeMark, RegenerateSecret, regeneratedKeys } from '../components/regenerate';
+import { liveGeneration } from '../lib/recipes';
 import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
@@ -537,6 +538,7 @@ function EnvironmentLedger({
                       project={project}
                       environment={environment}
                       entry={entry}
+                      generated={liveGeneration(entry, active)}
                       rotateAfterDays={rotateAfterDays}
                       change={change ?? { key: entry.key, value: null, archived: false }}
                       editing={
@@ -1051,6 +1053,7 @@ function SecretRow({
   project,
   environment,
   entry,
+  generated,
   rotateAfterDays,
   change,
   editing,
@@ -1077,6 +1080,8 @@ function SecretRow({
   project: string;
   environment: string;
   entry: SecretKey;
+  /** Its recipe, as the page may regenerate it by: a key pair's while both halves are listed alike (`liveGeneration`). */
+  generated: Generation | null;
   rotateAfterDays: number | null;
   change: SecretChange;
   editing: boolean;
@@ -1277,7 +1282,7 @@ function SecretRow({
           ) : (
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
-              {entry.generated !== null && <RecipeMark generated={entry.generated} />}
+              {generated !== null && <RecipeMark generated={generated} />}
               {leaving && <span className="tag tag-red">Will be archived</span>}
               {lent.length > 0 && (
                 <button
@@ -1457,7 +1462,7 @@ function SecretRow({
                       Rename
                     </Menu.Item>
                   )}
-                  {canWrite && !editing && !leaving && entry.generated !== null && (
+                  {canWrite && !editing && !leaving && generated !== null && (
                     <Menu.Item className="menu-item" onClick={() => setRegenerating(true)}>
                       <Generate size={14} />
                       Regenerate…
@@ -1520,15 +1525,14 @@ function SecretRow({
         />
       )}
 
-      {canWrite && entry.generated !== null && (
+      {canWrite && generated !== null && (
         <RegenerateSecret
           open={regenerating}
           onOpenChange={setRegenerating}
           place={`${project}/${environment}`}
           entry={entry}
-          generated={entry.generated}
+          generated={generated}
           onConfirm={() => {
-            const generated = entry.generated!;
             setReveal(null);
             // Made here at the moment of confirming, and sent at once: the value is never on the page.
             act(async () => coffre.secrets.set(`${project}/${environment}`, await regenerateWrite(entry.key, generated)), {
