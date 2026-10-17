@@ -191,7 +191,7 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.deepEqual(Object.keys(entry!.metadata).sort(), ['bindingId', 'credentialId', 'expiresAt', 'generation', 'issuer', 'run']);
   assert.deepEqual((entry!.metadata.run as Record<string, unknown>).run_id, '7001');
   // The service's token list is for tokens people keep.
-  assert.deepEqual((await runtime.signin!.listServiceTokens(await contextFor(deps, ROOT), SERVICE)), []);
+  assert.deepEqual((await runtime.signin!.listTokens(await contextFor(deps, ROOT), { type: 'service', id: SERVICE })), []);
   const [binding] = await db.owner.select().from(serviceBindings);
   assert.notEqual(binding!.lastUsedAt, null);
   // An ES256 issuer is the same.

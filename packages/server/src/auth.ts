@@ -1,11 +1,11 @@
-import { ACCESS_JWT_HEADER, type AuthConfig, type Principal } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@coffre/core/identity';
 import type { CredentialScope } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
 import { callerFrom, loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
-import { CredentialUncheckable } from './api/signin.ts';
+import { CredentialUncheckable, type PersonalToken } from './api/signin.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -19,8 +19,10 @@ export type AuthenticatedIdentity = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
-  /** That credential, when a trust binding issued it for a CI run: every entry the request writes names it. */
+  /** That credential, when a trust binding issued it for a CI run, or it is a personal token: every entry the request writes names it. */
   provenance: string | null;
+  /** The personal token the request came in on, which acts as its person within its scope; null for anything else. */
+  personalToken: PersonalToken | null;
   /** The MCP connection a tool's call came through; null for every other request. */
   via: McpVia | null;
 };
@@ -62,13 +64,24 @@ export function readCookie(request: Request, name: string): string | null {
   return cookieValue(request, name);
 }
 
+/**
+ * The browser's session, from its cookie in signin mode. Never a personal
+ * token: that is a bearer token, sent in a header, and what trusts the
+ * cookie (pages, linking an account, approving a sign-in) trusts a person
+ * at their browser, which a token planted in the cookie is not.
+ */
+export function sessionCookie(request: Request, auth: AuthConfig): string | null {
+  const token = cookieValue(request, sessionCookieName(auth));
+  return token === null || tokenKind(token) === 'personal' ? null : token;
+}
+
 export function bearerToken(request: Request): string | null {
   const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
   return match === null ? null : match[1];
 }
 
 export function accessTokenForRequest(request: Request, auth: AuthConfig): string | null {
-  if (auth.mode === 'signin') return cookieValue(request, sessionCookieName(auth));
+  if (auth.mode === 'signin') return sessionCookie(request, auth);
   const token = request.headers.get(ACCESS_JWT_HEADER);
   return token === null || token.length === 0 ? null : token;
 }
@@ -119,6 +132,7 @@ export async function authenticateRequest(
   let credentialGeneration: number | undefined;
   let exchanged = false;
   let credentialScope: CredentialScope | null = null;
+  let personalToken: PersonalToken | null = null;
   let checked: Access | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
@@ -127,8 +141,9 @@ export async function authenticateRequest(
       access?: Access;
       exchanged?: boolean;
       credentialScope?: CredentialScope | null;
+      personalToken?: PersonalToken | null;
     };
-    ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, ...principal } = verified);
+    ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
@@ -153,7 +168,8 @@ export async function authenticateRequest(
       requestId,
       sourceIp,
       credentialId,
-      provenance: exchanged ? credentialId : null,
+      provenance: exchanged || personalToken !== null ? credentialId : null,
+      personalToken,
       via: null,
     };
   } catch (error) {

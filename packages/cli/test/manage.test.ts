@@ -87,6 +87,56 @@ test('tokens issue --scope narrows what it reaches, by path and role, repeated o
   assert.equal(calls.length, 1, 'nothing asked for a bad scope');
 });
 
+const PERSONAL = 'coffre_pat_' + 'x'.repeat(40);
+/** What `/me` answers for Ada, as the personal token commands ask who they are about. */
+const ADA_ME = { principal: { type: 'user', id: 'ada@acme.example' } };
+
+test('tokens issue with no service makes a personal token: its label and scope said, an hour unless told, a week at most', async () => {
+  const { connect, calls, written, io } = fixture((call) =>
+    call.path === '/me' ? ADA_ME : { id: 'pat-1', token: PERSONAL, expiresAt: '2026-10-17T18:30:00.000Z', scope: { 'market/dev': 'viewer' } });
+  await manage.tokensIssue(connect, ['--label', 'cursor-agent', '--scope', 'market/dev=viewer', '--expires-in', '4h'], io);
+  assert.deepEqual(calls.map((call) => [call.method, call.path, call.body]), [
+    ['GET', '/me', undefined],
+    ['POST', '/members/user:ada@acme.example/tokens', { label: 'cursor-agent', expiresInMinutes: 240, scope: { 'market/dev': 'viewer' } }],
+  ]);
+  assert.equal(written.out, `${PERSONAL}\n`);
+  assert.equal(written.err, 'coffre: your personal token pat-1 "cursor-agent", acting as you on viewer on market/dev, until 2026-10-17 18:30 UTC. It is shown this once\n');
+
+  calls.length = 0;
+  await manage.tokensIssue(connect, ['--label', 'script', '--scope', 'market/dev=viewer'], io);
+  assert.equal((calls[1]!.body as { expiresInMinutes: number }).expiresInMinutes, 60);
+  for (const [given, minutes] of [['30m', 30], ['2d', 2880], ['7d', 10080], ['1', 1440]] as const) {
+    calls.length = 0;
+    await manage.tokensIssue(connect, ['--label', 'script', '--scope', 'market/dev=viewer', '--expires-in', given], io);
+    assert.equal((calls[1]!.body as { expiresInMinutes: number }).expiresInMinutes, minutes, given);
+  }
+  for (const bad of ['0m', '8d', '10081m', '4w', 'soon', '1.5h']) {
+    await assert.rejects(manage.tokensIssue(connect, ['--label', 'script', '--scope', 'market/dev=viewer', '--expires-in', bad], io), manage.UsageError, bad);
+  }
+});
+
+test('tokens with no service lists your personal tokens, to the minute; tokens revoke <id> ends one, shown first', async () => {
+  const token = { id: 'pat-1', label: 'cursor-agent', hint: 'coffre_pat_…abcd', createdAt: '2026-10-17T14:30:00.000Z', createdBy: 'ada@acme.example', expiresAt: '2026-10-17T18:30:00.000Z', lastUsedAt: null, lastUsedIp: null, scope: { 'market/dev': 'viewer' } };
+  const { connect, calls, written, io } = fixture((call) => (call.path === '/me' ? ADA_ME : call.method === 'DELETE' ? { revoked: true } : { tokens: [token] }));
+  await manage.tokens(connect, [], io);
+  assert.equal(written.out, 'pat-1  …coffre_pat_…abcd  cursor-agent      expires 2026-10-17 18:30 UTC  last used never  reaches viewer on market/dev\n');
+  assert.deepEqual(calls.map((call) => call.path), ['/me', '/members/user:ada@acme.example/tokens']);
+
+  written.out = '';
+  await manage.tokensRevoke(connect, ['pat-1'], io);
+  assert.match(written.out, /^would revoke your personal token pat-1, …coffre_pat_…abcd "cursor-agent", last used never: whatever uses it stops at once\./);
+  assert.ok(!calls.some((call) => call.method === 'DELETE'));
+  written.out = '';
+  await manage.tokensRevoke(connect, ['pat-1', '--apply'], io);
+  assert.equal(written.out, 'revoked your personal token pat-1, …coffre_pat_…abcd "cursor-agent", last used never\n');
+  assert.equal(calls.at(-1)!.path, '/members/user:ada@acme.example/tokens/pat-1');
+  await assert.rejects(manage.tokensRevoke(connect, ['pat-2', '--apply'], io), /you hold no personal token pat-2/);
+
+  // A service account holds none.
+  const service = fixture(() => ({ principal: { type: 'service', id: 'ci' } }));
+  await assert.rejects(manage.tokens(service.connect, [], service.io), /a service account holds no personal token/);
+});
+
 const LISTED = {
   tokens: [{ id: 'tok-1', label: 'CI', hint: 'abcd', createdAt: '2026-10-01T00:00:00Z', createdBy: 'root@acme.example', expiresAt: '2027-01-01T00:00:00Z', lastUsedAt: null, lastUsedIp: null, scope: { 'market/dev': 'viewer' } }],
 };
@@ -310,11 +360,63 @@ test('references lists what a place lends and holds, and who reads through each'
 
 test('fork --reference makes references, and names the keys it copied instead', async () => {
   const { connect, calls, written, io } = fixture(() => ({
-    environment: { slug: 'qa', name: 'qa', archivedAt: null }, created: true, forked: { from: 'staging', keys: 3, references: 2, copied: ['STRIPE_KEY'] },
+    environment: { slug: 'qa', name: 'qa', archivedAt: null }, created: true, forked: { from: 'staging', keys: 3, references: 2, copied: ['STRIPE_KEY'], inherits: false },
   }));
   await manage.fork(connect, ['market/staging', 'qa', '--reference'], io);
   assert.deepEqual(calls[0]!.body, { name: 'qa', from: 'staging', references: true });
   assert.equal(written.out, 'created market/qa from market/staging: 3 keys, 2 references, and 1 copied: STRIPE_KEY, whose source you read only through staging\n  whoever reads market/qa reads those values through them, as they change\n');
+});
+
+test('fork --inherit copies nothing, says what its readers need, and is no fork as references', async () => {
+  const { connect, calls, written, io } = fixture(({ method }) => method === 'GET'
+    ? { permissions: [], keys: [], parents: [], rotateAfterDays: null }
+    : { environment: { slug: 'prod-eu', name: 'prod-eu', archivedAt: null }, created: true, forked: { from: 'prod', keys: 0, references: 0, copied: [], inherits: true } });
+  await manage.fork(connect, ['market/prod', 'prod-eu', '--inherit'], io);
+  assert.deepEqual(calls.map((call) => [call.method, call.path, call.body]), [
+    ['GET', '/secrets/market/prod', undefined],
+    ['PUT', '/projects/market/prod-eu', { name: 'prod-eu', from: 'prod', inherit: true }],
+  ]);
+  assert.equal(written.out, "created market/prod-eu, inheriting market/prod: nothing copied\n  it reads prod's keys as they change, but for those it sets or removes; its readers need read on prod for those\n");
+  await assert.rejects(manage.fork(connect, ['market/prod', 'x', '--inherit', '--reference'], io), /--reference or --inherit, not both/);
+  assert.equal(calls.length, 2);
+
+  // An instance before 0.7 would copy: refused before anything is made.
+  const old = fixture(({ method }) => (method === 'GET' ? { permissions: [], keys: [], rotateAfterDays: null } : assert.fail('nothing is made')));
+  await assert.rejects(manage.fork(old.connect, ['market/prod', 'prod-eu', '--inherit'], old.io), /older than forks that inherit \(coffre 0\.7\)/);
+  // And an answer that does not say it inherits is no success.
+  const copied = fixture(({ method }) => method === 'GET'
+    ? { permissions: [], keys: [], parents: [], rotateAfterDays: null }
+    : { environment: { slug: 'prod-eu', name: 'prod-eu', archivedAt: null }, created: true, forked: { from: 'prod', keys: 3, references: 0, copied: [] } });
+  await assert.rejects(manage.fork(copied.connect, ['market/prod', 'prod-eu', '--inherit'], copied.io), /does not inherit from market\/prod/);
+});
+
+test("reset and remove, in a fork: back to the parent's value, or without its key, and --undo for each", async () => {
+  const { connect, calls, written, io } = fixture(({ method, path, body }) => {
+    if (method === 'GET') return { permissions: [], keys: [], parents: path.includes('prod-eu') ? ['prod'] : [], rotateAfterDays: null };
+    if (path.startsWith('/secrets/')) return { key: 'DATABASE_URL', archived: (body as { inherit: boolean }).inherit, folder: null, from: 'prod' };
+    return { operationId: 'op', keys: { SENTRY_DSN: (body as Record<string, unknown>).SENTRY_DSN === true ? 'dismissed' : 'restored' } };
+  });
+  await manage.resetSecret(connect, ['market/prod-eu/DATABASE_URL'], io);
+  await manage.resetSecret(connect, ['market/prod-eu/DATABASE_URL', '--undo'], io);
+  assert.deepEqual(calls.map((call) => call.body), [{ inherit: true }, { inherit: false }]);
+  assert.equal(written.out, [
+    "market/prod-eu/DATABASE_URL reads market/prod's value again; its own is kept: `coffre reset market/prod-eu/DATABASE_URL --undo` serves it again",
+    'market/prod-eu/DATABASE_URL overrides market/prod again, with the value it had',
+    '',
+  ].join('\n'));
+
+  written.out = '';
+  await manage.removeSecret(connect, ['market/prod-eu/SENTRY_DSN'], io);
+  await manage.removeSecret(connect, ['market/prod-eu/SENTRY_DSN', '--undo'], io);
+  assert.deepEqual(calls.slice(2).map((call) => [call.method, call.path, call.body]), [
+    ['GET', '/secrets/market/prod-eu', undefined],
+    ['PATCH', '/projects/market/prod-eu/dismissals', { SENTRY_DSN: true }],
+    ['GET', '/secrets/market/prod-eu', undefined],
+    ['PATCH', '/projects/market/prod-eu/dismissals', { SENTRY_DSN: null }],
+  ]);
+  assert.match(written.out, /^market\/prod-eu does without its parent's SENTRY_DSN: `coffre remove market\/prod-eu\/SENTRY_DSN --undo` inherits it again\nmarket\/prod-eu inherits SENTRY_DSN again/);
+  // Outside a fork, remove is no dismissal: archive is what takes a key out.
+  await assert.rejects(manage.removeSecret(connect, ['market/prod/SENTRY_DSN'], io), /market\/prod inherits from no environment: `coffre archive market\/prod\/SENTRY_DSN`/);
 });
 
 test('missing lists what siblings have, and dismiss --all dismisses each in one call', async () => {
@@ -478,7 +580,11 @@ test('folders lists the projects\' folders, or an environment\'s with its path; 
 
 test('a command reads its arguments before it asks for a session', async () => {
   const connect = () => assert.fail('no session is asked for');
-  await assert.rejects(manage.tokens(connect, [], fixture(() => null).io), /name <service>/);
+  await assert.rejects(manage.tokens(connect, ['a', 'b'], fixture(() => null).io), /too many arguments: b/);
+  await assert.rejects(manage.tokensIssue(connect, [], fixture(() => null).io), /a personal token needs --label/);
+  await assert.rejects(manage.tokensIssue(connect, ['--label', 'agent'], fixture(() => null).io), /a personal token needs --scope/);
+  await assert.rejects(manage.tokensIssue(connect, ['--label', 'agent', '--scope', 'market/dev=viewer', '--expires-in', '8d'], fixture(() => null).io), /a minute to 7 days/);
+  await assert.rejects(manage.tokensIssue(connect, ['deploy', '--expires-in', '4h'], fixture(() => null).io), /days for a service token/);
   await assert.rejects(manage.projectsCreate(connect, ['a', 'b'], fixture(() => null).io), /too many arguments: b/);
   await assert.rejects(manage.tokensIssue(connect, ['deploy', '--bogus'], fixture(() => null).io), { code: 'ERR_PARSE_ARGS_UNKNOWN_OPTION' });
 });

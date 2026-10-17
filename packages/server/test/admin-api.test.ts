@@ -314,12 +314,14 @@ test('environment grants expose only the listed names of inaccessible siblings',
     slug: 'dev',
     name: 'Development',
     accessible: true,
+    parent: null,
     details: { archivedAt: null, secretCount: 1 },
   });
   assert.deepEqual(prod, {
     slug: 'prod',
     name: 'Production',
     accessible: false,
+    parent: null,
     details: null,
   });
 });

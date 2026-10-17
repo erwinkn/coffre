@@ -221,6 +221,8 @@ function EnvironmentCard({
           ) : (
             <span className="env-card-name">{environment.slug}</span>
           )}
+          {/* A fork: its keys are its parent's, but for those it sets or removes. An instance before 0.7 says nothing. */}
+          {environment.parent != null && <span className="tag tag-outline">inherits {environment.parent}</span>}
         </span>
 
         {isArchived ? (
@@ -429,16 +431,17 @@ function EnvironmentCard({
 }
 
 /**
- * A new environment, empty, or forked from one you can read: each of its
- * keys copied, value and folder, without history. Copying is a read, and
- * logged as one.
+ * A new environment, empty, or forked from one you can read: inheriting
+ * its keys live (docs/design/forking.md), or each of them copied, value and
+ * folder, without history, or a reference to it. Copying is a read, and
+ * logged as one; inheriting reads nothing until the fork is read.
  */
 function NewEnvironment({ project, sources }: { project: string; sources: string[] }) {
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
-  // '' for empty, 'copy:prod' for a copy, 'ref:prod' for references to prod.
+  // '' for empty, 'inherit:prod' for a fork that inherits, 'copy:prod' for a copy, 'ref:prod' for references to prod.
   const [start, setStart] = useState('');
-  const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['copy' | 'ref', string]);
+  const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['inherit' | 'copy' | 'ref', string]);
   const coffre = useCoffre();
   // A fork as references copies the keys whose source you read only through their parent: said before you confirm.
   const { data: parent } = useQuery({ ...queries.secrets(coffre, { project, environment: from }), enabled: how === 'ref' });
@@ -473,7 +476,7 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
           onSubmit={(event) => {
             event.preventDefault();
             // Listed at once, as saving; the list says if the server refuses.
-            create({ slug, ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}) });
+            create({ slug, ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}), ...(how === 'inherit' ? { inherit: true } : {}) });
             setSlug('');
             setStart('');
             close();
@@ -509,6 +512,11 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
               <select className="select" value={start} onChange={(event) => setStart(event.target.value)}>
                 <option value="">Empty</option>
                 {sources.map((source) => (
+                  <option key={`inherit:${source}`} value={`inherit:${source}`}>
+                    Inheriting from {source}
+                  </option>
+                ))}
+                {sources.map((source) => (
                   <option key={`copy:${source}`} value={`copy:${source}`}>
                     A copy of {source}
                   </option>
@@ -522,7 +530,9 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
               <span className="hint">
                 {how === ''
                   ? 'No secrets yet.'
-                  : how === 'copy'
+                  : how === 'inherit'
+                    ? `Keeps reading ${from}'s keys, live, except those you set or remove here. Whoever reads ${slug === '' ? 'the new environment' : slug} needs read on ${from} too, for those.`
+                    : how === 'copy'
                     ? `Each of ${from}'s keys, with its current value and folder, without history.`
                     : `Each key follows ${from}'s until it gets a value of its own. Whoever can read ${slug === '' ? 'the new environment' : slug} will read ${from}'s values through them, even without access to ${from}.`}
               </span>

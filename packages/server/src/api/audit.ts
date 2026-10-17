@@ -10,6 +10,7 @@ import {
   auditPage,
   auditRange,
   exchangesOf,
+  personalTokensOf,
   latestCheckpoint,
   places,
   resolvePath,
@@ -58,6 +59,12 @@ export type AuditEntryView = {
    * proof of which run sent the request.
    */
   run: { exchangeSeq: number; claims: Record<string, string | number> } | null;
+  /**
+   * For an entry written on a personal token: the token, by its row's id
+   * and the label its `token.create` entry logged, for "ada via token
+   * 'cursor-agent'". The entry's actor is its person.
+   */
+  token: { id: string; label: string } | null;
   metadata: Record<string, unknown>;
 };
 
@@ -209,7 +216,7 @@ export async function listAudit(
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 
   const rows = await auditPage(ctx.db, filter);
-  const entries = await withRuns(ctx, rows.map(entryView));
+  const entries = await withCredentials(ctx, rows.map(entryView));
   if (query.detail === true) return { entries };
   const last = rows.length < query.limit ? undefined : rows[rows.length - 1].seq;
   const hidden = await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, last);
@@ -218,18 +225,28 @@ export async function listAudit(
   return { entries, hidden };
 }
 
-/** Each entry's run, when it was written on a credential a trust binding issued: one read for the page. */
-async function withRuns(ctx: ApiContext, entries: AuditEntryView[]): Promise<AuditEntryView[]> {
+/**
+ * What each entry was written on, when its request came in on a credential
+ * it names: the run, for one a trust binding issued; the token, for a
+ * personal token. One read of each for the page.
+ */
+async function withCredentials(ctx: ApiContext, entries: AuditEntryView[]): Promise<AuditEntryView[]> {
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const ids = [...new Set(entries.flatMap((entry) => {
     const id = entry.metadata.credentialId;
     return entry.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
   }))];
-  const exchanges = await exchangesOf(ctx.db, ids);
+  const [exchanges, tokens] = await Promise.all([exchangesOf(ctx.db, ids), personalTokensOf(ctx.db, ids)]);
   return entries.map((entry) => {
     if (entry.action === 'token.exchange') return { ...entry, run: { exchangeSeq: entry.seq, claims: runClaims(entry.metadata.run) } };
-    const exchange = typeof entry.metadata.credentialId === 'string' ? exchanges.get(entry.metadata.credentialId) : undefined;
-    return exchange === undefined ? entry : { ...entry, run: { exchangeSeq: Number(exchange.seq), claims: runClaims(exchange.run) } };
+    const id = typeof entry.metadata.credentialId === 'string' ? entry.metadata.credentialId : undefined;
+    const exchange = id === undefined ? undefined : exchanges.get(id);
+    const token = id === undefined ? undefined : tokens.get(id);
+    return {
+      ...entry,
+      ...(exchange === undefined ? {} : { run: { exchangeSeq: Number(exchange.seq), claims: runClaims(exchange.run) } }),
+      ...(token === undefined ? {} : { token: { id: id!, label: token.label } }),
+    };
   });
 }
 
@@ -263,6 +280,7 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
     relatedSeq: row.relatedSeq === null ? null : Number(row.relatedSeq),
     requestId: row.requestId,
     run: null,
+    token: null,
     metadata,
   };
 }

@@ -2,6 +2,79 @@
 
 ## Unreleased
 
+- **`coffre run --keep-existing`.** `coffre run` still sets every key of the
+  environments it names over a variable of the same name in your shell. With
+  `--keep-existing`, a variable already set there keeps its value, an empty one
+  included, and coffre's is dropped. One line on stderr names the keys kept,
+  never a value. Every value is still read, and every read is audited.
+- **Forks that inherit.** An environment can now be made as a fork of
+  another in its project that keeps reading its parent's keys, live:
+  `coffre fork market/prod prod-eu --inherit`, "Inheriting from prod" in
+  Add environment, or MCP's `create_environment` with `inherits`. A key
+  added to or rotated in prod reaches prod-eu on its next read. prod-eu
+  overrides a key by writing it, adds keys of its own, and removes one it
+  should not have (`coffre remove`, or Remove in the key's menu).
+  `coffre reset`, or Reset to prod, goes back to the parent's value and
+  keeps the override, which `--undo` serves again. Forks of forks are
+  allowed, at most three parents up.
+- **A fork lends nothing.** Reading what a fork inherits takes read on the
+  parent, by your own grants: a reader of prod-eu alone gets a 403 that
+  names the inherited keys. Each inherited value is logged as a read of
+  prod's key, "in market/prod-eu", in both environments' logs; one read
+  through prod's own reference stays in its source's log and prod's. To
+  lend values across that line, use references, as before.
+- **The environment page shows where each key comes from.** "from prod"
+  for an inherited key, "overrides prod" for an override, flagged "prod
+  changed since" when prod wrote a newer value, and removed keys struck
+  through, with Restore. `coffre list` says the same, and
+  `GET /secrets/...` gives each key a `parent` and the environment its
+  `parents`.
+- **Renames and missing keys follow.** Renaming a key in a parent renames
+  the forks' overrides and removals of it. Missing keys compare what each
+  environment resolves to: a fork misses nothing it inherits, and a parent
+  misses no key that only its forks hold.
+- **Guards.** An environment that live forks inherit from cannot be
+  archived, and one any fork names cannot be deleted; a fork is restored
+  only while its parent is live. A reference to a key a fork only
+  inherits is refused, naming the parent's key to refer to instead.
+- **Migration** `0004_environment_parents` adds `environments.parent_id`,
+  nullable, with a same-project foreign key on Postgres. It only adds:
+  the previous release runs on it. Rolled back to 0.6 after forks exist, a
+  fork reads as holding only its own keys, so archive forks before rolling
+  back.
+- **Personal tokens: hand a script or an agent part of what you hold, for
+  an afternoon.** `coffre tokens issue --label cursor-agent --scope
+  market/dev=developer --expires-in 4h` makes a bearer token, `coffre_pat_…`,
+  that acts as you on what its scope names: never more than you held when
+  you made it, and at each request no more than you hold then. Losing a
+  grant narrows it, gaining one widens nothing, and being removed ends it.
+  It lasts a minute to a week, an hour unless told. Its scope names only
+  roles that manage no access (viewer, developer, maintainer, auditor), and
+  it reaches your secrets and places alone: it makes no token, session,
+  connected app, grant, member, service account or trust binding, changes
+  no setting, approves no sign-in, deletes nothing for good, and runs no
+  instance, whatever your role. Every entry it writes, the vault's too,
+  names it, and the audit log shows "ada via token 'cursor-agent'", in the
+  pages and in `coffre audit`. `coffre tokens` lists yours and `coffre
+  tokens revoke <id>` ends one; so does `coffre logout` signed in with it.
+  Your account's Sessions tab lists them, with Revoke; a person's page lists
+  theirs for whoever runs the instance, and their removal revokes them
+  ([docs/design/personal-tokens.md](docs/design/personal-tokens.md)).
+- **A credential with a scope holds nothing of the instance's.** A request
+  on one runs no instance, reads no whole log, makes no project and sets up
+  no service account under the instance's setting. Service accounts' tokens
+  could not before either; an Owner's personal token cannot now.
+- **API.** `GET`, `POST` and `DELETE /api/members/user:<email>/tokens` list,
+  make and revoke personal tokens; a personal token's `POST` takes `label`,
+  `expiresInMinutes` and `scope`, all three required. `GET /api/me` says
+  which personal token a request came in on (`personalToken`), and each
+  audit entry made with one carries it (`token`). The member report lists a
+  person's (`personalTokens`), and `ServiceTokenRow` is now `TokenRow`.
+- **Schema.** `0005_personal_tokens` widens `credentials`' kind check to
+  `personal` and indexes the log's `token.create` entries by the credential
+  they made. Nothing is removed or tightened, and 0.6 refuses a personal
+  token during the deploy, as no token of its own.
+
 ## 0.6.2 (2026-10-17)
 
 - **Copy a secret without revealing it.** A hidden value now has a Copy button

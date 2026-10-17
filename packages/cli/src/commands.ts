@@ -59,7 +59,7 @@ export const SECTIONS = [
     title: 'Session',
     entries: [
       { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in; use <url> in this directory and below,', 'and by default'] },
-      { command: 'login', usage: ['login <url> --token'], about: ["a CI run's sign-in: a bearer token, asked for or piped in"] },
+      { command: 'login', usage: ['login <url> --token'], about: ["a CI run's or a script's sign-in: a bearer or personal", 'token, asked for or piped in'] },
       { command: 'login', usage: ['login <url> --access-client-id <id>'], about: ['the same, behind Cloudflare Access: its secret asked for'] },
       {
         command: 'login',
@@ -73,6 +73,18 @@ export const SECTIONS = [
       { command: 'sessions revoke', usage: ['sessions revoke <id> [--apply]'], about: ['signs that session out'] },
       { command: 'apps', usage: ['apps [--json]'], about: ['the MCP clients you connected, such as Claude'] },
       { command: 'apps revoke', usage: ['apps revoke <id> [--apply]'], about: ['disconnects that app'] },
+      { command: 'tokens', usage: ['tokens [--json]'], about: ['your personal tokens, which act as you'] },
+      {
+        command: 'tokens issue',
+        usage: ['tokens issue --label <label> --scope <path>=<role>,…', '             [--expires-in <30m|4h|2d>] [--output-file <path>]'],
+        about: [
+          'a personal token, for a script or an agent: it acts as you',
+          'on what --scope says, at most what you hold now and less',
+          'whenever you hold less; never on access or sign-in. An hour',
+          'unless told, a week at most; every entry it makes names it',
+        ],
+      },
+      { command: 'tokens revoke', usage: ['tokens revoke <id> [--apply]'], about: ['ends that personal token; `coffre logout` with it, too'] },
       { command: 'identities', usage: ['identities [--json]'], about: ['the accounts you sign in with'] },
       { command: 'identities unlink', usage: ['identities unlink <id> [--apply]'], about: ['stops that account signing you in'] },
     ],
@@ -104,8 +116,13 @@ export const SECTIONS = [
       },
       {
         command: 'run',
-        usage: [`run       ${P}... -- <command>`],
-        about: ['several environments: their keys together, and a key in two', 'of them stops it before anything is read'],
+        usage: [`run       [--keep-existing] ${P}... -- <command>`],
+        about: [
+          'several environments: their keys together, and a key in two',
+          'of them stops it before anything is read; --keep-existing lets',
+          'a variable already set in your shell, empty ones too, win',
+          "over coffre's value for it",
+        ],
       },
       { command: 'export', usage: [`export    ${P}... [--format dotenv|json|shell|github]`], about: ['several, as run takes them'] },
       { command: 'history', usage: [`history   ${P}/<KEY> [--json]`] },
@@ -114,6 +131,16 @@ export const SECTIONS = [
       { command: 'rename', usage: [`rename    ${P}/<KEY> <NEW_KEY>`], about: ['the key, with its versions'] },
       { command: 'archive', usage: [`archive   ${P}/<KEY>`], about: ['out of reads, runs and exports; its versions kept'] },
       { command: 'unarchive', usage: [`unarchive ${P}/<KEY>`] },
+      {
+        command: 'reset',
+        usage: [`reset     ${P}/<KEY> [--undo]`],
+        about: ["in a fork, back to its parent's value; its own is kept,", 'and --undo serves it again'],
+      },
+      {
+        command: 'remove',
+        usage: [`remove    ${P}/<KEY> [--undo]`],
+        about: ["in a fork, does without its parent's key; --undo inherits it", 'again'],
+      },
       { command: 'move', usage: [`move      ${P}/<KEY> (<folder> | --none)`], about: ['into a folder, to arrange the list; nothing else changes'] },
       {
         command: 'folders',
@@ -159,11 +186,12 @@ export const SECTIONS = [
       { command: 'environments create', usage: [`environments create ${P}`] },
       {
         command: 'fork',
-        usage: [`fork ${P} <new-environment> [--reference]`],
+        usage: [`fork ${P} <new-environment> [--reference | --inherit]`],
         about: [
           'a new environment beside it, each key a copy of its value,',
           'without history; --reference makes each key a reference',
-          'to its parent instead',
+          'to its parent instead; --inherit copies nothing: it reads',
+          "its parent's keys live, but for those it sets or removes",
         ],
       },
       { command: 'environments rename', usage: [`environments rename ${P} --slug <new-environment>`] },
@@ -342,7 +370,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /projects/:project': { commands: ['projects delete'] },
   'PUT /projects/:project/:environment': { commands: ['environments create', 'fork'] },
   'GET /projects/:project/:environment/missing': { commands: ['missing'] },
-  'PATCH /projects/:project/:environment/dismissals': { commands: ['missing dismiss', 'missing restore'] },
+  'PATCH /projects/:project/:environment/dismissals': { commands: ['missing dismiss', 'missing restore', 'remove'] },
   'PATCH /projects/:project/:environment': { commands: ['environments rename', 'environments archive', 'environments unarchive'] },
   'DELETE /projects/:project/:environment': { commands: ['environments delete'] },
   'GET /secrets/:project/:environment': { commands: ['list'] },
@@ -353,7 +381,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'PATCH /folders/:project/:environment/:folder': { commands: ['folders rename'] },
   'DELETE /folders/:project/:environment/:folder': { commands: ['folders remove'] },
   'GET /references': { commands: ['references', 'access'] },
-  'PATCH /secrets/:project/:environment/:key': { commands: ['rename', 'archive', 'unarchive', 'move'] },
+  'PATCH /secrets/:project/:environment/:key': { commands: ['rename', 'archive', 'unarchive', 'move', 'reset'] },
   'GET /secrets/:project/:environment/:key/versions': { commands: ['history'] },
   'POST /secrets/:project/:environment/:key/restore': { commands: ['rollback'] },
   'POST /reveals': { commands: ['get', 'run', 'export'] },

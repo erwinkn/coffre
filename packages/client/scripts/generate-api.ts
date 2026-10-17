@@ -37,6 +37,7 @@ const NAMED = {
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
   IdentityRow: 'api/signin.ts',
+  InheritResult: 'api/secrets.ts',
   Me: 'api/projects.ts',
   Member: 'api/members.ts',
   MemberAccess: 'api/members.ts',
@@ -49,10 +50,10 @@ const NAMED = {
   RemovedMember: 'api/members.ts',
   SecretKey: 'api/secrets.ts',
   SecretVersion: 'api/secrets.ts',
-  ServiceTokenRow: 'api/signin.ts',
   SessionRow: 'api/signin.ts',
   SetResult: 'api/secrets.ts',
   TokenPlan: 'api/signin.ts',
+  TokenRow: 'api/signin.ts',
 } as const;
 
 const PROBE = `${root}__api_probe.ts`;

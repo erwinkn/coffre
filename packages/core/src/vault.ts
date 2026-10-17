@@ -255,9 +255,11 @@ export type UnwrapInput = Correlation & Through & {
   /**
    * `via` reads a source's current version through a reference: the vault
    * checks the reader's grants on the holder's environment, as its
-   * `reference.create` entry names it, not on the source's.
+   * `reference.create` entry names it, not on the source's. `through`, an
+   * environment's id, is the fork an inherited value is read in: the vault
+   * logs the read there too, and decides on the value's own environment.
    */
-  items: { secretVersionId: string; via?: Via }[];
+  items: { secretVersionId: string; via?: Via; through?: string }[];
 };
 
 /** A reference, as a read names it: its id, and the seq of the vault's `reference.create` entry. */

@@ -2563,6 +2563,34 @@ a.crumb-link:hover {
   text-decoration-thickness: 1.5px;
 }
 
+/* In a fork (docs/design/forking.md): a key it inherits reads as its
+   parent's, muted; one it removed is struck through, not served. */
+.secret-row.is-inherited .cell-key > .key-cell > span:first-child,
+.secret-row.is-inherited .mask {
+  color: var(--ink-3);
+}
+
+.secret-row.is-removed .cell-key > .key-cell > span:first-child {
+  color: var(--ink-3);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+/* The parent a tag names, linking to its own row of the key. */
+.tag-link {
+  position: relative;
+  z-index: 1;
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+.tag-link:hover {
+  color: var(--ink);
+  text-decoration-color: currentColor;
+}
+
 .key-cell {
   display: flex;
   align-items: center;

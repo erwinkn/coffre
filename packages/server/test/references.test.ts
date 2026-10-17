@@ -395,12 +395,12 @@ test('a fork as references points at the original sources, one hop, and copies w
   await root.access.set(`user:${ADA}`, { billing: 'maintainer' });
   // Bo reads market's value through billing/prod only: that key is copied, the rest referenced.
   const byBo = await bo.environments.create('billing/qa', { name: 'qa', from: 'prod', references: true });
-  assert.deepEqual(byBo.forked, { from: 'prod', keys: 2, references: 1, copied: ['DATABASE_URL'] });
+  assert.deepEqual(byBo.forked, { from: 'prod', keys: 2, references: 1, copied: ['DATABASE_URL'], inherits: false });
   const qa = new Map((await bo.secrets.list('billing/qa')).keys.map((key) => [key.key, key.reference?.source ?? `v${key.version}`]));
   assert.deepEqual(Object.fromEntries(qa), { DATABASE_URL: 'v1', PORT: 'billing/prod/PORT' });
   // Ada reads market herself: billing/prod's reference resolves to market's key, not to billing's.
   const byAda = await ada.environments.create('billing/staging', { name: 'staging', from: 'prod', references: true });
-  assert.deepEqual(byAda.forked, { from: 'prod', keys: 2, references: 2, copied: [] });
+  assert.deepEqual(byAda.forked, { from: 'prod', keys: 2, references: 2, copied: [], inherits: false });
   const staging = new Map((await ada.secrets.list('billing/staging')).keys.map((key) => [key.key, key.reference?.source]));
   assert.deepEqual(Object.fromEntries(staging), { DATABASE_URL: 'market/prod/DATABASE_URL', PORT: 'billing/prod/PORT' });
   assert.deepEqual((await bo.secrets.reveal('billing/staging')).values, { DATABASE_URL: 'postgres://v1', PORT: '8080' });

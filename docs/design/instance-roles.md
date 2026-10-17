@@ -266,6 +266,10 @@ scoped to `dev` that asks the vault for a value in `prod` is refused and
 logged (`no_grant`). A credential a binding issued for a CI run carries
 its binding's.
 
+**A person's personal tokens** (0.7) carry a scope of the same shape,
+weighed the same way against what their person holds at each request:
+[personal-tokens.md](personal-tokens.md).
+
 **Where it lives.** A `scope` column on `credentials` and
 `service_bindings`, from migration `0003_credential_scopes`: the grants as
 JSON, projects and environments by id, under the row's MAC (the app's,

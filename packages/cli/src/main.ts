@@ -67,7 +67,7 @@ import {
   Unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, credentialScopeInWords, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
@@ -621,7 +621,7 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
 
 /** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
-  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
+  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
   await saveRun({ origin, mode: 'signin', by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
@@ -758,6 +758,11 @@ async function whoami(args: string[]): Promise<void> {
     service: "the run's ID token, as --service",
   }[to.by];
   process.stdout.write(`${named(me.principal.type, me.principal.id)} on ${to.origin}${why}, via ${via}\n`);
+  // An instance before 0.7 says nothing of one.
+  if (me.personalToken) {
+    const { label, expiresAt, scope } = me.personalToken;
+    process.stdout.write(`  personal token "${label}", ends ${expiresAt.slice(0, 16).replace('T', ' ')} UTC, reaching ${credentialScopeInWords(scope)}\n`);
+  }
   if (to.by === 'person' && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
@@ -856,14 +861,23 @@ async function list(args: string[]): Promise<void> {
       const written = age === null ? '-' : age === 0 ? 'today' : `${age} day${age === 1 ? '' : 's'} ago`;
       const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: rotate it)` : '';
       const archived = entry.archived ? '  (archived)' : '';
+      // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
+      const parent = entry.parent ?? null;
+      const standing = parent === null
+        ? ''
+        : parent.state === 'inherited'
+          ? `  (from ${parent.from}${parent.reset ? '; its own reset, and kept' : ''})`
+          : parent.state === 'removed'
+            ? `  (removed: ${parent.from} ${parent.held === false ? 'dropped it' : 'has it'})`
+            : `  (overrides ${parent.from}${parent.changed ? `; ${parent.from} changed since` : ''})`;
       const { reference } = entry;
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
         continue;
       }
-      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${due}${archived}\n`);
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${due}${archived}${standing}\n`);
     }
   }
 }
@@ -950,19 +964,32 @@ async function readEnvironments(paths: readonly string[]): Promise<[string, stri
 /**
  * Fetch every secret of the environments named and exec a command with them
  * in its environment: one audited read per environment, and one audit row
- * per secret injected.
+ * per secret injected. A variable the shell already sets is overwritten,
+ * unless --keep-existing keeps it. (`export` prints values for a tool to
+ * apply, so it has no shell environment to defer to.)
  */
 async function run(args: string[]): Promise<void> {
   const separator = args.indexOf('--');
   if (separator === -1 || separator === args.length - 1) {
-    fail('usage: coffre run <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
+    fail('usage: coffre run [--keep-existing] <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
   }
 
-  const { positionals } = parseArgs({ args: args.slice(0, separator), options: {}, allowPositionals: true, strict: true });
+  const { values: flags, positionals } = parseArgs({
+    args: args.slice(0, separator),
+    options: { 'keep-existing': { type: 'boolean', default: false } },
+    allowPositionals: true,
+    strict: true,
+  });
   const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
   const values = Object.fromEntries(await readEnvironments(paths));
+  // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
+  const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
+  for (const key of kept) delete values[key];
+  if (kept.length > 0) {
+    process.stderr.write(`coffre: kept the value already set in your environment for ${kept.sort().join(', ')}, not coffre's\n`);
+  }
 
   const child = spawn(command[0], command.slice(1), {
     // Secrets are passed through the environment of the child only. They are
@@ -1181,6 +1208,7 @@ function waysIn(
     ? [
         plural(counts.grants, 'grant'),
         plural(counts.sessions, 'session'),
+        ...(counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
         plural(counts.identities, 'linked account'),
         plural(counts.apps, 'connected app'),
       ].join(', ')
@@ -1339,6 +1367,16 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
+  // An instance before 0.7 lists none.
+  const personalTokens = report.personalTokens ?? [];
+  if (personalTokens.length > 0) {
+    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${personalTokens.length})\n`);
+    for (const token of personalTokens) {
+      const used = token.lastUsedAt === null ? 'never used' : `last used ${token.lastUsedAt.slice(0, 10)}`;
+      process.stdout.write(`  "${token.label ?? ''}" ${token.hint}, reaching ${reaches(token.scope)}, ${used}, expires ${token.expiresAt.slice(0, 16).replace('T', ' ')} UTC\n`);
+    }
+  }
+
   if (report.issuedTokens.length > 0) {
     process.stdout.write(`\nBearer tokens ${they} issued to service accounts, which still work\n`);
     for (const token of report.issuedTokens) {
@@ -1405,9 +1443,10 @@ async function audit(args: string[]): Promise<void> {
 
   for (const entry of result.entries.reverse()) {
     const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
-    process.stdout.write(
-      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${(entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId).padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`,
-    );
+    // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
+    // An instance before 0.7 sends no `token`.
+    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}`;
+    process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
   }
 }
 
@@ -1515,6 +1554,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   rename: (args) => manage.renameSecret(connect, args),
   archive: (args) => manage.archiveSecret(connect, args, true),
   unarchive: (args) => manage.archiveSecret(connect, args, false),
+  reset: (args) => manage.resetSecret(connect, args),
+  remove: (args) => manage.removeSecret(connect, args),
   move: (args) => manage.move(connect, args),
   folders: (args) => manage.folders(connect, args),
   'folders rename': (args) => manage.foldersRename(connect, args),

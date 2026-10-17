@@ -122,6 +122,10 @@ coffre whoami                               # who you are, where, and why there
 coffre use                                  # the instances you are signed in to, and the directories pinned to each
 coffre sessions                             # where you are signed in; sessions revoke <id> signs one out
 coffre identities                           # the accounts you sign in with
+coffre tokens issue --label cursor-agent --scope market/dev=developer --expires-in 4h
+                                            # a personal token: acts as you, for a script or an agent, within
+                                            # its scope and never past what you hold (docs/design/personal-tokens.md)
+coffre tokens                               # your personal tokens; tokens revoke <id> ends one
 
 coffre list     market/dev                  # keys, who wrote each value and how long ago; --stale, those due for rotation
 coffre get      market/dev/DATABASE_URL     # the value; piped, exactly its bytes, no newline added (a terminal gets one)
@@ -130,6 +134,7 @@ coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a r
 coffre references market/prod               # what reads it through references; references break ends one
 coffre run      market/dev -- printenv
 coffre run      market/prod auth/prod -- ./deploy   # several: their keys together; a key in two of them stops it
+coffre run --keep-existing market/dev -- ./app      # a variable already set in your shell (empty too) wins over coffre's
 coffre export   market/dev --format dotenv  # or json, shell, github; several environments, as run
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
@@ -159,6 +164,9 @@ coffre environments rename market/dev --slug development
 coffre environments archive market/dev
 coffre environments unarchive market/dev
 coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history; --reference follows prod
+coffre fork     market/prod prod-eu --inherit   # copies nothing: reads prod's keys live, but for those it sets or removes
+coffre reset    market/prod-eu/DATABASE_URL # in a fork, back to prod's value; --undo serves its own again
+coffre remove   market/prod-eu/SENTRY_DSN   # in a fork, does without prod's key; --undo inherits it again
 coffre roles                                # the instance roles and the project roles, and their permissions
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
