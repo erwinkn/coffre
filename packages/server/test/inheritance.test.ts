@@ -390,3 +390,19 @@ test('an override unarchived, or renamed onto a removed key, ends its removal as
   const read = await values(maintainer, 'market/prod-eu');
   assert.deepEqual([read.STRIPE_KEY, read.SENTRY_DSN], ['sk_live_1', 'https://sentry/prod']);
 });
+
+test("a fork the vault refuses is named in the refusal, never filed under: another project's log does not get it", async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/dev', { name: 'Dev' });
+  const [version] = await db.owner.select({ id: secretVersions.id }).from(secretVersions).limit(1);
+  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  const billingDev = await environmentId('billing/dev');
+  const claimed = await deps.vault.unwrap({ principal: `user:${MAINTAINER}`, purpose: 'run', items: [{ secretVersionId: version.id, through: billingDev }] });
+  assert.deepEqual(claimed.ok ? null : claimed.refusal.code, 'bad_claim');
+  const refusals = await entries('vault', 'secret.read');
+  assert.deepEqual(refusals.map((entry) => [entry.decision, entry.metadata.through, entry.metadata.also]), [
+    ['deny', { environmentId: billingDev, refused: true }, undefined],
+  ]);
+  const { entries: billingLog } = await root.audit.list({ path: 'billing/dev' });
+  assert.equal(billingLog.filter((entry) => entry.action === 'secret.read').length, 0);
+});

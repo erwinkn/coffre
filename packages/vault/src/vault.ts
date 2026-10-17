@@ -793,15 +793,25 @@ class VaultService implements Vault {
     validateItems(items, 'wrapped');
     const sealed = await this.#referencesAt(vias);
     const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])));
+    // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own.
+    // Checked once, not again under the log's head: it decides nothing, so a fork archived meanwhile only names a read.
+    const throughOk = items.map((item, i) => {
+      const through = throughs[i];
+      if (through === null) return true;
+      const fork = forks.get(through);
+      const decidedAt = sealed[i]?.holder ?? item.secret;
+      return fork !== undefined && !fork.deleted && !fork.archived && fork.projectId === decidedAt.projectId && through !== decidedAt.environmentId;
+    });
     const versionIds = new Map(items.map((item) => [item.secret, item.id]));
-    const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i], through: throughs[i] }]));
+    const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i], through: throughs[i], throughOk: throughOk[i] }]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => {
-      const { via, sealed: seal, through } = viaOf.get(secret)!;
+      const { via, sealed: seal, through, throughOk: ok } = viaOf.get(secret)!;
       return {
         ...keyEntry('secret.read', principal, secret, decision, code, input, {
           purpose: input.purpose,
           ...(via === null ? {} : viaDetail(via, seal)),
-          ...(through === null ? {} : throughDetail(through, forks.get(through))),
+          // A fork that failed the check is named, never filed under: its project's log is no place for this read.
+          ...(through === null ? {} : ok ? throughDetail(through, forks.get(through)) : { through: { environmentId: through, refused: true } }),
         }),
         secretVersionId: versionIds.get(secret),
       };
@@ -810,15 +820,7 @@ class VaultService implements Vault {
     if (items.some((item, i) => vias[i] !== null && (sealed[i] === null || sealed[i]!.source.secretId !== item.secret.secretId || !item.current))) {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
     }
-    // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own.
-    // Checked once, not again under the log's head: it decides nothing, so a fork archived meanwhile only names a read.
-    if (items.some((item, i) => {
-      const through = throughs[i];
-      if (through === null) return false;
-      const fork = forks.get(through);
-      const decidedAt = sealed[i]?.holder ?? item.secret;
-      return fork === undefined || fork.deleted || fork.archived || fork.projectId !== decidedAt.projectId || through === decidedAt.environmentId;
-    })) {
+    if (throughOk.includes(false)) {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
     }
     const ends = sealed.flatMap((seal) => (seal === null ? [] : [seal.seq]));

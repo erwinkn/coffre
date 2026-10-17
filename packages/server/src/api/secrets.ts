@@ -626,8 +626,11 @@ export async function patchSecret(
       }));
     }
     if (renaming) log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
-    // Live under its key again, or under a new one: in a fork, no longer removed.
-    if (!archived && (archiving || renaming)) await endRemovals(ctx, tx, log, place, environment, [renaming ? nextKey : secret.key], null);
+    // Live under its key again, or under a new one: in a fork, no longer removed. The row as it is now, under the head, names the key.
+    if (!archived && (archiving || renaming)) {
+      const [now] = await lock(tx, secrets, { id: secret.id });
+      if (now !== undefined && now.archivedAt === null) await endRemovals(ctx, tx, log, place, environment, [now.key], null);
+    }
     if (moving) {
       await fileSecrets(tx, [{ secretId: secret.id, folder }]);
       log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));
