@@ -199,8 +199,10 @@ function EnvironmentLedger({
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
   const folders = foldersOf(active);
-  // What can be filed now: not a secret whose save is still on its way, which may not exist yet.
-  const settled = active.filter((entry) => status(entry.key).state !== 'pending');
+  // What can be filed now: not a secret whose save is on its way, which may
+  // not exist yet, nor one with an edit pending, as its menu offers no move
+  // while it is edited.
+  const settled = active.filter((entry) => status(entry.key).state !== 'pending' && secretChangeFor(changes, entry.key) === undefined);
   // Renaming or removing a folder: everything in it at once, the keys staying where they are.
   const refile = useAction();
   const place = `${project}/${environment}`;
@@ -546,6 +548,8 @@ function EnvironmentLedger({
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
                       onDismiss={dismiss}
+                      // A refused save puts its edits back, and the bar under the table says why.
+                      failureShown={saveError === null || change === undefined}
                       columns={columns}
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
@@ -1065,6 +1069,7 @@ function SecretRow({
   status,
   disabled,
   onDismiss,
+  failureShown,
   columns,
   onEdit,
   onPatch,
@@ -1096,6 +1101,8 @@ function SecretRow({
   disabled: boolean;
   /** Forget a refused change once its row has said so. */
   onDismiss: (mutationId: number) => void;
+  /** Whether the row says why its change was refused, which it does unless the bar under the table does. */
+  failureShown: boolean;
   columns: number;
   onEdit: () => void;
   onPatch: (patch: Partial<SecretChange>) => void;
@@ -1592,10 +1599,7 @@ function SecretRow({
         </tr>
       ) : null}
 
-      {/* A refused change made outside the pending edits, a move for one,
-          says why here. A refused save puts its edit back on the row, and
-          the bar under the table says why. */}
-      {!renamed && !valueChanged && !leaving && (
+      {failureShown && (
         <RowFailure
           status={status}
           columns={columns}
