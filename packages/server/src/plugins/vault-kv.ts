@@ -21,7 +21,7 @@
  * alone, never a cookie, and no CORS answer lets another site's page send
  * one, so these GETs can reveal what coffre's own API reveals only to a POST.
  * Each read is the API's reveal, as the token's holder: the same checks, the
- * same vault, one `secret.read` entry per value.
+ * same vault, the same `secret.read` entry.
  */
 import { CoffreError, type Me } from '@coffre/client';
 

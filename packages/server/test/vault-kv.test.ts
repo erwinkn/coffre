@@ -44,7 +44,7 @@ async function body(response: Response) {
   return (await response.json()) as { data: Record<string, unknown> & { data?: Record<string, string> }; errors?: string[] } & Record<string, unknown>;
 }
 
-test("ESO's store check and reads: lookup-self, then an environment, with every value logged as read by the token", async () => {
+test("ESO's store check and reads: lookup-self, then an environment, logged as one read of its keys by the token", async () => {
   // SecretStore validation: ESO's checkToken asserts `type` is a string and `ttl` a number, and reads `expire_time`.
   const self = await body(await vault('auth/token/lookup-self'));
   assert.equal(self.data.type, 'service');
@@ -65,8 +65,10 @@ test("ESO's store check and reads: lookup-self, then an environment, with every 
   // The environment's own version, as `GET /api/projects/market/prod/version` answers it, without a read.
   assert.equal(metadata.custom_metadata.coffre_version, (await clientFor(deps, ROOT).environments.version('market/prod')).version);
 
+  // One entry for the environment, naming every key it opened (#242).
   const reads = (await entries('secret.read')).filter((entry) => entry.decision === 'allow');
-  assert.deepEqual(reads.map((entry) => entry.actor).sort(), ['token:eso', 'token:eso']);
+  assert.deepEqual(reads.map((entry) => entry.actor), ['token:eso']);
+  assert.equal(JSON.stringify(reads[0]!.metadata.secrets).includes('STRIPE_KEY'), true);
 });
 
 test('one value, by its key', async () => {

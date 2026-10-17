@@ -69,7 +69,7 @@ What ESO then sends, and what coffre does for each request:
 | ESO sends | coffre does |
 |---|---|
 | `GET /v1/auth/token/lookup-self` (once, to mark the store Ready) | Checks the token and answers who it is: `display_name: token:eso`, `type: service`, `ttl: 0` |
-| `GET /v1/secret/data/market/prod` (every 15 min) | Runs the API's reveal of `market/prod` as `token:eso`: the same checks, the same vault call, one `secret.read` entry per value. It answers `{ data: { data: { DATABASE_URL: …, STRIPE_KEY: … } } }` |
+| `GET /v1/secret/data/market/prod` (every 15 min) | Runs the API's reveal of `market/prod` as `token:eso`: the same checks, the same vault call, one `secret.read` entry naming the keys it opened. It answers `{ data: { data: { DATABASE_URL: …, STRIPE_KEY: … } } }` |
 | `GET /v1/secret/data/market/staging` | 403 `permission denied`, logged as a refusal, as `coffre export market/staging` would be |
 | `GET /v1/secret/data/market/gone` | 404 `{"errors":[]}`, which ESO reads as the secret deleted |
 
@@ -320,12 +320,10 @@ with the browser's cookie. None of that can happen here:
 - Every answer is `cache-control: no-store`, carries coffre's security
   headers, and passes the migration door.
 
-**Audit volume.** Today each poll logs one `secret.read` per value, from
-the vault. Take ESO polling 10 ExternalSecrets of 20 keys every 15 minutes:
-that is 800 entries an hour, about 19,000 a day, or 7 million a year. This
-is the same volume `coffre export` in a 15-minute cron would cause. One
-entry per bulk read is coming (W123, T95), which cuts that to 40 entries an
-hour. The adapter needs no change for it, since it is the API's reveal.
+**Audit volume.** Each poll is one reveal, which the vault logs as one
+`secret.read` for the environment, naming every key it opened (#242). Take
+ESO polling 10 ExternalSecrets every 15 minutes: that is 40 entries an
+hour, about 1,000 a day, the same as `coffre export` in a 15-minute cron.
 Don't optimize it here. And if a poll ever needs to know whether anything
 changed without reading values, coffre's environment version (T94,
 `GET /api/projects/<p>/<e>/version`) is the tool, not change detection of
