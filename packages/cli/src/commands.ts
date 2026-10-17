@@ -59,7 +59,7 @@ export const SECTIONS = [
     title: 'Session',
     entries: [
       { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in; use <url> in this directory and below,', 'and by default'] },
-      { command: 'login', usage: ['login <url> --token'], about: ["a CI run's sign-in: a bearer token, asked for or piped in"] },
+      { command: 'login', usage: ['login <url> --token'], about: ["a CI run's or a script's sign-in: a bearer or personal", 'token, asked for or piped in'] },
       { command: 'login', usage: ['login <url> --access-client-id <id>'], about: ['the same, behind Cloudflare Access: its secret asked for'] },
       {
         command: 'login',
@@ -73,6 +73,18 @@ export const SECTIONS = [
       { command: 'sessions revoke', usage: ['sessions revoke <id> [--apply]'], about: ['signs that session out'] },
       { command: 'apps', usage: ['apps [--json]'], about: ['the MCP clients you connected, such as Claude'] },
       { command: 'apps revoke', usage: ['apps revoke <id> [--apply]'], about: ['disconnects that app'] },
+      { command: 'tokens', usage: ['tokens [--json]'], about: ['your personal tokens, which act as you'] },
+      {
+        command: 'tokens issue',
+        usage: ['tokens issue --label <label> --scope <path>=<role>,…', '             [--expires-in <30m|4h|2d>] [--output-file <path>]'],
+        about: [
+          'a personal token, for a script or an agent: it acts as you',
+          'on what --scope says, at most what you hold now and less',
+          'whenever you hold less; never on access or sign-in. An hour',
+          'unless told, a week at most; every entry it makes names it',
+        ],
+      },
+      { command: 'tokens revoke', usage: ['tokens revoke <id> [--apply]'], about: ['ends that personal token; `coffre logout` with it, too'] },
       { command: 'identities', usage: ['identities [--json]'], about: ['the accounts you sign in with'] },
       { command: 'identities unlink', usage: ['identities unlink <id> [--apply]'], about: ['stops that account signing you in'] },
     ],

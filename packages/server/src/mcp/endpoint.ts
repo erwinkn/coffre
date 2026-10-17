@@ -309,6 +309,7 @@ async function call(
     sourceIp,
     credentialId: null,
     provenance: connection.id,
+    personalToken: null,
     via,
   };
   // The API in process, as the connection's person: one token check for the whole call, the one already made.

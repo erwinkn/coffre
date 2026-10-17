@@ -122,6 +122,10 @@ coffre whoami                               # who you are, where, and why there
 coffre use                                  # the instances you are signed in to, and the directories pinned to each
 coffre sessions                             # where you are signed in; sessions revoke <id> signs one out
 coffre identities                           # the accounts you sign in with
+coffre tokens issue --label cursor-agent --scope market/dev=developer --expires-in 4h
+                                            # a personal token: acts as you, for a script or an agent, within
+                                            # its scope and never past what you hold (docs/design/personal-tokens.md)
+coffre tokens                               # your personal tokens; tokens revoke <id> ends one
 
 coffre list     market/dev                  # keys, who wrote each value and how long ago; --stale, those due for rotation
 coffre get      market/dev/DATABASE_URL     # the value; piped, exactly its bytes, no newline added (a terminal gets one)

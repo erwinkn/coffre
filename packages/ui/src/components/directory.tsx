@@ -480,6 +480,7 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
     ? [
         plural(live.grants, 'grant'),
         plural(live.sessions, 'session'),
+        ...(live.tokens > 0 ? [plural(live.tokens, 'personal token')] : []),
         plural(live.identities, 'linked sign-in account'),
         ...(features.mcp ? [apps] : []),
       ]

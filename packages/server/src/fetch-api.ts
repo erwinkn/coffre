@@ -9,6 +9,7 @@ import {
   readCookie,
   accessTampered,
   registrationRequired,
+  sessionCookie,
   sessionCookieName,
   unauthenticated,
   type AuthenticatedIdentity,
@@ -43,7 +44,7 @@ export function apiCredential(request: Request, auth: AuthConfig): ApiCredential
   }
   const header = bearerToken(request);
   if (header !== null) return { token: header, ambient: false };
-  const cookie = readCookie(request, sessionCookieName(auth));
+  const cookie = sessionCookie(request, auth);
   return cookie === null ? null : { token: cookie, ambient: true };
 }
 
@@ -202,9 +203,8 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
     // Access's cookie too, when the browser sent it: what tells a browser's page from any other caller.
     return token === null ? {} : { [ACCESS_JWT_HEADER]: token, ...(cookie === null ? {} : { cookie: `${ACCESS_COOKIE}=${encodeURIComponent(cookie)}` }) };
   }
-  const name = sessionCookieName(auth);
-  const token = readCookie(page, name);
-  return token === null ? {} : { cookie: `${name}=${encodeURIComponent(token)}` };
+  const token = sessionCookie(page, auth);
+  return token === null ? {} : { cookie: `${sessionCookieName(auth)}=${encodeURIComponent(token)}` };
 }
 
 /**

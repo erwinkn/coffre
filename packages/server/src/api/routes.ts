@@ -1,4 +1,4 @@
-import { MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
 import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -6,14 +6,14 @@ import { z } from 'zod';
 import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
-import { badRequest, notFound } from './errors.ts';
+import { badRequest, forbidden, notFound } from './errors.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { managedAccount } from './services.ts';
-import type { IssuedServiceToken, TokenPlan } from './signin.ts';
+import type { IssuedToken, PersonalTokenInput, TokenPlan } from './signin.ts';
 import { getSettings, putSettings } from './settings.ts';
 import { missingKeys, setDismissals } from './missing.ts';
-import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
+import { formatMember, parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
@@ -135,6 +135,32 @@ function serviceId(member: string): string {
   const ref = parseMember(member);
   if (ref.type !== 'service') throw notFound('only tokens hold service tokens');
   return ref.id;
+}
+
+/** What a token is made with, as `POST /members/:member/tokens` takes it: a service's or a person's. */
+const tokenInput = z.object({
+  // Printed in lists, the log and terminals: no control character, which could rewrite what is shown around it.
+  label: z.string().trim().min(1).max(120).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
+  // A service token's lifetime, in days.
+  expiresInDays: z.number().int().min(1).max(366).optional(),
+  // A personal token's, in minutes: an afternoon's script or agent, a week at most.
+  expiresInMinutes: z.number().int().min(1).max(MAX_PERSONAL_TOKEN_MINUTES).optional(),
+  scope: credentialScope,
+});
+
+/**
+ * A personal token's input, from a person for themselves: its label,
+ * lifetime and scope all said, since a token reaching all its person holds
+ * for months is what it is there to avoid.
+ */
+function personalInput(ctx: ApiContext, person: string, input: z.output<typeof tokenInput>): PersonalTokenInput {
+  if (ctx.caller.principal.type !== 'user' || ctx.caller.principal.id !== person) {
+    throw forbidden('a person makes personal tokens for themselves alone');
+  }
+  if (input.label === null) throw badRequest('a personal token needs a label, which every entry it makes names');
+  if (input.expiresInMinutes === undefined || input.expiresInDays !== undefined) throw badRequest('a personal token lasts expiresInMinutes, not days');
+  if (input.scope === undefined) throw badRequest('a personal token needs a scope: what it reaches, by path');
+  return { label: input.label, expiresInMinutes: input.expiresInMinutes, scope: input.scope };
 }
 
 /**
@@ -323,29 +349,34 @@ export const routes = {
   ...route('DELETE /members/:member', {
     run: (ctx, { params }) => removeMember(ctx, parseMember(params.member)),
   }),
+  // A member's tokens: a service account's bearer tokens, or a person's personal tokens, which act as them.
   ...route('GET /members/:member/tokens', {
     run: async (ctx, { params }) => ({
-      tokens: await signin(ctx).listServiceTokens(ctx, serviceId(params.member)),
+      tokens: await signin(ctx).listTokens(ctx, parseMember(params.member)),
     }),
   }),
   ...route('POST /members/:member/tokens', {
-    input: z.object({
-      label: z.string().trim().min(1).max(120).nullable().default(null),
-      expiresInDays: z.number().int().min(1).max(366),
-      scope: credentialScope,
-    }),
+    input: tokenInput,
     // `?dryRun=1` answers what the token would reach, and issues nothing.
     query: dryRunFlag,
-    run: (ctx, { params, input, query }): Promise<TokenPlan | IssuedServiceToken> =>
-      query.dryRun !== undefined
-        ? signin(ctx).planServiceToken(ctx, serviceId(params.member), input)
-        : signin(ctx).issueServiceToken(ctx, serviceId(params.member), input),
+    run: (ctx, { params, input, query }): Promise<TokenPlan | IssuedToken> => {
+      const member = parseMember(params.member);
+      if (member.type === 'user') {
+        const personal = personalInput(ctx, member.id, input);
+        return query.dryRun !== undefined ? signin(ctx).planPersonalToken(ctx, personal) : signin(ctx).issuePersonalToken(ctx, personal);
+      }
+      if (input.expiresInDays === undefined || input.expiresInMinutes !== undefined) throw badRequest('a service token lasts expiresInDays');
+      const service = { label: input.label, expiresInDays: input.expiresInDays, scope: input.scope };
+      return query.dryRun !== undefined
+        ? signin(ctx).planServiceToken(ctx, member.id, service)
+        : signin(ctx).issueServiceToken(ctx, member.id, service);
+    },
   }),
   ...route('DELETE /members/:member/tokens/:id', {
     run: async (ctx, { params }) => {
-      const service = serviceId(params.member);
-      const { managed } = await managedAccount(ctx, ctx.caller, service);
-      return signin(ctx).revokeCredential(ctx, params.id, managed ? service : null);
+      const member = parseMember(params.member);
+      const managed = member.type === 'service' && (await managedAccount(ctx, ctx.caller, member.id)).managed;
+      return signin(ctx).revokeCredential(ctx, params.id, { member: formatMember(member), managed });
     },
   }),
   ...route('GET /members/:member/bindings', {

@@ -282,11 +282,36 @@ export function grantKind(grant: GrantPlace): 'project' | 'environment' | null {
  *   account   developer on market/dev, then viewer on market/prod too
  *   token     developer on market/dev, issued before market/prod
  *   request   reads and writes market/dev, never market/prod
+ *
+ * A person's personal token carries one too, each grant one they held when
+ * they made it (`delegable` roles only), and is weighed the same way
+ * against what they hold now, by their instance role or their grants.
  */
 export type CredentialScope = readonly (GrantPlace & { role: Role })[];
 
 /** The most places a scope asked for names: far more than any credential needs, and a bound on what a request makes the app check. */
 export const MAX_SCOPE_PLACES = 1000;
+
+/**
+ * Whether a personal token's scope may name `role`: one that manages no
+ * access. A token acting as its person reaches their secrets and places,
+ * never who holds them, so it cannot hand anyone, itself included, more
+ * than it was given. A project's Owner who wants a token for all of it
+ * names `maintainer`.
+ */
+export function delegable(role: Role): boolean {
+  return !roleGrants(role, 'grant.manage');
+}
+
+/** The roles a personal token's scope may name, in catalogue order. */
+export const DELEGABLE_ROLES: readonly Role[] = ROLE_NAMES.filter(delegable);
+
+/**
+ * The longest a personal token lasts: a week. It is for an afternoon's
+ * script or agent, and whoever needs it longer makes another, as a person,
+ * rather than keep one around.
+ */
+export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
 
 /**
  * A credential's scope, by path as the API names it, in words, each role
@@ -326,7 +351,13 @@ export type Holdings = {
   scope: Scope;
   /** Live grants only. */
   grants: readonly (GrantPlace & { role: Role })[];
-  /** The scope of the credential a request came in on, past which nothing reaches; absent or null for a session's. */
+  /**
+   * The scope of the credential a request came in on, past which nothing
+   * reaches; absent or null for a session's. A scope names places, so a
+   * request made with one holds nothing of the instance's own: it does not
+   * run the instance, read its whole log or make projects, whatever its
+   * holder's instance role.
+   */
   credentialScope?: CredentialScope | null;
 };
 
@@ -388,7 +419,7 @@ export function mayManageAccess(actor: Holdings, place: Place): boolean {
  * does none of these.
  */
 export function runsInstance(holder: Holdings): boolean {
-  return administers(holder.role) && unscoped(holder.scope);
+  return holder.credentialScope == null && administers(holder.role) && unscoped(holder.scope);
 }
 
 /**
@@ -408,11 +439,13 @@ export type ServiceSetting = Scope;
  * everything `role` does. A Developer on `market/dev` gives viewer or
  * developer there, never maintainer; a grant on `market` takes holding it
  * on all of `market`. `setting` is null for a service account, which sets
- * up none.
+ * up none; a request on a credential with a scope sets none up either,
+ * since what it set up would outlive it.
  */
 export function givesService(holder: Holdings, setting: ServiceSetting | null, role: Role, place: Place): boolean {
   if (mayManageAccess(holder, place)) return true;
-  return setting !== null && inScope(setting, place) && ROLES[role].permissions.every((permission) => allows(holder, permission, place));
+  return setting !== null && holder.credentialScope == null && inScope(setting, place)
+    && ROLES[role].permissions.every((permission) => allows(holder, permission, place));
 }
 
 /** Whether `holder` gives a service account anything anywhere among `places`: whether they set any up. */
@@ -475,7 +508,7 @@ export function issuesCredential(
  * Anyone else reads the places they hold `audit.read` in.
  */
 export function readsWholeLog(holder: Holdings): boolean {
-  return instanceRoleGrants(holder.role, 'audit.read') && unscoped(holder.scope);
+  return holder.credentialScope == null && instanceRoleGrants(holder.role, 'audit.read') && unscoped(holder.scope);
 }
 
 /**
@@ -486,7 +519,7 @@ export function readsWholeLog(holder: Holdings): boolean {
  */
 export function makesProjects(holder: Holdings): boolean {
   const { projects, environments } = holder.scope;
-  return administers(holder.role) && environments === 'all' && (projects === 'all' || 'except' in projects);
+  return holder.credentialScope == null && administers(holder.role) && environments === 'all' && (projects === 'all' || 'except' in projects);
 }
 
 export {

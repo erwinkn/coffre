@@ -389,6 +389,10 @@ export const auditLog = pgTable(
     index('audit_log_exchange_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'credentialId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.exchange' AND ${table.decision} = 'allow'`),
+    // The token a credential is, when one was issued: its creation's entry, by the credential's ID, whose label names a personal token's entries.
+    index('audit_log_token_create_idx')
+      .on(sql`((${table.metadata})::jsonb ->> 'targetCredentialId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'token.create' AND ${table.decision} = 'allow'`),
     // Whether a reference has ended: the vault's `reference.end` naming its creation.
     index('audit_log_reference_end_idx')
       .on(table.relatedSeq)
@@ -722,7 +726,7 @@ export const credentials = pgTable(
     // The member it acts as, `user:<email>` or `token:<id>`, under the generation it was issued in.
     principal: text().notNull(),
     identityId: uuid('identity_id'),
-    // What a service token reaches (`CredentialScope`), JSON: null for a session, one a binding issued (its binding's), or one of 0.4 the app has not sealed yet.
+    // What a service or personal token reaches (`CredentialScope`), JSON: null for a session, one a binding issued (its binding's), or one of 0.4 the app has not sealed yet.
     scope: text(),
     label: text(),
     createdAt: createdAt(),
@@ -735,7 +739,7 @@ export const credentials = pgTable(
   },
   (table) => [
     unique('credentials_token_hash_key').on(table.tokenHash),
-    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service')`),
+    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal')`),
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
     check('credentials_kind_matches_principal', sql`(${table.kind} = 'service') = (${table.principal} LIKE 'token:%')`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),

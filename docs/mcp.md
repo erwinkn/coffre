@@ -81,7 +81,11 @@ another environment's keys live (docs/design/forking.md). With **Manage access**
 To use secrets in a command, a client with a shell runs it in your
 terminal as `coffre run market/staging -- npm test`, which sets them for
 that process only: the values never enter the conversation. The CLI must be
-signed in (`coffre login`), and the MCP connection grants it nothing.
+signed in (`coffre login`), and the MCP connection grants it nothing. An
+agent with a CLI of its own, in a home of its own, signs it in with a
+personal token piped to `coffre login <url> --token`, which reaches only
+what you name and lasts an hour unless told
+([design/personal-tokens.md](design/personal-tokens.md)).
 
 Each tool is coffre's API called as you, so a tool can do no more than you
 could with the CLI.

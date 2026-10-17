@@ -67,7 +67,7 @@ import {
   Unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, credentialScopeInWords, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
@@ -621,7 +621,7 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
 
 /** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
-  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
+  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
   await saveRun({ origin, mode: 'signin', by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
@@ -758,6 +758,11 @@ async function whoami(args: string[]): Promise<void> {
     service: "the run's ID token, as --service",
   }[to.by];
   process.stdout.write(`${named(me.principal.type, me.principal.id)} on ${to.origin}${why}, via ${via}\n`);
+  // An instance before 0.7 says nothing of one.
+  if (me.personalToken) {
+    const { label, expiresAt, scope } = me.personalToken;
+    process.stdout.write(`  personal token "${label}", ends ${expiresAt.slice(0, 16).replace('T', ' ')} UTC, reaching ${credentialScopeInWords(scope)}\n`);
+  }
   if (to.by === 'person' && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
@@ -1203,6 +1208,7 @@ function waysIn(
     ? [
         plural(counts.grants, 'grant'),
         plural(counts.sessions, 'session'),
+        ...(counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
         plural(counts.identities, 'linked account'),
         plural(counts.apps, 'connected app'),
       ].join(', ')
@@ -1361,6 +1367,16 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
+  // An instance before 0.7 lists none.
+  const personalTokens = report.personalTokens ?? [];
+  if (personalTokens.length > 0) {
+    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${personalTokens.length})\n`);
+    for (const token of personalTokens) {
+      const used = token.lastUsedAt === null ? 'never used' : `last used ${token.lastUsedAt.slice(0, 10)}`;
+      process.stdout.write(`  "${token.label ?? ''}" ${token.hint}, reaching ${reaches(token.scope)}, ${used}, expires ${token.expiresAt.slice(0, 16).replace('T', ' ')} UTC\n`);
+    }
+  }
+
   if (report.issuedTokens.length > 0) {
     process.stdout.write(`\nBearer tokens ${they} issued to service accounts, which still work\n`);
     for (const token of report.issuedTokens) {
@@ -1427,9 +1443,10 @@ async function audit(args: string[]): Promise<void> {
 
   for (const entry of result.entries.reverse()) {
     const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
-    process.stdout.write(
-      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${(entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId).padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`,
-    );
+    // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
+    // An instance before 0.7 sends no `token`.
+    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}`;
+    process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
   }
 }
 
