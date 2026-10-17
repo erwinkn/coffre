@@ -133,7 +133,7 @@ export async function currentEnvelopes(
   environmentId: string,
   secretId?: string,
 ): Promise<{ secretId: string; secretVersionId: string; key: string; version: number; envelope: Envelope }[]> {
-  return (await environmentSecrets(db, environmentId, secretId)).flatMap((secret) =>
+  return (await environmentSecrets(db, environmentId, secretId === undefined ? undefined : { secretId })).flatMap((secret) =>
     secret.archivedAt === null && secret.current !== null
       ? [{
           secretId: secret.id,

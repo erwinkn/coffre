@@ -162,6 +162,10 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
   if (values.reference && values.inherit) throw new UsageError('--reference or --inherit, not both: a fork holds references to its parent, or inherits from it');
   nameIgnored(values, 'environment', io);
   const api = connect();
+  // An instance before 0.7 drops `inherit` it does not know, and copies: asked first, as its list of the parent says.
+  if (values.inherit && (await api.secrets.list(`${project}/${from}`)).parents === undefined) {
+    throw new UsageError('this instance is older than forks that inherit (coffre 0.7): it would copy instead. Upgrade it, or fork without --inherit');
+  }
   const made = await api.environments.create(`${project}/${slug}`, {
     name: slug,
     from: from!,
@@ -169,6 +173,9 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
     ...(values.inherit ? { inherit: true } : {}),
   });
   if (values.inherit) {
+    if (made.forked?.inherits !== true) {
+      throw new UsageError(`${project}/${made.environment.slug} was ${made.created ? 'made' : 'there already'}, but does not inherit from ${project}/${from}: check it with \`coffre list ${project}/${made.environment.slug}\``);
+    }
     io.out.write(`created ${project}/${made.environment.slug}, inheriting ${project}/${from}: nothing copied\n`);
     io.out.write(`  it reads ${from}'s keys as they change, but for those it sets or removes; its readers need read on ${from} for those\n`);
     return;
@@ -314,17 +321,10 @@ export async function removeSecret(connect: () => CoffreClient, args: string[], 
   const environment = path.slice(0, path.lastIndexOf('/'));
   const key = path.slice(path.lastIndexOf('/') + 1);
   const api = connect();
-  const { parents, keys: listed } = await api.secrets.list(environment);
+  // A fork's, and only one inherited: the server refuses a key the fork holds a value of, which a removal would not stop.
+  const { parents } = await api.secrets.list(environment);
   if (parents === undefined || parents.length === 0) {
     throw new UsageError(`${environment} inherits from no environment: \`coffre archive ${path}\` takes a key out of it`);
-  }
-  // A value of its own beats a removal: the fork would go on serving it.
-  const entry = listed.find((each) => each.key === key && !each.archived);
-  if (!values.undo && entry !== undefined && entry.parent?.state === 'overridden') {
-    throw new UsageError(`${path} overrides ${entry.parent.from}'s with a value of its own: \`coffre reset ${path}\` first, then remove it`);
-  }
-  if (!values.undo && entry !== undefined && entry.parent === null) {
-    throw new UsageError(`${path} is ${environment}'s own, inherited from nowhere: \`coffre archive ${path}\` takes it out`);
   }
   const { keys } = await api.environments.dismiss(environment, { [key]: values.undo ? null : true });
   if (keys[key] === 'unchanged') return void io.out.write(`${path} was ${values.undo ? 'not removed' : 'removed'} already\n`);

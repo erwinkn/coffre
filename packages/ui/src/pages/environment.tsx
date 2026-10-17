@@ -1315,7 +1315,8 @@ function SecretRow({
       <tr className={`secret-row${state} ${rowClass(status)}`}>
         <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
-          {editing && canWrite ? (
+          {/* An inherited key has no row here to rename: overriding it keeps its name. */}
+          {editing && canWrite && own ? (
             <div className="edit-stack">
               <input
                 className="input input-mono"

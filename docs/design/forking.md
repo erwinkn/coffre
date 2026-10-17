@@ -104,7 +104,10 @@ deliberately does without K" (`dismissed_keys`, from 0.6). In a plain
 environment that only hides K from the missing-keys strip. In a fork it
 also hides the parent's K. One fact, one record. Restoring the dismissal
 brings the inherited value back. A live row of the fork's own beats its
-dismissal, so writing a removed key gives it a value. Two records, the
+dismissal, so writing a removed key gives it a value. The other way round
+is refused: a fork can't remove a key it holds a live value of, which it
+would go on serving, so `coffre remove` says to reset or archive it first,
+checked under the log's head with the dismissal. Two records, the
 row and the dismissal, now describe one key, so one rule keeps them
 apart: whatever makes a fork's row live ends its key's removal, in the
 same transaction, through one function, `endRemovals`. A row becomes live

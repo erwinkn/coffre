@@ -353,7 +353,7 @@ async function valuesIn(
   environment: { projectId: string; environmentId: string; slug: string },
   key?: string,
 ): Promise<{ items: Readable[]; unreadable: { key: string; reason: string }[] }> {
-  const rows = (await environmentSecrets(db, environment.environmentId)).filter((row) => row.archivedAt === null && (key === undefined || row.key === key));
+  const rows = (await environmentSecrets(db, environment.environmentId, key === undefined ? undefined : { key })).filter((row) => row.archivedAt === null);
   const references = await currentReferences(db, rows.filter((row) => row.current === null).map((row) => row.id));
   const live = [...references.values()].filter((reference) => reference.state === 'live');
   const envelopes = await versionEnvelopes(db, live.map((reference) => reference.source!.currentVersionId!));

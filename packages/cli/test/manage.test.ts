@@ -318,25 +318,31 @@ test('fork --reference makes references, and names the keys it copied instead', 
 });
 
 test('fork --inherit copies nothing, says what its readers need, and is no fork as references', async () => {
-  const { connect, calls, written, io } = fixture(() => ({
-    environment: { slug: 'prod-eu', name: 'prod-eu', archivedAt: null }, created: true, forked: { from: 'prod', keys: 0, references: 0, copied: [], inherits: true },
-  }));
+  const { connect, calls, written, io } = fixture(({ method }) => method === 'GET'
+    ? { permissions: [], keys: [], parents: [], rotateAfterDays: null }
+    : { environment: { slug: 'prod-eu', name: 'prod-eu', archivedAt: null }, created: true, forked: { from: 'prod', keys: 0, references: 0, copied: [], inherits: true } });
   await manage.fork(connect, ['market/prod', 'prod-eu', '--inherit'], io);
-  assert.deepEqual(calls, [{ method: 'PUT', path: '/projects/market/prod-eu', body: { name: 'prod-eu', from: 'prod', inherit: true } }]);
+  assert.deepEqual(calls.map((call) => [call.method, call.path, call.body]), [
+    ['GET', '/secrets/market/prod', undefined],
+    ['PUT', '/projects/market/prod-eu', { name: 'prod-eu', from: 'prod', inherit: true }],
+  ]);
   assert.equal(written.out, "created market/prod-eu, inheriting market/prod: nothing copied\n  it reads prod's keys as they change, but for those it sets or removes; its readers need read on prod for those\n");
   await assert.rejects(manage.fork(connect, ['market/prod', 'x', '--inherit', '--reference'], io), /--reference or --inherit, not both/);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
+
+  // An instance before 0.7 would copy: refused before anything is made.
+  const old = fixture(({ method }) => (method === 'GET' ? { permissions: [], keys: [], rotateAfterDays: null } : assert.fail('nothing is made')));
+  await assert.rejects(manage.fork(old.connect, ['market/prod', 'prod-eu', '--inherit'], old.io), /older than forks that inherit \(coffre 0\.7\)/);
+  // And an answer that does not say it inherits is no success.
+  const copied = fixture(({ method }) => method === 'GET'
+    ? { permissions: [], keys: [], parents: [], rotateAfterDays: null }
+    : { environment: { slug: 'prod-eu', name: 'prod-eu', archivedAt: null }, created: true, forked: { from: 'prod', keys: 3, references: 0, copied: [] } });
+  await assert.rejects(manage.fork(copied.connect, ['market/prod', 'prod-eu', '--inherit'], copied.io), /does not inherit from market\/prod/);
 });
 
 test("reset and remove, in a fork: back to the parent's value, or without its key, and --undo for each", async () => {
   const { connect, calls, written, io } = fixture(({ method, path, body }) => {
-    if (method === 'GET') {
-      const keys = [
-        { key: 'DATABASE_URL', archived: false, parent: { from: 'prod', state: 'overridden', changed: false, reset: false } },
-        { key: 'EU_REGION', archived: false, parent: null },
-      ];
-      return { permissions: [], keys, parents: path.includes('prod-eu') ? ['prod'] : [], rotateAfterDays: null };
-    }
+    if (method === 'GET') return { permissions: [], keys: [], parents: path.includes('prod-eu') ? ['prod'] : [], rotateAfterDays: null };
     if (path.startsWith('/secrets/')) return { key: 'DATABASE_URL', archived: (body as { inherit: boolean }).inherit, folder: null, from: 'prod' };
     return { operationId: 'op', keys: { SENTRY_DSN: (body as Record<string, unknown>).SENTRY_DSN === true ? 'dismissed' : 'restored' } };
   });
@@ -361,11 +367,6 @@ test("reset and remove, in a fork: back to the parent's value, or without its ke
   assert.match(written.out, /^market\/prod-eu does without its parent's SENTRY_DSN: `coffre remove market\/prod-eu\/SENTRY_DSN --undo` inherits it again\nmarket\/prod-eu inherits SENTRY_DSN again/);
   // Outside a fork, remove is no dismissal: archive is what takes a key out.
   await assert.rejects(manage.removeSecret(connect, ['market/prod/SENTRY_DSN'], io), /market\/prod inherits from no environment: `coffre archive market\/prod\/SENTRY_DSN`/);
-  // A value of its own would still be served: the command says what to do instead, and dismisses nothing.
-  const before = calls.length;
-  await assert.rejects(manage.removeSecret(connect, ['market/prod-eu/DATABASE_URL'], io), /overrides prod's with a value of its own: `coffre reset market\/prod-eu\/DATABASE_URL` first/);
-  await assert.rejects(manage.removeSecret(connect, ['market/prod-eu/EU_REGION'], io), /market\/prod-eu's own, inherited from nowhere: `coffre archive/);
-  assert.equal(calls.filter((call) => call.method === 'PATCH').length, calls.slice(0, before).filter((call) => call.method === 'PATCH').length);
 });
 
 test('missing lists what siblings have, and dismiss --all dismisses each in one call', async () => {

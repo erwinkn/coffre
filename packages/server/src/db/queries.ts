@@ -1276,13 +1276,13 @@ export type SecretRow = {
 
 /**
  * An environment's secrets, archived ones included, each with its current
- * version and ciphertext; or just one of them. Listing, revealing, running
- * and exporting all read this.
+ * version and ciphertext; or just one of them, by id or by key. Listing,
+ * revealing, running and exporting all read this.
  */
 export async function environmentSecrets(
   db: Queryable,
   environmentId: string,
-  secretId?: string,
+  only?: { secretId: string } | { key: string },
 ): Promise<SecretRow[]> {
   const { secrets, secretVersions, projects, environments } = tablesOf(db);
   const rows = await db
@@ -1305,7 +1305,7 @@ export async function environmentSecrets(
       eq(secrets.environmentId, environmentId),
       isNull(projects.archivedAt),
       isNull(environments.archivedAt),
-      secretId === undefined ? undefined : eq(secrets.id, secretId),
+      only === undefined ? undefined : 'secretId' in only ? eq(secrets.id, only.secretId) : eq(secrets.key, only.key),
     ))
     .orderBy(asc(secrets.key));
   return rows.map((row) => ({

@@ -34,7 +34,7 @@ import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.
 import { scopeView } from './members.ts';
 import { serviceSettingFor, setsUp } from './services.ts';
 import { formatMember } from './paths.ts';
-import { resolveKeys } from './inheritance.ts';
+import { resolveKeys, type Held } from './inheritance.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
 export type Me = {
@@ -149,7 +149,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   // The projects whose secrets the caller may count, and where they may.
   const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
   const [known, folders] = await Promise.all([places(ctx.db), projectFolderOf(ctx.db)]);
-  const counts = await forkCounts(ctx.db, known);
+  const resolved = await forkKeys(ctx.db, known);
   for (const project of known) {
     const slugOf = new Map(project.environments.map((environment) => [environment.id, environment.slug]));
     const parent = (environment: { parentId: string | null }) => (environment.parentId === null ? null : (slugOf.get(environment.parentId) ?? null));
@@ -180,7 +180,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
           parent: parent(environment),
           details: {
             archivedAt: iso(environment.archivedAt),
-            secretCount: secretAccess ? (counts.get(environment.id) ?? environment.secretCount) : null,
+            secretCount: secretAccess ? (resolved.get(environment.id)?.size ?? environment.secretCount) : null,
           },
         };
       }),
@@ -200,24 +200,29 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
     }
   }
 
-  // One query counts every project, rather than one list per environment.
+  // One query counts every project, rather than one list per environment. A
+  // project with forks counts the names its environments resolve to, which
+  // its environments' own rows may not hold: a fork inherits them.
   const distinct = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
-  for (const { summary, projectId } of counted) summary.secretCount = distinct.get(projectId) ?? 0;
+  for (const { summary, projectId, environmentIds } of counted) {
+    const names = environmentIds.some((id) => resolved.has(id))
+      ? new Set(environmentIds.flatMap((id) => [...(resolved.get(id)?.keys() ?? [])])).size
+      : undefined;
+    summary.secretCount = names ?? distinct.get(projectId) ?? 0;
+  }
   return { projects: summaries };
 }
 
 /**
- * How many keys each fork resolves to, its own and those it inherits, for
- * the projects that have one: two queries for all of them, none without.
+ * The keys each environment resolves to, its own and those it inherits, in
+ * the projects that have a fork: two queries for all of them, none without.
  */
-async function forkCounts(db: Queryable, known: readonly PlaceRow[]): Promise<Map<string, number>> {
+async function forkKeys(db: Queryable, known: readonly PlaceRow[]): Promise<Map<string, Map<string, Held>>> {
   const forked = known.filter((project) => project.environments.some((environment) => environment.parentId !== null));
   const ids = forked.flatMap((project) => project.environments.map((environment) => environment.id));
   if (ids.length === 0) return new Map();
   const [live, dismissed] = await Promise.all([liveKeysIn(db, ids), dismissalsAcross(db, ids)]);
-  const counts = new Map<string, number>();
-  for (const [id, keys] of resolveKeys(forked.flatMap((project) => project.environments), live, dismissed)) counts.set(id, keys.size);
-  return counts;
+  return resolveKeys(forked.flatMap((project) => project.environments), live, dismissed);
 }
 
 export type PlaceView = {

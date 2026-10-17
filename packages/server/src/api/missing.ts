@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import { dismissedKeys } from '@coffre/db/schema';
+import type { Transaction } from '@coffre/db';
+import { dismissedKeys, secrets } from '@coffre/db/schema';
 
-import { dismissalsAcross, dismissalsIn, environmentSecrets, liveKeysIn, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
-import { allowed, audited, type ApiContext } from './context.ts';
-import { ApiError, notFound } from './errors.ts';
-import { resolveKeys } from './inheritance.ts';
+import { dismissalsAcross, dismissalsIn, environmentSecrets, liveKeysIn, lock, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
+import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
+import { ApiError, conflict, notFound } from './errors.ts';
+import { inheritedRows, resolveKeys } from './inheritance.ts';
 import { checkEnvironment } from './secrets.ts';
 
 /**
@@ -78,6 +79,27 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
   };
 }
 
+/**
+ * In a fork, a dismissal removes a key it inherits. One it holds a live
+ * value of is served whatever is dismissed, so removing it would say one
+ * thing and do another: refused, under the head, which every write that
+ * makes a row live holds too, so none lands between the check and the
+ * removal.
+ */
+async function refuseOwnRemovals(ctx: ApiContext, tx: Transaction, place: ResolvedPath, keys: readonly string[], operationId: string): Promise<void> {
+  if (keys.length === 0) return;
+  const own = (await lock(tx, secrets, { environmentId: place.environment!.id, key: [...keys] })).filter((row) => row.archivedAt === null);
+  if (own.length === 0) return;
+  const held = (await inheritedRows(tx, place.environment!.id))?.held ?? new Map();
+  const path = `${place.project.slug}/${place.environment!.slug}`;
+  const [first] = own;
+  const how = held.has(first!.key) ? `\`coffre reset ${path}/${first!.key}\` first, then remove it` : `\`coffre archive ${path}/${first!.key}\` takes it out`;
+  throw new Refusal(
+    conflict(`${path} holds ${own.map((row) => row.key).join(', ')} of its own, which removing would not stop it serving: ${how}`),
+    denied(ctx, 'missing.dismiss', 'held_here', { projectId: place.project.id, environmentId: place.environment!.id, operationId, metadata: { keys: own.map((row) => row.key) } }),
+  );
+}
+
 /** The environments below one, forks of its forks too, from each environment's parent. */
 function forksBelow(environments: readonly { id: string; parentId: string | null }[], environmentId: string): Set<string> {
   const below = new Set<string>();
@@ -111,6 +133,7 @@ export async function setDismissals(
   return audited(ctx, async (tx, log) => {
     // Under the head, as every write to a place: one archived or deleted since the router found it takes no dismissal.
     await checkEnvironment(tx, place, here);
+    if (place.environment!.parentId !== null) await refuseOwnRemovals(ctx, tx, place, Object.keys(patch).filter((key) => patch[key] === true), operationId);
     const before = new Set((await dismissalsIn(tx, here.environmentId)).map((row) => row.key));
     const now = new Date();
     const by = ctx.caller.principal.id;

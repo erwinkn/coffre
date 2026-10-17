@@ -294,9 +294,12 @@ test('a value written again as the same reference ends its removal too', async (
   await root.secrets.set('billing/prod', { SOURCE: 'billing-secret' });
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   await root.secrets.set('market/prod-eu', { STRIPE_KEY: { ref: 'billing/prod/SOURCE' } });
+  // Reset, then removed: written again as the same reference, it serves, and is no longer removed.
+  await root.secrets.inherit('market/prod-eu/STRIPE_KEY', true);
   await root.environments.dismiss('market/prod-eu', { STRIPE_KEY: true });
   await root.secrets.set('market/prod-eu', { STRIPE_KEY: { ref: 'billing/prod/SOURCE' } });
   assert.deepEqual((await root.environments.missing('market/prod-eu')).dismissed, []);
+  assert.equal((await values(root, 'market/prod-eu')).STRIPE_KEY, 'billing-secret');
 });
 
 test('no copy goes into an empty environment that inherits, and a chain made around the app is not followed', async () => {
@@ -312,18 +315,19 @@ test('no copy goes into an empty environment that inherits, and a chain made aro
   await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: /parents loop or run past 3/ });
 });
 
-test('a reset override is overridden again by a write, and a restored version ends a removal as a write does', async () => {
+test('a reset override is overridden again by a write, and a write over a removal ends it', async () => {
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu_1' });
   await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
   await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu_2' });
   assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_eu_2');
 
-  // Removed while overridden, then an old version restored: reset, the key inherits, not stays removed.
+  // Reset and removed, then written: it overrides, and reset again, the key inherits, not stays removed.
+  await maintainer.secrets.inherit('market/prod-eu/STRIPE_KEY', true);
   await maintainer.environments.dismiss('market/prod-eu', { STRIPE_KEY: true });
-  await maintainer.secrets.restore('market/prod-eu/STRIPE_KEY', 1);
-  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_eu_1');
-  await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu_3' });
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_eu_3');
+  await maintainer.secrets.inherit('market/prod-eu/STRIPE_KEY', true);
   assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_live_1');
 });
 
@@ -616,4 +620,30 @@ test("a reference refused on a key a fork inherits names the parent's key only t
     assert.equal(error.message, 'market/prod-eu/STRIPE_KEY is no live secret to refer to');
     return true;
   });
+});
+
+test('a fork removes only what it inherits: a key it holds a value of is refused, under the head', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { DATABASE_URL: 'postgres://eu', EU_REGION: 'eu-west-1' });
+  await assert.rejects(maintainer.environments.dismiss('market/prod-eu', { DATABASE_URL: true }), {
+    status: 409,
+    message: /market\/prod-eu holds DATABASE_URL of its own, which removing would not stop it serving: `coffre reset market\/prod-eu\/DATABASE_URL` first/,
+  });
+  await assert.rejects(maintainer.environments.dismiss('market/prod-eu', { EU_REGION: true }), { status: 409, message: /`coffre archive market\/prod-eu\/EU_REGION` takes it out/ });
+  assert.deepEqual((await maintainer.environments.missing('market/prod-eu')).dismissed, []);
+  // Reset first, and the removal holds.
+  await maintainer.secrets.inherit('market/prod-eu/DATABASE_URL', true);
+  await maintainer.environments.dismiss('market/prod-eu', { DATABASE_URL: true });
+  assert.equal((await values(maintainer, 'market/prod-eu')).DATABASE_URL, undefined);
+  // Outside forks, a dismissal of a key held is as it was: moot, and allowed.
+  await root.environments.dismiss('market/prod', { DATABASE_URL: true });
+});
+
+test("a project's count is of the names its environments resolve to, a fork-only reader's included", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { EU_REGION: 'eu-west-1' });
+  await root.access.set(`user:${ADA}`, { 'market/prod-eu': 'viewer' });
+  const market = (await ada.projects.list()).projects.find((project) => project.slug === 'market')!;
+  assert.deepEqual([market.secretCount, market.environments.find((environment) => environment.slug === 'prod-eu')?.details?.secretCount], [4, 4]);
+  assert.equal((await maintainer.projects.list()).projects.find((project) => project.slug === 'market')!.secretCount, 4);
 });
