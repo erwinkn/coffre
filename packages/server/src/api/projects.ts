@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { runsInstance, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
-import type { Transaction } from '@coffre/db';
+import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
@@ -543,6 +543,14 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
   return withRefusals(ctx, async () => {
     requireInstance(ctx, action, fields, `delete ${what === 'project' ? 'a project' : 'an environment'} for good`);
     if (!archived(place)) throw notArchived();
+    // A fork, archived or not, keeps its parent: deleted, it would leave the fork naming a tombstone forever.
+    const forked = async (db: Queryable) => (environment === null ? [] : forksOf(db, environment.id, { archived: true }));
+    const parentOf = (forks: string[]) => new Refusal(
+      conflict(`${path} is the parent of ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: delete ${forks.length === 1 ? 'it' : 'them'} first`),
+      denied(ctx, action, 'inherited', { ...fields, metadata: { path, forks } }),
+    );
+    const forks = await forked(ctx.db);
+    if (forks.length > 0) throw parentOf(forks);
 
     const [scope, references] = await Promise.all([deletionScope(ctx.db, doomed), referencesAt(ctx.db, doomed)]);
     const deletion = (tombstone: string, versions = scope.versions): Deletion => ({
@@ -597,6 +605,8 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
           denied(ctx, action, 'restored', fields),
         );
       }
+      const forksNow = await forked(tx);
+      if (forksNow.length > 0) throw parentOf(forksNow);
       // A grant set there since the vault revoked them would outlive the place, named by no path that could revoke it.
       if ((await deletionScope(tx, doomed)).grants.length > 0) {
         throw new Refusal(

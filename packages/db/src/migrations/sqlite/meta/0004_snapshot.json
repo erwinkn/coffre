@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "f2626341-5663-4e40-b901-8a95ae0cec7e",
+  "id": "e5b2812f-ab9d-4fad-8ca6-4fefa8cd62e2",
   "prevId": "e88f495b-b45b-45f9-a361-e1b224e6ecfe",
   "tables": {
     "audit_chain_head": {
@@ -957,6 +957,15 @@
         }
       },
       "indexes": {
+        "environments_parent_id_owner_key": {
+          "name": "environments_parent_id_owner_key",
+          "columns": [
+            "parent_id",
+            "owner"
+          ],
+          "isUnique": true,
+          "where": "instr(\"environments\".\"slug\", '~') = 0"
+        },
         "environments_parent_idx": {
           "name": "environments_parent_idx",
           "columns": [
@@ -977,14 +986,6 @@
           "columns": [
             "id",
             "project_id"
-          ],
-          "isUnique": true
-        },
-        "environments_parent_id_owner_key": {
-          "name": "environments_parent_id_owner_key",
-          "columns": [
-            "parent_id",
-            "owner"
           ],
           "isUnique": true
         }

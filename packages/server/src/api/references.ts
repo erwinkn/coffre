@@ -325,6 +325,27 @@ async function resolveValues(
   return { items, unreadable: refused };
 }
 
+/**
+ * The inherited keys a caller cannot be told of, by the parent each comes
+ * from: values, and unreadable keys alike, since why a key cannot be read
+ * (a broken reference's source, who broke it) is the parent's to tell.
+ * Reading what a fork inherits takes read on that parent, by the caller's
+ * own grants: a fork lends nothing.
+ */
+export function unreadParents(
+  ctx: ApiContext,
+  projectId: string,
+  read: { items: readonly Readable[]; unreadable: readonly Unreadable[] },
+): Map<string, string[]> {
+  const unread = new Map<string, string[]>();
+  for (const row of [...read.items, ...read.unreadable]) {
+    if (row.parent === undefined || row.key === undefined) continue;
+    const parent = { projectId, environmentId: row.parent.environmentId, environmentSlug: row.parent.slug };
+    if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key].sort());
+  }
+  return unread;
+}
+
 /** One environment's own values, without what it inherits: `readableValues`, a layer at a time. */
 async function valuesIn(
   db: Queryable,

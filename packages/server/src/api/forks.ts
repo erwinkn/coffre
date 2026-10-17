@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
-import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
+import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues } from './keys.ts';
 import { putEnvironment, type PlaceView } from './projects.ts';
-import { readableValues, type Readable } from './references.ts';
+import { readableValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -61,6 +61,11 @@ export async function forkEnvironment(
     }
     // What the fork reads, checked before anything is made: a reference that cannot be read stops it.
     const readable = await readableValues(ctx.db, source, sourcePlace);
+    const unread = unreadParents(ctx, project.id, readable);
+    if (unread.size > 0) {
+      const which = [...unread].map(([parent, keys]) => `${keys.join(', ')} from ${project.slug}/${parent}`);
+      throw forbidden(`${project.slug}/${from} inherits ${which.join('; ')}, which you cannot read`);
+    }
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 

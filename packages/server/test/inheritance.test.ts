@@ -311,3 +311,53 @@ test('no copy goes into an empty environment that inherits, and a chain made aro
   await db.owner.update(environments).set({ parentId: eu }).where(eq(environments.id, prod));
   await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: /parents loop or run past 3/ });
 });
+
+test('a reset override is overridden again by a write, and a restored version ends a removal as a write does', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu_1' });
+  await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu_2' });
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_eu_2');
+
+  // Removed while overridden, then an old version restored: reset, the key inherits, not stays removed.
+  await maintainer.environments.dismiss('market/prod-eu', { STRIPE_KEY: true });
+  await maintainer.secrets.restore('market/prod-eu/STRIPE_KEY', 1);
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_eu_1');
+  await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_live_1');
+});
+
+test('a parent is deleted only once no fork names it, and a deleted personal config frees its place', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.environments.update('market/prod-eu', { archived: true });
+  await root.environments.update('market/prod', { archived: true });
+  await assert.rejects(root.environments.delete('market/prod'), { status: 409, message: /market\/prod is the parent of market\/prod-eu: delete it first/ });
+  await root.environments.delete('market/prod-eu');
+  await root.environments.delete('market/prod');
+
+  // Personal configs are not made by the API yet: the index, in the database.
+  await root.environments.create('market/dev', { name: 'Dev' });
+  const [dev] = [await environmentId('dev')];
+  const [market] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
+  const personal = (slug: string) => ({ id: crypto.randomUUID(), projectId: market.id, slug, name: slug, parentId: dev, owner: `user:${ADA}` });
+  await db.owner.insert(environments).values(personal('dev-p-1~deleted-2026-10-17'));
+  await db.owner.insert(environments).values(personal('dev-p-2'));
+  await assert.rejects(db.owner.insert(environments).values(personal('dev-p-3')));
+});
+
+test("forking a fork tells its forker no more of an unreadable parent than a read does", async () => {
+  const ADMIN = 'admin2@acme.example';
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'Prod' });
+  await root.secrets.set('billing/prod', { PRIVATE_SOURCE: 'billing-secret' });
+  await root.secrets.set('market/prod', { SHARED: { ref: 'billing/prod/PRIVATE_SOURCE' } });
+  await root.references.break('market/prod/SHARED');
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.members.add(`user:${ADMIN}`, { role: 'admin' });
+  await root.access.set(`user:${ADMIN}`, { 'market/prod-eu': 'viewer' });
+  await assert.rejects(clientFor(deps, ADMIN).environments.create('market/eu-copy', { from: 'prod-eu' }), (error: { status: number; message: string }) => {
+    assert.equal(error.status, 403);
+    assert.doesNotMatch(error.message, /billing|PRIVATE_SOURCE|broke/);
+    return true;
+  });
+});

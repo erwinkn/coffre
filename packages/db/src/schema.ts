@@ -78,8 +78,8 @@ export const environments = pgTable(
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
-    // One personal config per person per environment.
-    unique('environments_parent_id_owner_key').on(table.parentId, table.owner),
+    // One personal config per person per environment; a deleted one, a tombstone, holds no place.
+    uniqueIndex('environments_parent_id_owner_key').on(table.parentId, table.owner).where(sql`strpos(${table.slug}, '~') = 0`),
     check('environments_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     // An environment is never its own parent. Longer loops, written around the app, are refused at read (`parentsOf`).
     check('environments_parent_check', sql`${table.parentId} IS NULL OR ${table.parentId} <> ${table.id}`),

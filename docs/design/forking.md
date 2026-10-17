@@ -71,8 +71,9 @@ database can't promise that alone: its login could insert two rows naming
 each other in one statement. So a check refuses the simplest case, an
 environment that is its own parent, and a read refuses a chain that
 loops or runs past the cap, written around the app, instead of following
-it. `UNIQUE (parent_id, owner)` gives each person at most one personal
-config per environment.
+it. A unique index on `(parent_id, owner)` gives each person at most one
+personal config per environment. It's partial, leaving out tombstones, so
+deleting a personal config frees its place.
 
 A fork's own keys are ordinary `secrets` rows in its environment. Here is
 `market/prod-eu`, forked from prod, after Cy sets two keys and removes one:
@@ -103,9 +104,12 @@ deliberately does without K" (`dismissed_keys`, from 0.6). In a plain
 environment that only hides K from the missing-keys strip. In a fork it
 also hides the parent's K. One fact, one record. Restoring the dismissal
 brings the inherited value back. A live row of the fork's own beats its
-dismissal, so writing a removed key gives it a value. The write should
-also restore the dismissal, so that a later reset lands on the parent's
-value and not on "removed".
+dismissal, so writing a removed key gives it a value. Two records, the
+row and the dismissal, now describe one key, so one rule keeps them
+apart: every write to a fork's key ends its removal, in the write's own
+transaction, through one function (`endRemovals`) that each write calls
+(a value, a reference, a restored version). A later reset then lands on
+the parent's value, not on "removed".
 
 ### A personal config is a fork with an owner
 
@@ -215,8 +219,12 @@ inherited by market/prod-eu: archive it first". This is D41's rule for
 references, applied to parents, and the prototype has it. Personal
 configs are the exception: they're private and derived, so archiving dev
 archives every `dev@…` with it, and restoring dev restores them. A fork
-is restored only while its parent is live. Deleting an archived parent
-deletes its archived forks with it, listed in the deletion preview. If a
+is restored only while its parent is live. Deleting a parent for good is
+refused while any fork names it, archived or not: "market/prod is the
+parent of market/prod-eu: delete it first". A deleted parent would leave
+its forks naming a tombstone forever, unrestorable, and deleting is rare
+and the instance Owners' alone, so they delete forks first. Personal
+configs are deleted with their parent. If a
 parent is archived anyway, around the app, a read of the fork refuses
 and says why ("market/prod-eu inherits from market/prod, which is
 archived"). It never runs half empty.
@@ -533,9 +541,10 @@ What's built:
     empty environment that already inherits;
   - the chain read in one snapshot (`SNAPSHOT`), and the parent check
     before any other refusal;
-  - a write in a fork restoring the key's removal (`api/secrets.ts`);
-  - the archive block, and the refusal to restore a fork whose parent is
-    archived (`api/projects.ts`).
+  - every write in a fork ending the key's removal (`endRemovals`), and a
+    write reviving an override that was reset (`api/secrets.ts`);
+  - the archive block, the refusal to restore a fork whose parent is
+    archived, and the refusal to delete a parent (`api/projects.ts`).
 - `packages/core` and `packages/vault`: `through` on `unwrap`'s items,
   checked and logged as `through` and `also` (`vault.ts`).
 - `packages/client`: the regenerated `api.ts`.

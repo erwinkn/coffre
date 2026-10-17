@@ -1407,13 +1407,13 @@ export async function liveEnvironment(db: Queryable, environmentId: string): Pro
   return row !== undefined;
 }
 
-/** The live environments that inherit from `environmentId` directly, by slug. */
-export async function forksOf(db: Queryable, environmentId: string): Promise<string[]> {
+/** The environments that inherit from `environmentId` directly, by slug: the live ones, or with `archived`, those archived too. */
+export async function forksOf(db: Queryable, environmentId: string, { archived = false }: { archived?: boolean } = {}): Promise<string[]> {
   const { environments } = tablesOf(db);
   const rows = await db
     .select({ slug: environments.slug })
     .from(environments)
-    .where(and(eq(environments.parentId, environmentId), isNull(environments.archivedAt), standing(environments.slug)))
+    .where(and(eq(environments.parentId, environmentId), archived ? undefined : isNull(environments.archivedAt), standing(environments.slug)))
     .orderBy(asc(environments.slug));
   return rows.map((row) => row.slug);
 }

@@ -28,10 +28,11 @@ import {
 } from '../db/queries.ts';
 import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
+import type { AuditEntry } from '../db/audit.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, type ReferenceView, type Resolved } from './references.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type ReferenceView, type Resolved } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -181,6 +182,28 @@ async function appendVersion(
   await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: new Date() });
 }
 
+/**
+ * A fork's keys that got a value or a reference of their own, which are
+ * no longer removed: reset later, each inherits again (docs/design/forking.md).
+ * Every write to a fork's key ends its removal here, under the head.
+ */
+async function endRemovals(
+  ctx: ApiContext,
+  tx: Transaction,
+  log: AuditEntry[],
+  place: ResolvedPath,
+  environment: Environment,
+  keys: readonly string[],
+  operationId: string,
+): Promise<void> {
+  if (place.environment!.parentId === null || keys.length === 0) return;
+  const removed = new Set((await dismissalsIn(tx, environment.environmentId)).map((row) => row.key));
+  for (const key of keys.filter((key) => removed.has(key))) {
+    await update(tx, dismissedKeys, { environmentId: environment.environmentId, key }, { restoredAt: new Date(), restoredBy: ctx.caller.principal.id });
+    log.push(allowed(ctx, 'missing.restore', { ...environment, operationId, metadata: { key } }));
+  }
+}
+
 /** A competing write invalidated the keys prepared outside the transaction. */
 class PrepareAgain extends Error {}
 
@@ -243,9 +266,11 @@ export async function setSecrets(
     const currently = await currentReferences(ctx.db, heads.filter((row) => row.currentVersionId === null).map((row) => row.id));
     // Each key's newest reference, which the transaction checks no write replaced meanwhile.
     const newestBefore = newestReferences(await referenceRows(ctx.db, { holderSecretIds: heads.map((row) => row.id) }));
+    // In a fork, an archived key is an override reset to its parent's: writing it again overrides again.
+    const fork = place.environment!.parentId !== null;
     const archived = (key: string) => {
       const row = prepared.get(key);
-      if (row?.archivedAt == null) return;
+      if (row?.archivedAt == null || fork) return;
       throw new Refusal(
         conflict(`${key} is archived; unarchive it before writing a new version`),
         denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
@@ -336,6 +361,12 @@ export async function setSecrets(
       if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
 
       const keys: Record<string, SetOutcome> = {};
+      for (const key of [...items, ...references].map((item) => item.key)) {
+        const row = byKey.get(key);
+        if (row?.archivedAt == null) continue;
+        await update(tx, secrets, { id: row.id }, { archivedAt: null });
+        log.push(allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }));
+      }
       const versions = items.map(({ key, secret }, i) => {
         log.push(allowed(ctx, 'secret.write', {
           ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i], metadata: { key, version: secret.version },
@@ -370,14 +401,7 @@ export async function setSecrets(
         keys[key] = { reference: sourcePath(source) };
       }
       for (const { key, source } of refs.map((ref) => ({ key: ref.key, source: ref.ref }))) keys[key] ??= { reference: source };
-      // In a fork, a key given a value or a reference of its own is no longer removed: reset later, it inherits again.
-      if (place.environment!.parentId !== null) {
-        const removed = new Set((await dismissalsIn(tx, environment.environmentId)).map((row) => row.key));
-        for (const key of keysIn.filter((key) => patch[key] !== null && removed.has(key))) {
-          await update(tx, dismissedKeys, { environmentId: environment.environmentId, key }, { restoredAt: now, restoredBy: ctx.caller.principal.id });
-          log.push(allowed(ctx, 'missing.restore', { ...environment, operationId, metadata: { key } }));
-        }
-      }
+      await endRemovals(ctx, tx, log, place, environment, keysIn.filter((key) => patch[key] !== null), operationId);
       const archiving = archives.map((key) => byKey.get(key)).filter((secret) => secret !== undefined && secret.archivedAt === null);
       if (archiving.length > 0) {
         await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: archiving.map((secret) => secret!.id) }, 'secret.archive', { ...environment, operationId });
@@ -703,6 +727,7 @@ export async function restoreVersion(
       log.push(allowed(ctx, 'secret.restore', {
         ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion },
       }));
+      await endRemovals(ctx, tx, log, place, environment, [prepared.key], operationId);
       return { key: prepared.key, version };
     });
   });
@@ -747,14 +772,8 @@ export async function reveal(
         denied(ctx, 'secret.read', 'unknown_secret', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
-    // An inherited value is the parent's: reading it takes read there, by the reader's own grants. A fork lends
-    // nothing, and says nothing past a key's name about what the reader cannot read, not even why it cannot be read.
-    const unread = new Map<string, string[]>();
-    for (const row of [...rows, ...unreadable]) {
-      if (row.parent === undefined || row.key === undefined) continue;
-      const parent = { projectId: environment.projectId, environmentId: row.parent.environmentId, environmentSlug: row.parent.slug };
-      if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key].sort());
-    }
+    // Before any other refusal: past a key's name, a fork says nothing of what its reader cannot read.
+    const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable });
     if (unread.size > 0) {
       const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
       throw new Refusal(
