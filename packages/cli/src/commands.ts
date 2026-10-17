@@ -104,8 +104,13 @@ export const SECTIONS = [
       },
       {
         command: 'run',
-        usage: [`run       ${P}... -- <command>`],
-        about: ['several environments: their keys together, and a key in two', 'of them stops it before anything is read'],
+        usage: [`run       [--keep-existing] ${P}... -- <command>`],
+        about: [
+          'several environments: their keys together, and a key in two',
+          'of them stops it before anything is read; --keep-existing lets',
+          'a variable already set in your shell, empty ones too, win',
+          "over coffre's value for it",
+        ],
       },
       { command: 'export', usage: [`export    ${P}... [--format dotenv|json|shell|github]`], about: ['several, as run takes them'] },
       { command: 'history', usage: [`history   ${P}/<KEY> [--json]`] },

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`coffre run --keep-existing`.** `coffre run` still sets every key of the
+  environments it names over a variable of the same name in your shell. With
+  `--keep-existing`, a variable already set there keeps its value, an empty one
+  included, and coffre's is dropped. One line on stderr names the keys kept,
+  never a value. Every value is still read, and every read is audited.
 - **Forks that inherit.** An environment can now be made as a fork of
   another in its project that keeps reading its parent's keys, live:
   `coffre fork market/prod prod-eu --inherit`, "Inheriting from prod" in
@@ -15,8 +20,9 @@
 - **A fork lends nothing.** Reading what a fork inherits takes read on the
   parent, by your own grants: a reader of prod-eu alone gets a 403 that
   names the inherited keys. Each inherited value is logged as a read of
-  prod's key, "in market/prod-eu", in both environments' logs. To lend
-  values across that line, use references, as before.
+  prod's key, "in market/prod-eu", in both environments' logs; one read
+  through prod's own reference stays in its source's log and prod's. To
+  lend values across that line, use references, as before.
 - **The environment page shows where each key comes from.** "from prod"
   for an inherited key, "overrides prod" for an override, flagged "prod
   changed since" when prod wrote a newer value, and removed keys struck
