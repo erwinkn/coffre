@@ -403,9 +403,11 @@ checks that the recipe reads, stores it, written canonical
 `generated`, and in its version history. Regenerate, `coffre regenerate
 market/prod/SESSION_SECRET` or the row's menu, makes the next value by it, in
 the environment it is asked of, and nobody sees either. It addresses keys by
-name, so each value it sends says the version it `replaces`, as listed, and
-the server refuses the whole write (409) if any key is not at that version
-now: renamed, archived, typed over or regenerated meanwhile, by anyone.
+name, so each value it sends says the version it `replaces`, by the
+`versionId` the listing gave it (unique, as a version number is not), and the
+server refuses the whole write (409) unless every key resolves to that
+version now, checked again under the log's head: renamed, archived, typed
+over or regenerated meanwhile, by anyone, here or in a parent.
 In a fork, a key it inherits lists the recipe of the parent's value it
 reads, to a reader of that parent, as its version; regenerating it writes
 an override in the fork, never the parent, and `replaces` is the inherited

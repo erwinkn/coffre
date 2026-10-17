@@ -246,10 +246,11 @@ function EnvironmentLedger({
   const archived = keys.filter((entry) => entry.archived);
   const existing = new Set(keys.map((entry) => entry.key));
   const versionOf = (key: string) => keys.find((entry) => entry.key === key.trim())?.version ?? null;
-  /** The listed version of each key, those with one: what a regenerate replaces. */
+  /** The listed version id of each key, those with one: what a regenerate replaces. */
+  const versionIdOf = (name: string) => active.find((entry) => entry.key === name)?.versionId ?? null;
   const versionsOf = (names: readonly string[]) =>
     Object.fromEntries(names.flatMap((name) => {
-      const version = active.find((entry) => entry.key === name)?.version ?? null;
+      const version = versionIdOf(name);
       return version === null ? [] : [[name, version] as const];
     }));
 
@@ -605,7 +606,9 @@ function EnvironmentLedger({
                         status(key).state === 'pending' ||
                         editing.has(key) ||
                         secretChangeFor(changes, key) !== undefined ||
-                        drafts.some((draft) => draft.key.trim() === key || draft.companion?.key.trim() === key)
+                        drafts.some((draft) => draft.key.trim() === key || draft.companion?.key.trim() === key) ||
+                        // Written here and not yet read back: no version to say it replaces.
+                        versionIdOf(key) === null
                       }
                       onRegenerate={(generated) =>
                         regenerate(

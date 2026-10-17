@@ -9,7 +9,7 @@ import { liveGeneration, regenerateWaits } from '../src/lib/recipes.ts';
 const PAIR = { recipe: 'ecdsa:p-256', pair: { private: 'JWT_PRIVATE_KEY', public: 'JWT_PUBLIC_KEY' } };
 
 function listed(key: string, generated: SecretKey['generated'], more: Partial<SecretKey> = {}): SecretKey {
-  return { key, reference: null, folder: null, archived: false, version: 1, updatedAt: null, updatedBy: null, generated, ...more };
+  return { key, reference: null, folder: null, archived: false, version: 1, versionId: `${key}-v1`, updatedAt: null, updatedBy: null, generated, parent: null, ...more };
 }
 
 const pair = () => [listed('JWT_PRIVATE_KEY', PAIR), listed('JWT_PUBLIC_KEY', PAIR), listed('TOKEN', { recipe: 'bytes:32:base62' })];
@@ -73,7 +73,7 @@ test("Regenerate is a save of every key it writes: both halves are pending until
   const sent: unknown[] = [];
   const client = { secrets: { set: async (path: string, patch: unknown) => (sent.push([path, patch]), { operationId: 'op', keys: {} }) } } as unknown as CoffreClient;
   const change = regenerateSecret(client, { project: 'market', environment: 'dev' }, 'ada@acme.example');
-  const vars = { key: 'JWT_PUBLIC_KEY', generated: PAIR, versions: { JWT_PRIVATE_KEY: 1, JWT_PUBLIC_KEY: 1 } };
+  const vars = { key: 'JWT_PUBLIC_KEY', generated: PAIR, versions: { JWT_PRIVATE_KEY: 'private-v1', JWT_PUBLIC_KEY: 'public-v1' } };
   // The page's status marks each target pending, and a row with a save on its way takes no edit.
   assert.deepEqual(change.targets(vars).map(({ id, kind }) => [id, kind]), [['JWT_PRIVATE_KEY', 'saving'], ['JWT_PUBLIC_KEY', 'saving']]);
   const busy = new Set(change.targets(vars).map((target) => target.id));
@@ -93,7 +93,7 @@ test("Regenerate is a save of every key it writes: both halves are pending until
   assert.equal(path, 'market/dev');
   assert.deepEqual(Object.keys(patch), ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY']);
   // Each replaces the version the page listed: the server refuses it if either has changed since.
-  assert.deepEqual([patch.JWT_PUBLIC_KEY!.generated, patch.JWT_PRIVATE_KEY!.replaces, patch.JWT_PUBLIC_KEY!.replaces], [PAIR, 1, 1]);
+  assert.deepEqual([patch.JWT_PUBLIC_KEY!.generated, patch.JWT_PRIVATE_KEY!.replaces, patch.JWT_PUBLIC_KEY!.replaces], [PAIR, 'private-v1', 'public-v1']);
 });
 
 test('Regenerate waits while either half is being edited, before any save is sent', () => {

@@ -13,7 +13,7 @@ const TOKEN = `coffre_cli_${'g'.repeat(43)}`;
 
 type Generation = { recipe: string; pair?: { private: string; public: string } };
 type Held = { version: number; archived?: boolean; generated?: Generation | null };
-type Written = { value: string; generated?: Generation; replaces?: number };
+type Written = { value: string; generated?: Generation; replaces?: string };
 
 /**
  * A coffre with one environment, app/prod, which lists its keys with their
@@ -34,7 +34,8 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
       return send(200, {
         permissions: ['secret.read', 'secret.write'],
         keys: Object.entries(held).map(([key, { version, archived = false, generated = null }]) => ({
-          key, version, archived, reference: null, folder: null, updatedAt: null, updatedBy: null, ...(unsaid ? {} : { generated }),
+          key, version, archived, reference: null, folder: null, updatedAt: null, updatedBy: null,
+          ...(unsaid ? {} : { generated, versionId: `${key}-v${version}` }),
         })),
         rotateAfterDays: null,
       });
@@ -151,7 +152,7 @@ test('regenerate makes a new value by the recipe the key has, and a key pair who
   assert.match(coffre.writes[0]!.TOKEN!.value, /^[A-Za-z0-9_-]{22}$/);
   assert.deepEqual(coffre.writes[0]!.TOKEN!.generated, { recipe: 'bytes:16:base64url' });
   // It replaces the version listed, which the server holds it to.
-  assert.equal(coffre.writes[0]!.TOKEN!.replaces, 4);
+  assert.equal(coffre.writes[0]!.TOKEN!.replaces, 'TOKEN-v4');
 
   const halves = await coffre.coffre(['regenerate', 'app/prod/VERIFY_KEY']);
   assert.equal(halves.code, 0, halves.stderr);
@@ -161,7 +162,7 @@ test('regenerate makes a new value by the recipe the key has, and a key pair who
       'VERIFY_KEY regenerated as version 3: the public key of a new ECDSA P-384 pair with SIGNING_KEY (ecdsa:p-384)\n',
   );
   assert.deepEqual(Object.keys(coffre.writes[1]!), ['SIGNING_KEY', 'VERIFY_KEY']);
-  for (const written of Object.values(coffre.writes[1]!)) assert.deepEqual([written.generated, written.replaces], [pair, 2]);
+  assert.deepEqual(Object.values(coffre.writes[1]!).map((written) => [written.generated, written.replaces]), [[pair, 'SIGNING_KEY-v2'], [pair, 'VERIFY_KEY-v2']]);
   unseen({ stdout: run.stdout + halves.stdout, stderr: run.stderr + halves.stderr }, coffre.writes);
 });
 

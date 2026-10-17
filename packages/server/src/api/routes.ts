@@ -105,8 +105,8 @@ const generatedValue = z.object({
     }),
     pair: z.object({ private: secretKey, public: secretKey }).strict().optional(),
   }).strict(),
-  // A regenerate's: the version it replaces, or the write is refused (409).
-  replaces: z.number().int().positive().optional(),
+  // A regenerate's: the id of the version it replaces, as listed, or the write is refused (409).
+  replaces: z.string().max(64).optional(),
 }).strict();
 
 const role = z.enum(ROLE_NAMES);

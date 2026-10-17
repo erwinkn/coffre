@@ -531,6 +531,8 @@ export function saveSecrets(
           reference: null,
           archived: false,
           version: inherited ? null : (entry?.version ?? 0) + 1,
+          // Known once the list is read back: until then, nothing regenerates it.
+          versionId: null,
           updatedAt: now,
           updatedBy: author,
           generated: generations.get(key) ?? null,
@@ -602,8 +604,8 @@ export function moveSecret(
   };
 }
 
-/** What Regenerate is asked: the key, its recipe, and the version of each key it writes, as listed. */
-export type RegenerateVars = { key: string; generated: Generation; versions: Readonly<Record<string, number>> };
+/** What Regenerate is asked: the key, its recipe, and the version id of each key it writes, as listed. */
+export type RegenerateVars = { key: string; generated: Generation; versions: Readonly<Record<string, string>> };
 
 /**
  * Regenerate a key by its recipe: the value made in this browser as the
@@ -636,6 +638,7 @@ export function regenerateSecret(
           ...entry,
           reference: null,
           version: inherited ? null : (entry.version ?? 0) + 1,
+          versionId: null,
           updatedAt: now,
           updatedBy: author,
           generated: vars.generated,

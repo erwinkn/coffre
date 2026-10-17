@@ -63,6 +63,12 @@ export type SecretKey = {
   /** Who wrote its own current version; null for a reference. */
   updatedBy: string | null;
   /**
+   * The id of the version it resolves to, its own or, in a fork, the one
+   * it inherits: what a regenerate says it `replaces`. Unique, unlike a
+   * version number, which each row counts from one. Null where `version` is.
+   */
+  versionId: string | null;
+  /**
    * How its current value was made, when a client generated it: what
    * Regenerate makes the next one by. A key pair's half has it only while
    * the other half's current value is from the same pair.
@@ -97,10 +103,10 @@ export type SecretVersion = {
  * A value, a value a client generated, with how (`@coffre/core/recipe`), or
  * a reference to another secret by path. A value written without a recipe
  * has none: writing one by hand ends what Regenerate can do. A regenerate
- * says the version each key's value `replaces`, and is refused if that is
+ * says the version each key's value `replaces`, by its id, and is refused if that is
  * not its current version.
  */
-export type SecretValue = string | { value: string; generated: Generation; replaces?: number } | { ref: string };
+export type SecretValue = string | { value: string; generated: Generation; replaces?: string } | { ref: string };
 
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
 
@@ -218,6 +224,7 @@ export async function listSecrets(
     folder: row.folder,
     archived: row.archivedAt !== null,
     version: row.current?.version ?? null,
+    versionId: row.current?.id ?? null,
     updatedAt: writtenAt(row)?.toISOString() ?? null,
     updatedBy: row.current?.createdBy ?? null,
     generated: generated.get(row.id) ?? null,
@@ -242,7 +249,7 @@ export async function listSecrets(
     const shown = !removed && reads(held.from);
     keys.push({
       ...view(held.row),
-      ...(shown ? {} : { reference: null, version: null, updatedAt: null, updatedBy: null, generated: null }),
+      ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null }),
       // A removed key resolves to nothing here, and has nothing to regenerate.
       ...(removed ? { generated: null } : {}),
       archived: false,
@@ -254,7 +261,7 @@ export async function listSecrets(
     const from = inherited.cut.get(key);
     if (from === undefined || own.has(key)) continue;
     keys.push({
-      key, reference: null, folder: null, archived: false, version: null, updatedAt: null, updatedBy: null, generated: null,
+      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null,
       parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
     });
   }
@@ -408,6 +415,31 @@ async function resetKeys(db: Queryable, place: ResolvedPath): Promise<ReadonlySe
   return new Set((await inheritedOf(db, place))?.held.keys());
 }
 
+/**
+ * Why a regenerate in the patch is stale, or null: each value that says the
+ * version it `replaces` must name the version its key resolves to now, by
+ * id, as the listing gave it: its own live row's current version, or in a
+ * fork, while it holds none live and did not remove it, the one it inherits.
+ */
+function regenerated(
+  patch: Readonly<Record<string, SecretValue | null>>,
+  own: ReadonlyMap<string, { archivedAt: Date | null; currentVersionId: string | null }>,
+  inherited: Awaited<ReturnType<typeof inheritedRows>>,
+): string | null {
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null || typeof value !== 'object' || !('replaces' in value) || value.replaces === undefined) continue;
+    const row = own.get(key);
+    const live = row !== undefined && row.archivedAt === null;
+    const passedDown = live || inherited?.removed.has(key) ? undefined : inherited?.held.get(key)?.row;
+    const resolved = live ? row.currentVersionId : passedDown?.current?.id ?? null;
+    if (resolved === value.replaces) continue;
+    return resolved === null
+      ? `${key} has no value to regenerate now: it was renamed, archived or made a reference since it was listed. Nothing was written`
+      : `${key} changed since it was listed: it was written, rolled back or regenerated meanwhile. Nothing was written`;
+  }
+  return null;
+}
+
 /** What a fork inherits, or null outside forks: what its reset overrides are, and what a regenerate replaces there. */
 async function inheritedOf(db: Queryable, place: ResolvedPath): Promise<Awaited<ReturnType<typeof inheritedRows>>> {
   if (place.environment!.parentId === null) return null;
@@ -488,24 +520,11 @@ export async function setSecrets(
       conflict(`${key} is archived; unarchive it before writing a new version`),
       denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
     );
-    // A regenerate replaces the versions it was listed with, or nothing: a key renamed, archived
-    // or written meanwhile is no longer the one it regenerates. Its listed version is its own
-    // value's, or in a fork, while it holds none live, the one it inherits: regenerating that
-    // writes an override here, never the parent. Its own rows are checked again under the head,
-    // as any prepared write, by `PrepareAgain`.
-    for (const [key, value] of Object.entries(patch)) {
-      if (value === null || typeof value !== 'object' || !('replaces' in value) || value.replaces === undefined) continue;
-      const row = prepared.get(key);
-      const live = row !== undefined && row.archivedAt === null;
-      const passedDown = live || inherited?.removed.has(key) ? undefined : inherited?.held.get(key)?.row;
-      const resolved = live ? (row.currentVersionId === null ? null : row.currentVersion) : passedDown?.current?.version ?? null;
-      if (resolved === value.replaces) continue;
-      throw conflict(
-        resolved === null
-          ? `${key} has no value to regenerate now: it was renamed, archived or made a reference since it was listed. Nothing was written`
-          : `${key} changed since it was listed: it is version ${resolved}, not ${value.replaces}. Nothing was written`,
-      );
-    }
+    // A regenerate replaces the versions it was listed with, by their ids, or nothing: a key
+    // renamed, archived or written meanwhile, here or in a parent, is not the one it regenerates.
+    // Checked again under the head, below, where nothing can move.
+    const stale = regenerated(patch, prepared, inherited);
+    if (stale !== null) throw conflict(stale);
     const archived = (key: string) => {
       const row = prepared.get(key);
       if (row?.archivedAt == null || resettable.has(key)) return;
@@ -594,6 +613,13 @@ export async function setSecrets(
       // A reference made meanwhile, to a key this write prepared without it.
       const newest = newestReferences(await referenceRows(tx, { holderSecretIds: rows.map((row) => row.id) }));
       if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
+      // What a regenerate replaces, resolved again under the head, its parents' rows included: one that
+      // moved since it was prepared is prepared again, and refused there.
+      if (Object.values(patch).some((value) => value !== null && typeof value === 'object' && 'replaces' in value)) {
+        // The rows that were there when it was prepared: one this write just made for an override is not yet one.
+        const before = new Map([...byKey].filter(([key]) => prepared.has(key)));
+        if (regenerated(patch, before, await inheritedOf(tx, place)) !== null) throw new PrepareAgain();
+      }
 
       const keys: Record<string, SetOutcome> = {};
       // A reset override written again serves again, a reference written again unchanged too; still one the parent holds.

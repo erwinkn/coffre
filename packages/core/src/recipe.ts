@@ -228,7 +228,7 @@ export async function generate(recipe: Recipe): Promise<Generated> {
  * was made, and for a regenerate the version it replaces, which the server
  * holds it to.
  */
-export type GeneratedWrite = Record<string, { value: string; generated: Generation; replaces?: number }>;
+export type GeneratedWrite = Record<string, { value: string; generated: Generation; replaces?: string }>;
 
 /**
  * A value made by the recipe for `key`, as a write sends it, and for a key
@@ -250,15 +250,15 @@ export async function generateWrite(key: string, recipe: Recipe, publicKey?: str
  * The next value of a key by the recipe its current one was made by, as a
  * listing says it: a key pair's either half makes the pair again, whole,
  * under the names its halves have now. Each key says the version it
- * replaces, `versionOf` it as listed, and the server refuses the write
- * (409) if any has changed since: renamed, archived, typed over or
- * regenerated meanwhile. A regenerate addresses keys by name, and without
- * that it could write a name that no longer holds the pair.
+ * replaces, by the id `versionIdOf` gives as listed, and the server refuses
+ * the write (409) if any has changed since: renamed, archived, typed over
+ * or regenerated meanwhile. A regenerate addresses keys by name, and
+ * without that it could write a name that no longer holds the pair.
  */
 export async function regenerateWrite(
   key: string,
   generated: Generation,
-  versionOf: (key: string) => number | null,
+  versionIdOf: (key: string) => string | null,
 ): Promise<GeneratedWrite> {
   const recipe = parseRecipe(generated.recipe);
   if (recipe.kind === 'pair' && generated.pair === undefined) {
@@ -266,8 +266,8 @@ export async function regenerateWrite(
   }
   const write = recipe.kind === 'pair' ? await generateWrite(generated.pair!.private, recipe, generated.pair!.public) : await generateWrite(key, recipe);
   for (const [name, entry] of Object.entries(write)) {
-    const version = versionOf(name);
-    if (version === null) throw new Error(`${name} is not listed with a version of its own to regenerate`);
+    const version = versionIdOf(name);
+    if (version === null) throw new Error(`${name} is not listed with a version to regenerate`);
     entry.replaces = version;
   }
   return write;

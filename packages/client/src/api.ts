@@ -246,6 +246,7 @@ export type Api = {
         version: number | null;
         updatedAt: string | null;
         updatedBy: string | null;
+        versionId: string | null;
         generated: null | {
           recipe: string;
           pair?: {
@@ -276,7 +277,7 @@ export type Api = {
             public: string;
           };
         };
-        replaces?: number;
+        replaces?: string;
       } | {
         ref: string;
       };
@@ -1897,6 +1898,7 @@ export type SecretKey = {
   version: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
+  versionId: string | null;
   generated: null | {
     recipe: string;
     pair?: {
