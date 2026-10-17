@@ -1595,7 +1595,7 @@ function SecretRow({
       {/* A refused change made outside the pending edits, a move for one,
           says why here. A refused save puts its edit back on the row, and
           the bar under the table says why. */}
-      {!editing && !leaving && (
+      {!renamed && !valueChanged && !leaving && (
         <RowFailure
           status={status}
           columns={columns}
