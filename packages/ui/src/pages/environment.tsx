@@ -1387,9 +1387,7 @@ function SecretRow({
                   />
                   <CompanionNote companion={change.companion} versionOf={versionOf} />
                   {!overridden && parent !== null && (
-                    <span className="edit-note">
-                      Saving overrides <span className="mono">{parent.from}</span>'s value here
-                    </span>
+                    <span className="edit-note">Saved here, over {parent.from}'s value</span>
                   )}
                   {reference !== null && reference.state === 'live' && (
                     <span className="edit-note">
@@ -1514,7 +1512,7 @@ function SecretRow({
         </td>
 
         <td className="col-written" data-label="Last written">
-          <Written entry={entry} rotateAfterDays={rotateAfterDays} />
+          {!removed && <Written entry={entry} rotateAfterDays={rotateAfterDays} />}
         </td>
 
         <td className="col-actions">
