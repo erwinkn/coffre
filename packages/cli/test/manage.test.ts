@@ -203,7 +203,12 @@ test('projects and environments: create, rename and archive, each one request, b
   );
   assert.equal(written.err, 'coffre: --name is ignored: a project goes by its slug\ncoffre: --name is ignored: an environment goes by its slug\n');
   await assert.rejects(manage.projectsRename(connect, ['deck'], io), /give it a new --slug/);
-  await assert.rejects(manage.projectsRename(connect, ['deck', '--name', 'Deck'], io), /give it a new --slug/);
+  // --name alone, as a script from before 0.6.2 passes it: said to be ignored, and nothing sent.
+  const sent = calls.length;
+  await manage.projectsRename(connect, ['deck', '--name', 'Deck'], io);
+  await manage.environmentsRename(connect, ['deck/production', '--name', 'Production'], io);
+  assert.equal(calls.length, sent);
+  assert.match(written.err, /--name is ignored: a project goes by its slug\ncoffre: --name is ignored: an environment goes by its slug\n$/);
   await assert.rejects(manage.environmentsCreate(connect, ['deck'], io), /expected <project>\/<environment>, not "deck"/);
 });
 

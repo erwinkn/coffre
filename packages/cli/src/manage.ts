@@ -161,17 +161,19 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
   if (values.reference && references > 0) io.out.write(`  whoever reads ${project}/${made.environment.slug} reads those values through them, as they change\n`);
 }
 
-/** The patch `--slug` makes: the new slug. */
-function renamed(values: { name?: string; slug?: string }, what: 'project' | 'environment', io: Io): { slug: string } {
+/** The patch `--slug` makes, or null for `--name` alone, which a script from before 0.6.2 may pass: nothing to change. */
+function renamed(values: { name?: string; slug?: string }, what: 'project' | 'environment', io: Io): { slug: string } | null {
   nameIgnored(values, what, io);
-  if (values.slug === undefined) throw new UsageError('give it a new --slug');
-  return { slug: values.slug };
+  if (values.slug !== undefined) return { slug: values.slug };
+  if (values.name !== undefined) return null;
+  throw new UsageError('give it a new --slug');
 }
 
 export async function projectsRename(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, renaming, ['<project>']);
   const { project } = place(positionals[0]!, false);
   const patch = renamed(values, 'project', io);
+  if (patch === null) return;
   const api = connect();
   const { project: now } = await api.projects.update(project, patch);
   io.out.write(`${project} is now ${now.slug}\n`);
@@ -181,6 +183,7 @@ export async function environmentsRename(connect: () => CoffreClient, args: stri
   const { values, positionals } = parse(args, renaming, ['<project>/<environment>']);
   const { project, environment } = place(positionals[0]!, true);
   const patch = renamed(values, 'environment', io);
+  if (patch === null) return;
   const api = connect();
   const { environment: now } = await api.environments.update(`${project}/${environment}`, patch);
   io.out.write(`${project}/${environment} is now ${project}/${now.slug}\n`);

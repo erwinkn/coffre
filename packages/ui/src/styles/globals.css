@@ -4070,6 +4070,11 @@ a.env-card-name:hover {
   background: var(--subtle);
 }
 
+/* A menu entry that is a link reads as any other entry. */
+a.menu-item:hover {
+  text-decoration: none;
+}
+
 .menu-item[data-disabled] {
   color: var(--ink-3);
 }

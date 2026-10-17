@@ -368,6 +368,20 @@ test('a 2025-era client makes changes through the link, as any client without UR
   assert.match(sixth.body.result!.content[0]!.text!, /5 changes are waiting/);
 });
 
+test('a create call that names its environment, as before 0.6.2, still matches its approval, and the name is not shown', async () => {
+  const token = await connect(DEV, 'read write');
+  const args = { environment: 'market/stage', name: 'Stage' };
+  const asked = (await callRaw(token, 'create_environment', args)).body.result!;
+  const { id } = asked.structuredContent!.approval as { id: string };
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.summary, 'create the environment market/stage');
+  assert.deepEqual(shown.details.map((line) => line.label), ['Environment']);
+  assert.equal((await decide(id, true)).body.status, 'approved');
+  assert.equal((await callRaw(token, 'create_environment', args)).body.result!.structuredContent!.status, 'approved');
+  const market = (await clientFor(deps, ROOT).projects.list()).projects.find((project) => project.slug === 'market')!;
+  assert.equal(market.environments.find((environment) => environment.slug === 'stage')?.name, 'stage');
+});
+
 test('a disconnected app’s approvals can no longer be decided', async () => {
   const token = await connect(DEV, 'read write');
   const id = ((await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })).body.result!.structuredContent!.approval as { id: string }).id;

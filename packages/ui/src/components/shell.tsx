@@ -5,7 +5,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
+import { Link, useRouterState } from '@tanstack/react-router';
 import { Dialog } from '@base-ui/react/dialog';
 import { Menu } from '@base-ui/react/menu';
 import { INSTANCE_ROLES } from '@coffre/core/access';
@@ -419,7 +419,8 @@ function Breadcrumbs({
 
   if (section !== 'projects' || projectSlug === undefined) return null;
 
-  const active = projects.filter((project) => project.archivedAt === null);
+  // The active projects, and this one even archived: its page is its entry in the list.
+  const listed = projects.filter((project) => project.archivedAt === null || project.slug === projectSlug);
   const project = projects.find((entry) => entry.slug === projectSlug);
 
   return (
@@ -431,7 +432,7 @@ function Breadcrumbs({
       <span className="crumb-sep" aria-hidden>
         /
       </span>
-      <ProjectCrumb slug={projectSlug} current={environmentSlug === undefined} projects={active} />
+      <ProjectCrumb slug={projectSlug} current={environmentSlug === undefined} projects={listed} />
 
       {environmentSlug !== undefined && (
         <>
@@ -451,7 +452,8 @@ function Breadcrumbs({
 
 /**
  * The project you are in, one button that lists every project. Its own
- * page, all its environments, is the current one in that list.
+ * page, all its environments, is the current one in that list. Each entry
+ * is a link, so the router fetches its page as it is pointed at or focused.
  */
 function ProjectCrumb({
   slug,
@@ -462,7 +464,6 @@ function ProjectCrumb({
   current: boolean;
   projects: ProjectSummary[];
 }) {
-  const navigate = useNavigate();
   return (
     <Menu.Root>
       <Menu.Trigger
@@ -478,17 +479,16 @@ function ProjectCrumb({
         <Menu.Group>
           <Menu.GroupLabel className="menu-label">Projects</Menu.GroupLabel>
           {projects.map((project) => (
-            <Menu.Item
+            <Menu.LinkItem
               key={project.slug}
               className="menu-item"
-              onClick={() =>
-                navigate({ to: '/projects/$project', params: { project: project.slug } })
-              }
+              closeOnClick
+              render={<Link to="/projects/$project" params={{ project: project.slug }} />}
             >
               <Tile name={project.slug} />
               {project.slug}
               {project.slug === slug && <Check size={14} className="menu-check" />}
-            </Menu.Item>
+            </Menu.LinkItem>
           ))}
         </Menu.Group>
       </MenuPopup>
@@ -496,7 +496,7 @@ function ProjectCrumb({
   );
 }
 
-/** The environment you are in, one button that lists its siblings you can open. */
+/** The environment you are in, one button that lists its siblings you can open, as links like the project's. */
 function EnvironmentCrumb({
   projectSlug,
   slug,
@@ -506,7 +506,6 @@ function EnvironmentCrumb({
   slug: string;
   environments: ProjectSummary['environments'];
 }) {
-  const navigate = useNavigate();
   if (environments.length === 0) {
     return (
       <span className="crumb-link" aria-current="page">
@@ -530,14 +529,15 @@ function EnvironmentCrumb({
             Environments in {projectSlug}
           </Menu.GroupLabel>
           {environments.map((environment) => (
-            <Menu.Item
+            <Menu.LinkItem
               key={environment.slug}
               className="menu-item"
-              onClick={() =>
-                navigate({
-                  to: '/projects/$project/$environment',
-                  params: { project: projectSlug, environment: environment.slug },
-                })
+              closeOnClick
+              render={
+                <Link
+                  to="/projects/$project/$environment"
+                  params={{ project: projectSlug, environment: environment.slug }}
+                />
               }
             >
               <span className="mono">{environment.slug}</span>
@@ -546,7 +546,7 @@ function EnvironmentCrumb({
                 {environment.details?.secretCount === 1 ? '' : 's'}
               </span>
               {environment.slug === slug && <Check size={14} className="menu-check" />}
-            </Menu.Item>
+            </Menu.LinkItem>
           ))}
         </Menu.Group>
       </MenuPopup>
