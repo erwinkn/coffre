@@ -211,16 +211,17 @@ newlines, or use `coffre run` to pass them directly to a child process.
 
 `--output-file .env` writes the export to a file only you can read (0600),
 whole or not at all: beside it, then renamed over it. With `--watch`, coffre
-keeps that file current. Every minute (`--interval 5m` for another) it asks
+keeps that file current. Every minute (`--interval`, from 5s to 24h) it asks
 each environment's version, `coffre version market/prod`, which reads no
 value and is not logged, and reads the values only once a version changed:
 a value written, a key added, archived or renamed, or for a fork, anything
 it inherits. It rewrites the file only when what it holds changed, then
 runs `--on-change`, through the shell, without any value in its
 environment. A round that fails keeps the file as it was, says why on
-stderr, and waits twice as long before the next, up to 15 minutes; a first
-round that fails ends it, as an export would. Each read is logged as any
-export's.
+stderr, and waits twice as long before the next, up to 15 minutes or the
+interval, whichever is longer; a first round that fails ends it, as an
+export would. Each read is logged as any export's, and answers the version
+of what it read, which the watch compares the next with.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
 (mode 0600), and can be revoked from the account page.

@@ -67,7 +67,8 @@ export type Watch = {
  * new one reads, writes the file when what it holds changed, then runs the
  * hook. The first round fails as an export does, with nothing to keep; a
  * later one says why, keeps the file as it was, and waits twice as long
- * each time, up to 15 minutes, before it asks again.
+ * each time, up to 15 minutes or the interval, whichever is longer, before
+ * it asks again.
  */
 export async function watch({ version, read, file, intervalMs, onChange, say, wait = sleep }: Watch): Promise<never> {
   let seen: string | null = null;

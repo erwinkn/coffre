@@ -11,10 +11,15 @@
   read on the environment, and on each parent a fork inherits from.
 - **`coffre export --output-file` and `--watch`.** `--output-file .env`
   writes the export to a 0600 file, whole or not at all. `--watch` keeps it
-  current: it asks the version every minute (`--interval`), reads only once
-  it changed, rewrites the file only when its contents change, then runs
-  `--on-change '<command>'`. A failed round keeps the file and backs off,
-  up to 15 minutes.
+  current: it asks the version every minute (`--interval`, from 5s to
+  24h), reads only once it changed, rewrites the file only when its
+  contents change, then runs `--on-change '<command>'`. A failed round
+  keeps the file and waits twice as long each time, up to 15 minutes or
+  the interval, whichever is longer.
+- **A read of a whole environment answers its version.** `POST
+  /api/reveals` of `market/prod` answers the `version` of exactly what it
+  opened (null for one key's): a poller keeps that one, not the version it
+  asked before reading, since a change undone in between brings that back.
 - **`coffre run --keep-existing`.** `coffre run` still sets every key of the
   environments it names over a variable of the same name in your shell. With
   `--keep-existing`, a variable already set there keeps its value, an empty one
