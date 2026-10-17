@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { deriveLogKey, entryHash } from '@coffre/core/audit';
-import { appendEntries, BATCH_BYTES, batchThrough, LogHeadMismatch } from '@coffre/db/log';
+import { appendEntries, BATCH_BYTES, LogHeadMismatch, withinBytes } from '@coffre/db/log';
 import { eq } from 'drizzle-orm';
 
 import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
@@ -110,12 +110,34 @@ test('a log of large entries is verified whole, in batches that hold no more tha
     await write(2);
   }
   const [head] = await db.owner.select().from(auditChainHead);
-  const first = await batchThrough(db.owner, 0n, 10_000);
-  assert.ok(first !== null && first < head.nextSeq - 1n, 'one batch held every large entry');
+  const first = await withinBytes(db.owner, undefined, 10_000);
+  assert.ok(first !== null && first.cut && first.to < head.nextSeq - 1n, 'one batch held every large entry');
   const verified = await root.audit.verify();
   assert.ok(verified.ok, JSON.stringify(verified));
   // Through every entry: the large ones, and those the request itself wrote after them.
   assert.ok(verified.through !== null && verified.through >= Number(head.nextSeq - 1n) && verified.entries === verified.through + 1, JSON.stringify(verified));
+});
+
+test('a page of the log holds no more than BATCH_BYTES of what its entries list, and says there is more: the pages still tile it', async () => {
+  const listing = 'x'.repeat(Math.ceil(BATCH_BYTES / 3));
+  for (let i = 0; i < 4; i++) {
+    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ ...entry, action: 'large', metadata: { listing } }]));
+    await write(1);
+  }
+  const seen: number[] = [];
+  const sizes: number[] = [];
+  for (let before: number | undefined; ;) {
+    const page = await root.audit.list({ before, limit: 100 });
+    seen.push(...page.entries.filter((found) => found.action === 'large' || found.action === 'test').map((found) => found.seq));
+    sizes.push(page.entries.length);
+    if (!page.more) break;
+    before = page.entries.at(-1)!.seq;
+  }
+  // Two large entries a page at most, every entry once, newest first.
+  assert.ok(sizes.length >= 2 && sizes[0]! < 100, JSON.stringify(sizes));
+  assert.equal(seen.length, 8);
+  assert.deepEqual(seen, [...seen].sort((a, b) => b - a));
+  assert.equal(new Set(seen).size, 8);
 });
 
 test('audit verification reports live key operations without calling the log broken', async () => {

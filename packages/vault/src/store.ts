@@ -4,7 +4,7 @@ import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/va
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { batchThrough, entryColumns } from '@coffre/db/log';
+import { entryColumns, withinBytes } from '@coffre/db/log';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -326,12 +326,12 @@ function stored(rows: object[]): StoredEntry[] {
 /** Up to `limit` entries of either author from `fromSeq`, oldest first: the chain as it runs. */
 export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
-  const through = await batchThrough(db, fromSeq, limit);
-  if (through === null) return [];
+  const batch = await withinBytes(db, gte(auditLog.seq, fromSeq), limit);
+  if (batch === null) return [];
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(gte(auditLog.seq, fromSeq), lte(auditLog.seq, through)))
+    .where(and(gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
     .orderBy(asc(auditLog.seq));
   return stored(rows);
 }
@@ -340,12 +340,12 @@ export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number)
 export async function vaultEntriesAfter(db: Queryable, afterSeq: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const vault = eq(auditLog.author, 'vault' satisfies Author);
-  const through = await batchThrough(db, afterSeq + 1n, limit, vault);
-  if (through === null) return [];
+  const batch = await withinBytes(db, and(vault, gt(auditLog.seq, afterSeq)), limit);
+  if (batch === null) return [];
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(vault, gt(auditLog.seq, afterSeq), lte(auditLog.seq, through)))
+    .where(and(vault, gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
     .orderBy(asc(auditLog.seq));
   return stored(rows);
 }

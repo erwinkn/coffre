@@ -1037,6 +1037,7 @@ export type Api = {
           [key: string]: unknown;
         };
       }[];
+      more: boolean;
       hidden?: {
         action: string;
         count: number;

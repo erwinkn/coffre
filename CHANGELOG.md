@@ -129,7 +129,10 @@
   secrets" and opens to each, and `coffre audit` adds "(37 secrets)". The
   bulk limit still counts keys, and the offboarding report still lists each
   value a member read. Entries written before stay as they are and verify as
-  they did. No migration.
+  they did. No migration. A page of `GET /api/audit`, and each batch of a
+  verification, holds at most 8 MiB of what its entries list, so a page of
+  large reads can come back short of its `limit`: the response's new `more`
+  says whether to page back with `before`.
 - **Ask the log about one key.** `coffre audit market/prod/DATABASE_URL`, and
   `GET /api/audit?path=market/prod/DATABASE_URL`, list who read or changed
   it, reads of several that listed it included. The route took only a project

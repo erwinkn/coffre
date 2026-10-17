@@ -66,6 +66,14 @@ test('a run of twelve secrets the vault logged as one entry reads the same, and 
   assert.equal(said({ ...run, decision: 'deny', reason: 'no_grant' }), 'tried to run market/prod, 12 secrets: no grant');
 });
 
+test('a read whose list was emptied or mangled around coffre still reads, as its place', () => {
+  const emptied = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [], metadata: { purpose: 'run', secrets: [] } });
+  assert.deepEqual(perSecret(emptied), [emptied]);
+  assert.equal(said(emptied), 'ran market/prod');
+  const mangled = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [{ key: null, version: null }, { key: 'B', version: 2 }], metadata: { purpose: 'run', secrets: ['x', { subject: 'market/prod/B', version: 2 }] } });
+  assert.deepEqual(perSecret(mangled).map((one) => plain(describe([one]).parts)), ['ran market/prod', 'ran market/prod/B']);
+});
+
 test('values read through references, one entry for their source, read as a run of the holder', () => {
   const keys = [{ key: 'DATABASE_URL', version: 3 }, { key: 'STRIPE_KEY', version: 1 }];
   const through = entry({

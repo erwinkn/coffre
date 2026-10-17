@@ -280,6 +280,17 @@ test('the log of one key finds the read of its environment, which lists it, and 
   assert.equal((await read('market/prod')), undefined);
 });
 
+test('the log of a key is asked for by its full path, the longest slugs and key included', async () => {
+  const [project, environment, key] = [`p${'r'.repeat(62)}`, `e${'n'.repeat(62)}`, `K${'E'.repeat(127)}`];
+  await root.projects.create(project, { name: 'Long' });
+  await root.environments.create(`${project}/${environment}`, { name: 'Long' });
+  await root.secrets.set(`${project}/${environment}`, { [key]: 'value' });
+  const path = `${project}/${environment}/${key}`;
+  assert.equal(path.length, 256);
+  const { entries } = await root.audit.list({ path, limit: 10 });
+  assert.deepEqual(entries.filter((found) => found.action === 'secret.write').map((found) => found.key), [key]);
+});
+
 test('keys that are also Object prototype property names survive a round trip', async () => {
   await root.secrets.set('market/dev', { constructor: 'one', toString: 'two' });
   const result = await reader.secrets.reveal('market/dev');

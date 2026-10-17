@@ -651,14 +651,18 @@ export function leadOf(batch: AuditEntry[]): AuditEntry {
  */
 export function perSecret<T extends AuditEntry>(entry: T): T[] {
   const listed = entry.metadata.secrets;
-  if (entry.secrets === null || !Array.isArray(listed)) return [entry];
-  return entry.secrets.map(({ key, version }, i) => ({
-    ...entry,
-    key,
-    version,
-    secrets: null,
-    metadata: { ...entry.metadata, secrets: undefined, ...(listed[i] as Record<string, unknown>) },
-  }));
+  // One whose list was emptied or mangled, which verification would flag, still reads as itself.
+  if (entry.secrets === null || entry.secrets.length === 0 || !Array.isArray(listed)) return [entry];
+  return entry.secrets.map(({ key, version }, i) => {
+    const own = listed[i];
+    return {
+      ...entry,
+      key,
+      version,
+      secrets: null,
+      metadata: { ...entry.metadata, secrets: undefined, ...(typeof own === 'object' && own !== null && !Array.isArray(own) ? own : {}) },
+    };
+  });
 }
 
 /** What a line says: one entry, or a batch that shares an operation. */

@@ -1,5 +1,5 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { and, asc, desc, eq, gte, lt, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, lt, sql, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
@@ -219,36 +219,42 @@ export function entryColumns(db: Queryable) {
 }
 
 /**
- * Metadata a check that reads the log in order holds at once, at most: an
- * entry about a read of several secrets lists them, a thousand some 150
- * kilobytes, so a count of entries alone does not bound a batch's memory
- * within a Worker's 128 megabytes.
+ * Metadata a reader of many entries holds at once, at most: an entry about
+ * a read of several secrets lists them, a thousand some 150 kilobytes, so a
+ * count of entries alone does not bound a batch's or a page's memory within
+ * a Worker's 128 megabytes.
  */
 export const BATCH_BYTES = 8 * 1024 * 1024;
 
 /**
- * The last entry of a batch of such a check: of the entries `where` matches
- * from `fromSeq` on, oldest first, no more than `limit`, and no more than
- * `BATCH_BYTES` of metadata between them, but always the first. Null when
- * none is left. Read before the batch itself, which runs to it, so a check
- * reads on until a batch comes back empty.
+ * Of the entries `where` matches, in `order` of seq, the first `limit` or
+ * fewer that hold no more than `BATCH_BYTES` of metadata between them, but
+ * always the first: the seqs they run from and to, and whether the bytes
+ * cut the run short of `limit`. Null when none matches. A reader asks this
+ * first, then reads `where` between the two.
  */
-export async function batchThrough(db: Queryable, fromSeq: bigint, limit: number, where?: SQL): Promise<bigint | null> {
+export async function withinBytes(
+  db: Queryable,
+  where: SQL | undefined,
+  limit: number,
+  order: 'asc' | 'desc' = 'asc',
+): Promise<{ from: bigint; to: bigint; cut: boolean; count: number } | null> {
   const { auditLog } = tablesOf(db);
   const sizes = await db
     .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
     .from(auditLog)
-    .where(and(gte(auditLog.seq, fromSeq), where))
-    .orderBy(asc(auditLog.seq))
+    .where(where)
+    .orderBy(order === 'asc' ? asc(auditLog.seq) : desc(auditLog.seq))
     .limit(limit);
-  let through: bigint | null = null;
   let held = 0;
-  for (const { seq, bytes } of sizes) {
+  let count = 0;
+  for (const { bytes } of sizes) {
     held += Number(bytes);
-    if (through !== null && held > BATCH_BYTES) break;
-    through = seq;
+    if (count > 0 && held > BATCH_BYTES) break;
+    count += 1;
   }
-  return through;
+  if (count === 0) return null;
+  return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count };
 }
 
 /**

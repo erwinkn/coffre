@@ -174,11 +174,15 @@ export type AuditQuery = {
  * stretch runs from its oldest entry, or the log's first on the last page,
  * up to where it started, the head or `before`: pages tile the log, and
  * each hidden entry is counted on exactly one.
+ *
+ * A page holds `limit` entries, or fewer where they list more secrets than
+ * a page holds (`auditPage`): `more` says whether to page back, `before`
+ * the oldest seq on it.
  */
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[]; hidden?: HiddenCount[] }> {
+): Promise<{ entries: AuditEntryView[]; more: boolean; hidden?: HiddenCount[] }> {
   const filter: AuditFilter = {
     decision: query.decision,
     excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
@@ -221,14 +225,14 @@ export async function listAudit(
   }
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 
-  const rows = await auditPage(ctx.db, filter);
+  const { rows, more } = await auditPage(ctx.db, filter);
   const entries = await withCredentials(ctx, rows.map(entryView));
-  if (query.detail === true) return { entries };
-  const last = rows.length < query.limit ? undefined : rows[rows.length - 1].seq;
+  if (query.detail === true) return { entries, more };
+  const last = more ? rows[rows.length - 1]!.seq : undefined;
   const hidden = await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, last);
   // Most of what is hidden first.
   hidden.sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0));
-  return { entries, hidden };
+  return { entries, more, hidden };
 }
 
 /**
@@ -263,7 +267,7 @@ function runClaims(run: unknown): Record<string, string | number> {
 
 const DETAIL = new Set<string>(DETAIL_ACTIONS);
 
-function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEntryView {
+function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): AuditEntryView {
   const metadata = JSON.parse(row.metadata) as Record<string, unknown>;
   // The vault names a secret by its path, the app by its key.
   const path = typeof metadata.subject === 'string' ? metadata.subject : null;

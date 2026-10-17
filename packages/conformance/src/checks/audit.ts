@@ -268,9 +268,9 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
 export async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: number | undefined; ; ) {
-    const { entries } = await api.audit.list({ before, limit: 500, detail: '1' });
+    const { entries, more } = await api.audit.list({ before, limit: 500, detail: '1' });
     all.push(...entries);
-    if (entries.length < 500) return all;
+    if (!more || entries.length === 0) return all;
     before = entries.at(-1)!.seq;
   }
 }

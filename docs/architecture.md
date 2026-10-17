@@ -322,7 +322,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
 | what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["read"]}` |
 | the MCP clients I connected, and disconnecting one | `GET /api/apps`, `DELETE /api/apps/:id` |
-| the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
+| the audit log, and verifying it | `GET /api/audit?path=market/prod/DATABASE_URL` → `{entries, more}`, `GET /api/audit/verification` |
 
 Three conventions carry it:
 
@@ -609,7 +609,10 @@ three values through references into `shared/prod` is two entries, one
 for each environment the values came from. `GET /api/audit` gives a read
 of several as one entry with its `secrets` (each key and version), and a
 filter on a secret (`path=market/prod/DATABASE_URL`) finds the reads that
-list it. Entries written before 0.7.0, one per secret, read and verify as
+list it. A page, and each batch of a verification, holds no more than 8 MiB
+of what its entries list (`BATCH_BYTES`), so a page of reads of thousands
+of secrets each comes back short of its `limit`, with `more` saying to page
+back. Entries written before 0.7.0, one per secret, read and verify as
 they always did. A
 write is the app's `secret.write`, naming the vault's `key.wrap` by
 `related_seq`; access and membership changes are the vault's

@@ -4,7 +4,7 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { batchThrough } from '@coffre/db/log';
+import { withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1695,12 +1695,12 @@ function shown<Row extends { occurredAt: number }>(row: Row): Omit<Row, 'occurre
 /** Rows in chain order from `fromSeq`, with every field as it was hashed: a batch of a full check, at most `limit` and `BATCH_BYTES` of metadata. */
 export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
   const { auditLog } = tablesOf(db);
-  const through = await batchThrough(db, fromSeq, limit);
-  if (through === null) return [];
+  const batch = await withinBytes(db, gte(auditLog.seq, fromSeq), limit);
+  if (batch === null) return [];
   const rows = await db
     .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
     .from(auditLog)
-    .where(and(gte(auditLog.seq, fromSeq), lte(auditLog.seq, through)))
+    .where(and(gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
     .orderBy(asc(auditLog.seq));
   return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
 }
@@ -1783,20 +1783,24 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
 
 /**
  * A page of the log, both authors, newest first, with the slugs of the
- * places each entry names and the key of its secret.
+ * places each entry names and the key of its secret: up to `limit` entries,
+ * fewer where they list more than a page holds (`withinBytes`). `more`
+ * when older entries may match: the page was full, or cut short.
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
+  const where = auditWhere(db, filter);
+  const page = await withinBytes(db, where, filter.limit, 'desc');
+  if (page === null) return { rows: [], more: false };
   const rows = await db
     .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })
     .from(auditLog)
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
-    .where(auditWhere(db, filter))
-    .orderBy(desc(auditLog.seq))
-    .limit(filter.limit);
-  return rows.map(shown);
+    .where(and(where, lte(auditLog.seq, page.from), gte(auditLog.seq, page.to)))
+    .orderBy(desc(auditLog.seq));
+  return { rows: rows.map(shown), more: page.cut || page.count === filter.limit };
 }
 
 /** The newest of one author's allowed entries of `action`, with the database's clock beside it. */
