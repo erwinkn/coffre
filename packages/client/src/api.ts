@@ -131,6 +131,7 @@ export type Api = {
       name?: string;
       from?: string;
       references?: boolean;
+      inherit?: boolean;
     };
     output: {
       environment: {
@@ -144,6 +145,7 @@ export type Api = {
         keys: number;
         references: number;
         copied: string[];
+        inherits: boolean;
       };
     };
   };

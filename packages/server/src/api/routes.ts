@@ -165,8 +165,9 @@ export const routes = {
   }),
   ...route('PUT /projects/:project/:environment', {
     // `from` forks a sibling: its keys, values and folders, without history.
-    // With `references`, each key a reference to its parent's instead of a copy.
-    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional() }),
+    // With `references`, each key a reference to its parent's instead of a copy;
+    // with `inherit`, no key at all: it reads its parent's, live, but for those it sets or removes.
+    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional(), inherit: z.boolean().optional() }),
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
@@ -175,7 +176,12 @@ export const routes = {
       environmentSlug.parse(params.environment);
       return input.from === undefined
         ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
-        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from, references: input.references === true });
+        : forkEnvironment(ctx, place, params.environment, {
+            name: input.name,
+            from: input.from,
+            references: input.references === true,
+            inherit: input.inherit === true,
+          });
     },
   }),
   ...route('PATCH /projects/:project/:environment', {

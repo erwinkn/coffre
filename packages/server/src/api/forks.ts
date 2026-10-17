@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import { environmentSecrets, fileSecrets, resolvePath, type ResolvedPath } from '../db/queries.ts';
+import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
-import { conflict, notFound, vaultRefused } from './errors.ts';
+import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
 import { openValues } from './keys.ts';
 import { putEnvironment, type PlaceView } from './projects.ts';
 import { currentReferences, placeOfRow, readableValues } from './references.ts';
@@ -14,7 +14,7 @@ import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
  * many of them references, and which it copied where references were asked
  * for: a key whose source the forker reads only through the parent.
  */
-export type Forked = { from: string; keys: number; references: number; copied: string[] };
+export type Forked = { from: string; keys: number; references: number; copied: string[]; inherits: boolean };
 
 /**
  * Fork `from` into `slug`, a new environment of the same project: each
@@ -38,18 +38,20 @@ export async function forkEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   slug: string,
-  input: { name?: string; from: string; references: boolean },
+  input: { name?: string; from: string; references: boolean; inherit: boolean },
 ): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
   const { project } = place;
   const { from } = input;
   return withRefusals(ctx, async () => {
     if (from === slug) throw conflict('an environment cannot be forked into itself');
+    if (input.inherit && input.references) throw badRequest('a fork inherits its parent, or holds references to it: not both');
     const source = await resolvePath(ctx.db, { project: project.slug, environment: from });
     if (source?.environment == null || source.project.archivedAt !== null || source.environment.archivedAt !== null) {
       throw notFound(`${project.slug} has no environment ${from} to fork`);
     }
     const sourcePlace = { projectId: project.id, environmentId: source.environment.id };
     need(ctx, 'secret.read', placeOf(project, source.environment), 'environment.fork', { metadata: { from, slug } });
+    if (input.inherit) return inheritFrom(ctx, place, slug, source, input.name);
     if (place.environment !== null) {
       if (place.environment.archivedAt !== null) throw conflict(`${project.slug}/${slug} is archived; restore it before forking into it`);
       const live = (await environmentSecrets(ctx.db, place.environment.id)).filter((secret) => secret.archivedAt === null);
@@ -68,7 +70,7 @@ export async function forkEnvironment(
     const patch: Record<string, SecretValue> = Object.create(null);
     copies.forEach((item, i) => (patch[item.key] = opened.values[i]!));
     for (const [key, path] of plan) patch[key] = { ref: path };
-    const forked = { from, keys: readable.items.length, references: plan.size, copied: input.references ? copies.map((item) => item.key) : [] };
+    const forked = { from, keys: readable.items.length, references: plan.size, copied: input.references ? copies.map((item) => item.key) : [], inherits: false };
     if (readable.items.length === 0) return { environment, created, forked };
 
     const target = await resolvePath(ctx.db, { project: project.slug, environment: slug });
@@ -88,6 +90,29 @@ export async function forkEnvironment(
     }
     return { environment, created, forked };
   });
+}
+
+/**
+ * A fork that inherits: a new environment whose keys are its parent's,
+ * read live, until it sets or removes its own (docs/design/forking.md).
+ * Nothing is copied or read now. Its parent is set once, here: a personal
+ * config is no parent, and a chain stops at `MAX_PARENTS`.
+ */
+async function inheritFrom(
+  ctx: ApiContext,
+  place: ResolvedPath,
+  slug: string,
+  parent: ResolvedPath,
+  name: string | undefined,
+): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
+  const from = parent.environment!.slug;
+  if (place.environment !== null) throw conflict(`${place.project.slug}/${slug} already exists: a fork that inherits is a new environment`);
+  if (parent.environment!.owner !== null) throw conflict(`${place.project.slug}/${from} is a personal config: fork the environment it inherits from`);
+  if ((await parentsOf(ctx.db, parent.environment!.id)).length >= MAX_PARENTS) {
+    throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);
+  }
+  const { environment, created } = await putEnvironment(ctx, place, slug, { name }, { from, parentId: parent.environment!.id });
+  return { environment, created, forked: { from, keys: 0, references: 0, copied: [], inherits: true } };
 }
 
 /**

@@ -310,7 +310,7 @@ test('references lists what a place lends and holds, and who reads through each'
 
 test('fork --reference makes references, and names the keys it copied instead', async () => {
   const { connect, calls, written, io } = fixture(() => ({
-    environment: { slug: 'qa', name: 'qa', archivedAt: null }, created: true, forked: { from: 'staging', keys: 3, references: 2, copied: ['STRIPE_KEY'] },
+    environment: { slug: 'qa', name: 'qa', archivedAt: null }, created: true, forked: { from: 'staging', keys: 3, references: 2, copied: ['STRIPE_KEY'], inherits: false },
   }));
   await manage.fork(connect, ['market/staging', 'qa', '--reference'], io);
   assert.deepEqual(calls[0]!.body, { name: 'qa', from: 'staging', references: true });

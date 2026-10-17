@@ -27,7 +27,7 @@ import {
 } from '../db/queries.ts';
 import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
-import { conflict, notFound, vaultRefused } from './errors.ts';
+import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, type ReferenceView, type Resolved } from './references.ts';
@@ -730,19 +730,33 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
-    if (path.key !== undefined && (place.secret === null || place.secret.archivedAt !== null)) {
+    const { items: rows, unreadable } = await readableValues(ctx.db, place, environment, path.key);
+    // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
+    if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
       throw new Refusal(
         notFound('unknown secret'),
         denied(ctx, 'secret.read', 'unknown_secret', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
-
-    const { items: rows, unreadable } = await readableValues(ctx.db, place, environment, place.secret?.id);
-    // A reference that cannot be read stops the whole read, saying why, rather than run without it.
+    // A reference or a parent that cannot be read stops the whole read, saying why, rather than run without it.
     if (unreadable.length > 0) {
       throw new Refusal(
         conflict(unreadable.join('; ')),
         denied(ctx, 'secret.read', 'reference_unreadable', { ...environment, operationId, metadata: { references: unreadable.length } }),
+      );
+    }
+    // An inherited value is the parent's: reading it takes read there, by the reader's own grants. A fork lends nothing.
+    const unread = new Map<string, string[]>();
+    for (const row of rows) {
+      if (row.parent === undefined) continue;
+      const parent = { projectId: environment.projectId, environmentId: row.parent.environmentId, environmentSlug: row.parent.slug };
+      if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key]);
+    }
+    if (unread.size > 0) {
+      const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
+      throw new Refusal(
+        forbidden(`${formatPath(path)} inherits ${which.join('; ')}, which you cannot read`),
+        denied(ctx, 'secret.read', 'parent_unreadable', { ...environment, operationId, metadata: { parents: [...unread.keys()] } }),
       );
     }
     // A key with nothing to read, no version of its own and no reference the vault sealed, as a row written around it: no value.

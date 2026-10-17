@@ -136,7 +136,15 @@ export async function lock<T extends Table>(tx: Transaction, table: T, match: Ma
 
 export type ResolvedPath = {
   project: { id: string; slug: string; name: string; archivedAt: Date | null };
-  environment: { id: string; slug: string; name: string; archivedAt: Date | null } | null;
+  environment: {
+    id: string;
+    slug: string;
+    name: string;
+    archivedAt: Date | null;
+    /** The environment it inherits from, a fork's; and a personal config's owner. */
+    parentId: string | null;
+    owner: string | null;
+  } | null;
   secret: {
     id: string;
     key: string;
@@ -189,7 +197,14 @@ export async function resolvePath(
     environment:
       environment === null
         ? null
-        : { id: environment.id, slug: environment.slug, name: environment.name, archivedAt: environment.archivedAt },
+        : {
+            id: environment.id,
+            slug: environment.slug,
+            name: environment.name,
+            archivedAt: environment.archivedAt,
+            parentId: environment.parentId,
+            owner: environment.owner,
+          },
     secret:
       secret === null
         ? null
@@ -1341,6 +1356,47 @@ export async function secretHistory(
 // --- missing keys ---------------------------------------------------------------
 
 /** An environment's dismissed keys, those not restored since. */
+/**
+ * At most how many parents stand above an environment: `prod`, `prod-eu`,
+ * `prod-eu-canary`, and a personal config of that (docs/design/forking.md).
+ */
+export const MAX_PARENTS = 3;
+
+/** An environment a fork inherits from, as a read needs it. */
+export type ParentRow = { id: string; slug: string; owner: string | null; archivedAt: Date | null; deleted: boolean };
+
+/**
+ * The environments `environmentId` inherits from, nearest first: its
+ * parent, that one's, and so on. A parent never changes once set, so no
+ * chain loops; it stops at `MAX_PARENTS` all the same.
+ */
+export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[]> {
+  const { environments } = tablesOf(db);
+  const parents: ParentRow[] = [];
+  let [next] = await db.select({ parentId: environments.parentId }).from(environments).where(eq(environments.id, environmentId));
+  while (next?.parentId != null && parents.length < MAX_PARENTS) {
+    const [row] = await db
+      .select({ id: environments.id, slug: environments.slug, owner: environments.owner, archivedAt: environments.archivedAt, parentId: environments.parentId })
+      .from(environments)
+      .where(eq(environments.id, next.parentId));
+    if (row === undefined) break;
+    parents.push({ id: row.id, slug: row.slug, owner: row.owner, archivedAt: row.archivedAt, deleted: isTombstone(row.slug) });
+    next = row;
+  }
+  return parents;
+}
+
+/** The live environments that inherit from `environmentId` directly, by slug. */
+export async function forksOf(db: Queryable, environmentId: string): Promise<string[]> {
+  const { environments } = tablesOf(db);
+  const rows = await db
+    .select({ slug: environments.slug })
+    .from(environments)
+    .where(and(eq(environments.parentId, environmentId), isNull(environments.archivedAt), standing(environments.slug)))
+    .orderBy(asc(environments.slug));
+  return rows.map((row) => row.slug);
+}
+
 export async function dismissalsIn(db: Queryable, environmentId: string) {
   const { dismissedKeys } = tablesOf(db);
   return db

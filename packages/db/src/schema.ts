@@ -68,16 +68,32 @@ export const environments = pgTable(
     name: text().notNull(),
     createdAt: createdAt(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
+    // The environment it inherits from, in the same project: its keys are
+    // this one's, but for those it sets or removes (docs/design/forking.md).
+    // Set when it is made and never after, so no chain can loop.
+    parentId: uuid('parent_id'),
+    // A personal config's owner, `user:<email>`: a fork only they read.
+    owner: text(),
   },
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
+    // One personal config per person per environment.
+    unique('environments_parent_id_owner_key').on(table.parentId, table.owner),
     check('environments_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
+    check('environments_owner_check', sql`${table.owner} IS NULL OR (${table.parentId} IS NOT NULL AND ${table.owner} LIKE 'user:_%')`),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],
       foreignColumns: [projects.id],
     }).onDelete('restrict'),
+    // Checked at the end of a statement, not at each row: one that deletes a fork and its parent together is no orphan.
+    foreignKey({
+      name: 'environments_parent_in_project',
+      columns: [table.parentId, table.projectId],
+      foreignColumns: [table.id, table.projectId],
+    }).onDelete('no action'),
+    index('environments_parent_idx').on(table.parentId),
   ],
 );
 

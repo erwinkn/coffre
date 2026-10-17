@@ -7,7 +7,9 @@ import type { SecretRef, Via } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 
 import {
+  dismissalsIn,
   environmentSecrets,
+  parentsOf,
   referenceRows,
   resolvePath,
   secretPlaces,
@@ -247,13 +249,27 @@ export function unreadable({ view, holder, source, row, state }: Resolved): stri
   }
 }
 
-/** A value to open: its own version, or a source's through a reference (`via`). */
-export type Readable = { key: string; secretVersionId: string; secret: SecretRef; envelope: Envelope; via?: Via };
+/**
+ * A value to open: its own version, or a source's through a reference
+ * (`via`). An inherited one names the parent it comes from, and `through`,
+ * the fork it was read in, which the vault logs it in too.
+ */
+export type Readable = {
+  key: string;
+  secretVersionId: string;
+  secret: SecretRef;
+  envelope: Envelope;
+  via?: Via;
+  through?: string;
+  parent?: { environmentId: string; slug: string };
+};
 
 /**
- * What a read of an environment, or of one secret in it, opens: each live
+ * What a read of an environment, or of one key in it, opens: each live
  * key's current value, and for a key that is a reference, its source's
- * current value through it. A reference that cannot be read is named in
+ * current value through it. A fork's keys come first, then each parent's
+ * in turn for the keys no nearer environment holds or removed (a dismissal,
+ * docs/design/forking.md). A key that cannot be read is named in
  * `unreadable`, and its reader decides: a read refuses whole rather than
  * go without it.
  */
@@ -261,24 +277,57 @@ export async function readableValues(
   db: Queryable,
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
-  secretId?: string,
+  key?: string,
 ): Promise<{ items: Readable[]; unreadable: string[] }> {
-  const rows = (await environmentSecrets(db, environment.environmentId, secretId)).filter((row) => row.archivedAt === null);
+  const here = `${place.project.slug}/${place.environment!.slug}`;
+  const parents = await parentsOf(db, environment.environmentId);
+  const layers = [{ id: environment.environmentId, slug: place.environment!.slug, archivedAt: null, deleted: false }, ...parents];
+  const items: Readable[] = [];
+  const refused: string[] = [];
+  // The keys a nearer environment settled: holds, or removed.
+  const settled = new Set<string>();
+  for (const [depth, layer] of layers.entries()) {
+    if (layer.deleted || layer.archivedAt !== null) {
+      refused.push(`${here} inherits from ${place.project.slug}/${layer.slug}, which is ${layer.deleted ? 'deleted' : 'archived'}`);
+      break;
+    }
+    const own = await valuesIn(db, place.project.slug, { projectId: environment.projectId, environmentId: layer.id, slug: layer.slug }, key);
+    for (const item of own.items) {
+      if (settled.has(item.key)) continue;
+      items.push(depth === 0 ? item : { ...item, through: environment.environmentId, parent: { environmentId: layer.id, slug: layer.slug } });
+    }
+    for (const unread of own.unreadable) if (!settled.has(unread.key)) refused.push(unread.reason);
+    for (const settles of [...own.items, ...own.unreadable]) settled.add(settles.key);
+    if (depth < layers.length - 1) for (const dismissed of await dismissalsIn(db, layer.id)) settled.add(dismissed.key);
+  }
+  items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { items, unreadable: refused };
+}
+
+/** One environment's own values, without what it inherits: `readableValues`, a layer at a time. */
+async function valuesIn(
+  db: Queryable,
+  project: string,
+  environment: { projectId: string; environmentId: string; slug: string },
+  key?: string,
+): Promise<{ items: Readable[]; unreadable: { key: string; reason: string }[] }> {
+  const rows = (await environmentSecrets(db, environment.environmentId)).filter((row) => row.archivedAt === null && (key === undefined || row.key === key));
   const references = await currentReferences(db, rows.filter((row) => row.current === null).map((row) => row.id));
   const live = [...references.values()].filter((reference) => reference.state === 'live');
   const envelopes = await versionEnvelopes(db, live.map((reference) => reference.source!.currentVersionId!));
   const items: Readable[] = [];
-  const refused: string[] = [];
+  const refused: { key: string; reason: string }[] = [];
   for (const row of rows) {
     if (row.current !== null) {
       items.push({
         key: row.key,
         secretVersionId: row.current.id,
         secret: {
-          ...environment,
+          projectId: environment.projectId,
+          environmentId: environment.environmentId,
           secretId: row.id,
           version: row.current.version,
-          path: `${place.project.slug}/${place.environment!.slug}/${row.key}`,
+          path: `${project}/${environment.slug}/${row.key}`,
         },
         envelope: row.current.envelope,
       });
@@ -289,7 +338,7 @@ export async function readableValues(
     const source = reference.source!;
     const opened = reference.state === 'live' ? envelopes.get(source.currentVersionId!) : undefined;
     if (opened === undefined) {
-      refused.push(unreadable(reference));
+      refused.push({ key: row.key, reason: unreadable(reference) });
       continue;
     }
     items.push({

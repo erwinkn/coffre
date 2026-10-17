@@ -10,6 +10,7 @@ import {
   deletionScope,
   distinctSecretCounts,
   eraseVersions,
+  forksOf,
   insert,
   places,
   projectsInFolder,
@@ -336,7 +337,7 @@ export async function putEnvironment(
   place: ResolvedPath,
   slug: string,
   input: { name?: string },
-  { from }: { from?: string } = {},
+  { from, parentId = null }: { from?: string; parentId?: string | null } = {},
 ): Promise<{ environment: PlaceView; created: boolean }> {
   const { project, environment } = place;
   const name = input.name ?? slug;
@@ -357,7 +358,7 @@ export async function putEnvironment(
     }
     const id = randomUUID();
     try {
-      await insert(tx, environments, { id, projectId: project.id, slug, name });
+      await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
     } catch (error) {
       if (isUniqueViolation(error)) throw slugTaken('environment', slug);
       throw error;
@@ -365,7 +366,7 @@ export async function putEnvironment(
     log.push(allowed(ctx, 'environment.create', {
       projectId: project.id,
       environmentId: id,
-      metadata: { slug, name, ...(from === undefined ? {} : { from }) },
+      metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
     }));
     return { environment: { slug, name, archivedAt: null }, created: true };
   });
@@ -422,6 +423,14 @@ export async function patchEnvironment(
   return audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
     if (archivedAt != null) await refuseIfRead(ctx, tx, `${project.slug}/${environment.slug}`, scope, 'environment.archive', scope);
+    // A live fork reads its parent's keys: archiving the parent would leave it half empty (docs/design/forking.md).
+    const forks = archivedAt == null ? [] : await forksOf(tx, environment.id);
+    if (forks.length > 0) {
+      throw new Refusal(
+        conflict(`${project.slug}/${environment.slug} is inherited by ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: archive ${forks.length === 1 ? 'it' : 'them'} first`),
+        denied(ctx, 'environment.archive', 'inherited', { ...scope, metadata: { forks } }),
+      );
+    }
     if (renamed || archivedAt !== undefined) {
       try {
         await update(tx, environments, { id: environment.id }, { ...renames, archivedAt });
