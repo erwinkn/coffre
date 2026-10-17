@@ -284,3 +284,16 @@ test("a personal token's label is shown wherever it goes, so it holds no control
   const out = entries.find((entry) => entry.action === 'sign_out')!;
   assert.deepEqual(out.token, { id: issued.id, label: 'agent' });
 });
+
+test("a token of a personal config's owner keeps to its scope's role there too: a viewer's reads their dev@me, and writes nothing", async () => {
+  await ada.secrets.set('market/dev@me', { API_KEY: 'ada-own' });
+  const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  assert.equal((await bearer(issued.token).secrets.reveal('market/dev@me')).values.API_KEY, 'ada-own');
+  assert.equal(await status(bearer(issued.token).secrets.set('market/dev@me', { API_KEY: 'x' })), 403);
+  assert.equal(await status(bearer(issued.token).secrets.update('market/dev@me/API_KEY', { archived: true })), 403);
+  assert.equal((await ada.secrets.reveal('market/dev@me')).values.API_KEY, 'ada-own');
+  // The vault holds it to the same, whatever the app asks.
+  const writer = await ada.tokens.issue(ADA, { label: 'writer', expiresInMinutes: 60, scope: { 'market/dev': 'developer' } });
+  await bearer(writer.token).secrets.set('market/dev@me', { API_KEY: 'from-a-writer' });
+  assert.equal((await ada.secrets.reveal('market/dev@me')).values.API_KEY, 'from-a-writer');
+});

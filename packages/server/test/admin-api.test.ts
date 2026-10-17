@@ -315,6 +315,7 @@ test('environment grants expose only the listed names of inaccessible siblings',
     name: 'Development',
     accessible: true,
     parent: null,
+    personal: false,
     details: { archivedAt: null, secretCount: 1 },
   });
   assert.deepEqual(prod, {
@@ -322,6 +323,7 @@ test('environment grants expose only the listed names of inaccessible siblings',
     name: 'Production',
     accessible: false,
     parent: null,
+    personal: false,
     details: null,
   });
 });

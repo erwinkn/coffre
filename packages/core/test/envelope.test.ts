@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import { seal, open, ENVELOPE_VERSION } from '../src/envelope.ts';
-import { encodeAad, type SecretContext } from '../src/context.ts';
+import { encodeAad, ownerKey, type SecretContext } from '../src/context.ts';
 import { LocalKekProvider } from '../src/kek/local.ts';
+import { KekBadClaimError } from '../src/kek/types.ts';
 import { KekRegistry } from '../src/kek/registry.ts';
 
 /**
@@ -166,4 +167,18 @@ test('removing a KEK that rows still reference fails loudly', async () => {
     () => open(sealed, dev, withoutIt),
     /no vault key configured for local:kek-retired/,
   );
+});
+
+test("a personal config's data key opens for its owner alone: another owner, or none, fails the wrap's AAD", async () => {
+  const { dev } = fixture();
+  const kek = LocalKekProvider.generate('kek-test-1');
+  const dek = randomBytes(32);
+  const ada = { ...dev, owner: ownerKey('user:ada@acme.example') };
+  const wrapped = await kek.wrap(dek, ada);
+  assert.deepEqual(await kek.unwrap(wrapped, ada), dek);
+  await assert.rejects(kek.unwrap(wrapped, { ...dev, owner: ownerKey('user:bo@acme.example') }), KekBadClaimError);
+  // As a release before personal configs would read it: without the owner, it does not open.
+  await assert.rejects(kek.unwrap(wrapped, dev), KekBadClaimError);
+  assert.notDeepEqual(encodeAad(ada), encodeAad(dev));
+  assert.throws(() => encodeAad({ ...dev, owner: 'user:ada@acme.example' }), /owner must be a lowercase SHA-256/);
 });

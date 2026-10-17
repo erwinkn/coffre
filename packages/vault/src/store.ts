@@ -193,10 +193,20 @@ function at(db: Queryable, place: Place) {
  * deleted, alone or with its project: then no key under it opens, or is
  * wrapped, whatever grant would cover it.
  */
+/** An environment as a decision reads it. */
+export type EnvironmentRow = {
+  projectId: string;
+  slug: string;
+  owner: string | null;
+  parentId: string | null;
+  deleted: boolean;
+  archived: boolean;
+};
+
 export async function environmentsById(
   db: Queryable,
   ids: readonly string[],
-): Promise<Map<string, { projectId: string; slug: string; deleted: boolean; archived: boolean }>> {
+): Promise<Map<string, EnvironmentRow>> {
   if (ids.length === 0) return new Map();
   const { environments, projects } = tablesOf(db);
   const rows = await db
@@ -204,6 +214,9 @@ export async function environmentsById(
       id: environments.id,
       projectId: environments.projectId,
       slug: environments.slug,
+      // A personal config's owner, and the environment it is a config of, whose read it takes.
+      owner: environments.owner,
+      parentId: environments.parentId,
       deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
       // Only what names a fork asks it: nothing is decided on it.
       archived: truth(or(isNotNull(environments.archivedAt), isNotNull(projects.archivedAt))!),

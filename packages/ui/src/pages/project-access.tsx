@@ -40,7 +40,7 @@ function ProjectAccess({ slug, principalType, children }: { slug: string; princi
   if (!result.ok) return <Notice tone="bad">{result.error}</Notice>;
   return (
     <>
-      <AccessPanel principalType={principalType} project={slug} environments={project.environments} grants={result.grants} />
+      <AccessPanel principalType={principalType} project={slug} environments={project.environments.filter((environment) => !environment.personal)} grants={result.grants} />
       {children}
     </>
   );

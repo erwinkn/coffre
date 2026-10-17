@@ -158,6 +158,12 @@ export type OffboardingReport = {
    * (docs/design/environments.md, "Offboarding").
    */
   references: ReferenceView[];
+  /**
+   * Their personal configs (docs/design/forking.md), by project, the
+   * environment each is a config of, and the slug that deletes it: values
+   * nobody else reads, which leaving makes unreadable, listed for deletion.
+   */
+  personal: { project: string; of: string; slug: string }[];
 };
 
 /**
@@ -519,6 +525,9 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     apps,
     personalTokens: member.type === 'user' ? tokenRows(held, known) : [],
     references: made,
+    personal: known.flatMap((project) => project.environments
+      .filter((environment) => environment.owner === formatMember(member))
+      .map((environment) => ({ project: project.slug, of: environment.parentSlug ?? '?', slug: environment.slug }))),
   };
 }
 

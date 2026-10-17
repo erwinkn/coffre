@@ -38,6 +38,7 @@ export type {
   MemberAccess,
   MissingKey,
   OffboardingReport,
+  PersonalConfig,
   ProjectSummary,
   ReferenceView,
   RemovedMember,
@@ -204,6 +205,8 @@ export function createClient(options: ClientOptions) {
       delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
       /** The keys its sibling environments have and it lacks, read or not, and those its team dismissed. */
       missing: (path: string) => call('GET /projects/:project/:environment/missing', place(path)),
+      /** A project's personal configs, for whoever manages its environments: whose, of what, and their key names. */
+      personal: (project: string) => call('GET /personal/:project', place(project)),
       /**
        * A version of what reading it would open: it changes whenever a read
        * would, and reads no value, so it is not logged. Poll it, and read

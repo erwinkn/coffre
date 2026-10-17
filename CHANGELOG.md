@@ -83,6 +83,25 @@
   the previous release runs on it. Rolled back to 0.6 after forks exist, a
   fork reads as holding only its own keys, so archive forks before rolling
   back.
+- **Personal configs.** `market/dev@me` is your own fork of dev: its keys,
+  live, with values of your own over them, which only you read, and only
+  while you read dev. Nobody else reads them, an instance Owner included,
+  and the vault binds each value to its owner, so a row changed in the
+  database opens nothing. `coffre set market/dev@me/DATABASE_URL` makes
+  yours, or "My own dev" on dev's page. A read of `market/dev@me` is dev's
+  while you have none, so a committed `coffre run market/dev@me -- pnpm
+  dev` serves everyone, CI included; a write never falls back. A Viewer of
+  dev may keep one.
+- **What others see of them.** Lists show you yours, as `dev@me`, and
+  nobody else's, and missing keys compare none. Whoever manages a
+  project's environments lists its personal configs (`coffre personal
+  market`, or Personal configs on its Environments tab): whose, of what, and their
+  key names, never a value; they and the owner may delete one, erasing its
+  values. They are archived, restored and deleted with their parent, hold
+  no reference, and take no grant.
+- **Migration** `0007_personal_configs` adds `environments.owner`, with its
+  check and a unique index. It only adds. A release before 0.7 cannot open
+  a personal config's values: their data keys are bound to the owner.
 - **Personal tokens: hand a script or an agent part of what you hold, for
   an afternoon.** `coffre tokens issue --label cursor-agent --scope
   market/dev=developer --expires-in 4h` makes a bearer token, `coffre_pat_…`,

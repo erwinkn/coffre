@@ -121,7 +121,8 @@ export const SECTIONS = [
           'several environments: their keys together, and a key in two',
           'of them stops it before anything is read; --keep-existing lets',
           'a variable already set in your shell, empty ones too, win',
-          "over coffre's value for it",
+          "over coffre's value for it; <environment>@me reads your",
+          'personal config of it, or it while you have none',
         ],
       },
       {
@@ -206,6 +207,15 @@ export const SECTIONS = [
           'without history; --reference makes each key a reference',
           'to its parent instead; --inherit copies nothing: it reads',
           "its parent's keys live, but for those it sets or removes",
+        ],
+      },
+      {
+        command: 'personal',
+        usage: ['personal  <project> [--json]'],
+        about: [
+          "its members' personal configs, <environment>@me: whose, of",
+          'what, and their key names, never values; `environments delete',
+          '<project>/<slug>` deletes one, as its owner deletes <env>@me',
         ],
       },
       { command: 'environments rename', usage: [`environments rename ${P} --slug <new-environment>`] },
@@ -384,6 +394,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /projects/:project': { commands: ['projects delete'] },
   'PUT /projects/:project/:environment': { commands: ['environments create', 'fork'] },
   'GET /projects/:project/:environment/missing': { commands: ['missing'] },
+  'GET /personal/:project': { commands: ['personal'] },
   'GET /projects/:project/:environment/version': { commands: ['version', 'export'] },
   'PATCH /projects/:project/:environment/dismissals': { commands: ['missing dismiss', 'missing restore', 'remove'] },
   'PATCH /projects/:project/:environment': { commands: ['environments rename', 'environments archive', 'environments unarchive'] },

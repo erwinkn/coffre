@@ -220,6 +220,8 @@ test('every other action has a sentence', () => {
     [{ action: 'secret.move', ...prod, key: 'STRIPE_KEY', metadata: { from: 'stripe', to: null } }, 'moved market/prod/STRIPE_KEY out of its folder'],
     [{ action: 'environment.create', project: 'market', environment: 'staging', metadata: { slug: 'staging', from: 'prod' } }, 'created environment market/staging, a fork of prod'],
     [{ action: 'environment.create', project: 'market', environment: 'prod-eu', metadata: { slug: 'prod-eu', from: 'prod', inherits: 'prod' } }, 'created environment market/prod-eu, inheriting from prod'],
+    [{ action: 'environment.create', project: 'market', environment: 'dev-p-3f9c2a1b', metadata: { slug: 'dev-p-3f9c2a1b', personal: 'dev' } }, 'created a personal config of market/dev'],
+    [{ action: 'environment.delete', project: 'market', environment: 'dev-p-3f9c2a1b~deleted-2026-10-17', metadata: { path: 'market/dev@ada@acme.example', personal: true } }, 'deleted a personal config, market/dev@ada@acme.example'],
     [{ action: 'secret.reset', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', metadata: { key: 'DATABASE_URL', from: 'prod' } }, "reset market/prod-eu/DATABASE_URL to prod's value"],
     [{ action: 'secret.rename', project: 'market', environment: 'prod-eu', key: 'OLD', metadata: { key: 'OLD', nextKey: 'NEW', parent: 'prod' } }, 'renamed market/prod-eu/OLD to NEW, as prod did'],
     [{ action: 'secret.read', ...prod, key: 'STRIPE_KEY', metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' } } }, 'ran market/prod/STRIPE_KEY in market/prod-eu'],

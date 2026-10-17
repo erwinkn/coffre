@@ -72,6 +72,9 @@ export const environments = pgTable(
     // this one's, but for those it sets or removes (docs/design/forking.md).
     // Set when it is made and never after, so no chain can loop.
     parentId: uuid('parent_id'),
+    // A personal config's owner, `user:<email>`: a fork whose values only they
+    // read, the vault binding each to them. Set when it is made and never after.
+    owner: text(),
   },
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
@@ -79,6 +82,9 @@ export const environments = pgTable(
     check('environments_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     // An environment is never its own parent. Longer loops, written around the app, are refused at read (`parentsOf`).
     check('environments_parent_check', sql`${table.parentId} IS NULL OR ${table.parentId} <> ${table.id}`),
+    check('environments_owner_check', sql`${table.owner} IS NULL OR (${table.parentId} IS NOT NULL AND ${table.owner} LIKE 'user:_%')`),
+    // One personal config per person per environment; a deleted one, a tombstone, holds no place.
+    uniqueIndex('environments_parent_id_owner_key').on(table.parentId, table.owner).where(sql`strpos(${table.slug}, '~') = 0`),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],
