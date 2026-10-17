@@ -467,7 +467,7 @@ function ProjectCrumb({
   return (
     <Menu.Root>
       <Menu.Trigger
-        className="crumb-link crumb-switch"
+        className="crumb-link crumb-switch crumb-project"
         aria-label={`${slug}, switch project`}
         aria-current={current ? 'page' : undefined}
       >
