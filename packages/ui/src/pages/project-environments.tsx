@@ -483,8 +483,8 @@ function PersonalConfigs({ project }: { project: string }) {
         onConfirm={() => {
           const doomed = deleting!;
           void run(() => coffre.environments.delete(`${project}/${doomed.slug}`), {
-            // The owner's own `dev@me` too, when it is theirs: its card and its keys go.
-            affects: [keys.personal(project), ...affects.places(), ...affects.secrets({ project, environment: `${doomed.of}@me` })],
+            // The list, and the owner's own `dev@me` when it is theirs: its card and its keys go.
+            affects: [...affects.places(), ...affects.secrets({ project, environment: `${doomed.of}@me` })],
             onSuccess: () => toast.success(`Deleted ${doomed.owner.replace(/^user:/, '')}'s ${doomed.of}`),
           });
         }}

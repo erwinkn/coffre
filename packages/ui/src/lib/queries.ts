@@ -632,10 +632,13 @@ export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {
  * change also lands in the audit log, which is always read fresh.
  */
 export const affects = {
-  /** A project or environment made, renamed or archived: the tree, and where you hold access. */
-  places: (): QueryKey[] => [keys.projects, keys.me],
-  /** Secrets written, renamed, restored or archived: the environment and the counts. */
-  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references'], ['missing']],
+  /**
+   * A project or environment made, renamed or archived: the tree, where you
+   * hold access, and the personal configs listed of it, which go with it.
+   */
+  places: (): QueryKey[] => [keys.projects, keys.me, ['personal']],
+  /** Secrets written, renamed, restored or archived: the environment, the counts, and the personal configs' key names. */
+  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references'], ['missing'], ['personal']],
   /**
    * Someone's access in a project changed: its grants, their report, and, as
    * it may be your own, what you can see.
