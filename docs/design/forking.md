@@ -227,7 +227,7 @@ derived, not copied, so a move in prod shows in every fork at once.
 **A key is archived in the parent.** Inheriting stops, as archived keys
 are not live. A fork's override of it stays, and now reads as an
 addition. A fork's removal of it does nothing, and the page shows it as
-"removed; prod no longer has it", which can be cleaned up.
+"removed · prod archived it", which Restore cleans up.
 
 **The parent is archived or deleted.** Archiving an environment that live
 forks inherit from is refused. The 409 names them: "market/prod is
@@ -484,10 +484,13 @@ POST  /api/reveals                                 {"path": "market/dev@me"}   a
 ```
 
 Each listed key's `parent` is null outside a fork and for a key only the
-fork holds; otherwise `{ from, state, changed, reset }`: `state` is
-`inherited`, `overridden` or `removed`, `from` the environment holding
+fork holds; otherwise `{ from, state, changed, reset, held }`: `state`
+is `inherited`, `overridden` or `removed`, `from` the environment holding
 the parent's key, `changed` that its value is newer than the override,
-and `reset` that the fork's own value was reset and is kept. A key is
+`reset` that the fork's own value was reset and is kept, and `held`,
+false for a removal of a key `from` has archived since ("removed · prod
+archived it", with Restore). A fork's folder actions reach only the keys
+it holds; an inherited key is filed where its parent files it. A key is
 listed once: a reset override is folded into its inherited entry, not
 listed again as archived.
 

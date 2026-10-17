@@ -211,15 +211,17 @@ function EnvironmentLedger({
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
   const folders = foldersOf(active);
+  // In a fork, an inherited key is filed where its parent files it: only the keys held here are filed here.
+  const heldHere = (entry: SecretKey) => entry.parent === null || entry.parent.state === 'overridden';
   // What can be filed now: not a secret whose save is on its way, which may
   // not exist yet, nor one with an edit pending, as its menu offers no move
   // while it is edited.
-  const settled = active.filter((entry) => status(entry.key).state !== 'pending' && secretChangeFor(changes, entry.key) === undefined);
+  const settled = active.filter((entry) => heldHere(entry) && status(entry.key).state !== 'pending' && secretChangeFor(changes, entry.key) === undefined);
   // Renaming or removing a folder: everything in it at once, the keys staying where they are.
   const refile = useAction();
   const place = `${project}/${environment}`;
   const folderMenu = (folder: string, count: number) =>
-    canWrite && (
+    canWrite && count > 0 && (
       <FolderMenu
         folder={folder}
         count={count}
@@ -575,7 +577,7 @@ function EnvironmentLedger({
               </thead>
               <tbody>
                 {byFolder(listed).flatMap(([folder, entries]) => [
-                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} actions={folderMenu(folder, entries.length)} />]),
+                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} actions={folderMenu(folder, entries.filter(heldHere).length)} />]),
                   ...entries.map((entry) => {
                   const change = secretChangeFor(changes, entry.key);
                   const state = status(entry.key);
@@ -1729,7 +1731,7 @@ function Standing({ project, secretKey, parent }: { project: string; secretKey: 
     case 'inherited':
       return <span className="tag tag-outline">from {from}</span>;
     case 'removed':
-      return <span className="tag tag-outline">removed · {from} has it</span>;
+      return <span className="tag tag-outline">removed · {from} {parent.held ? 'has it' : 'archived it'}</span>;
     case 'overridden':
       return (
         <>

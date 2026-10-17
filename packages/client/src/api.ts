@@ -243,6 +243,7 @@ export type Api = {
           state: "inherited" | "overridden" | "removed";
           changed: boolean;
           reset: boolean;
+          held: boolean;
         };
       }[];
       parents: string[];
@@ -1719,6 +1720,7 @@ export type SecretKey = {
     state: "inherited" | "overridden" | "removed";
     changed: boolean;
     reset: boolean;
+    held: boolean;
   };
 };
 

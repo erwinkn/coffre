@@ -648,7 +648,9 @@ export function forkKey(
     saving: FORK_WORDS[action],
     label: (vars) => vars.key,
     targets: (vars) => [saving(vars.key)],
-    apply: (entries, vars) => entries.map((entry) => (entry.key === vars.key ? standing(entry) : entry)),
+    // A removal of a key the parent archived since, restored, leaves nothing to list.
+    apply: (entries, vars) => entries.flatMap((entry) =>
+      entry.key !== vars.key ? [entry] : action === 'restore' && entry.parent?.held === false ? [] : [standing(entry)]),
     affects: () => affects.secrets(place),
     run: (vars) =>
       action === 'remove' || action === 'restore'

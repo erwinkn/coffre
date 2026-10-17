@@ -22,6 +22,7 @@ import {
   secretHistory,
   update,
   MAX_PARENTS,
+  type ParentRow,
   type ResolvedPath,
   type SecretPlaceRow,
   type SecretRow,
@@ -33,7 +34,7 @@ import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
-import { descendantsOf, inheritedRows } from './inheritance.ts';
+import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type ReferenceView, type Resolved } from './references.ts';
@@ -66,10 +67,11 @@ export type SecretKey = {
    * is the environment that holds it, the parent or one above; `changed`
    * says its value is newer than the override; `reset`, that the fork's
    * own value was reset to it and is kept, archived, for `inherit: false`
-   * to serve again. Each key is listed once. Null for a key only this
+   * to serve again; `held`, false for a removal of a key `from` has
+   * archived since. Each key is listed once. Null for a key only this
    * environment holds, and outside forks.
    */
-  parent: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean; reset: boolean } | null;
+  parent: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean; reset: boolean; held: boolean } | null;
 };
 
 export type SecretVersion = {
@@ -164,7 +166,9 @@ export async function listSecrets(
   const fork = place.environment!.parentId !== null;
   const read = async (db: Queryable) => {
     const rows = await environmentSecrets(db, environment.environmentId);
-    const inherited = fork ? await inheritedRows(db, environment.environmentId) : { parents: [], held: new Map(), removed: new Set<string>() };
+    const inherited = fork
+      ? await inheritedRows(db, environment.environmentId)
+      : { parents: [], held: new Map<string, InheritedRow>(), removed: new Set<string>(), archived: new Map<string, ParentRow>() };
     if (inherited === null) throw conflict(`${place.project.slug}/${place.environment!.slug}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre`);
     const references = await currentReferences(db, [...rows, ...[...inherited.held.values()].map((held) => held.row)].filter((row) => row.current === null).map((row) => row.id));
     return { rows, inherited, references };
@@ -204,7 +208,7 @@ export async function listSecrets(
     // Flagged while the parent's value is newer than the override, to whoever may know when it was written.
     const [mine, theirs] = [writtenAt(row), writtenAt(held.row)];
     const changed = reads(held.from) && mine !== null && theirs !== null && theirs > mine;
-    return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false } };
+    return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
   });
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;
@@ -214,7 +218,16 @@ export async function listSecrets(
       ...view(held.row),
       ...(shown ? {} : { reference: null, version: null, updatedAt: null, updatedBy: null }),
       archived: false,
-      parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key) },
+      parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
+    });
+  }
+  // A removal of a key the parent archived since: no longer doing anything, until the parent brings it back. Listed, to be restored.
+  for (const key of inherited.removed) {
+    const from = inherited.archived.get(key);
+    if (from === undefined || own.has(key) || reset.has(key)) continue;
+    keys.push({
+      key, reference: null, folder: null, archived: false, version: null, updatedAt: null, updatedBy: null,
+      parent: { from: from.slug, state: 'removed', changed: false, reset: false, held: false },
     });
   }
   keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));

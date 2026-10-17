@@ -53,30 +53,37 @@ export type InheritedRow = { row: SecretRow; from: ParentRow };
 
 /**
  * What a fork inherits, row by row: its parents nearest first, each key
- * its parent resolves to with the row that holds it, and the keys the
- * fork removed. Null for a chain that loops or runs past `MAX_PARENTS`,
+ * its parent resolves to with the row that holds it, the keys the fork
+ * removed, and `archived`, the parent that archived a key none holds
+ * live: what a removal of it stands for once the parent dropped it. Null for a chain that loops or runs past `MAX_PARENTS`,
  * written around the app. One query a level, at most three, in whatever
  * transaction `db` is: a caller that lists reads in one snapshot.
  */
 export async function inheritedRows(
   db: Queryable,
   environmentId: string,
-): Promise<{ parents: ParentRow[]; held: Map<string, InheritedRow>; removed: Set<string> } | null> {
+): Promise<{ parents: ParentRow[]; held: Map<string, InheritedRow>; removed: Set<string>; archived: Map<string, ParentRow> } | null> {
   const parents = await parentsOf(db, environmentId);
   if (parents === null) return null;
   const held = new Map<string, InheritedRow>();
+  const archived = new Map<string, ParentRow>();
   const removed = new Set((await dismissalsIn(db, environmentId)).map((row) => row.key));
   // The keys a nearer parent settled: those it holds, and those it removed.
   const settled = new Set<string>();
   for (const [depth, parent] of parents.entries()) {
     for (const row of await environmentSecrets(db, parent.id)) {
-      if (row.archivedAt !== null || settled.has(row.key)) continue;
+      if (settled.has(row.key)) continue;
+      if (row.archivedAt !== null) {
+        if (!archived.has(row.key)) archived.set(row.key, parent);
+        continue;
+      }
       held.set(row.key, { row, from: parent });
       settled.add(row.key);
     }
     if (depth < parents.length - 1) for (const dismissal of await dismissalsIn(db, parent.id)) settled.add(dismissal.key);
   }
-  return { parents, held, removed };
+  for (const key of held.keys()) archived.delete(key);
+  return { parents, held, removed, archived };
 }
 
 /**
