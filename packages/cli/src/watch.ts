@@ -33,12 +33,13 @@ export function replaceFile(file: string, text: string): boolean {
   return true;
 }
 
-/** `60`, `60s`, `5m` or `1h`, in milliseconds: at least five seconds. */
+/** `60`, `60s`, `5m` or `1h`, in milliseconds: five seconds to a day. */
 export function interval(text: string): number {
   const match = /^(\d+)([smh]?)$/.exec(text);
   const unit = { '': 1_000, s: 1_000, m: 60_000, h: 3_600_000 }[match?.[2] ?? ''];
   const ms = match === null || unit === undefined ? NaN : Number(match[1]) * unit;
-  if (!(ms >= 5_000)) throw new Error(`--interval takes a duration of at least 5s, such as 60s or 5m, not "${text}"`);
+  // Past a day a timer would not wait (Node fires one longer than 2^31 - 1 ms at once).
+  if (!(ms >= 5_000 && ms <= 86_400_000)) throw new Error(`--interval takes a duration from 5s to 24h, such as 60s or 5m, not "${text}"`);
   return ms;
 }
 
@@ -49,8 +50,8 @@ function duration(ms: number): string {
 export type Watch = {
   /** The environments' versions together: they change whenever a read of them would. */
   version: () => Promise<string>;
-  /** Read them, as the file holds them. */
-  read: () => Promise<string>;
+  /** Read them: as the file holds them, and the version of exactly what was read. */
+  read: () => Promise<{ text: string; version: string }>;
   file: string;
   intervalMs: number;
   /** A shell command run after each write that changed the file, before the next round. */
@@ -73,11 +74,12 @@ export async function watch({ version, read, file, intervalMs, onChange, say, wa
   let pause = intervalMs;
   for (;;) {
     try {
-      const now = await version();
-      if (now !== seen) {
-        // Asked before the read: a write in between shows as a new version next round, read again then.
-        const changed = replaceFile(file, await read());
-        seen = now;
+      if ((await version()) !== seen) {
+        // The read's own version, not the one just asked: a version comes back when a change is undone,
+        // so one asked before a write that the read saw, and its undoing, would never differ again.
+        const got = await read();
+        const changed = replaceFile(file, got.text);
+        seen = got.version;
         if (changed) {
           say(`wrote ${file}`);
           if (onChange !== null) await hook(onChange, say);

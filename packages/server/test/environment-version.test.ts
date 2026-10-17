@@ -69,6 +69,9 @@ test('a version changes with what a read opens, and with nothing else; asking fo
   assert.equal(await versionOf('market/prod'), first);
   assert.equal(await versionOf('market/prod', root), first, "the environment's, not its reader's");
   assert.deepEqual(await written(), []);
+  // A read of the environment answers the version of what it opened; one of a key, none.
+  assert.equal((await maintainer.secrets.reveal('market/prod')).version, first);
+  assert.equal((await maintainer.secrets.reveal('market/prod/STRIPE_KEY')).version, null);
 
   // Filing a key is no change to a read; a value, an archive or a new name is.
   await maintainer.secrets.update('market/prod/DATABASE_URL', { folder: 'database' });
@@ -101,6 +104,7 @@ test("a fork's version covers what it inherits: its parent's writes, its overrid
   const inherited = await versionOf('market/prod-eu');
   // Inheriting everything, it opens what its parent does.
   assert.equal(inherited, await versionOf('market/prod'));
+  assert.equal((await maintainer.secrets.reveal('market/prod-eu')).version, inherited);
 
   await maintainer.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_2' });
   const rotated = await versionOf('market/prod-eu');

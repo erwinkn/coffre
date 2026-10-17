@@ -388,6 +388,7 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      version: string | null;
     };
   };
   "GET /members": {

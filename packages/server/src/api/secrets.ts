@@ -37,7 +37,7 @@ import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type ReferenceView, type Resolved } from './references.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -965,7 +965,7 @@ export async function restoreVersion(
 export async function reveal(
   ctx: ApiContext,
   path: Path,
-): Promise<{ operationId: string; values: Record<string, string> }> {
+): Promise<{ operationId: string; values: Record<string, string>; version: string | null }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     const place = await resolvePath(ctx.db, path);
@@ -1024,7 +1024,8 @@ export async function reveal(
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
-    return { operationId, values: { ...values } };
+    // An environment's version, of exactly what was read: what a watch compares the next one with.
+    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null };
   });
 }
 
@@ -1051,9 +1052,18 @@ export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): 
       denied(ctx, 'secret.version', 'parent_unreadable', { ...environment, metadata: { parents: [...unread.keys()] } }),
     ));
   }
+  return { version: versionOf(read) };
+}
+
+/**
+ * A read's version: each key with the version it resolves to, and each key
+ * that cannot be read with why. A whole environment's read answers it too
+ * (`reveal`), of what it opened.
+ */
+function versionOf(read: { items: readonly Readable[]; unreadable: readonly Unreadable[] }): string {
   // Key names hold no NUL or newline (`secretKey`), and every reason comes last on its line.
   const hash = createHash('sha256');
   for (const item of read.items) hash.update(`${item.key}\0${item.secretVersionId}\n`);
   for (const unreadable of read.unreadable) hash.update(`!${unreadable.key ?? ''}\0${unreadable.reason}\n`);
-  return { version: hash.digest('base64url') };
+  return hash.digest('base64url');
 }

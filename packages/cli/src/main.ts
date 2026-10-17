@@ -214,7 +214,7 @@ async function cloudflaredToken(origin: string): Promise<string> {
     if (token === '' || token.includes(' ')) throw new Error(stdout);
     return token;
   } catch {
-    fail(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
+    throw new Error(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
   }
 }
 
@@ -260,7 +260,7 @@ type Hint = (status: number, reason: string | null) => string | null;
 function client(to: Target = target(), hint?: Hint, handled: readonly number[] = []): CoffreClient {
   return createClient({
     url: to.origin,
-    headers: () => headersFor(to),
+    headers: () => headersFor(to).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error))),
     transport: (request) => send(request, to, hint, handled),
   });
 }
@@ -947,7 +947,7 @@ async function readValue(key: string): Promise<string> {
  * came back is checked again, for an environment changed in between. What
  * stops it is thrown, for the command to end on or, watching, to outlive.
  */
-async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<[string, string][]> {
+async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<{ entries: [string, string][]; version: string }> {
   if (paths.length > 1) {
     const keys: [string, string[]][] = [];
     for (const path of paths) {
@@ -965,17 +965,21 @@ async function readEnvironments(paths: readonly string[], api: { read: CoffreCli
     const shared = clash(keys);
     if (shared !== null) throw new Error(`${shared}: a key comes from one environment only. Nothing was read`);
   }
-  const read: [string, Record<string, string>][] = [];
-  for (const path of paths) read.push([path, (await api.read.secrets.reveal(path)).values]);
-  const shared = clash(read.map(([path, values]) => [path, Object.keys(values)]));
+  const read: [string, { values: Record<string, string>; version: string | null }][] = [];
+  for (const path of paths) read.push([path, await api.read.secrets.reveal(path)]);
+  const shared = clash(read.map(([path, { values }]) => [path, Object.keys(values)]));
   if (shared !== null) throw new Error(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
-  return read.flatMap(([, values]) => Object.entries(values));
+  // The environments' versions, of what was read: as `coffre version` answers them, together.
+  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' ') };
 }
 
 /** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
 function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
   const api = { read: client(), list: client(target(), undefined, [403, 404]) };
-  return readEnvironments(paths, api).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  return readEnvironments(paths, api).then(
+    (read) => read.entries,
+    (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
+  );
 }
 
 /**
@@ -1057,12 +1061,15 @@ async function exportEnv(args: string[]): Promise<void> {
   if (values.watch) {
     const intervalMs = attempt(() => interval(values.interval ?? '60s'));
     const to = target();
-    if (to.credential.kind === 'workload') fail("--watch outlives a CI run's credential, which lasts five minutes: watch with a session or a bearer token");
+    if (to.by === 'run' || to.credential.kind === 'workload') fail("--watch outlives a CI run's credential, which lasts five minutes: watch with a session or a bearer token");
     const api = enduringClient(to);
     process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
     await watch({
       version: async () => (await Promise.all(paths.map((path) => api.environments.version(path)))).map((answer) => answer.version).join(' '),
-      read: async () => text(byKey(await readEnvironments(paths, { read: api, list: api }))),
+      read: async () => {
+        const { entries, version } = await readEnvironments(paths, { read: api, list: api });
+        return { text: text(byKey(entries)), version };
+      },
       file: file!,
       intervalMs,
       onChange: values['on-change'] ?? null,
