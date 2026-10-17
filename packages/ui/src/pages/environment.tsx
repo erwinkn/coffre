@@ -1785,14 +1785,16 @@ function NoPersonalConfig({ project, of }: { project: string; of: string }) {
     <>
       <PageHeader tile={project} title={`${of}@me`} />
       <Card labelledBy="no-personal-config" title={`You have no personal ${of} yet`}>
-        <p className="card-row-desc">
-          A personal config is your own <span className="mono">{project}/{of}</span>: it reads {of}'s keys as they change,
-          and the values you set or remove there are yours alone. No one else reads them, an Owner included, and you read
-          them only while you read {of}. Until you make one, <span className="mono">{project}/{of}@me</span> reads {of} itself,
-          so a script can name it either way.
-        </p>
-        {error !== null && <ErrorLine error={error} />}
-        <div className="dialog-actions">
+        <div className="card-row">
+          <div>
+            <p className="card-row-desc">
+              A personal config is your own <span className="mono">{project}/{of}</span>: it reads {of}'s keys as they change,
+              and the values you set or remove there are yours alone. No one else reads them, an Owner included, and you read
+              them only while you read {of}. Until you make one, <span className="mono">{project}/{of}@me</span> reads {of} itself,
+              so a script can name it either way.
+            </p>
+            {error !== null && <ErrorLine error={error} />}
+          </div>
           <button
             type="button"
             className="btn btn-primary"
