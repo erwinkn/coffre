@@ -4,11 +4,13 @@ import type { Place } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
-import type { Queryable } from '@coffre/db';
+import type { Database, Queryable } from '@coffre/db';
+import { SNAPSHOT } from '@coffre/db/dialect';
 
 import {
   dismissalsIn,
   environmentSecrets,
+  MAX_PARENTS,
   parentsOf,
   referenceRows,
   resolvePath,
@@ -266,41 +268,58 @@ export type Readable = {
   parent?: { environmentId: string; slug: string };
 };
 
+/** What a read cannot open, and why; and the parent it would be inherited from, which the reader must read to be told. */
+export type Unreadable = { reason: string; key?: string; parent?: { environmentId: string; slug: string } };
+
 /**
  * What a read of an environment, or of one key in it, opens: each live
  * key's current value, and for a key that is a reference, its source's
  * current value through it. A fork's keys come first, then each parent's
  * in turn for the keys no nearer environment holds or removed (a dismissal,
- * docs/design/forking.md). A key that cannot be read is named in
- * `unreadable`, and its reader decides: a read refuses whole rather than
- * go without it.
+ * docs/design/forking.md), all read in one snapshot, so a write meanwhile
+ * is seen whole or not at all; the snapshot is closed before anything is
+ * opened. An environment with no parent needs none: a read of it opens no
+ * transaction. A key that cannot be read is named in `unreadable`, and its
+ * reader decides: a read refuses whole rather than go without it.
  */
 export async function readableValues(
-  db: Queryable,
+  db: Database,
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
   key?: string,
-): Promise<{ items: Readable[]; unreadable: string[] }> {
+): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
+  if (place.environment!.parentId === null) return resolveValues(db, place, environment, key);
+  return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
+}
+
+async function resolveValues(
+  tx: Queryable,
+  place: ResolvedPath,
+  environment: { projectId: string; environmentId: string },
+  key?: string,
+): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
   const here = `${place.project.slug}/${place.environment!.slug}`;
-  const parents = await parentsOf(db, environment.environmentId);
+  const parents = await parentsOf(tx, environment.environmentId);
+  if (parents === null) return { items: [], unreadable: [{ reason: `${here}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre` }] };
   const layers = [{ id: environment.environmentId, slug: place.environment!.slug, archivedAt: null, deleted: false }, ...parents];
   const items: Readable[] = [];
-  const refused: string[] = [];
+  const refused: Unreadable[] = [];
   // The keys a nearer environment settled: holds, or removed.
   const settled = new Set<string>();
   for (const [depth, layer] of layers.entries()) {
+    const parent = depth === 0 ? undefined : { environmentId: layer.id, slug: layer.slug };
     if (layer.deleted || layer.archivedAt !== null) {
-      refused.push(`${here} inherits from ${place.project.slug}/${layer.slug}, which is ${layer.deleted ? 'deleted' : 'archived'}`);
+      refused.push({ reason: `${here} inherits from ${place.project.slug}/${layer.slug}, which is ${layer.deleted ? 'deleted' : 'archived'}` });
       break;
     }
-    const own = await valuesIn(db, place.project.slug, { projectId: environment.projectId, environmentId: layer.id, slug: layer.slug }, key);
+    const own = await valuesIn(tx, place.project.slug, { projectId: environment.projectId, environmentId: layer.id, slug: layer.slug }, key);
     for (const item of own.items) {
       if (settled.has(item.key)) continue;
-      items.push(depth === 0 ? item : { ...item, through: environment.environmentId, parent: { environmentId: layer.id, slug: layer.slug } });
+      items.push(parent === undefined ? item : { ...item, through: environment.environmentId, parent });
     }
-    for (const unread of own.unreadable) if (!settled.has(unread.key)) refused.push(unread.reason);
+    for (const unread of own.unreadable) if (!settled.has(unread.key)) refused.push({ ...unread, ...(parent === undefined ? {} : { parent }) });
     for (const settles of [...own.items, ...own.unreadable]) settled.add(settles.key);
-    if (depth < layers.length - 1) for (const dismissed of await dismissalsIn(db, layer.id)) settled.add(dismissed.key);
+    if (depth < layers.length - 1) for (const dismissed of await dismissalsIn(tx, layer.id)) settled.add(dismissed.key);
   }
   items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   return { items, unreadable: refused };

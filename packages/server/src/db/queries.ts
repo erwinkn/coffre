@@ -1367,19 +1367,23 @@ export type ParentRow = { id: string; slug: string; owner: string | null; archiv
 
 /**
  * The environments `environmentId` inherits from, nearest first: its
- * parent, that one's, and so on. A parent never changes once set, so no
- * chain loops; it stops at `MAX_PARENTS` all the same.
+ * parent, that one's, and so on. The app makes a parent before its child
+ * and never changes it, so its chains neither loop nor run past
+ * `MAX_PARENTS`. Null for one that does, written around it.
  */
-export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[]> {
+export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[] | null> {
   const { environments } = tablesOf(db);
   const parents: ParentRow[] = [];
+  const seen = new Set([environmentId]);
   let [next] = await db.select({ parentId: environments.parentId }).from(environments).where(eq(environments.id, environmentId));
-  while (next?.parentId != null && parents.length < MAX_PARENTS) {
+  while (next?.parentId != null) {
+    if (seen.has(next.parentId) || parents.length === MAX_PARENTS) return null;
+    seen.add(next.parentId);
     const [row] = await db
       .select({ id: environments.id, slug: environments.slug, owner: environments.owner, archivedAt: environments.archivedAt, parentId: environments.parentId })
       .from(environments)
       .where(eq(environments.id, next.parentId));
-    if (row === undefined) break;
+    if (row === undefined) return null;
     parents.push({ id: row.id, slug: row.slug, owner: row.owner, archivedAt: row.archivedAt, deleted: isTombstone(row.slug) });
     next = row;
   }

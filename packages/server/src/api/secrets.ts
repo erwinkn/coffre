@@ -373,7 +373,7 @@ export async function setSecrets(
       // In a fork, a key given a value or a reference of its own is no longer removed: reset later, it inherits again.
       if (place.environment!.parentId !== null) {
         const removed = new Set((await dismissalsIn(tx, environment.environmentId)).map((row) => row.key));
-        for (const key of [...items, ...references].map((item) => item.key).filter((key) => removed.has(key))) {
+        for (const key of keysIn.filter((key) => patch[key] !== null && removed.has(key))) {
           await update(tx, dismissedKeys, { environmentId: environment.environmentId, key }, { restoredAt: now, restoredBy: ctx.caller.principal.id });
           log.push(allowed(ctx, 'missing.restore', { ...environment, operationId, metadata: { key } }));
         }
@@ -747,25 +747,26 @@ export async function reveal(
         denied(ctx, 'secret.read', 'unknown_secret', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
-    // A reference or a parent that cannot be read stops the whole read, saying why, rather than run without it.
-    if (unreadable.length > 0) {
-      throw new Refusal(
-        conflict(unreadable.join('; ')),
-        denied(ctx, 'secret.read', 'reference_unreadable', { ...environment, operationId, metadata: { references: unreadable.length } }),
-      );
-    }
-    // An inherited value is the parent's: reading it takes read there, by the reader's own grants. A fork lends nothing.
+    // An inherited value is the parent's: reading it takes read there, by the reader's own grants. A fork lends
+    // nothing, and says nothing past a key's name about what the reader cannot read, not even why it cannot be read.
     const unread = new Map<string, string[]>();
-    for (const row of rows) {
-      if (row.parent === undefined) continue;
+    for (const row of [...rows, ...unreadable]) {
+      if (row.parent === undefined || row.key === undefined) continue;
       const parent = { projectId: environment.projectId, environmentId: row.parent.environmentId, environmentSlug: row.parent.slug };
-      if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key]);
+      if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key].sort());
     }
     if (unread.size > 0) {
       const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
       throw new Refusal(
         forbidden(`${formatPath(path)} inherits ${which.join('; ')}, which you cannot read`),
         denied(ctx, 'secret.read', 'parent_unreadable', { ...environment, operationId, metadata: { parents: [...unread.keys()] } }),
+      );
+    }
+    // A reference or a parent that cannot be read stops the whole read, saying why, rather than run without it.
+    if (unreadable.length > 0) {
+      throw new Refusal(
+        conflict(unreadable.map((unread) => unread.reason).join('; ')),
+        denied(ctx, 'secret.read', 'reference_unreadable', { ...environment, operationId, metadata: { references: unreadable.length } }),
       );
     }
     // A key with nothing to read, no version of its own and no reference the vault sealed, as a row written around it: no value.

@@ -93,6 +93,8 @@ export const environments = sqliteTable(
     unique('environments_project_scoped').on(table.id, table.projectId),
     unique('environments_parent_id_owner_key').on(table.parentId, table.owner),
     check('environments_slug_check', isPlaceSlug(table.slug)),
+    // An environment is never its own parent. Longer loops, written around the app, are refused at read (`parentsOf`).
+    check('environments_parent_check', sql`${table.parentId} IS NULL OR ${table.parentId} <> ${table.id}`),
     check('environments_owner_check', sql`${table.owner} IS NULL OR (${table.parentId} IS NOT NULL AND ${table.owner} LIKE 'user:_%')`),
     foreignKey({
       name: 'environments_project_id_fkey',

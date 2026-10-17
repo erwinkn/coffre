@@ -54,12 +54,14 @@ export async function forkEnvironment(
     if (input.inherit) return inheritFrom(ctx, place, slug, source, input.name);
     if (place.environment !== null) {
       if (place.environment.archivedAt !== null) throw conflict(`${project.slug}/${slug} is archived; restore it before forking into it`);
+      // Filled, a fork that inherits would be neither a copy nor a fork of what it inherits.
+      if (place.environment.parentId !== null) throw conflict(`${project.slug}/${slug} inherits from another environment: a fork goes into a new or empty one that inherits nothing`);
       const live = (await environmentSecrets(ctx.db, place.environment.id)).filter((secret) => secret.archivedAt === null);
       if (live.length > 0) throw conflict(`${project.slug}/${slug} already has secrets: a fork goes into a new or empty environment`);
     }
     // What the fork reads, checked before anything is made: a reference that cannot be read stops it.
     const readable = await readableValues(ctx.db, source, sourcePlace);
-    if (readable.unreadable.length > 0) throw conflict(readable.unreadable.join('; '));
+    if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
     const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
@@ -107,7 +109,8 @@ async function inheritFrom(
   const from = parent.environment!.slug;
   if (place.environment !== null) throw conflict(`${place.project.slug}/${slug} already exists: a fork that inherits is a new environment`);
   if (parent.environment!.owner !== null) throw conflict(`${place.project.slug}/${from} is a personal config: fork the environment it inherits from`);
-  if ((await parentsOf(ctx.db, parent.environment!.id)).length >= MAX_PARENTS) {
+  const above = await parentsOf(ctx.db, parent.environment!.id);
+  if (above === null || above.length >= MAX_PARENTS) {
     throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);
   }
   const { environment, created } = await putEnvironment(ctx, place, slug, { name }, { from, parentId: parent.environment!.id });

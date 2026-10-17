@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "fc6a334a-c07b-4b13-ba15-39d09dc0630a",
+  "id": "f2626341-5663-4e40-b901-8a95ae0cec7e",
   "prevId": "e88f495b-b45b-45f9-a361-e1b224e6ecfe",
   "tables": {
     "audit_chain_head": {
@@ -1025,6 +1025,10 @@
         "environments_slug_check": {
           "name": "environments_slug_check",
           "value": "(length(\"environments\".\"slug\") BETWEEN 1 AND 63 AND \"environments\".\"slug\" GLOB '[a-z0-9]*' AND \"environments\".\"slug\" NOT GLOB '*[^a-z0-9-]*') OR (instr(\"environments\".\"slug\", '~') BETWEEN 2 AND 64 AND substr(\"environments\".\"slug\", 1, instr(\"environments\".\"slug\", '~') - 1) GLOB '[a-z0-9]*' AND substr(\"environments\".\"slug\", 1, instr(\"environments\".\"slug\", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr(\"environments\".\"slug\", instr(\"environments\".\"slug\", '~') + 1)) BETWEEN 1 AND 40 AND substr(\"environments\".\"slug\", instr(\"environments\".\"slug\", '~') + 1) NOT GLOB '*[^a-z0-9-]*')"
+        },
+        "environments_parent_check": {
+          "name": "environments_parent_check",
+          "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
         },
         "environments_owner_check": {
           "name": "environments_owner_check",

@@ -65,10 +65,13 @@ environments
 
 `parent_id` has a foreign key on `(parent_id, project_id)` to `(id,
 project_id)`, so a parent is always in the same project. The app's login
-may insert both columns and update neither. A parent can't change, and a
-chain can't loop, because a parent exists before its child and stays its
-parent forever. There's no cycle check anywhere, because no cycle can
-exist. `UNIQUE (parent_id, owner)` gives each person at most one personal
+may insert both columns and update neither, so a parent can't change.
+The app makes a parent before its child, so its chains can't loop. The
+database can't promise that alone: its login could insert two rows naming
+each other in one statement. So a check refuses the simplest case, an
+environment that is its own parent, and a read refuses a chain that
+loops or runs past the cap, written around the app, instead of following
+it. `UNIQUE (parent_id, owner)` gives each person at most one personal
 config per environment.
 
 A fork's own keys are ordinary `secrets` rows in its environment. Here is
@@ -81,7 +84,9 @@ A fork's own keys are ordinary `secrets` rows in its environment. Here is
 | `STRIPE_KEY` | none | | prod's `sk_live_1`, inherited |
 | `SENTRY_DSN` | none | yes | nothing, removed |
 
-A read walks the chain nearest first. A key is settled by the first
+A read walks the chain nearest first, in one read-only snapshot, so a
+write that sets a key and ends its removal meanwhile is seen whole or not
+at all, and the snapshot closes before the vault is asked. A key is settled by the first
 environment that holds it live or dismissed it. That's the whole rule.
 It's `readableValues` in `packages/server/src/api/references.ts`, a loop
 over the layers.
@@ -261,7 +266,10 @@ Dee still reads prod-eu's own keys one at a time
 (`market/prod-eu/DATABASE_URL`). It's all or nothing, as references
 already are: never run without a key. The app refuses before the vault is
 asked. The vault refuses anyway if asked, since it decides an inherited
-read on the parent's place, by the reader's own grants (tested).
+read on the parent's place, by the reader's own grants (tested). The
+parent check comes before any other refusal. If prod's `SHARED` is a
+broken reference into `billing`, Dee hears only that SHARED comes from
+prod, never which billing key it pointed at or who broke it.
 
 **What a fork's reader sees of the parent.** The inherited key names,
 since key names are not secret within a project (docs/design/environments.md,
@@ -521,7 +529,10 @@ What's built:
     `putEnvironment` storing `parent_id`, with the parent checked again
     under the log's head;
   - forks as copies or references of a fork, which take what it resolves
-    to, each key where it's held, with that folder;
+    to, each key where it's held, with that folder; and no copy into an
+    empty environment that already inherits;
+  - the chain read in one snapshot (`SNAPSHOT`), and the parent check
+    before any other refusal;
   - a write in a fork restoring the key's removal (`api/secrets.ts`);
   - the archive block, and the refusal to restore a fork whose parent is
     archived (`api/projects.ts`).

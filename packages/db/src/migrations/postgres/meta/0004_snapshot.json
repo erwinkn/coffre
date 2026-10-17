@@ -1,5 +1,5 @@
 {
-  "id": "4b5179e9-8c30-4d16-a492-7877970a5798",
+  "id": "f70c61ed-762f-44ba-ac0b-d5cd21b74246",
   "prevId": "59e5ba04-f7a0-4e7d-a349-9e47da2bf28e",
   "version": "7",
   "dialect": "postgresql",
@@ -1224,6 +1224,10 @@
         "environments_slug_check": {
           "name": "environments_slug_check",
           "value": "\"environments\".\"slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$'"
+        },
+        "environments_parent_check": {
+          "name": "environments_parent_check",
+          "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
         },
         "environments_owner_check": {
           "name": "environments_owner_check",

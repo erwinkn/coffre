@@ -271,3 +271,43 @@ test("forking a fork as references or copies takes what it resolves to: each key
     ['STRIPE_KEY', null],
   ]);
 });
+
+test("a fork's reader who cannot read the parent learns no more than a key's name, broken references included", async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'Prod' });
+  await root.secrets.set('billing/prod', { PRIVATE_SOURCE: 'billing-secret' });
+  await root.secrets.set('market/prod', { SHARED: { ref: 'billing/prod/PRIVATE_SOURCE' } });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.references.break('market/prod/SHARED');
+  await root.access.set(`user:${ADA}`, { 'market/prod-eu': 'viewer' });
+  await assert.rejects(ada.secrets.reveal('market/prod-eu'), (error: { status: number; message: string }) => {
+    assert.equal(error.status, 403);
+    assert.doesNotMatch(error.message, /billing|PRIVATE_SOURCE|broke/);
+    assert.match(error.message, /SHARED/);
+    return true;
+  });
+});
+
+test('a value written again as the same reference ends its removal too', async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'Prod' });
+  await root.secrets.set('billing/prod', { SOURCE: 'billing-secret' });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.secrets.set('market/prod-eu', { STRIPE_KEY: { ref: 'billing/prod/SOURCE' } });
+  await root.environments.dismiss('market/prod-eu', { STRIPE_KEY: true });
+  await root.secrets.set('market/prod-eu', { STRIPE_KEY: { ref: 'billing/prod/SOURCE' } });
+  assert.deepEqual((await root.environments.missing('market/prod-eu')).dismissed, []);
+});
+
+test('no copy goes into an empty environment that inherits, and a chain made around the app is not followed', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.environments.create('market/dev', { name: 'Dev' });
+  await root.secrets.set('market/dev', { DEV_ONLY: 'x' });
+  await assert.rejects(maintainer.environments.create('market/prod-eu', { from: 'dev' }), { status: 409, message: /inherits from another environment/ });
+
+  // The database refuses an environment that is its own parent; a loop of two, it cannot, and the read refuses it.
+  const [eu, prod] = [await environmentId('prod-eu'), await environmentId('prod')];
+  await assert.rejects(db.owner.update(environments).set({ parentId: eu }).where(eq(environments.id, eu)));
+  await db.owner.update(environments).set({ parentId: eu }).where(eq(environments.id, prod));
+  await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: /parents loop or run past 3/ });
+});
