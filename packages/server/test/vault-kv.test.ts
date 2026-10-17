@@ -99,6 +99,32 @@ test("a person's CLI session reads what they may, as they would with `coffre exp
   assert.deepEqual(data.data, STAGING);
 });
 
+test("a fork that inherits reads its parent's values live, as the API's reveal does, and only with read on the parent", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.secrets.set('market/prod-eu', { REGION: 'eu-west-1' });
+  await root.access.set('token:eso', { 'market/prod-eu': 'viewer' });
+  // A token reaches what its account held when it was made: this one, both.
+  const both = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'eso', { label: 'eu', expiresInDays: 1 })).token;
+  assert.deepEqual((await body(await vault('secret/data/market/prod-eu', both))).data.data, { ...PROD, REGION: 'eu-west-1' });
+  await root.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_rotated' });
+  assert.equal((await body(await vault('secret/data/market/prod-eu/STRIPE_KEY', both))).data.data!.STRIPE_KEY, 'sk_live_rotated');
+  // Read on the fork alone: its inherited keys are refused (R8), and nothing is revealed.
+  await root.access.set('token:eso', { 'market/prod': null });
+  const refused = await vault('secret/data/market/prod-eu', both);
+  assert.equal(refused.status, 403);
+  assert.equal((await refused.text()).includes('eu-west-1'), false);
+});
+
+test("a person's personal token reads within its scope, and lookup-self answers for it", async () => {
+  await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: 'viewer' });
+  const issued = await runtime.signin!.issuePersonalToken(await contextFor(deps, DEV), { label: 'vault-cli', expiresInMinutes: 60, scope: { 'market/staging': 'viewer' } });
+  assert.match(issued.token, /^coffre_pat_/);
+  assert.equal((await body(await vault('auth/token/lookup-self', issued.token))).data.display_name, `user:${DEV}`);
+  assert.deepEqual((await body(await vault('secret/data/market/staging', issued.token))).data.data, STAGING);
+  assert.equal((await vault('secret/data/market/prod', issued.token)).status, 403);
+});
+
 test('read only: every other method is 405, and changes nothing', async () => {
   for (const method of ['PUT', 'POST', 'PATCH', 'DELETE']) {
     const response = await vault('secret/data/market/prod', eso, { method, body: JSON.stringify({ data: { STRIPE_KEY: 'x' } }) });

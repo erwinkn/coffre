@@ -53,6 +53,7 @@ function appRuntime(auth: AuthConfig) {
     vault: vaultKnowing({}),
     db: null,
     schema: { migrated: true },
+    plugins: [],
   } as never;
 }
 

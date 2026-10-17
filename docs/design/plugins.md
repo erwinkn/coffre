@@ -288,7 +288,13 @@ plugins: [
 The mount is `secret` by default, as in Vault (`vaultKv({ mount: 'kv' })`
 changes it). The metadata in a data response has `version: 0`, because an
 environment has no version of its own. Each value's history stays in
-coffre.
+coffre. A value-free environment version is coming (W124, T94): once it
+lands, `version` and `created_time` should come from it.
+
+A fork that inherits (#238) reads through the adapter as it does through
+`coffre export`. The adapter calls the API's reveal, so inherited keys
+resolve live from the parent and need read on the parent. A token that
+reads only the fork gets 403, never a partial map. A test holds both.
 
 **Errors.** coffre's 401 and 403 become Vault's `403 permission denied`
 with coffre's reason after it. A 404 becomes `404 {"errors":[]}`, which the
@@ -309,13 +315,15 @@ with the browser's cookie. None of that can happen here:
 - Every answer is `cache-control: no-store`, carries coffre's security
   headers, and passes the migration door.
 
-**Audit volume.** Each poll logs one `secret.read` per value, from the
-vault. Take ESO polling 10
-ExternalSecrets of 20 keys every 15 minutes: that is 800 entries an hour,
-about 19,000 a day, or 7 million a year. This is the same volume `coffre
-export` in a 15-minute cron would cause. Don't optimize it now. If it ever matters, the lever is coalescing identical
-reads by the same credential within a window. Dropping entries is not an
-option.
+**Audit volume.** Today each poll logs one `secret.read` per value, from
+the vault. Take ESO polling 10 ExternalSecrets of 20 keys every 15 minutes:
+that is 800 entries an hour, about 19,000 a day, or 7 million a year. This
+is the same volume `coffre export` in a 15-minute cron would cause. One
+entry per bulk read is coming (W123, T95), which cuts that to 40 entries an
+hour. The adapter needs no change for it, since it is the API's reveal.
+Don't optimize it here. And if a poll ever needs to know whether anything
+changed without reading values, the value-free environment version (T94)
+is the tool, not change detection of the adapter's own.
 
 **Which tools this buys.** Requests were taken from each tool's source
 (ESO v2.13.0, `hashicorp/vault/api` v1.22.0, Vault v2.2.0, Terraform
@@ -384,10 +392,12 @@ uploaded key set as one more way a binding trusts an issuer.
    credential's `expiresAt` to `GET /api/me`, which `coffre whoami` could
    show too. *Recommendation: add it in the PR that ships this.*
 5. **Which tokens count as a Vault token.** Any token the API accepts
-   counts: service tokens and also a person's CLI session, so `vault kv
-   get` works for a developer as themselves. *Recommendation: keep it*,
-   since it is the API's rule. Refusing `coffre_web_` browser sessions in
-   the header is also an option, at the cost of one more rule.
+   counts: service tokens, a person's personal token (`coffre_pat_`,
+   #239), or their CLI session. So `vault kv get` works for a developer as
+   themselves, within a personal token's scope, and a test holds that.
+   *Recommendation: keep it*, since it is the API's rule. Refusing
+   `coffre_web_` browser sessions in the header is also an option, at the
+   cost of one more rule.
 6. **LIST and metadata, for ESO's `find` and tag filters.** LIST maps
    cleanly: `secret/metadata/?list=true` gives `["market/"]` and
    `secret/metadata/market?list=true` gives `["prod", "staging"]`, both
