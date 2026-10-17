@@ -396,6 +396,7 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      version: string | null;
     };
   };
   "GET /members": {
@@ -1222,6 +1223,12 @@ export type Api = {
       truncated: boolean;
     } | {
       app: null;
+    };
+  };
+  "GET /projects/:project/:environment/version": {
+    input: undefined;
+    output: {
+      version: string;
     };
   };
 };

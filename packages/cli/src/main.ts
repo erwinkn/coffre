@@ -25,6 +25,7 @@ import { clash, environmentPaths, listOf } from './environments.ts';
 import * as manage from './manage.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
+import { interval, replaceFile, watch } from './watch.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   choose,
@@ -213,7 +214,7 @@ async function cloudflaredToken(origin: string): Promise<string> {
     if (token === '' || token.includes(' ')) throw new Error(stdout);
     return token;
   } catch {
-    fail(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
+    throw new Error(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
   }
 }
 
@@ -259,8 +260,23 @@ type Hint = (status: number, reason: string | null) => string | null;
 function client(to: Target = target(), hint?: Hint, handled: readonly number[] = []): CoffreClient {
   return createClient({
     url: to.origin,
-    headers: () => headersFor(to),
+    headers: () => headersFor(to).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error))),
     transport: (request) => send(request, to, hint, handled),
+  });
+}
+
+/**
+ * The API, for one instance, where every refusal and failure comes back to
+ * the command as an error, said in the server's words, and none ends the
+ * CLI: for `export --watch`, which outlives a failed round.
+ */
+function enduringClient(to: Target): CoffreClient {
+  return createClient({
+    url: to.origin,
+    headers: () => headersFor(to),
+    transport: (request) => fetch(request, { redirect: 'manual' }).catch((error: unknown) => {
+      throw new Error(unreachable(to.origin, error));
+    }),
   });
 }
 
@@ -933,32 +949,42 @@ async function readValue(key: string): Promise<string> {
  * first, which opens no value: one the caller may not read, a reference in
  * it that cannot be read, or a key two of them define stops here, before
  * anything is read. Then each is read, one audited read apiece, and what
- * came back is checked again, for an environment changed in between.
+ * came back is checked again, for an environment changed in between. What
+ * stops it is thrown, for the command to end on or, watching, to outlive.
  */
-async function readEnvironments(paths: readonly string[]): Promise<[string, string][]> {
+async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<{ entries: [string, string][]; version: string }> {
   if (paths.length > 1) {
-    const listing = client(target(), undefined, [403, 404]);
     const keys: [string, string[]][] = [];
     for (const path of paths) {
-      const listed = await listing.secrets.list(path).catch((error: unknown) =>
-        fail(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`),
-      );
+      const listed = await api.list.secrets.list(path).catch((error: unknown) => {
+        throw new Error(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`);
+      });
       const live = listed.keys.filter(({ archived }) => !archived);
       // A key without a value of its own reads through its reference, which reveal refuses for the whole environment when it cannot.
       const stuck = live.find(({ version, reference }) => version === null && reference !== null && reference.state !== 'live');
       if (stuck !== undefined) {
-        fail(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
+        throw new Error(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
       }
       keys.push([path, live.filter(({ version, reference }) => version !== null || reference !== null).map(({ key }) => key)]);
     }
     const shared = clash(keys);
-    if (shared !== null) fail(`${shared}: a key comes from one environment only. Nothing was read`);
+    if (shared !== null) throw new Error(`${shared}: a key comes from one environment only. Nothing was read`);
   }
-  const read: [string, Record<string, string>][] = [];
-  for (const path of paths) read.push([path, (await client().secrets.reveal(path)).values]);
-  const shared = clash(read.map(([path, values]) => [path, Object.keys(values)]));
-  if (shared !== null) fail(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
-  return read.flatMap(([, values]) => Object.entries(values));
+  const read: [string, { values: Record<string, string>; version: string | null }][] = [];
+  for (const path of paths) read.push([path, await api.read.secrets.reveal(path)]);
+  const shared = clash(read.map(([path, { values }]) => [path, Object.keys(values)]));
+  if (shared !== null) throw new Error(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
+  // The environments' versions, of what was read: as `coffre version` answers them, together.
+  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' ') };
+}
+
+/** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
+function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
+  const api = { read: client(), list: client(target(), undefined, [403, 404]) };
+  return readEnvironments(paths, api).then(
+    (read) => read.entries,
+    (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
+  );
 }
 
 /**
@@ -983,7 +1009,7 @@ async function run(args: string[]): Promise<void> {
   const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
-  const values = Object.fromEntries(await readEnvironments(paths));
+  const values = Object.fromEntries(await readOrEnd(paths));
   // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
   const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
   for (const key of kept) delete values[key];
@@ -1014,31 +1040,60 @@ async function run(args: string[]): Promise<void> {
 async function exportEnv(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: { format: { type: 'string', default: 'dotenv' } },
+    options: {
+      format: { type: 'string', default: 'dotenv' },
+      'output-file': { type: 'string' },
+      watch: { type: 'boolean', default: false },
+      interval: { type: 'string' },
+      'on-change': { type: 'string' },
+    },
     allowPositionals: true,
   });
-  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--format dotenv|json|shell|github]';
+  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--format dotenv|json|shell|github] [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]';
   const format = values.format;
   if (format !== 'dotenv' && format !== 'json' && format !== 'shell' && format !== 'github') fail(usage);
   const paths = environmentPaths(positionals);
+  const file = values['output-file'];
   const githubEnv = process.env.GITHUB_ENV;
   if (format === 'github' && !githubEnv) fail('--format github requires GITHUB_ENV (run it in a GitHub Actions step)');
+  if (format === 'github' && file !== undefined) fail('--format github appends to GITHUB_ENV, and writes no other file');
+  if (values.watch && file === undefined) fail('--watch keeps a file current: name it, --output-file <file>');
+  if (!values.watch && (values.interval !== undefined || values['on-change'] !== undefined)) fail('--interval and --on-change are for --watch');
+  const text = (entries: [string, string][]) =>
+    format === 'json' ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n` : format === 'shell' ? formatShellExports(entries) : formatDotenv(entries);
+  const byKey = (entries: [string, string][]) => entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 
-  const entries = (await readEnvironments(paths)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  if (values.watch) {
+    const intervalMs = attempt(() => interval(values.interval ?? '60s'));
+    const to = target();
+    if (to.by === 'run' || to.credential.kind === 'workload') fail("--watch outlives a CI run's credential, which lasts five minutes: watch with a session or a bearer token");
+    const api = enduringClient(to);
+    process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
+    await watch({
+      version: async () => (await Promise.all(paths.map((path) => api.environments.version(path)))).map((answer) => answer.version).join(' '),
+      read: async () => {
+        const { entries, version } = await readEnvironments(paths, { read: api, list: api });
+        return { text: text(byKey(entries)), version };
+      },
+      file: file!,
+      intervalMs,
+      onChange: values['on-change'] ?? null,
+      say: (line) => process.stderr.write(`coffre: ${line}\n`),
+    }).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  }
+
+  const entries = byKey(await readOrEnd(paths));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.
     process.stdout.write(githubMasks([...(await workloadSecrets()), ...entries]));
     attempt(() => appendFileSync(githubEnv!, githubEnvironment(entries), { encoding: 'utf8', mode: 0o600 }));
-  } else process.stdout.write(
-    format === 'json'
-      ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`
-      : attempt(() => (format === 'shell' ? formatShellExports(entries) : formatDotenv(entries))),
-  );
+  } else if (file !== undefined) attempt(() => replaceFile(file, text(entries)));
+  else process.stdout.write(attempt(() => text(entries)));
   if (process.stderr.isTTY) {
     const count = entries.length;
     process.stderr.write(
-      `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}; each read is in the audit log under your name\n`,
+      `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}${file === undefined ? '' : ` into ${file}`}; each read is in the audit log under your name\n`,
     );
   }
 }
@@ -1548,6 +1603,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   set,
   run,
   export: exportEnv,
+  version: (args) => manage.version(connect, args),
   history,
   rollback,
   import: importEnv,

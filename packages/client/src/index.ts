@@ -203,6 +203,12 @@ export function createClient(options: ClientOptions) {
       delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
       /** The keys its sibling environments have and it lacks, read or not, and those its team dismissed. */
       missing: (path: string) => call('GET /projects/:project/:environment/missing', place(path)),
+      /**
+       * A version of what reading it would open: it changes whenever a read
+       * would, and reads no value, so it is not logged. Poll it, and read
+       * only when it changed.
+       */
+      version: (path: string) => call('GET /projects/:project/:environment/version', place(path)),
       /** Dismiss missing keys (`true`) or restore them (`null`). */
       dismiss: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment/dismissals'>) =>
         call('PATCH /projects/:project/:environment/dismissals', place(path), patch),
