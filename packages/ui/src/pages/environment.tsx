@@ -54,7 +54,7 @@ import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
 import { RecipeMark, RegenerateSecret, regeneratedKeys } from '../components/regenerate';
-import { liveGeneration } from '../lib/recipes';
+import { liveGeneration, regenerateWaits } from '../lib/recipes';
 import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
@@ -539,6 +539,7 @@ function EnvironmentLedger({
                       environment={environment}
                       entry={entry}
                       generated={liveGeneration(entry, active)}
+                      pending={(key) => status(key).state === 'pending'}
                       rotateAfterDays={rotateAfterDays}
                       change={change ?? { key: entry.key, value: null, archived: false }}
                       editing={
@@ -1054,6 +1055,7 @@ function SecretRow({
   environment,
   entry,
   generated,
+  pending,
   rotateAfterDays,
   change,
   editing,
@@ -1082,6 +1084,8 @@ function SecretRow({
   entry: SecretKey;
   /** Its recipe, as the page may regenerate it by: a key pair's while both halves are listed alike (`liveGeneration`). */
   generated: Generation | null;
+  /** Whether a save of a key in this environment is on its way. */
+  pending: (key: string) => boolean;
   rotateAfterDays: number | null;
   change: SecretChange;
   editing: boolean;
@@ -1463,7 +1467,11 @@ function SecretRow({
                     </Menu.Item>
                   )}
                   {canWrite && !editing && !leaving && generated !== null && (
-                    <Menu.Item className="menu-item" onClick={() => setRegenerating(true)}>
+                    <Menu.Item
+                      className="menu-item"
+                      disabled={regenerateWaits(entry.key, generated, pending)}
+                      onClick={() => setRegenerating(true)}
+                    >
                       <Generate size={14} />
                       Regenerate…
                     </Menu.Item>

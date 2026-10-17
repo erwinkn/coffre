@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient, SecretKey } from '@coffre/client';
 
 import { saveSecrets } from '../src/lib/changes.ts';
-import { liveGeneration } from '../src/lib/recipes.ts';
+import { liveGeneration, regenerateWaits } from '../src/lib/recipes.ts';
 
 const PAIR = { recipe: 'ecdsa:p-256', pair: { private: 'JWT_PRIVATE_KEY', public: 'JWT_PUBLIC_KEY' } };
 
@@ -50,4 +50,21 @@ test('a value typed over one half, shown at once, leaves neither half regenerabl
     changes: { JWT_PUBLIC_KEY: { key: 'JWT_PUBLIC_KEY', value: 'pasted', archived: false } },
   });
   assert.deepEqual(regenerable(shown), { JWT_PRIVATE_KEY: null, JWT_PUBLIC_KEY: null, TOKEN: { recipe: 'bytes:32:base62' } });
+});
+
+test("a pair's Regenerate waits while a save of either half is on its way, its rename included", () => {
+  const entries = pair();
+  const vars = { active: entries, drafts: [], changes: { JWT_PRIVATE_KEY: { key: 'SIGNING_KEY', value: null, archived: false } } };
+  const shown = shownAfter(entries, vars);
+  // What the save marks pending, as the page's status reads it: the key under both its names.
+  const save = saveSecrets({} as CoffreClient, { project: 'market', environment: 'dev' }, 'ada@acme.example');
+  const saving = new Set(save.targets(vars).map((target) => target.id));
+  assert.deepEqual([...saving].sort(), ['JWT_PRIVATE_KEY', 'SIGNING_KEY']);
+  const publicKey = shown.find((entry) => entry.key === 'JWT_PUBLIC_KEY')!;
+  assert.equal(regenerateWaits(publicKey.key, liveGeneration(publicKey, shown)!, (key) => saving.has(key)), true, 'from the untouched half');
+  assert.equal(regenerateWaits(publicKey.key, liveGeneration(publicKey, shown)!, () => false), false, 'once the rename has landed');
+  // A key of its own waits only on its own save.
+  const token = shown.find((entry) => entry.key === 'TOKEN')!;
+  assert.equal(regenerateWaits('TOKEN', token.generated!, (key) => saving.has(key)), false);
+  assert.equal(regenerateWaits('TOKEN', token.generated!, (key) => key === 'TOKEN'), true);
 });

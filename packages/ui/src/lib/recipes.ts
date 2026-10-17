@@ -43,3 +43,15 @@ export function renamePairs(entries: readonly SecretKey[], renames: ReadonlyMap<
         },
   );
 }
+
+/**
+ * Whether a key's Regenerate waits: while a save of either half of its pair
+ * is on its way. A rename shown at once names the pair as it will be, and a
+ * regenerate sent before the rename lands would write the new name first:
+ * the rename would then fail, the old name keeping the old private key
+ * beside a new public key.
+ */
+export function regenerateWaits(key: string, generated: Generation, pending: (key: string) => boolean): boolean {
+  const keys = generated.pair === undefined ? [key] : [key, generated.pair.private, generated.pair.public];
+  return keys.some(pending);
+}
