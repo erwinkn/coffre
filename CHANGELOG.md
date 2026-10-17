@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.0 (2026-10-17)
+
 - **Read coffre from tools that speak Vault.** An optional plugin, added in
   the deployment's configuration (`plugins: [vaultKv()]` from
   `@coffre/server/plugins/vault-kv`) and one route file (`routes/v1.$.ts`),
