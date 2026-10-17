@@ -3701,46 +3701,6 @@ a.env-card-name:hover {
   font-weight: 600;
 }
 
-/* The toggle for detail: a small switch that says what it does. */
-.detail-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-left: auto;
-  color: var(--ink-2);
-  font-size: 0.8125rem;
-}
-
-.detail-toggle .switch {
-  position: relative;
-  width: 1.75rem;
-  height: 1rem;
-  border-radius: 999px;
-  background: var(--border);
-  transition: background 120ms ease;
-}
-
-.detail-toggle .switch::after {
-  content: '';
-  position: absolute;
-  top: 0.125rem;
-  left: 0.125rem;
-  width: 0.75rem;
-  height: 0.75rem;
-  border-radius: 50%;
-  background: var(--panel);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
-  transition: transform 120ms ease;
-}
-
-.detail-toggle[aria-pressed='true'] .switch {
-  background: var(--accent);
-}
-
-.detail-toggle[aria-pressed='true'] .switch::after {
-  transform: translateX(0.75rem);
-}
-
 /* ========================================================================== */
 /* Notices, empty states, closed doors                                        */
 /* ========================================================================== */

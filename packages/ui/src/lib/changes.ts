@@ -98,7 +98,7 @@ export function grantAccess(client: CoffreClient, project: string): Change<Grant
     },
     affects: (vars) => [
       ...affects.access(project, memberRef(vars.principalType, vars.principalId)),
-      ...(vars.admit === true ? affects.admission() : []),
+      ...(vars.admit === true ? affects.admission(memberRef(vars.principalType, vars.principalId)) : []),
     ],
     run: async (vars) => {
       const place = grantPlace(project, vars.environmentSlug);
@@ -161,7 +161,7 @@ export function invite(client: CoffreClient): Change<Directory, DirectoryPrincip
         scope: vars.principalType === 'user' ? vars.scope : EVERYWHERE,
       },
     ],
-    affects: () => affects.admission(),
+    affects: (vars) => affects.admission(principalId(vars)),
     run: async (vars) => {
       // Adding is an idempotent PUT that would also set the role of someone
       // already here; this is only for someone new.

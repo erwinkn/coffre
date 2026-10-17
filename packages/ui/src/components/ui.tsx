@@ -439,7 +439,8 @@ function relative(iso: string, now: number, style: 'long' | 'narrow' = 'long'): 
   return formatter.format(Math.round(delta / divisor), unit);
 }
 
-function absolute(iso: string, precise: boolean): string {
+/** A UTC time as the log writes it: `2026-10-17 08:45:13`, to the millisecond when `precise`. */
+export function absolute(iso: string, precise: boolean): string {
   return iso.replace('T', ' ').replace('Z', '').slice(0, precise ? 23 : 19);
 }
 

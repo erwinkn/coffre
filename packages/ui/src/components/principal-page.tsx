@@ -270,9 +270,7 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
               <UnreadAccess member={memberRef(principalType, principalId)} error={error} />
             ) : rows.length === 0 ? (
               <EmptyState title="No project access yet">
-                {editable.length > 0
-                  ? `Edit access gives this ${kind} access to several projects at once.`
-                  : `None of the projects where you manage access has a grant for this ${kind}.`}
+                {editable.length > 0 ? undefined : `None of the projects where you manage access has a grant for this ${kind}.`}
               </EmptyState>
             ) : (
               <GrantsTable
@@ -315,11 +313,9 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
             </div>
           )}
 
-          <p className="hint section-foot">
-            {held?.managed === true && principalType === 'service'
-              ? 'Only projects where you may give it access are listed: what you hold there, where the instance lets you.'
-              : 'Only projects where you manage access are listed.'}
-          </p>
+          {!(held?.managed === true && principalType === 'service') && (
+            <p className="hint section-foot">Only projects where you manage access are listed.</p>
+          )}
 
         </>
       )}
