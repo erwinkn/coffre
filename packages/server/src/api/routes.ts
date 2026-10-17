@@ -518,6 +518,7 @@ export const routes = {
   // The log
   ...route('GET /audit', {
     input: z.object({
+      // A project, an environment, or a secret: `market/prod/DATABASE_URL` for who read or changed it.
       path: z.string().max(200).optional(),
       actor: z.string().max(330).optional(),
       decision: z.enum(['allow', 'deny']).optional(),
@@ -530,7 +531,7 @@ export const routes = {
       listAudit(ctx, {
         ...input,
         detail: input.detail !== undefined,
-        path: input.path === undefined ? undefined : parsePath(input.path, [1, 2]),
+        path: input.path === undefined ? undefined : parsePath(input.path),
       }),
   }),
   ...route('GET /audit/verification', { run: (ctx) => verifyAudit(ctx) }),

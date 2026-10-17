@@ -5,7 +5,8 @@ const KEY_ACTIONS = new Set(['secret.read', 'key.wrap', 'key.rewrap']);
 
 type Item = { item: number; secretId: string; version: number; subject: string };
 type ParsedIntent = { intentId: string; operation: string; expiresAt: number; keys: Item[] };
-type ParsedOutcome = Item & { intentId: string; relatedSeq: bigint };
+/** An outcome entry: one item of its intent, or several, for a read logged once per place. */
+type ParsedOutcome = { intentId: string; relatedSeq: bigint; items: Item[] };
 type Intent = ParsedIntent & { entry: StoredEntry; seen: Set<number> };
 type Accounting = { ok: true; pending: number } | Extract<LogVerification, { ok: false }>;
 
@@ -36,19 +37,21 @@ export class KeyAccounting {
       const parsed = parseOutcome(entry);
       if (typeof parsed === 'string') return broken(parsed);
       const intent = this.#intents.get(parsed.relatedSeq);
-      const key = intent?.keys[parsed.item];
-      if (intent === undefined || key === undefined || intent.seen.has(parsed.item)) {
-        return broken('key outcome does not identify one item of its intent');
+      for (const outcome of parsed.items) {
+        const key = intent?.keys[outcome.item];
+        if (intent === undefined || key === undefined || intent.seen.has(outcome.item)) {
+          return broken('key outcome does not identify one item of its intent');
+        }
+        if (parsed.intentId !== intent.intentId || entry.actor !== intent.entry.actor || entry.action !== intent.operation) {
+          return broken('key outcome belongs to another operation');
+        }
+        if (outcome.secretId !== key.secretId || outcome.version !== key.version || outcome.subject !== key.subject) {
+          return broken('key outcome does not match its intended secret');
+        }
+        intent.seen.add(outcome.item);
       }
-      if (parsed.intentId !== intent.intentId || entry.actor !== intent.entry.actor || entry.action !== intent.operation) {
-        return broken('key outcome belongs to another operation');
-      }
-      if (parsed.secretId !== key.secretId || parsed.version !== key.version || parsed.subject !== key.subject) {
-        return broken('key outcome does not match its intended secret');
-      }
-      intent.seen.add(parsed.item);
       // Completed batches need no state, and another outcome for one is a duplicate.
-      if (intent.seen.size === intent.keys.length) this.#intents.delete(intent.entry.seq);
+      if (intent !== undefined && intent.seen.size === intent.keys.length) this.#intents.delete(intent.entry.seq);
     }
   }
 
@@ -91,13 +94,22 @@ function parseIntent(entry: StoredEntry): ParsedIntent | string {
 function parseOutcome(entry: StoredEntry): ParsedOutcome | string {
   const detail = payload(entry.metadata);
   if (detail === null) return 'key outcome has no valid accounting payload';
-  const { intent, item, version, subject } = detail;
+  const { intent } = detail;
   if (typeof intent !== 'string' || entry.relatedSeq === null) return 'key outcome has no intent identity';
-  if (typeof item !== 'number' || !Number.isSafeInteger(item) || item < 0) return 'key outcome has no valid item number';
-  const secretId = entry.secretId ?? detail.secretId;
-  if (typeof secretId !== 'string' || typeof subject !== 'string') return 'key outcome has no secret identity';
-  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) return 'key outcome has no valid version';
-  return { intentId: intent, relatedSeq: entry.relatedSeq, item, secretId, version, subject };
+  // Several secrets read at one place share one entry, each its item there.
+  const many = detail.secrets;
+  if (many !== undefined && (!Array.isArray(many) || many.length === 0)) return 'key outcome has no valid item list';
+  const listed = many === undefined ? [{ ...detail, secretId: entry.secretId ?? detail.secretId }] : many.map(record);
+  const items: Item[] = [];
+  for (const one of listed) {
+    if (one === null) return 'key outcome has no valid item list';
+    const { item, secretId, version, subject } = one;
+    if (typeof item !== 'number' || !Number.isSafeInteger(item) || item < 0) return 'key outcome has no valid item number';
+    if (typeof secretId !== 'string' || typeof subject !== 'string') return 'key outcome has no secret identity';
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) return 'key outcome has no valid version';
+    items.push({ item, secretId, version, subject });
+  }
+  return { intentId: intent, relatedSeq: entry.relatedSeq, items };
 }
 
 function payload(text: string): Record<string, unknown> | null {

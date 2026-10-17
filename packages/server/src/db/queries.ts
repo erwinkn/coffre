@@ -730,21 +730,15 @@ export async function members(
 }
 
 /**
- * Every allowed read, write and import of a secret by these actors, the
- * restores of the secrets they touched, and every removal from the
- * instance, oldest first. Each row that names a secret carries it as it is
- * now: its key, current version, and whether it or its place is archived.
+ * Every allowed read, write and import of a secret by these actors, a read
+ * of several once per secret it lists, then every restore, oldest first.
+ * Each row that names a secret carries it as it is now: its key, current
+ * version, and whether it or its place is archived.
  */
 export async function memberActivity(db: Queryable, actorIds: string[]) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
   const allowed = eq(auditLog.decision, 'allow');
-  const seen = and(
-    allowed,
-    inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
-    inArray(auditLog.action, ['secret.read', 'secret.write']),
-  );
-  const touched = db.select({ id: auditLog.secretId }).from(auditLog).where(seen);
-  const rows = await db
+  const entries = (where: SQL | undefined) => db
     .select({
       actor: auditLog.actor,
       action: auditLog.action,
@@ -761,14 +755,42 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
     .leftJoin(environments, eq(environments.id, secrets.environmentId))
     .leftJoin(projects, eq(projects.id, secrets.projectId))
-    .where(
-      or(
-        seen,
-        and(allowed, eq(auditLog.action, 'secret.restore'), inArray(auditLog.secretId, touched)),
-      ),
-    )
+    .where(where)
     .orderBy(asc(auditLog.seq));
-  return rows.map(shown);
+  const [seen, restores] = await Promise.all([
+    entries(and(
+      allowed,
+      inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
+      inArray(auditLog.action, ['secret.read', 'secret.write']),
+    )),
+    // Few, each someone's choice: all of them, for whichever secrets were seen.
+    entries(and(allowed, eq(auditLog.action, 'secret.restore'))),
+  ]);
+  const listedOf = (row: (typeof seen)[number]) => {
+    const { secrets: listed } = JSON.parse(row.metadata) as { secrets?: unknown };
+    return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
+  };
+  const ids = seen.flatMap((row) => (listedOf(row) ?? []).flatMap(({ secretId }) => (typeof secretId === 'string' ? [secretId] : [])));
+  const now = await secretPlaces(db, ids);
+  const rows = seen.flatMap((row) => {
+    const listed = listedOf(row);
+    if (listed === null) return [row];
+    return listed.flatMap((secret) => {
+      const found = typeof secret.secretId === 'string' ? now.get(secret.secretId) : undefined;
+      if (found === undefined) return [];
+      return [{
+        ...row,
+        secretId: found.id,
+        metadata: JSON.stringify(secret),
+        key: found.key,
+        currentVersion: found.currentVersion,
+        archived: found.archivedAt !== null || found.environmentArchivedAt !== null || found.projectArchivedAt !== null,
+        project: found.project,
+        environment: found.environment,
+      }];
+    });
+  });
+  return [...rows, ...restores].map(shown);
 }
 
 /** The person an account at a provider is bound to, if it is. */
@@ -1714,8 +1736,26 @@ function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', 
 }
 
 /**
+ * A read of several secrets at one place that lists one of these among its
+ * `secrets`, read there or through it, as a holder (`readsByPlace` in the
+ * vault). Its entry names no secret of its own; its place's filters narrow
+ * the entries this reads.
+ */
+function listed(db: Queryable, ids: readonly string[]): SQL {
+  const { auditLog } = tablesOf(db);
+  const named = (secret: SQL) => or(...ids.map((id) => sql`${secret} = ${id}`))!;
+  const among = dialect.engineOf(db) === 'postgres'
+    ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
+        WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`
+    : sql`EXISTS (SELECT 1 FROM json_each(${auditLog.metadata}, '$.secrets') AS listed
+        WHERE ${named(sql`json_extract(listed.value, '$.secretId')`)} OR ${named(sql`json_extract(listed.value, '$.also.secretId')`)})`;
+  return and(eq(auditLog.action, 'secret.read'), isNull(auditLog.secretId), among)!;
+}
+
+/**
  * The conditions of `filter`, as a WHERE clause on the log. A place matches
- * the entries about it, and those about a reference into or out of it.
+ * the entries about it, and those about a reference into or out of it; a
+ * secret, too, the reads of several that list it.
  */
 function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
   const { auditLog } = tablesOf(db);
@@ -1729,7 +1769,7 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
       : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
     filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
     filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
-    filter.secretId === undefined ? undefined : at('secretId', [filter.secretId]),
+    filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),
     filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
     filter.excludeActions === undefined || filter.excludeActions.length === 0

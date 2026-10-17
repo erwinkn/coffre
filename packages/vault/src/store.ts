@@ -293,11 +293,18 @@ export async function everyProjectHolders(db: Queryable): Promise<string[]> {
 /** The action of an entry that releases a key, which the bulk limit counts. */
 export const RELEASE = 'secret.read';
 
-/** How many keys the vault has released to `principal` since `after`. */
+/**
+ * How many keys the vault has released to `principal` since `after`: one
+ * for an entry about one secret, and as many as it lists for one about
+ * several (`secrets`), a read logged once per place.
+ */
 export async function releasesSince(db: Queryable, principal: string, after: number): Promise<number> {
   const { auditLog } = tablesOf(db);
+  const listed = engineOf(db) === 'postgres'
+    ? sql`jsonb_array_length((${auditLog.metadata})::jsonb -> 'secrets')`
+    : sql`json_array_length(${auditLog.metadata}, '$.secrets')`;
   const [{ n }] = await db
-    .select({ n: count() })
+    .select({ n: sql<string | number | null>`SUM(COALESCE(${listed}, 1))` })
     .from(auditLog)
     .where(
       and(
@@ -308,7 +315,7 @@ export async function releasesSince(db: Queryable, principal: string, after: num
         gt(auditLog.occurredAt, after),
       ),
     );
-  return Number(n);
+  return Number(n ?? 0);
 }
 
 /** Rows of the log as the chain's codec reads them: `author` and `decision` are checked by the table. */

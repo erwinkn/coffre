@@ -46,6 +46,12 @@ export type AuditEntryView = {
   key: string | null;
   /** The version a read released, or a write or restore stored. */
   version: number | null;
+  /**
+   * For a read of several secrets at one place, logged as one entry: each
+   * key, with the version released, in the order read. `key` and `version`
+   * are then null. Null for an entry about one secret, or none.
+   */
+  secrets: { key: string | null; version: number | null }[] | null;
   /** One id for everything one action did: a reveal's reads, a write's versions, an access change. */
   operationId: string | null;
   /** An earlier entry this one follows from, such as the `key.wrap` behind a `secret.write`. */
@@ -276,6 +282,7 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
     environment: row.environment,
     key,
     version: typeof metadata.version === 'number' ? metadata.version : null,
+    secrets: readSecrets(row.action, metadata),
     operationId: row.operationId,
     relatedSeq: row.relatedSeq === null ? null : Number(row.relatedSeq),
     requestId: row.requestId,
@@ -283,6 +290,19 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
     token: null,
     metadata,
   };
+}
+
+/**
+ * The secrets a read of several lists (`readsByPlace` in the vault), in its
+ * order, by the key each path ends in: null for a version that named no
+ * secret, refused as `bad_claim`.
+ */
+function readSecrets(action: string, metadata: Record<string, unknown>): AuditEntryView['secrets'] {
+  if (action !== 'secret.read' || !Array.isArray(metadata.secrets)) return null;
+  return metadata.secrets.map((secret: unknown) => {
+    const { subject, version } = (secret ?? {}) as { subject?: unknown; version?: unknown };
+    return { key: typeof subject === 'string' ? subject.split('/').at(-1)! : null, version: typeof version === 'number' ? version : null };
+  });
 }
 
 /** What the keys are checked against (`AuditKeys`): for those who run the instance, whose keys they are. */

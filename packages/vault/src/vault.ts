@@ -428,7 +428,8 @@ class VaultService implements Vault {
           tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
         const result = await decide(d);
-        const entries = [...reports, ...d.log];
+        // A read is logged once per place, whichever way it ends (`readsByPlace`).
+        const entries = [...reports, ...readsByPlace(d.log)];
         let at = d.at;
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
@@ -451,7 +452,7 @@ class VaultService implements Vault {
       return { ok: true, ...result };
     } catch (error) {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
-      const entries = [...reports, ...error.entries];
+      const entries = [...reports, ...readsByPlace(error.entries)];
       if (entries.length > 0) {
         await this.#db.transaction(async (tx) => {
           await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
@@ -2573,6 +2574,74 @@ function keyEntry(
       version: secret.version,
       ...detail,
       ...traced(correlation),
+    }),
+  };
+}
+
+/** What every secret of one read shares, said once in its entry rather than in each of its `secrets`. */
+const READ_SHARED = ['purpose', 'intent', 'credentialId'] as const;
+
+/**
+ * A decision's `secret.read` entries, made one per secret, as the log keeps
+ * them: one per place it was decided at, the environment read and, through
+ * a reference, the holder's (`also`). An entry about several secrets lists
+ * them in `secrets`, each with what its own entry would have said: its
+ * `secretId`, `secretVersionId`, `subject`, `version`, and its `via`, holder
+ * (`also.secretId`) and intent `item` when it has them. An entry about one
+ * secret is as it always was. A `coffre run` of a hundred keys is one entry,
+ * not a hundred; what it decided, and for which keys, is the same. Other
+ * entries pass through, in order.
+ */
+function readsByPlace(entries: readonly NewEntry[]): NewEntry[] {
+  const groups = new Map<string, NewEntry[]>();
+  const out: (NewEntry | NewEntry[])[] = [];
+  for (const entry of entries) {
+    if (entry.action !== 'secret.read') {
+      out.push(entry);
+      continue;
+    }
+    const also = (JSON.parse(entry.metadata ?? '{}') as { also?: { projectId?: string; environmentId?: string } }).also;
+    const place = JSON.stringify([
+      entry.actor, entry.decision, entry.code ?? null, entry.projectId ?? null, entry.environmentId ?? null,
+      entry.operationId ?? null, entry.requestId ?? null, String(entry.relatedSeq ?? null), also?.projectId ?? null, also?.environmentId ?? null,
+    ]);
+    const group = groups.get(place);
+    if (group !== undefined) {
+      group.push(entry);
+      continue;
+    }
+    const fresh = [entry];
+    groups.set(place, fresh);
+    out.push(fresh);
+  }
+  return out.map((item) => (Array.isArray(item) ? oneRead(item) : item));
+}
+
+/** Entries of one read at one place as one entry: `readsByPlace`. */
+function oneRead(group: NewEntry[]): NewEntry {
+  const [first] = group as [NewEntry];
+  if (group.length === 1) return first;
+  const details = group.map((entry) => JSON.parse(entry.metadata ?? '{}') as Record<string, unknown>);
+  const shared = Object.fromEntries(READ_SHARED.flatMap((field) => (details[0]![field] === undefined ? [] : [[field, details[0]![field]]])));
+  const holder = details[0]!.also as { projectId: string; environmentId: string } | undefined;
+  const secrets = group.map((entry, i) => {
+    const own = Object.fromEntries(Object.entries(details[i]!).filter(([field]) => !(READ_SHARED as readonly string[]).includes(field) && field !== 'also'));
+    const also = details[i]!.also as { secretId: string } | undefined;
+    return {
+      ...(entry.secretId == null ? {} : { secretId: entry.secretId }),
+      ...(entry.secretVersionId == null ? {} : { secretVersionId: entry.secretVersionId }),
+      ...own,
+      ...(also === undefined ? {} : { also: { secretId: also.secretId } }),
+    };
+  });
+  return {
+    ...first,
+    secretId: null,
+    secretVersionId: null,
+    metadata: JSON.stringify({
+      ...shared,
+      ...(holder === undefined ? {} : { also: { projectId: holder.projectId, environmentId: holder.environmentId } }),
+      secrets,
     }),
   };
 }

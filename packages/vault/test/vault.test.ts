@@ -277,6 +277,33 @@ test('a batch is all or nothing, and every item is logged either way', async () 
   );
 });
 
+test('a read of several secrets is one entry for each place it read at, listing each secret and its version', async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer'], [w.prod, 'viewer']]);
+  const dev = [await w.secret(w.dev, 'A'), await w.secret(w.dev, 'B'), await w.secret(w.dev, 'C')];
+  const prod = await w.secret(w.prod, 'D');
+  const items = await Promise.all([...dev, prod].map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
+  const versions = await versionItems(items);
+  const operationId = randomUUID();
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: versions, requestId: 'req-1', operationId });
+  assert.ok(read.ok, JSON.stringify(read));
+
+  const { auditLog } = tablesOf(db.owner);
+  const entries = await db.owner.select().from(auditLog)
+    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.actor, ADA))).orderBy(asc(auditLog.seq));
+  // dev's three in one entry that lists them; prod's one, as a read of one secret always was.
+  assert.deepEqual(entries.map((entry) => [entry.environmentId, entry.secretId, entry.secretVersionId, entry.operationId, entry.requestId]), [
+    [w.dev, null, null, operationId, 'req-1'],
+    [w.prod, prod.secretId, versions[3]!.secretVersionId, operationId, 'req-1'],
+  ]);
+  assert.deepEqual(JSON.parse(entries[0]!.metadata), {
+    purpose: 'run',
+    secrets: dev.map((secret, i) => ({ secretId: secret.secretId, secretVersionId: versions[i]!.secretVersionId, subject: secret.path, version: 1 })),
+  });
+  assert.deepEqual(JSON.parse(entries[1]!.metadata), { subject: prod.path, version: 1, purpose: 'run' });
+  assert.ok((await w.vault.verifyLog({})).ok);
+});
+
 test('a wrapped key presented as another secret is a bad claim', async () => {
   const w = await world();
   await member(w, ADA, [[null, 'viewer']]);
@@ -450,13 +477,15 @@ test('a key service failing part of a batch leaves each key\'s outcome, and the 
 
   await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) }), /did not answer for 1 of 3 keys/);
   const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
+  // One entry per outcome at the place: each lists its keys, by their item of the intent.
+  const listed = (entry: (typeof entries)[number]) =>
+    (entry.detail.secrets as { subject: string; item: number }[] | undefined)?.map((key) => [key.item, key.subject]) ?? [[entry.detail.item, entry.subject]];
   assert.deepEqual(
-    entries.map((entry) => [entry.action, entry.subject, entry.code]),
+    entries.map((entry) => [entry.action, entry.code, entry.action === 'secret.read' ? listed(entry) : null]),
     [
       ['key.intent', null, null],
-      ['secret.read', items[0].secret.path, 'withheld'],
-      ['secret.read', items[1].secret.path, 'kms_unavailable'],
-      ['secret.read', items[2].secret.path, 'withheld'],
+      ['secret.read', 'withheld', [[0, items[0].secret.path], [2, items[2].secret.path]]],
+      ['secret.read', 'kms_unavailable', [[1, items[1].secret.path]]],
     ],
   );
   assert.deepEqual(
@@ -465,6 +494,25 @@ test('a key service failing part of a batch leaves each key\'s outcome, and the 
   );
   assert.equal(seen.opened.length, 2);
   assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'the keys KMS opened are wiped, not released');
+});
+
+test('through a key service, a read of several logs its intent, then one entry of outcomes for the place, each key its item', async () => {
+  const { keks } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secrets = [await w.secret(w.dev, 'A'), await w.secret(w.dev, 'B'), await w.secret(w.dev, 'C')];
+  const items = await Promise.all(secrets.map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
+  assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok);
+
+  const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
+  assert.deepEqual(entries.map((entry) => [entry.action, entry.outcome]), [['key.intent', 'allow'], ['secret.read', 'allow']]);
+  const [intent, read] = entries as [(typeof entries)[number], (typeof entries)[number]];
+  assert.equal(read.detail.relatedSeq, String(intent.seq));
+  assert.equal(read.detail.intent, intent.detail.intent);
+  assert.deepEqual((read.detail.secrets as { item: number; subject: string }[]).map((key) => [key.item, key.subject]), secrets.map((secret, i) => [i, secret.path]));
+  // Every key of the intent is accounted for, in the one entry: no batch is left pending.
+  const verified = await w.vault.verifyLog({});
+  assert.ok(verified.ok && verified.pending === undefined, JSON.stringify(verified));
 });
 
 test('a key service past the budget is cancelled, and opened keys are wiped', async () => {
@@ -558,7 +606,8 @@ test('the bulk limit counts keys per principal over a rolling window', async () 
 
   w.clock.offset += 60_001;
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok, true);
-  assert.equal((await vaultLog(w)).filter((entry) => entry.code === 'bulk_limit').length, 4);
+  // Each refused read is one entry, its keys listed.
+  assert.deepEqual((await vaultLog(w)).filter((entry) => entry.code === 'bulk_limit').map((entry) => (entry.detail.secrets as unknown[] | undefined)?.length ?? 1), [3, 1]);
 });
 
 test('two instances share one log, one bulk limit and one set of generations', async () => {
@@ -2342,8 +2391,9 @@ test('a deadline aborts KMS requests and drops queued keys before a removal can 
     assert.equal(active, 0, 'all in-flight requests settled before the decision ended');
     assert.equal(started, 8, 'the queued key never reached KMS');
     assert.ok((await (await w.twin()).remove({ actor: ROOT, principal: ADA })).ok);
+    // One entry per outcome at the place, listing the keys it was: eight uncertain, one never sent.
     const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'secret.read');
-    assert.deepEqual(outcomes.map((entry) => entry.code), [...Array<string>(8).fill('kms_uncertain'), 'cancelled']);
+    assert.deepEqual(outcomes.map((entry) => [entry.code, (entry.detail.secrets as unknown[] | undefined)?.length ?? 1]), [['kms_uncertain', 8], ['cancelled', 1]]);
   } finally {
     await sleep(650);
   }
@@ -2515,6 +2565,29 @@ for (const duplicate of [false, true]) {
     const result = await w.vault.verifyLog({});
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, duplicate ? /does not identify one item/ : /1 of 2 outcomes missing/);
+  });
+}
+
+for (const forged of ['repeats an item', 'names another version'] as const) {
+  test(`verification refuses a read of several whose outcome ${forged}`, async () => {
+    const w = await world();
+    const operationId = randomUUID();
+    const intentId = randomUUID();
+    const secrets = [await w.secret(w.dev, 'A'), await w.secret(w.dev, 'B')];
+    const keys = secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version }));
+    const intent = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
+      actor: ADA, action: 'key.intent', decision: 'allow', operationId,
+      metadata: JSON.stringify({ intent: intentId, operation: 'secret.read', expiresAt: Date.now() + 60_000, keys }),
+    }]));
+    const listed = forged === 'repeats an item' ? [keys[0], keys[0]] : [keys[0], { ...keys[1]!, version: 2 }];
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
+      actor: ADA, action: 'secret.read', decision: 'allow', operationId, relatedSeq: intent.seqStart,
+      projectId: w.project, environmentId: w.dev,
+      metadata: JSON.stringify({ purpose: 'run', intent: intentId, secrets: listed }),
+    }]));
+    const result = await w.vault.verifyLog({});
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, forged === 'repeats an item' ? /does not identify one item/ : /does not match its intended secret/);
   });
 }
 
