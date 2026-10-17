@@ -65,6 +65,7 @@ export type Api = {
           slug: string;
           name: string;
           accessible: boolean;
+          parent: string | null;
           details: null | {
             archivedAt: string | null;
             secretCount: number | null;
@@ -131,6 +132,7 @@ export type Api = {
       name?: string;
       from?: string;
       references?: boolean;
+      inherit?: boolean;
     };
     output: {
       environment: {
@@ -144,6 +146,7 @@ export type Api = {
         keys: number;
         references: number;
         copied: string[];
+        inherits: boolean;
       };
     };
   };
@@ -235,7 +238,15 @@ export type Api = {
         version: number | null;
         updatedAt: string | null;
         updatedBy: string | null;
+        parent: null | {
+          from: string;
+          state: "inherited" | "overridden" | "removed";
+          changed: boolean;
+          reset: boolean;
+          held: boolean;
+        };
       }[];
+      parents: string[];
       rotateAfterDays: number | null;
     };
   };
@@ -268,6 +279,7 @@ export type Api = {
       key?: string;
       archived?: boolean;
       folder?: string | null;
+      inherit?: boolean;
     };
     output: {
       key: string;
@@ -1425,6 +1437,13 @@ export type IdentityRow = {
   lastSignInAt: string | null;
 };
 
+export type InheritResult = {
+  key: string;
+  archived: boolean;
+  folder: string | null;
+  from: string;
+};
+
 export type Me = {
   principal: {
     type: "service" | "user";
@@ -1650,6 +1669,7 @@ export type ProjectSummary = {
     slug: string;
     name: string;
     accessible: boolean;
+    parent: string | null;
     details: null | {
       archivedAt: string | null;
       secretCount: number | null;
@@ -1695,6 +1715,13 @@ export type SecretKey = {
   version: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
+  parent: null | {
+    from: string;
+    state: "inherited" | "overridden" | "removed";
+    changed: boolean;
+    reset: boolean;
+    held: boolean;
+  };
 };
 
 export type SecretVersion = {

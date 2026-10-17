@@ -73,7 +73,8 @@ its answer says so first. The consent page warns before you grant it.
 With **Write**, it can ask to change secrets and places:
 `request_secret_value`, `generate_secret_value`, `rename_secret`, `archive_secret`,
 `unarchive_secret`, `restore_secret_version`, `create_project` and
-`create_environment`. With **Manage access**: `set_access`, `admit_member`,
+`create_environment`, which with `inherits` makes a fork that reads
+another environment's keys live (docs/design/forking.md). With **Manage access**: `set_access`, `admit_member`,
 `offboard_member`, `issue_service_token`, `revoke_service_token`,
 `trust_workload` and `untrust_workload`.
 

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
-import { notFound } from './errors.ts';
+import { badRequest, notFound } from './errors.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { managedAccount } from './services.ts';
@@ -18,6 +18,7 @@ import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
+  inheritSecret,
   listSecrets,
   listVersions,
   patchSecret,
@@ -165,17 +166,26 @@ export const routes = {
   }),
   ...route('PUT /projects/:project/:environment', {
     // `from` forks a sibling: its keys, values and folders, without history.
-    // With `references`, each key a reference to its parent's instead of a copy.
-    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional() }),
+    // With `references`, each key a reference to its parent's instead of a copy;
+    // with `inherit`, no key at all: it reads its parent's, live, but for those it sets or removes.
+    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional(), inherit: z.boolean().optional() }),
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
     run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; forked: Forked | null }> => {
       // Not a slug a project's page has (`@coffre/core/pages`).
       environmentSlug.parse(params.environment);
+      if (input.from === undefined && (input.inherit === true || input.references === true)) {
+        throw badRequest('a fork names the environment it forks: `from`');
+      }
       return input.from === undefined
         ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
-        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from, references: input.references === true });
+        : forkEnvironment(ctx, place, params.environment, {
+            name: input.name,
+            from: input.from,
+            references: input.references === true,
+            inherit: input.inherit === true,
+          });
     },
   }),
   ...route('PATCH /projects/:project/:environment', {
@@ -229,15 +239,18 @@ export const routes = {
       query.dryRun !== undefined ? dryRunSecrets(ctx, place, input) : setSecrets(ctx, place, input),
   }),
   ...route('PATCH /secrets/:project/:environment/:key', {
-    input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable() }).partial().strict()
-      .refine((patch) => patch.key !== undefined || patch.archived !== undefined || patch.folder !== undefined,
-        'provide a key, an archived flag or a folder'),
+    // In a fork, `inherit: true` resets a key to its parent's value, archiving its own;
+    // `false` overrides it again with the value it had (docs/design/forking.md).
+    input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable(), inherit: z.boolean() }).partial().strict()
+      .refine((patch) => patch.key !== undefined || patch.archived !== undefined || patch.folder !== undefined || patch.inherit !== undefined,
+        'provide a key, an archived flag, a folder or inherit')
+      .refine((patch) => patch.inherit === undefined || Object.keys(patch).length === 1, 'inherit goes alone'),
     needs: (patch) => [
-      ...(patch.key !== undefined || patch.folder !== undefined ? ['secret.write' as const] : []),
+      ...(patch.key !== undefined || patch.folder !== undefined || patch.inherit !== undefined ? ['secret.write' as const] : []),
       ...(patch.archived !== undefined ? ['secret.archive' as const] : []),
     ],
     action: 'secret.update',
-    run: (ctx, { place, input }) => patchSecret(ctx, place, input),
+    run: (ctx, { place, input }) => (input.inherit === undefined ? patchSecret(ctx, place, input) : inheritSecret(ctx, place, input.inherit)),
   }),
   ...route('GET /secrets/:project/:environment/:key/versions', {
     needs: 'secret.read',

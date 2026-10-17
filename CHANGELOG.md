@@ -7,6 +7,41 @@
   `--keep-existing`, a variable already set there keeps its value, an empty one
   included, and coffre's is dropped. One line on stderr names the keys kept,
   never a value. Every value is still read, and every read is audited.
+- **Forks that inherit.** An environment can now be made as a fork of
+  another in its project that keeps reading its parent's keys, live:
+  `coffre fork market/prod prod-eu --inherit`, "Inheriting from prod" in
+  Add environment, or MCP's `create_environment` with `inherits`. A key
+  added to or rotated in prod reaches prod-eu on its next read. prod-eu
+  overrides a key by writing it, adds keys of its own, and removes one it
+  should not have (`coffre remove`, or Remove in the key's menu).
+  `coffre reset`, or Reset to prod, goes back to the parent's value and
+  keeps the override, which `--undo` serves again. Forks of forks are
+  allowed, at most three parents up.
+- **A fork lends nothing.** Reading what a fork inherits takes read on the
+  parent, by your own grants: a reader of prod-eu alone gets a 403 that
+  names the inherited keys. Each inherited value is logged as a read of
+  prod's key, "in market/prod-eu", in both environments' logs; one read
+  through prod's own reference stays in its source's log and prod's. To
+  lend values across that line, use references, as before.
+- **The environment page shows where each key comes from.** "from prod"
+  for an inherited key, "overrides prod" for an override, flagged "prod
+  changed since" when prod wrote a newer value, and removed keys struck
+  through, with Restore. `coffre list` says the same, and
+  `GET /secrets/...` gives each key a `parent` and the environment its
+  `parents`.
+- **Renames and missing keys follow.** Renaming a key in a parent renames
+  the forks' overrides and removals of it. Missing keys compare what each
+  environment resolves to: a fork misses nothing it inherits, and a parent
+  misses no key that only its forks hold.
+- **Guards.** An environment that live forks inherit from cannot be
+  archived, and one any fork names cannot be deleted; a fork is restored
+  only while its parent is live. A reference to a key a fork only
+  inherits is refused, naming the parent's key to refer to instead.
+- **Migration** `0004_environment_parents` adds `environments.parent_id`,
+  nullable, with a same-project foreign key on Postgres. It only adds:
+  the previous release runs on it. Rolled back to 0.6 after forks exist, a
+  fork reads as holding only its own keys, so archive forks before rolling
+  back.
 
 ## 0.6.2 (2026-10-17)
 

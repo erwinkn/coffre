@@ -45,6 +45,12 @@ test('a run of twelve secrets is one line', () => {
   assert.equal(decidedBy(run), 'vault');
 });
 
+test("a run of a fork is a run of the fork, its parent's values counted as inherited", () => {
+  const own = entry({ action: 'secret.read', author: 'vault', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', operationId: 'op-1', metadata: { purpose: 'run' } });
+  const inherited = batch(2, { action: 'secret.read', author: 'vault', ...prod, metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' } } });
+  assert.equal(said(own, ...inherited), 'ran market/prod-eu: 3 secrets, 2 inherited');
+});
+
 test('a write says the version it made', () => {
   assert.equal(
     said(entry({ action: 'secret.write', ...prod, key: 'DATABASE_URL', version: 5 })),
@@ -168,6 +174,11 @@ test('every other action has a sentence', () => {
     [{ action: 'secret.move', ...prod, key: 'STRIPE_KEY', metadata: { from: null, to: 'stripe' } }, 'moved market/prod/STRIPE_KEY to the folder stripe'],
     [{ action: 'secret.move', ...prod, key: 'STRIPE_KEY', metadata: { from: 'stripe', to: null } }, 'moved market/prod/STRIPE_KEY out of its folder'],
     [{ action: 'environment.create', project: 'market', environment: 'staging', metadata: { slug: 'staging', from: 'prod' } }, 'created environment market/staging, a fork of prod'],
+    [{ action: 'environment.create', project: 'market', environment: 'prod-eu', metadata: { slug: 'prod-eu', from: 'prod', inherits: 'prod' } }, 'created environment market/prod-eu, inheriting from prod'],
+    [{ action: 'secret.reset', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', metadata: { key: 'DATABASE_URL', from: 'prod' } }, "reset market/prod-eu/DATABASE_URL to prod's value"],
+    [{ action: 'secret.rename', project: 'market', environment: 'prod-eu', key: 'OLD', metadata: { key: 'OLD', nextKey: 'NEW', parent: 'prod' } }, 'renamed market/prod-eu/OLD to NEW, as prod did'],
+    [{ action: 'secret.read', ...prod, key: 'STRIPE_KEY', metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' } } }, 'ran market/prod/STRIPE_KEY in market/prod-eu'],
+    [{ action: 'secret.read', project: 'billing', environment: 'prod', key: 'SOURCE', metadata: { purpose: 'run', via: { path: 'market/prod/SHARED' }, through: { environmentId: 'e', slug: 'prod-eu' } } }, 'ran billing/prod/SOURCE through market/prod/SHARED in market/prod-eu'],
     [{ action: 'environment.fork', ...prod, decision: 'deny', reason: 'missing_secret_read', metadata: { from: 'prod', slug: 'staging' } }, 'tried to fork market/prod into staging: no grant to read it'],
     [{ action: 'missing.dismiss', ...prod, metadata: { key: 'SENTRY_DSN' } }, 'dismissed SENTRY_DSN in market/prod as not needed'],
     [{ action: 'missing.restore', ...prod, metadata: { key: 'SENTRY_DSN' } }, 'restored SENTRY_DSN in market/prod to the missing keys'],

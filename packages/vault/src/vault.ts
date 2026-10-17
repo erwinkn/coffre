@@ -785,23 +785,45 @@ class VaultService implements Vault {
     const { principal } = input;
     validateText(input.purpose);
     const vias = input.items.map((item) => validateVia(item.via));
+    const throughs = input.items.map((item) => validateThrough(item.through));
     const loaded = await this.#versions(input, 'secret.read', { purpose: input.purpose });
     if (!loaded.ok) return loaded;
     // RPC can preserve shared objects, and two holders can read one source: each item its own secret.
     const items = loaded.versions.map((version) => ({ ...version, secret: { ...version.secret } }));
     validateItems(items, 'wrapped');
     const sealed = await this.#referencesAt(vias);
+    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])));
+    // A reference reads only the current version of the source its entry names.
+    const viaOk = items.map((item, i) => vias[i] === null || (sealed[i] !== null && sealed[i]!.source.secretId === item.secret.secretId && item.current));
+    // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own,
+    // for a read whose reference, if any, holds. Checked once, not again under the log's head: it decides nothing, so a
+    // fork archived meanwhile only names a read.
+    const throughOk = items.map((item, i) => {
+      const through = throughs[i];
+      if (through === null) return true;
+      if (!viaOk[i]) return false;
+      const fork = forks.get(through);
+      const decidedAt = sealed[i]?.holder ?? item.secret;
+      return fork !== undefined && !fork.deleted && !fork.archived && fork.projectId === decidedAt.projectId && through !== decidedAt.environmentId;
+    });
     const versionIds = new Map(items.map((item) => [item.secret, item.id]));
-    const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i] }]));
+    const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i], through: throughs[i], throughOk: throughOk[i] }]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => {
-      const { via, sealed: seal } = viaOf.get(secret)!;
+      const { via, sealed: seal, through, throughOk: ok } = viaOf.get(secret)!;
       return {
-        ...keyEntry('secret.read', principal, secret, decision, code, input, { purpose: input.purpose, ...(via === null ? {} : viaDetail(via, seal)) }),
+        ...keyEntry('secret.read', principal, secret, decision, code, input, {
+          purpose: input.purpose,
+          ...(via === null ? {} : viaDetail(via, seal)),
+          // A fork that failed the check is named, never filed under: its project's log is no place for this read.
+          ...(through === null ? {} : ok ? throughDetail(through, forks.get(through), via !== null) : { through: { environmentId: through, refused: true } }),
+        }),
         secretVersionId: versionIds.get(secret),
       };
     };
-    // A reference reads only the current version of the source its entry names.
-    if (items.some((item, i) => vias[i] !== null && (sealed[i] === null || sealed[i]!.source.secretId !== item.secret.secretId || !item.current))) {
+    if (viaOk.includes(false)) {
+      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
+    }
+    if (throughOk.includes(false)) {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
     }
     const ends = sealed.flatMap((seal) => (seal === null ? [] : [seal.seq]));
@@ -2456,6 +2478,29 @@ function validateVia(via: Via | null | undefined): Via | null {
   if (typeof via.reference !== 'string' || !UUID.test(via.reference)) throw new Error('a reference id must be a lowercase UUID');
   if (!Number.isSafeInteger(via.seq) || via.seq < 0) throw new Error("a reference's seq must be a whole number");
   return { reference: via.reference, seq: via.seq };
+}
+
+/** A read's fork, checked for shape: null for none. */
+function validateThrough(through: string | null | undefined): string | null {
+  if (through === undefined || through === null) return null;
+  if (typeof through !== 'string' || !UUID.test(through)) throw new Error("a fork's id must be a lowercase UUID");
+  return through;
+}
+
+/**
+ * How a read of an inherited value is logged: the fork it was read in,
+ * `through`, and as `also`, which puts it in the fork's log too, unless it
+ * was read through the parent's reference. The fork decides nothing: the
+ * reader's grants where the value is held do, as for any read.
+ */
+function throughDetail(through: string, fork: { projectId: string; slug: string } | undefined, viaReference: boolean): Record<string, unknown> {
+  return {
+    through: { environmentId: through, ...(fork === undefined ? {} : { slug: fork.slug }) },
+    // Through a reference, the entry is the source's, in another project perhaps, and stays filed where references
+    // file theirs: the source and the holder, the parent. A fork's own log would show a reader of the fork alone
+    // what the parent's reference reads, which is the parent's to tell.
+    ...(viaReference ? {} : { also: { projectId: fork?.projectId ?? null, environmentId: through } }),
+  };
 }
 
 /**

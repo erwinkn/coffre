@@ -47,16 +47,24 @@ export async function sealValues(
   }
 }
 
-/** Have the vault unwrap each envelope's key, and decrypt; `via` reads a source through a reference. */
+/**
+ * Have the vault unwrap each envelope's key, and decrypt; `via` reads a
+ * source through a reference, and `through` names the fork an inherited
+ * value is read in.
+ */
 export async function openValues(
   vault: Vault,
   asking: Asking & { purpose: Purpose },
-  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; via?: Via }[],
+  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; via?: Via; through?: string }[],
 ): Promise<Keyed<string>> {
   if (items.length === 0) return { ok: true, values: [] };
   const result = await vault.unwrap({
     ...asking,
-    items: items.map(({ secretVersionId, via }) => (via === undefined ? { secretVersionId } : { secretVersionId, via })),
+    items: items.map(({ secretVersionId, via, through }) => ({
+      secretVersionId,
+      ...(via === undefined ? {} : { via }),
+      ...(through === undefined ? {} : { through }),
+    })),
   });
   if (!result.ok) return result;
   return {

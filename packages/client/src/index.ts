@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, SetResult, TokenPlan } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, InheritResult, SetResult, TokenPlan } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -30,6 +30,7 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
+  InheritResult,
   ListedReference,
   Me,
   Member,
@@ -232,6 +233,12 @@ export function createClient(options: ClientOptions) {
         call('PATCH /secrets/:project/:environment/:key', place(path), { key }),
       update: (path: string, patch: RouteInput<'PATCH /secrets/:project/:environment/:key'>) =>
         call('PATCH /secrets/:project/:environment/:key', place(path), patch),
+      /**
+       * In a fork, a key back to its parent's value (`true`), its own kept,
+       * or its own served again (`false`); `from` holds the parent's.
+       */
+      inherit: (path: string, inherit: boolean) =>
+        call('PATCH /secrets/:project/:environment/:key', place(path), { inherit }) as Promise<InheritResult>,
     },
 
     /**

@@ -122,22 +122,34 @@ function plural(count: number, one: string, many = `${one}s`): string {
  * The secrets a read or write was about. A read through a reference is a
  * read of its source, "market/prod/DATABASE_URL through
  * billing/prod/DATABASE_URL"; a run that read some that way is a run of
- * the environment that holds them.
+ * the environment that holds them. A value a fork inherits is its parent's,
+ * read in the fork: "market/prod/STRIPE_KEY in market/prod-eu".
  */
 function secrets(facts: Facts): Part[] {
   const through = (entry: AuditEntry) => text((entry.metadata.via as { path?: unknown } | undefined)?.path);
+  // The fork a value was inherited in, by path: in its parent's project, which holds the reference a read went through.
+  const forkOf = (entry: AuditEntry) => {
+    const slug = text((entry.metadata.through as { slug?: unknown } | undefined)?.slug);
+    const project = through(entry)?.split('/')[0] ?? entry.project;
+    return slug === null || project === null ? null : `${project}/${slug}`;
+  };
   if (facts.batch.length === 1) {
-    const held = through(facts.entry);
-    return held === null ? place(facts.entry) : [...place(facts.entry), ' through ', { place: held }];
+    const [held, fork] = [through(facts.entry), forkOf(facts.entry)];
+    return [...place(facts.entry), ...(held === null ? [] : [' through ', { place: held }]), ...(fork === null ? [] : [' in ', { place: fork }])];
   }
-  const own = facts.batch.find((entry) => through(entry) === null);
+  const fork = facts.batch.map(forkOf).find((path) => path !== null);
+  const own = facts.batch.find((entry) => through(entry) === null && forkOf(entry) === null);
   const held = facts.batch.map(through).filter((path): path is string => path !== null);
-  const where = own !== undefined ? environmentOf(own) : [{ place: held[0]!.split('/').slice(0, 2).join('/') }];
+  const inherited = facts.batch.filter((entry) => forkOf(entry) !== null).length;
+  const where = fork !== undefined && fork !== null
+    ? [{ place: fork }]
+    : own !== undefined ? environmentOf(own) : [{ place: held[0]!.split('/').slice(0, 2).join('/') }];
   return [
     ...where,
     facts.refused ? ', ' : ': ',
     plural(facts.count, 'secret'),
     ...(held.length === 0 ? [] : [`, ${held.length} through ${held.length === 1 ? 'a reference' : 'references'}`]),
+    ...(inherited === 0 ? [] : [`, ${inherited} inherited`]),
   ];
 }
 
@@ -184,7 +196,12 @@ const placeTemplates = (kind: 'project' | 'environment'): Record<string, Templat
       tried: 'create',
       what,
       // A fork names the environment it copied.
-      then: ({ entry }) => (text(entry.metadata.from) === null ? [] : [`, a fork of ${text(entry.metadata.from)}`]),
+      then: ({ entry }) =>
+        text(entry.metadata.inherits) !== null
+          ? [`, inheriting from ${text(entry.metadata.inherits)}`]
+          : text(entry.metadata.from) === null
+            ? []
+            : [`, a fork of ${text(entry.metadata.from)}`],
     },
     [`${kind}.update`]: { did: 'changed', tried: 'change', what },
     [`${kind}.archive`]: { did: 'archived', tried: 'archive', what },
@@ -223,8 +240,17 @@ const TEMPLATES: Record<string, Template> = {
     did: 'renamed',
     tried: 'rename',
     what: ({ entry }) => [...place(entry), ...(text(entry.metadata.nextKey) === null ? [] : [` to ${text(entry.metadata.nextKey)}`])],
+    // In a fork, carried down from a rename in its parent.
+    then: ({ entry }) => (text(entry.metadata.parent) === null ? [] : [`, as ${text(entry.metadata.parent)} did`]),
   },
   'secret.archive': { did: 'archived', tried: 'archive', what: ({ entry }) => archivedKeys(entry) },
+  // In a fork: its own value set aside, kept, for its parent's.
+  'secret.reset': {
+    did: 'reset',
+    tried: 'reset',
+    what: ({ entry }) => place(entry),
+    then: ({ entry }) => (text(entry.metadata.from) === null ? [] : [` to ${text(entry.metadata.from)}'s value`]),
+  },
   'missing.dismiss': {
     did: 'dismissed',
     tried: 'dismiss',

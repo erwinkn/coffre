@@ -1,0 +1,3 @@
+-- Added in place, not by rebuilding the table as drizzle-kit would: a migration runs in one transaction, where SQLite ignores `foreign_keys=OFF`, so dropping a table other rows reference fails. SQLite adds no table constraint to an existing table, so the parent's same-project rule (`environments_parent_in_project` on Postgres) is the app's here.
+ALTER TABLE `environments` ADD `parent_id` text REFERENCES `environments`(`id`) ON DELETE no action CONSTRAINT "environments_parent_check" CHECK(`parent_id` IS NULL OR `parent_id` <> `id`);--> statement-breakpoint
+CREATE INDEX `environments_parent_idx` ON `environments` (`parent_id`);

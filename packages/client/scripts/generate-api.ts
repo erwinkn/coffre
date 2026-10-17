@@ -37,6 +37,7 @@ const NAMED = {
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
   IdentityRow: 'api/signin.ts',
+  InheritResult: 'api/secrets.ts',
   Me: 'api/projects.ts',
   Member: 'api/members.ts',
   MemberAccess: 'api/members.ts',

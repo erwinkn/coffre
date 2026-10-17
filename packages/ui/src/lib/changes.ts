@@ -359,20 +359,21 @@ export function environmentId(project: string, environment: string): string {
 }
 
 /** A new environment, empty or, `from` a sibling, forked: each of its keys copied. */
-export function createEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; from?: string; references?: boolean }, void> {
+export function createEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; from?: string; references?: boolean; inherit?: boolean }, void> {
   return {
     list: environmentsList(project),
     label: (vars) => `environment ${vars.slug}`,
     targets: (vars) => [saving(environmentId(project, vars.slug))],
     apply: (environments, vars) => [
       ...environments,
-      { slug: vars.slug, name: vars.slug, accessible: false, details: { archivedAt: null, secretCount: 0 } },
+      { slug: vars.slug, name: vars.slug, accessible: false, parent: vars.inherit === true ? (vars.from ?? null) : null, details: { archivedAt: null, secretCount: 0 } },
     ],
     affects: () => affects.places(),
     run: async (vars) => {
       const { created } = await client.environments.create(`${project}/${vars.slug}`, {
         ...(vars.from === undefined ? {} : { from: vars.from }),
         ...(vars.references === true ? { references: true } : {}),
+        ...(vars.inherit === true ? { inherit: true } : {}),
       });
       if (!created) throw new Refusal(`An environment named "${vars.slug}" already exists.`);
     },
@@ -497,17 +498,22 @@ export function saveSecrets(
     removing: ARCHIVING,
     apply: (entries, vars) => {
       const now = new Date().toISOString();
-      const bumped = (entry: SecretKey | undefined, key: string): SecretKey => ({
-        key,
-        // A rename keeps its folder; a new secret is in none.
-        folder: entry?.folder ?? null,
-        // A value of its own: no longer a reference.
-        reference: null,
-        archived: false,
-        version: (entry?.version ?? 0) + 1,
-        updatedAt: now,
-        updatedBy: author,
-      });
+      const bumped = (entry: SecretKey | undefined, key: string): SecretKey => {
+        // In a fork, a value written over the parent's is an override, whose own version the list read back says.
+        const inherited = entry?.parent != null && entry.parent.state !== 'overridden' && entry.key === key;
+        return {
+          key,
+          // A rename keeps its folder; a new secret is in none.
+          folder: entry?.folder ?? null,
+          // A value of its own: no longer a reference.
+          reference: null,
+          archived: false,
+          version: inherited ? null : (entry?.version ?? 0) + 1,
+          updatedAt: now,
+          updatedBy: author,
+          parent: entry?.parent == null || entry.key !== key ? null : { ...entry.parent, state: 'overridden', changed: false, reset: false },
+        };
+      };
       let next = entries.map((entry) => {
         const change = vars.changes[entry.key];
         if (change === undefined || change.archived) return entry;
@@ -598,6 +604,58 @@ export function archiveSecret(
       entries.map((entry) => (archived.has(entry.key) ? { ...entry, archived: true } : entry)),
     affects: () => affects.secrets(place),
     run: (vars) => client.secrets.update(`${place.project}/${place.environment}/${vars.key}`, { archived: true }),
+  };
+}
+
+/**
+ * In a fork, a key's standing to its parent's (docs/design/forking.md):
+ * `remove` does without the parent's key and `restore` inherits it again,
+ * a dismissal and its end; `reset` drops an override for the parent's
+ * value, its own kept, and `override` serves its own again. Each shows at
+ * once, and is undone by its opposite.
+ */
+export type ForkAction = 'remove' | 'restore' | 'reset' | 'override';
+
+const FORK_WORDS: Record<ForkAction, Words> = {
+  remove: { pending: 'Removing…', done: 'removed', failed: 'Not removed.' },
+  restore: { pending: 'Restoring…', done: 'restored', failed: 'Not restored.' },
+  reset: { pending: 'Resetting…', done: 'reset', failed: 'Not reset.' },
+  override: { pending: 'Overriding…', done: 'overridden', failed: 'Not overridden.' },
+};
+
+export function forkKey(
+  client: CoffreClient,
+  place: { project: string; environment: string },
+  action: ForkAction,
+): Change<Secrets, SecretKey, { key: string }, unknown> {
+  const path = `${place.project}/${place.environment}`;
+  const standing = (entry: SecretKey): SecretKey => {
+    if (entry.parent === null) return entry;
+    switch (action) {
+      // Not served: nothing of the parent's value is shown for it.
+      case 'remove':
+        return { ...entry, reference: null, version: null, updatedAt: null, updatedBy: null, parent: { ...entry.parent, state: 'removed' } };
+      // The parent's value, which the list read back brings.
+      case 'restore':
+      case 'reset':
+        return { ...entry, parent: { ...entry.parent, state: 'inherited', changed: false, reset: action === 'reset' || entry.parent.reset } };
+      case 'override':
+        return { ...entry, parent: { ...entry.parent, state: 'overridden', changed: false, reset: false } };
+    }
+  };
+  return {
+    list: secretsList(place),
+    saving: FORK_WORDS[action],
+    label: (vars) => vars.key,
+    targets: (vars) => [saving(vars.key)],
+    // A removal of a key the parent archived since, restored, leaves nothing to list.
+    apply: (entries, vars) => entries.flatMap((entry) =>
+      entry.key !== vars.key ? [entry] : action === 'restore' && entry.parent?.held === false ? [] : [standing(entry)]),
+    affects: () => affects.secrets(place),
+    run: (vars) =>
+      action === 'remove' || action === 'restore'
+        ? client.environments.dismiss(path, { [vars.key]: action === 'remove' ? true : null })
+        : client.secrets.inherit(`${path}/${vars.key}`, action === 'reset'),
   };
 }
 

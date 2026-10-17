@@ -5,7 +5,7 @@ import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns } from '@coffre/db/log';
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
  * Every query the vault makes, and the only code in it that holds them.
@@ -196,7 +196,7 @@ function at(db: Queryable, place: Place) {
 export async function environmentsById(
   db: Queryable,
   ids: readonly string[],
-): Promise<Map<string, { projectId: string; slug: string; deleted: boolean }>> {
+): Promise<Map<string, { projectId: string; slug: string; deleted: boolean; archived: boolean }>> {
   if (ids.length === 0) return new Map();
   const { environments, projects } = tablesOf(db);
   const rows = await db
@@ -205,6 +205,8 @@ export async function environmentsById(
       projectId: environments.projectId,
       slug: environments.slug,
       deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
+      // Only what names a fork asks it: nothing is decided on it.
+      archived: truth(or(isNotNull(environments.archivedAt), isNotNull(projects.archivedAt))!),
     })
     .from(environments)
     .innerJoin(projects, eq(projects.id, environments.projectId))

@@ -112,6 +112,9 @@ export async function projects(connect: () => CoffreClient, args: string[], io: 
 // A project or environment goes by its slug. `--name`, which gave it a label
 // before 0.6.2, is still taken, so that scripts passing it keep working, and
 // said to be ignored.
+/** `--undo`: what reset and remove did, undone. */
+const undo = { undo: { type: 'boolean', default: false } } as const;
+
 const naming = { name: { type: 'string' } } as const;
 const renaming = { name: { type: 'string' }, slug: { type: 'string' } } as const;
 
@@ -143,16 +146,40 @@ export async function environmentsCreate(connect: () => CoffreClient, args: stri
  * `coffre fork market/prod staging`: a new environment beside it, with each
  * live key's value and folder, and none of its history. Copying is a read,
  * logged as one; running it again fills the environment if it stopped
- * half way.
+ * half way. With --inherit, nothing is copied or read: the fork reads its
+ * parent's keys live, but for those it sets or removes, and its readers
+ * need read on the parent for those (docs/design/forking.md).
  */
 export async function fork(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { ...naming, reference: { type: 'boolean', default: false } }, ['<project>/<environment>', '<new-environment>']);
+  const { values, positionals } = parse(args, {
+    ...naming,
+    reference: { type: 'boolean', default: false },
+    inherit: { type: 'boolean', default: false },
+  }, ['<project>/<environment>', '<new-environment>']);
   const { project, environment: from } = place(positionals[0]!, true);
   const slug = positionals[1]!;
   if (slug.includes('/')) throw new UsageError(`name the new environment alone, as in staging, not "${slug}": it goes in ${project}`);
+  if (values.reference && values.inherit) throw new UsageError('--reference or --inherit, not both: a fork holds references to its parent, or inherits from it');
   nameIgnored(values, 'environment', io);
   const api = connect();
-  const made = await api.environments.create(`${project}/${slug}`, { name: slug, from: from!, ...(values.reference ? { references: true } : {}) });
+  // An instance before 0.7 drops `inherit` it does not know, and copies: asked first, as its list of the parent says.
+  if (values.inherit && (await api.secrets.list(`${project}/${from}`)).parents === undefined) {
+    throw new UsageError('this instance is older than forks that inherit (coffre 0.7): it would copy instead. Upgrade it, or fork without --inherit');
+  }
+  const made = await api.environments.create(`${project}/${slug}`, {
+    name: slug,
+    from: from!,
+    ...(values.reference ? { references: true } : {}),
+    ...(values.inherit ? { inherit: true } : {}),
+  });
+  if (values.inherit) {
+    if (made.forked?.inherits !== true) {
+      throw new UsageError(`${project}/${made.environment.slug} was ${made.created ? 'made' : 'there already'}, but does not inherit from ${project}/${from}: check it with \`coffre list ${project}/${made.environment.slug}\``);
+    }
+    io.out.write(`created ${project}/${made.environment.slug}, inheriting ${project}/${from}: nothing copied\n`);
+    io.out.write(`  it reads ${from}'s keys as they change, but for those it sets or removes; its readers need read on ${from} for those\n`);
+    return;
+  }
   const { keys = 0, references = 0, copied = [] } = made.forked ?? {};
   const what = values.reference
     ? `${references} reference${references === 1 ? '' : 's'}${copied.length === 0 ? '' : `, and ${copied.length} copied: ${copied.join(', ')}, whose source you read only through ${from}`}`
@@ -266,6 +293,44 @@ export async function archiveSecret(connect: () => CoffreClient, args: string[],
   const api = connect();
   await api.secrets.update(path, { archived });
   io.out.write(archived ? `archived ${path}: \`coffre unarchive ${path}\` brings it back\n` : `unarchived ${path}\n`);
+}
+
+/**
+ * `coffre reset market/prod-eu/KEY`: in a fork, the key reads its parent's
+ * value again; its own is archived, with its history. --undo serves it again.
+ */
+export async function resetSecret(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, undo, ['<project>/<environment>/<KEY>']);
+  const path = secret(positionals[0]!);
+  const api = connect();
+  const { from } = await api.secrets.inherit(path, !values.undo);
+  const project = path.slice(0, path.indexOf('/'));
+  io.out.write(values.undo
+    ? `${path} overrides ${project}/${from} again, with the value it had\n`
+    : `${path} reads ${project}/${from}'s value again; its own is kept: \`coffre reset ${path} --undo\` serves it again\n`);
+}
+
+/**
+ * `coffre remove market/prod-eu/KEY`: in a fork, it does without its
+ * parent's key, a dismissal, which the missing keys list too. --undo
+ * inherits it again.
+ */
+export async function removeSecret(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, undo, ['<project>/<environment>/<KEY>']);
+  const path = secret(positionals[0]!);
+  const environment = path.slice(0, path.lastIndexOf('/'));
+  const key = path.slice(path.lastIndexOf('/') + 1);
+  const api = connect();
+  // A fork's, and only one inherited: the server refuses a key the fork holds a value of, which a removal would not stop.
+  const { parents } = await api.secrets.list(environment);
+  if (parents === undefined || parents.length === 0) {
+    throw new UsageError(`${environment} inherits from no environment: \`coffre archive ${path}\` takes a key out of it`);
+  }
+  const { keys } = await api.environments.dismiss(environment, { [key]: values.undo ? null : true });
+  if (keys[key] === 'unchanged') return void io.out.write(`${path} was ${values.undo ? 'not removed' : 'removed'} already\n`);
+  io.out.write(values.undo
+    ? `${environment} inherits ${key} again, unless it holds its own\n`
+    : `${environment} does without its parent's ${key}: \`coffre remove ${path} --undo\` inherits it again\n`);
 }
 
 // --- references --------------------------------------------------------------

@@ -21,3 +21,9 @@ test('a rollback retires it too', () => {
 test('nothing revealed is never current', () => {
   assert.equal(revealIsCurrent(null, 3), false);
 });
+
+test("a fork's key reset to its parent's retires its own plaintext, though both are v1", () => {
+  const own: Reveal = { value: 'postgres://eu', version: 1, from: '.:', at: 0 };
+  assert.equal(revealIsCurrent(own, 1, '.:'), true);
+  assert.equal(revealIsCurrent(own, 1, 'prod:'), false);
+});

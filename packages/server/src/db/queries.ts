@@ -136,7 +136,14 @@ export async function lock<T extends Table>(tx: Transaction, table: T, match: Ma
 
 export type ResolvedPath = {
   project: { id: string; slug: string; name: string; archivedAt: Date | null };
-  environment: { id: string; slug: string; name: string; archivedAt: Date | null } | null;
+  environment: {
+    id: string;
+    slug: string;
+    name: string;
+    archivedAt: Date | null;
+    /** The environment it inherits from, a fork's. */
+    parentId: string | null;
+  } | null;
   secret: {
     id: string;
     key: string;
@@ -189,7 +196,13 @@ export async function resolvePath(
     environment:
       environment === null
         ? null
-        : { id: environment.id, slug: environment.slug, name: environment.name, archivedAt: environment.archivedAt },
+        : {
+            id: environment.id,
+            slug: environment.slug,
+            name: environment.name,
+            archivedAt: environment.archivedAt,
+            parentId: environment.parentId,
+          },
     secret:
       secret === null
         ? null
@@ -208,7 +221,8 @@ export type PlaceRow = {
   slug: string;
   name: string;
   archivedAt: Date | null;
-  environments: { id: string; slug: string; name: string; archivedAt: Date | null; secretCount: number }[];
+  /** Each with its live secret count, its own rows: a fork's inherited keys are its parent's. */
+  environments: { id: string; slug: string; name: string; archivedAt: Date | null; parentId: string | null; secretCount: number }[];
 };
 
 /**
@@ -245,6 +259,7 @@ export async function places(db: Queryable, { tombstones = false }: { tombstones
       slug: environment.slug,
       name: environment.name,
       archivedAt: environment.archivedAt,
+      parentId: environment.parentId,
       secretCount: Number(secretCount),
     });
   }
@@ -1261,13 +1276,13 @@ export type SecretRow = {
 
 /**
  * An environment's secrets, archived ones included, each with its current
- * version and ciphertext; or just one of them. Listing, revealing, running
- * and exporting all read this.
+ * version and ciphertext; or just one of them, by id or by key. Listing,
+ * revealing, running and exporting all read this.
  */
 export async function environmentSecrets(
   db: Queryable,
   environmentId: string,
-  secretId?: string,
+  only?: { secretId: string } | { key: string },
 ): Promise<SecretRow[]> {
   const { secrets, secretVersions, projects, environments } = tablesOf(db);
   const rows = await db
@@ -1290,7 +1305,7 @@ export async function environmentSecrets(
       eq(secrets.environmentId, environmentId),
       isNull(projects.archivedAt),
       isNull(environments.archivedAt),
-      secretId === undefined ? undefined : eq(secrets.id, secretId),
+      only === undefined ? undefined : 'secretId' in only ? eq(secrets.id, only.secretId) : eq(secrets.key, only.key),
     ))
     .orderBy(asc(secrets.key));
   return rows.map((row) => ({
@@ -1340,6 +1355,67 @@ export async function secretHistory(
 
 // --- missing keys ---------------------------------------------------------------
 
+/**
+ * At most how many parents stand above an environment: `prod`, `prod-eu`,
+ * and `prod-eu-canary` above `prod-eu-canary-a` (docs/design/forking.md).
+ */
+export const MAX_PARENTS = 3;
+
+/** An environment a fork inherits from, as a read needs it. */
+export type ParentRow = { id: string; slug: string; archivedAt: Date | null; deleted: boolean };
+
+/**
+ * The environments `environmentId` inherits from, nearest first: its
+ * parent, that one's, and so on. The app makes a parent before its child
+ * and never changes it, so its chains neither loop nor run past
+ * `MAX_PARENTS`. Null for one that does, written around it.
+ */
+export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[] | null> {
+  const { environments } = tablesOf(db);
+  const parents: ParentRow[] = [];
+  const seen = new Set([environmentId]);
+  let [next] = await db.select({ parentId: environments.parentId }).from(environments).where(eq(environments.id, environmentId));
+  while (next?.parentId != null) {
+    if (seen.has(next.parentId) || parents.length === MAX_PARENTS) return null;
+    seen.add(next.parentId);
+    const [row] = await db
+      .select({ id: environments.id, slug: environments.slug, archivedAt: environments.archivedAt, parentId: environments.parentId })
+      .from(environments)
+      .where(eq(environments.id, next.parentId));
+    if (row === undefined) return null;
+    parents.push({ id: row.id, slug: row.slug, archivedAt: row.archivedAt, deleted: isTombstone(row.slug) });
+    next = row;
+  }
+  return parents;
+}
+
+/** Whether an environment, and its project, are neither archived nor deleted. */
+export async function liveEnvironment(db: Queryable, environmentId: string): Promise<boolean> {
+  const { environments, projects } = tablesOf(db);
+  const [row] = await db
+    .select({ id: environments.id })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(and(
+      eq(environments.id, environmentId),
+      isNull(environments.archivedAt),
+      isNull(projects.archivedAt),
+      standing(environments.slug),
+      standing(projects.slug),
+    ));
+  return row !== undefined;
+}
+
+/** The environments that inherit from `environmentId` directly: the live ones, or with `archived`, those archived too. */
+export async function forksOf(db: Queryable, environmentId: string, { archived = false }: { archived?: boolean } = {}): Promise<{ id: string; slug: string }[]> {
+  const { environments } = tablesOf(db);
+  return db
+    .select({ id: environments.id, slug: environments.slug })
+    .from(environments)
+    .where(and(eq(environments.parentId, environmentId), archived ? undefined : isNull(environments.archivedAt), standing(environments.slug)))
+    .orderBy(asc(environments.slug));
+}
+
 /** An environment's dismissed keys, those not restored since. */
 export async function dismissalsIn(db: Queryable, environmentId: string) {
   const { dismissedKeys } = tablesOf(db);
@@ -1347,6 +1423,16 @@ export async function dismissalsIn(db: Queryable, environmentId: string) {
     .select({ key: dismissedKeys.key, dismissedAt: dismissedKeys.dismissedAt, dismissedBy: dismissedKeys.dismissedBy })
     .from(dismissedKeys)
     .where(and(eq(dismissedKeys.environmentId, environmentId), isNull(dismissedKeys.restoredAt)));
+}
+
+/** The keys these environments dismissed, those not restored since: in a fork, what it removed. */
+export async function dismissalsAcross(db: Queryable, environmentIds: readonly string[]) {
+  if (environmentIds.length === 0) return [];
+  const { dismissedKeys } = tablesOf(db);
+  return db
+    .select({ environmentId: dismissedKeys.environmentId, key: dismissedKeys.key })
+    .from(dismissedKeys)
+    .where(and(inArray(dismissedKeys.environmentId, [...environmentIds]), isNull(dismissedKeys.restoredAt)));
 }
 
 /** The live keys of these environments, each with its folder. */

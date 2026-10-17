@@ -92,6 +92,16 @@ no live secrets fills it, and on one that has secrets answers 409.
 Forks stay within one project. Copying into another project is a fork
 followed by references, or an import.
 
+A fork that **inherits** (0.7, `--inherit`) copies nothing: it keeps
+reading its parent's keys, live, but for those it sets (overrides and
+additions) or removes. Its readers need read on the parent for what it
+inherits; it lends nothing. docs/design/forking.md has the model, its
+access and audit, and the UI.
+
+```sh
+coffre fork market/prod prod-eu --inherit    # reads prod's keys as they change
+```
+
 ## References
 
 **The rule, from Erwin: a reference is a decision taken when it's

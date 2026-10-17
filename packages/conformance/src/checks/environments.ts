@@ -64,6 +64,39 @@ export async function forks({ admin, reader }: People, canaries: Canaries): Prom
   return "a fork holds dev's values and no history, and a viewer on dev neither makes one nor reads it";
 }
 
+/** Where the inheritance check forks prod; archived once checked. */
+const INHERITS = `${PROJECT}/prod-inherits`;
+
+/**
+ * A fork that inherits reads its parent's values live and copies none, and
+ * lends nothing (docs/design/forking.md): the reader, a viewer on dev given
+ * the fork alone, reads none of what it inherits from prod.
+ */
+export async function inheritance({ admin, reader }: People, canaries: Canaries): Promise<string> {
+  const prod = valuesIn(canaries, PROD);
+  const [key] = Object.keys(prod);
+  expect(key !== undefined, 'prod holds no secret to inherit');
+  const made = await admin.api.environments.create(INHERITS, { from: PROD.split('/')[1]!, inherit: true });
+  try {
+    expect(made.forked?.inherits === true && made.forked.keys === 0, 'a fork that inherits copied something', made);
+    const read = await admin.api.secrets.reveal(INHERITS);
+    expect(JSON.stringify(Object.entries(read.values).sort()) === JSON.stringify(Object.entries(prod).sort()), "the fork does not read prod's values");
+    const listed = await admin.api.secrets.list(INHERITS);
+    expect(listed.keys.every((each) => each.parent?.state === 'inherited'), 'a key the fork inherits is not listed as inherited', listed.keys);
+
+    await admin.api.access.set(reader.member, { [INHERITS]: 'viewer' });
+    try {
+      await refused("a reader of the fork alone read what it inherits from prod", reader.api.secrets.reveal(INHERITS));
+      await refused("a reader of the fork alone read one key it inherits from prod", reader.api.secrets.reveal(`${INHERITS}/${key}`));
+    } finally {
+      await admin.api.access.set(reader.member, { [INHERITS]: null });
+    }
+  } finally {
+    await admin.api.environments.update(INHERITS, { archived: true });
+  }
+  return "a fork that inherits prod reads prod's values, copies none, and lends none to a reader of the fork alone";
+}
+
 /** The key in dev the reference check makes, archived once checked. */
 const HELD = 'CONFORMANCE_REFERENCE';
 const FORGED = 'CONFORMANCE_FORGED';
