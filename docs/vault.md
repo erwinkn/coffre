@@ -14,8 +14,9 @@ token, see [kubernetes.md](kubernetes.md).
 
 ## Turning it on
 
-The adapter is a plugin, `vaultKv`. Add it in the deployment's
-configuration, `app/src/coffre.ts`, on either runtime:
+The adapter is a plugin, `vaultKv`. Add it to the deployment's
+configuration, `app/src/coffre.ts`, beside what it holds already. On
+Workers:
 
 ```ts
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
@@ -24,6 +25,15 @@ export const coffre = createCoffre((env: Env) => ({
   // …publicUrl, database, vault, auth, auditChainKey, as they are
   plugins: [vaultKv()],
 }));
+```
+
+On Node, the same line in the configuration object:
+
+```ts
+export const coffre = createCoffre({
+  // …publicUrl, database, vault, auth, auditChainKey, as they are
+  plugins: [vaultKv()],
+});
 ```
 
 Then add one route, `app/src/routes/v1.$.ts`, which hands every request
@@ -110,8 +120,10 @@ spec:
 
 The two entries are alternatives, shown together. `dataFrom` takes every
 value, and `data` takes the ones it names. Each entry is a read of its own,
-so this manifest reads `market/prod` twice per refresh. Each read shows in
-the audit log once, naming the keys it opened.
+so this manifest reads `market/prod` twice per refresh. A read writes one
+audit entry for each environment it opens values in, naming the keys:
+one for a plain environment, plus one per parent for a fork that
+inherits, and per source for references into another environment.
 
 A secret that is not there answers 404. That happens for an environment or
 a key that does not exist, or one that was archived or deleted. ESO reads a

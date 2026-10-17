@@ -10,8 +10,8 @@
     `secret/data/market/prod/KEY` one of them.
   - External Secrets Operator, the `vault` CLI, vals and Terraform read
     with a coffre token as their Vault token.
-  - Each read is the API's own reveal, as the token's holder, logged as
-    one.
+  - Each read is the API's own reveal, as the token's holder, and is
+    logged as one.
   - Writes, listing, versions and response wrapping are refused, and 404
     only ever means the place is not there, so that ESO never deletes a
     target over anything else.

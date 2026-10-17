@@ -323,9 +323,12 @@ with the browser's cookie. None of that can happen here:
   headers, and passes the migration door.
 
 **Audit volume.** Each poll is one reveal, which the vault logs as one
-`secret.read` for the environment, naming every key it opened (#242). Take
-ESO polling 10 ExternalSecrets of one fetch each every 15 minutes: that is 40 entries an
-hour, about 1,000 a day, the same as `coffre export` in a 15-minute cron.
+`secret.read` for each environment it opens values in, naming the keys
+(#242). That is one for a plain environment, plus one per parent for a fork
+that inherits, and per source for references into another environment.
+Take ESO polling 10 plain environments, one fetch each, every 15 minutes:
+that is 40 entries an hour, about 1,000 a day, the same as `coffre export`
+in a 15-minute cron.
 Don't optimize it here. And if a poll ever needs to know whether anything
 changed without reading values, coffre's environment version (T94,
 `GET /api/projects/<p>/<e>/version`) is the tool, not change detection of
