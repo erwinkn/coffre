@@ -1763,7 +1763,7 @@ function DeletePersonal({ project, environment, of }: { project: string; environ
         confirmLabel="Delete"
         onConfirm={() =>
           void run(() => coffre.environments.delete(`${project}/${environment}`), {
-            affects: [...affects.secrets({ project, environment }), ...affects.places()],
+            affects: [...affects.secrets({ project, environment }), ...affects.places(), queryKeys.personal(project)],
             onSuccess: () => {
               toast.success(`Your own ${of} is deleted`);
               void navigate({ to: '/projects/$project/$environment', params: { project, environment: of } });
@@ -1801,7 +1801,7 @@ function NoPersonalConfig({ project, of }: { project: string; of: string }) {
             className="btn btn-primary"
             disabled={pending}
             onClick={() => void run(() => coffre.environments.create(`${project}/${of}@me`), {
-              affects: [...affects.secrets({ project, environment: `${of}@me` }), ...affects.places()],
+              affects: [...affects.secrets({ project, environment: `${of}@me` }), ...affects.places(), queryKeys.personal(project)],
               onSuccess: () => toast.success(`Your own ${of} is made: what you set there is yours alone`),
             })}
           >

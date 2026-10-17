@@ -261,3 +261,15 @@ test('a key moved aside onto a name the personal config removed is no longer rem
   await ada.secrets.inherit('market/dev@me/NEXT_2', true);
   assert.equal((await values(ada, 'market/dev@me')).NEXT_2, 'dev-next-2');
 });
+
+test('an archived key moved aside leaves the removal of its new name as it was: it serves nothing', async () => {
+  await root.secrets.set('market/dev', { OLD: 'old' });
+  await ada.secrets.set('market/dev@me', { NEXT: 'ada-own' });
+  await ada.secrets.update('market/dev@me/NEXT', { archived: true });
+  await ada.environments.dismiss('market/dev@me', { NEXT_2: true });
+  await root.secrets.update('market/dev/OLD', { key: 'NEXT' });
+  // Her archived NEXT is NEXT_2 now; dev's own NEXT_2, added since, stays removed for her.
+  await root.secrets.set('market/dev', { NEXT_2: 'dev-next-2' });
+  const read = await values(ada, 'market/dev@me');
+  assert.deepEqual([read.NEXT, read.NEXT_2], ['old', undefined]);
+});

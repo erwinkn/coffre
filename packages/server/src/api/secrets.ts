@@ -791,8 +791,8 @@ async function renameBelow(
       const aside = await asideKey(tx, fork.id, nextKey);
       await update(tx, secrets, { id: taken.id }, { key: aside, updatedAt: new Date() });
       log.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: aside, parent, aside: true } }));
-      // Live under its new name, it is no longer removed there, as any row made live (`endRemovals`).
-      if ((await dismissalsIn(tx, fork.id)).some((row) => row.key === aside)) {
+      // Live under its new name, it is no longer removed there, as any row made live (`endRemovals`). An archived one serves nothing: the removal stands.
+      if (taken.archivedAt === null && (await dismissalsIn(tx, fork.id)).some((row) => row.key === aside)) {
         await update(tx, dismissedKeys, { environmentId: fork.id, key: aside }, { restoredAt: new Date(), restoredBy: ctx.caller.principal.id });
         log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: aside, renamed: nextKey, parent } }));
       }

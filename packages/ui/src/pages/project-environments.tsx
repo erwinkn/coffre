@@ -206,7 +206,8 @@ function EnvironmentCard({
   const deletable = manageable && isArchived && capabilities.runsInstance;
   const slugError = slug === '' ? null : environmentSlugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
-  const holders = holdersOf(grants, environment.slug);
+  // A personal config is its owner's alone: no grant reaches it, so none is shown on its card.
+  const holders = environment.personal === true ? [] : holdersOf(grants, environment.slug);
   // Scopes match environments by slug: a new one is said to move them before the rename is saved.
   const reslugged = slug !== environment.slug && slug !== '' && slugError === null;
 
