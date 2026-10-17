@@ -9,10 +9,10 @@ Coffre already forks, but a fork is a one-off. `coffre fork market/prod
 staging` copies prod's values into staging, and `--reference` makes each
 key a reference to prod's (docs/design/environments.md). A copy never
 follows prod. References follow each key's value, but a key added to prod
-later never reaches staging, and nothing records that staging came from
-prod. This note adds the missing piece: an
-environment that keeps reading its parent, live, except for the keys it
-sets or removes. A personal config is the same thing, owned by one person.
+later never reaches staging. The log's `environment.create` entry says
+staging was forked from prod, but nothing links the two afterwards. This
+note adds the missing piece: an environment that keeps reading its
+parent, live, except for the keys it sets or removes. A personal config is the same thing, owned by one person.
 
 The examples use one project, `market`, and four people. Ada is a
 developer on `market`. Bo reads `market/dev` only. Cy is a maintainer on
@@ -172,10 +172,10 @@ Coffre keeps the parts that matter and differs in four ways:
 
 - **A fork made of references.** `coffre fork --reference` exists. Its
   keys follow prod's values, but it doesn't pick up keys added to prod
-  later, it writes one sealed vault entry per key, and nothing says where
-  it came from. It's the right tool for
-  lending specific keys to people who can't read the source, which is a
-  different job.
+  later, it writes one sealed vault entry per key, and only its creation's
+  log entry says where it came from. It's the right tool for lending
+  specific keys to people who can't read the source, which is a different
+  job.
 - **Inheritance that lends, sealed by the vault.** The vault would seal
   "prod-eu inherits prod", and anyone reading prod-eu would read prod's
   values through it, as references work. It's the same machinery as
