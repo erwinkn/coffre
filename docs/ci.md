@@ -194,6 +194,56 @@ With the CLI:
   for your instance's URL piped to `coffre login --service <name>
   --id-token`.
 
+### Issuers coffre cannot reach
+
+coffre fetches an issuer's keys from the URL its discovery document names:
+an `https` URL on a public host. An issuer on a private network, a
+Kubernetes cluster's say, has no such URL. Upload its public keys with the
+binding instead, a JWKS, `{ "keys": [ … ] }`:
+
+```sh
+coffre trust api-deploy --issuer https://kubernetes.default.svc.cluster.local --jwks-file cluster-jwks.json \
+  --claim sub=system:serviceaccount:ci:deploy --claim kubernetes.io.serviceaccount.uid=4f1c8d2a-… --apply
+```
+
+In the dialog, "Other issuer", the keys go under Keys. With keys uploaded:
+
+- **coffre fetches nothing**, when the binding is made or at any exchange.
+  The issuer is then any string, the token's `iss` exactly, whatever its
+  scheme, host or port. github.com's and gitlab.com's issuers are the
+  exception: they rotate their keys, so coffre always fetches theirs.
+- **The keys are checked when uploaded.** coffre keeps RSA keys of 2048 bits
+  or more, for RS256, and P-256 keys, for ES256, each with only the members
+  that verify. It leaves out keys for encryption. A private or secret key
+  refuses the whole set: coffre keeps nothing of the issuer's that is
+  secret. The binding shows each key by its `kid`, or its RFC 7638
+  thumbprint when it has none.
+- **A token lives an hour at most**, `exp` minus `iat`, besides being
+  issued at most an hour before it is exchanged and spent once, as every
+  token is. coffre cannot ask such an issuer whether a token still stands,
+  so the hour is what a copied token is good for.
+- **A claim may be nested**, named by its path, its keys joined by dots:
+  `kubernetes.io.serviceaccount.uid` is `uid` in `serviceaccount` in
+  `kubernetes.io`. A key may hold dots of its own, so a name matches only
+  when exactly one reading of it reaches a value in the token. This holds
+  for every binding, not only those with uploaded keys.
+- **The service's bindings on an issuer share their keys.** A binding with
+  other keys than the others on its issuer is refused. When the issuer
+  rotates, give them all the new keys at once:
+
+  ```sh
+  coffre trust api-deploy --issuer https://kubernetes.default.svc.cluster.local --replace-keys --jwks-file cluster-jwks.json --apply
+  ```
+
+  Each binding on the issuer is replaced by one that is the same except
+  for its keys, and the credentials the old one issued end. Upload a set
+  that holds the old key and the new while the issuer moves from one to the
+  other, and tokens signed by either sign in. In the pages: a binding's
+  Claims, Replace keys.
+
+[Kubernetes](kubernetes.md) walks through it for a cluster's pods, with
+the projected token and a key rotation.
+
 ## Several environments
 
 A deploy that needs two environments' secrets names both:

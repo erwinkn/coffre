@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decodeWorkloadToken, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
+import { decodeWorkloadToken, keySummaries, KeysInvalid, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -97,4 +97,72 @@ test('the shape is checked before anything is trusted', () => {
   }
   assert.throws(() => decodeWorkloadToken('a.b'), /not a compact JWS/);
   assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /longer than 8192 bytes/);
+});
+
+test('with a lifetime given, a token that lives longer, iat to exp, is refused, however recently issued', async () => {
+  const { jwk, sign } = await signer('RS256', 'k8s');
+  const within = { issuer: ISSUER, audience: AUDIENCE, now: NOW, maxLifetime: 3600 };
+  await verifyWorkloadToken(await sign({ iat: at(-10), exp: at(3590) }), { keys: [jwk] }, within);
+  await refused(verifyWorkloadToken(await sign({ iat: at(-10), exp: at(3591) }), { keys: [jwk] }, within), 'too_long');
+  // Without one, as for an issuer whose keys coffre fetches, only the age counts.
+  await verify(await sign({ iat: at(-10), exp: at(86_400) }), [jwk]);
+});
+
+test('an uploaded key set keeps the public keys that sign, written one way, and its digest names it', async () => {
+  const rsa = await signer('RS256', 'rs');
+  const ec = await signer('ES256', 'es');
+  const set = await uploadedKeys({ keys: [{ ...rsa.jwk, x5c: ['MIIB'] }, ec.jwk, { ...ec.jwk, kid: 'enc', use: 'enc' }] });
+  assert.deepEqual(set.keys.map(({ kid, alg }) => [kid, alg]).sort(), [['es', 'ES256'], ['rs', 'RS256']]);
+  assert.deepEqual(set.keys.map(({ thumbprint }) => thumbprint), set.keys.map(({ thumbprint }) => thumbprint).sort(), 'kept in the order of their thumbprints');
+  assert.match(set.digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(keySummaries(set.jwks), set.keys);
+  assert.ok((JSON.parse(set.jwks) as { keys: Record<string, unknown>[] }).keys.every((key) => key.x5c === undefined));
+  const reordered = await uploadedKeys({ keys: [Object.fromEntries(Object.entries(rsa.jwk).reverse()), ec.jwk] });
+  assert.equal(reordered.digest, set.digest);
+  // The thumbprint is RFC 7638's: the same as jose's.
+  const { calculateJwkThumbprint } = await import('jose');
+  assert.equal(set.keys.find(({ kid }) => kid === 'rs')!.thumbprint, await calculateJwkThumbprint(rsa.jwk));
+  // What it keeps verifies.
+  await verify(await rsa.sign({}), JSON.parse(set.jwks).keys);
+
+  const invalid = (value: unknown, message: RegExp) => assert.rejects(uploadedKeys(value), (error: unknown) => error instanceof KeysInvalid && message.test(error.message));
+  await invalid([rsa.jwk], /a JWKS/);
+  await invalid({ keys: [] }, /no key that signs/);
+  await invalid({ keys: Array.from({ length: 33 }, () => rsa.jwk) }, /at most 32/);
+  await invalid({ keys: [{ ...rsa.jwk, d: 'x' }] }, /private or a secret key/);
+  await invalid({ keys: [{ ...rsa.jwk, alg: 'RS512' }] }, /RS256 or a P-256 key/);
+  await invalid({ keys: [{ ...rsa.jwk, n: 'AQAB' }] }, /under 2048 bits/);
+  // 256 bytes, but its first holds a single bit: 2041 bits, which jose would refuse to verify with.
+  const short = Buffer.from(rsa.jwk.n!, 'base64url');
+  short[0] = 0x01;
+  await invalid({ keys: [{ ...rsa.jwk, n: short.toString('base64url') }] }, /under 2048 bits/);
+  await invalid({ keys: [{ ...ec.jwk, x: 'AQAB' }] }, /32 bytes/);
+  await invalid({ keys: [{ ...ec.jwk, x: Buffer.alloc(32, 1).toString('base64url') }] }, /not a valid EC key/);
+  await invalid({ keys: [rsa.jwk, { ...ec.jwk, kid: 'rs' }] }, /two keys are key rs/);
+  // RSA parameters jose would take, though they verify what nobody signed: an exponent of 1 makes a signature its own message.
+  for (const e of ['AQ', 'Aw', 'AQAA', 'AAEAAQ', 'AQAB=']) await invalid({ keys: [{ ...rsa.jwk, e }] }, /exponent|n and e/);
+  const even = Buffer.from(rsa.jwk.n!, 'base64url');
+  even[even.length - 1]! &= 0xfe;
+  await invalid({ keys: [{ ...rsa.jwk, n: even.toString('base64url') }] }, /not a valid RSA key/);
+  await invalid({ keys: [{ ...rsa.jwk, n: `AA${rsa.jwk.n}` }] }, /fewest bytes/);
+  // One set, however listed: one digest, two kids of one key included.
+  assert.equal((await uploadedKeys({ keys: [ec.jwk, rsa.jwk] })).digest, (await uploadedKeys({ keys: [rsa.jwk, ec.jwk] })).digest);
+  const twice = [{ ...rsa.jwk, kid: 'old' }, { ...rsa.jwk, kid: 'next' }];
+  assert.equal((await uploadedKeys({ keys: twice })).digest, (await uploadedKeys({ keys: twice.toReversed() })).digest);
+  // An EC coordinate in another spelling, its last character's unused bits set: refused, not another key.
+  const last = ec.jwk.x!.at(-1)!;
+  const respelled = `${ec.jwk.x!.slice(0, -1)}${'AEIMQUYcgkosw048'.includes(last) ? String.fromCharCode(last.charCodeAt(0) + 1) : last}`;
+  if (respelled !== ec.jwk.x) await invalid({ keys: [{ ...ec.jwk, x: respelled }] }, /32 bytes/);
+  await invalid({ keys: [{ ...ec.jwk, x: `${ec.jwk.x}AA` }] }, /32 bytes/);
+});
+
+test('a token that names no key verifies under whichever key of the set signed it, as while an issuer rotates', async () => {
+  const [old, next] = [await signer('RS256', 'old'), await signer('RS256', 'next')];
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const token = await next.sign({}, { kid: undefined });
+  const keys = [unnamed(old.jwk), unnamed(next.jwk)];
+  assert.equal((await verify(token, keys)).sub, 'repo:acme/api:ref:refs/heads/main');
+  await refused(verify(await (await signer('RS256', 'other')).sign({}, { kid: undefined }), keys), 'signature');
+  // Its claims are still checked, under the key that signed it.
+  await refused(verify(await next.sign({ aud: 'https://elsewhere.example' }, { kid: undefined }), keys), 'audience');
 });

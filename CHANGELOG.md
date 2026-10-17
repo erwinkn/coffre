@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Ask whether an environment changed without reading it.** `coffre version
+  market/prod`, or `GET /api/projects/market/prod/version`, answers a
+  version of what a read of it would open: a value written, a key added,
+  archived or renamed, a reference's source rotated and, in a fork,
+  anything it inherits change it; filing a key in a folder does not. It
+  reads no value, so it is not logged, and it takes what a read takes:
+  read on the environment, and on each parent a fork inherits from.
+- **`coffre export --output-file` and `--watch`.** `--output-file .env`
+  writes the export to a 0600 file, whole or not at all. `--watch` keeps it
+  current: it asks the version every minute (`--interval`, from 5s to
+  24h), reads only once it changed, rewrites the file only when its
+  contents change, then runs `--on-change '<command>'`. A failed round
+  keeps the file and waits twice as long each time, up to 15 minutes or
+  the interval, whichever is longer.
+- **A read of a whole environment answers its version.** `POST
+  /api/reveals` of `market/prod` answers the `version` of exactly what it
+  opened (null for one key's): a poller keeps that one, not the version it
+  asked before reading, since a change undone in between brings that back.
 - **`coffre run --keep-existing`.** `coffre run` still sets every key of the
   environments it names over a variable of the same name in your shell. With
   `--keep-existing`, a variable already set there keeps its value, an empty one
@@ -74,6 +92,32 @@
   `personal` and indexes the log's `token.create` entries by the credential
   they made. Nothing is removed or tightened, and 0.6 refuses a personal
   token during the deploy, as no token of its own.
+- **Trust bindings for issuers coffre cannot reach.** A binding may carry its
+  issuer's public keys, uploaded with it, instead of fetching them:
+  `coffre trust <service> --issuer <iss> --jwks-file <path> --claim …`, or
+  Keys under "Other issuer" in the Trust dialog. coffre then fetches nothing,
+  so the issuer is any string its tokens name, matched exactly: a private
+  Kubernetes cluster's, at a `.local` name or a private address, works.
+  The keys are checked when uploaded (RS256 of 2048 bits or more, ES256 on
+  P-256, public keys only), and are under the binding's MAC. Such a binding
+  refuses a token that lives over an hour, `exp` minus `iat` (`too_long`),
+  besides the age limit and single use every token keeps.
+- **Replacing keys when the issuer rotates them.** `coffre trust <service>
+  --issuer <iss> --replace-keys --jwks-file <path>`, or Replace keys under a
+  binding's Claims, gives every binding of the service on the issuer the
+  new keys. Each is replaced by one the same but for them, and the
+  credentials the old one issued end. A set that holds the old key and the
+  new takes tokens signed by either while the issuer moves over.
+- **Nested claims.** A binding names a claim nested in the token by its
+  path, as `kubernetes.io.serviceaccount.uid`, beside `sub` and the rest.
+  It matches only when the path reads one way in the token.
+- **Kubernetes.** [docs/kubernetes.md](docs/kubernetes.md) shows how a pod
+  signs in with a projected service-account token for coffre's audience:
+  the cluster's keys from `kubectl get --raw /openid/v1/jwks`, the account
+  pinned by its UID, and a rotation.
+- **Migration** `0006_uploaded_keys` adds `jwks` to `service_bindings`, a
+  nullable column the app inserts and never updates. 0.6 keeps serving on
+  it.
 
 ## 0.6.2 (2026-10-17)
 

@@ -10,6 +10,8 @@ import {
   bindingOf,
   EMPTY_FORM,
   githubTarget,
+  keySetOf,
+  keysOf,
   lookupable,
   listedIds,
   listingGap,
@@ -145,6 +147,15 @@ test('the GitLab form names the namespace and the project, and the other issuer 
   const other = bindingOf(form({ platform: 'other', issuer: 'https://accounts.google.com', sub: '104', extra: 'email_verified=true\n\n  hd = acme.example ' }));
   assert.deepEqual(other, { profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104', email_verified: 'true', hd: 'acme.example' } });
   assert.throws(() => bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', sub: 'x', extra: 'oops' })), /"oops" is not <claim>=<value>/);
+
+  // A private cluster's keys, pasted: sent with it, for the server to check.
+  const cluster = 'https://kubernetes.default.svc.cluster.local';
+  const keys = { keys: [{ kty: 'RSA', kid: 'k8s', n: 'AQAB', e: 'AQAB' }] };
+  const pasted = bindingOf(form({ platform: 'other', issuer: cluster, sub: 'system:serviceaccount:ci:deploy', extra: 'kubernetes.io.serviceaccount.uid=4f1c', jwks: JSON.stringify(keys) }));
+  assert.deepEqual(pasted, { profile: 'custom', issuer: cluster, claims: { sub: 'system:serviceaccount:ci:deploy', 'kubernetes.io.serviceaccount.uid': '4f1c' }, jwks: keys });
+  assert.throws(() => bindingOf(form({ platform: 'other', issuer: cluster, sub: 'x', jwks: '{ keys' })), /not JSON/);
+  assert.throws(() => bindingOf(form({ platform: 'other', issuer: cluster, sub: 'x', jwks: '{"kty":"RSA"}' })), /a key set/);
+  assert.equal(keySetOf('  '), undefined);
 });
 
 test('a binding reads in a line: what it trusts, and at which ref', () => {
@@ -170,6 +181,10 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
     { title: 'GitLab project 345', detail: 'push at tag v1' },
   );
   assert.deepEqual(summary({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104' } }), { title: 'accounts.google.com', detail: 'sub 104' });
+  // A binding that carries its keys may name any issuer, a URL or not.
+  assert.deepEqual(summary({ profile: 'custom', issuer: 'kapsule:fr-par', claims: { sub: 'x' } }), { title: 'kapsule:fr-par', detail: 'sub x' });
+  assert.equal(keysOf({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');
+  assert.equal(keysOf({ jwksUri: 'sha256:00', keys: [{ kid: 'k8s', alg: 'RS256', thumbprint: 't1' }, { kid: null, alg: 'ES256', thumbprint: 't2' }] }), 'Uploaded: k8s (RS256), t2 (ES256)');
 });
 
 test("the Trust dialog leaves a binding's scope to the server until the person chooses: one that replaces others reaches what they did, and the picker says so", () => {

@@ -3,10 +3,11 @@
  * their platform signs for them (docs/design/oidc.md).
  *
  * A binding names a profile, an issuer, and claims a token must carry, each
- * a top-level string matched exactly. The event that started the run may
- * be any of several: a list. The profile sets the minimum: the server
- * refuses a binding that lacks a claim its profile requires, from the UI,
- * the CLI or the API alike. Say a service is bound to `ci.yml` of
+ * a string matched exactly, at the top of the token or nested in it
+ * (`claimAt`). The event that started the run may be any of several: a
+ * list. The profile sets the minimum: the server refuses a binding that
+ * lacks a claim its profile requires, from the UI, the CLI or the API
+ * alike. Say a service is bound to `ci.yml` of
  * `acme/api`, pushed or dispatched on `main`, or run for a pull request
  * into `main`:
  *
@@ -124,7 +125,12 @@ const ENVIRONMENT = /^(?! )[^\p{Cc}]{1,255}(?<! )$/u;
 export type ClaimValue = string | string[];
 export type BindingClaims = Record<string, ClaimValue>;
 
-/** What makes a binding, checked: its profile, its issuer as a URL, and its claims, sorted. */
+/**
+ * What makes a binding, checked: its profile, its issuer, and its claims,
+ * sorted. The issuer is a URL coffre may fetch, unless the binding carries
+ * its keys (`uploaded`): then coffre fetches nothing, and it is any string,
+ * matched exactly, such as a private Kubernetes cluster's.
+ */
 export type BindingPolicy = { profile: WorkloadProfile; issuer: string; claims: BindingClaims };
 
 /** A binding that breaks a rule, said so an owner can fix it. */
@@ -148,13 +154,18 @@ export function defaultIssuer(profile: WorkloadProfile): string | null {
   return profile === 'custom' ? null : GITHUB_ISSUER;
 }
 
+/** The longest issuer a binding with uploaded keys names, in bytes. */
+export const MAX_ISSUER_BYTES = 400;
+
 /**
  * Check a binding against its profile, and return it as stored: the
- * issuer as given, the claims sorted by name. Throws `BindingInvalid`.
+ * issuer as given, the claims sorted by name. With `uploaded`, the binding
+ * carries its issuer's keys, and its issuer need not be a URL coffre can
+ * fetch. Throws `BindingInvalid`.
  */
 export function checkBinding(
   input: { profile: string; issuer: string | null; claims: Record<string, unknown> },
-  options: { allowLoopback?: boolean } = {},
+  options: { allowLoopback?: boolean; uploaded?: boolean } = {},
 ): BindingPolicy {
   const profile = input.profile as WorkloadProfile;
   if (!WORKLOAD_PROFILES.includes(profile)) {
@@ -162,7 +173,8 @@ export function checkBinding(
   }
   const issuer = input.issuer ?? defaultIssuer(profile);
   if (issuer === null) throw new BindingInvalid('a custom binding names its issuer');
-  checkFetchUrl(issuer, 'the issuer', { allowLoopback: options.allowLoopback, path: true, query: false });
+  if (options.uploaded === true) checkIssuerName(issuer);
+  else checkFetchUrl(issuer, 'the issuer', { allowLoopback: options.allowLoopback, path: true, query: false });
   const forced = forcedProfiles(issuer);
   if (forced !== null && !forced.includes(profile)) {
     throw new BindingInvalid(`${issuer} signs only for the ${forced[0]} profile${forced.length > 1 ? 's' : ''}`);
@@ -202,6 +214,22 @@ export function checkBinding(
   if (profile.startsWith('github')) checkGitHub(profile, claims);
   if (profile === 'gitlab') checkGitLab(claims);
   return { profile, issuer, claims };
+}
+
+/**
+ * An issuer whose keys a binding carries: any string a token's `iss` can
+ * be, matched exactly, so none with a control character or a space at
+ * either end. Never github.com's or gitlab.com's, whose keys change when
+ * they rotate them: coffre fetches those.
+ */
+function checkIssuerName(issuer: string): void {
+  if (issuer === '' || /^\s|\s$/.test(issuer) || /\p{Cc}/u.test(issuer)) {
+    throw new BindingInvalid('the issuer is its tokens\' iss, exactly: no control character, no space at either end');
+  }
+  if (new TextEncoder().encode(issuer).length > MAX_ISSUER_BYTES) throw new BindingInvalid(`the issuer is longer than ${MAX_ISSUER_BYTES} bytes`);
+  if (issuer === GITHUB_ISSUER || issuer === GITLAB_ISSUER) {
+    throw new BindingInvalid(`${issuer} publishes its keys and rotates them: coffre fetches them, so upload none`);
+  }
 }
 
 /** A claim's values, one or several. */
@@ -259,9 +287,45 @@ function checkGitLab(claims: BindingClaims): void {
 }
 
 /**
+ * A claim of a token, by the name a binding gives it: a top-level claim, or
+ * one nested in objects, its path joined by dots. A key may hold dots of
+ * its own, as Kubernetes' `kubernetes.io` does, so a name is read every way
+ * its dots can split it, and names a claim only when exactly one of those
+ * readings reaches a value; none, or several, and it names nothing. In
+ *
+ *   { "sub": "system:serviceaccount:ci:deploy",
+ *     "kubernetes.io": { "namespace": "ci", "serviceaccount": { "name": "deploy", "uid": "4f1c…" } } }
+ *
+ * `kubernetes.io.serviceaccount.uid` is `4f1c…`, `kubernetes.io` an object,
+ * and `kubernetes.io.pod` nothing.
+ */
+export function claimAt(claims: Record<string, unknown>, name: string): unknown {
+  const parts = name.split('.');
+  let found: unknown;
+  let readings = 0;
+  // Each step takes one key, of one or more parts, from the object it is in; stops once a second reading shows.
+  const walk = (at: unknown, from: number): void => {
+    if (readings > 1) return;
+    if (from === parts.length) {
+      found = at;
+      readings++;
+      return;
+    }
+    if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
+    for (let to = from + 1; to <= parts.length; to++) {
+      const key = parts.slice(from, to).join('.');
+      if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
+    }
+  };
+  walk(claims, 0);
+  return readings === 1 ? found : undefined;
+}
+
+/**
  * The claims of a verified token that differ from what a binding expects,
  * by name: none when it matches. A claim matches when the token carries its
- * value, or one of its values. On GitHub's profiles, two readings:
+ * value, or one of its values, where `claimAt` reads it. On GitHub's
+ * profiles, two readings:
  *
  * - A `pull_request` run, at `refs/pull/<n>/merge`, counts as a run at the
  *   branch it merges into: its `ref`, and the ref its `workflow_ref` ends
@@ -275,7 +339,7 @@ export function differingClaims(profile: WorkloadProfile, expected: BindingClaim
   const claims = github ? atBaseBranch(token) : token;
   return Object.entries(expected)
     .filter(([name, value]) => {
-      const actual = claims[name];
+      const actual = claimAt(claims, name);
       if (typeof actual !== 'string') return true;
       if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
       return !claimValues(value).includes(actual);

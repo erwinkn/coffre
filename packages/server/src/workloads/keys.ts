@@ -1,4 +1,4 @@
-import { verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from '@coffre/core/identity';
+import { MAX_KEYS, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from '@coffre/core/identity';
 
 import { FetchRefused, type WorkloadTransport } from './transport.ts';
 
@@ -15,9 +15,8 @@ type Entry = { keys: JSONWebKeySet | null; fetchedAt: number; failedAt: number |
 export const KEYS_FRESH_MS = 10 * 60 * 1000;
 /** After a failed fetch, or a key the set lacks, this long before that URL is fetched again. */
 export const KEYS_COOLDOWN_MS = 60 * 1000;
-/** At most this many key sets, and keys in each. */
+/** At most this many key sets, and `MAX_KEYS` keys in each. */
 export const MAX_KEY_SETS = 64;
-export const MAX_KEYS = 32;
 
 const entries = new Map<string, Entry>();
 

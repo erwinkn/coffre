@@ -396,6 +396,7 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      version: string | null;
     };
   };
   "GET /members": {
@@ -719,6 +720,11 @@ export type Api = {
         profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
         issuer: string;
         jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
         claims: {
           [key: string]: string | string[];
         };
@@ -744,11 +750,21 @@ export type Api = {
       };
       label?: string | null;
       replaces?: string[];
+      jwks?: {
+        keys: {
+          [key: string]: unknown;
+        }[];
+      };
     };
     output: {
       profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
       issuer: string;
       jwksUri: string;
+      keys: null | {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
       claims: {
         [key: string]: string | string[];
       };
@@ -765,6 +781,11 @@ export type Api = {
         profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
         issuer: string;
         jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
         claims: {
           [key: string]: string | string[];
         };
@@ -1224,6 +1245,55 @@ export type Api = {
       app: null;
     };
   };
+  "GET /projects/:project/:environment/version": {
+    input: undefined;
+    output: {
+      version: string;
+    };
+  };
+  "POST /members/:member/bindings/keys": {
+    input: {
+      issuer: string;
+      jwks: {
+        keys: {
+          [key: string]: unknown;
+        }[];
+      };
+    };
+    output: {
+      issuer: string;
+      jwksUri: string;
+      keys: {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
+      replaces: string[];
+    } | {
+      bindings: {
+        id: string;
+        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        issuer: string;
+        jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
+        claims: {
+          [key: string]: string | string[];
+        };
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
+        label: string | null;
+        createdAt: string;
+        createdBy: string;
+        lastUsedAt: string | null;
+      }[];
+      replaced: string[];
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
@@ -1344,6 +1414,11 @@ export type BindingPlan = {
   profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
   issuer: string;
   jwksUri: string;
+  keys: null | {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
   claims: {
     [key: string]: string | string[];
   };
@@ -1361,6 +1436,11 @@ export type BindingView = {
   profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
   issuer: string;
   jwksUri: string;
+  keys: null | {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
   claims: {
     [key: string]: string | string[];
   };
@@ -1383,6 +1463,17 @@ export type ConnectedApp = {
   lastUsedAt: string | null;
   lastUsedIp: string | null;
   expiresAt: string;
+};
+
+export type KeysPlan = {
+  issuer: string;
+  jwksUri: string;
+  keys: {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
+  replaces: string[];
 };
 
 export type Deletion = {

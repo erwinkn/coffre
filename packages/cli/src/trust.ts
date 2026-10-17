@@ -9,7 +9,7 @@
  * not given, and shows what the server would save: the claims in full, the
  * issuer and the keys it names. `--apply` saves it.
  */
-import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView, type WorkloadIds } from '@coffre/client';
+import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView, type KeysPlan, type WorkloadIds } from '@coffre/client';
 import { credentialScopeInWords, isRole, type Role } from '@coffre/core/access';
 import {
   claimValues,
@@ -62,6 +62,8 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
        coffre trust <service> --gitlab <group>/<project> (--branch <b> | --tag <t>)
                     [--source push,web,schedule] [--gitlab-url <url>]
        coffre trust <service> --issuer <url> --claim sub=<subject> [--claim <name>=<value> …]
+       coffre trust <service> --issuer <iss> --jwks-file <path> --claim sub=<subject> [--claim …]
+       coffre trust <service> --issuer <iss> --replace-keys --jwks-file <path>
          IDs, when the lookup cannot see a private repository, owner or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
          [--scope <path>=<role>,…] [--label <text>] [--replace <binding-id>] [--apply]
@@ -71,6 +73,12 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
          by the branch it merges into
          --github-environment takes only the jobs that run in that GitHub environment, under its
          protection rules
+         --claim names a nested claim by its path: kubernetes.io.serviceaccount.uid=<uid>
+         --jwks-file uploads the issuer's public keys, a JWKS, for an issuer coffre cannot fetch them
+         from, such as a private Kubernetes cluster's (kubectl get --raw /openid/v1/jwks): then
+         --issuer is any string its tokens name, and coffre asks it nothing
+         --replace-keys gives every binding of the service on --issuer the keys of --jwks-file, as
+         when the issuer rotates its keys: a set that holds the old and the new takes tokens of both
        coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it
 A service account, service:<name>, signs in by OIDC this way, its CI's ID token matched by a trust
 binding, with no stored secret; or, for CI without OIDC, with a bearer token: coffre tokens issue <service>.`;
@@ -249,11 +257,55 @@ function custom(flags: TrustFlags): BindingRequest {
   return { profile: 'custom', issuer: flags.issuer!, claims };
 }
 
+/**
+ * The JWKS `--jwks-file` holds, as the API takes it; the server checks each
+ * key. Throws a sentence.
+ */
+export function keySetFrom(text: string, path: string): { keys: Record<string, unknown>[] } {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error(`${path} is not JSON: --jwks-file takes the issuer's key set, { "keys": [ … ] }`);
+  }
+  const keys = (value as { keys?: unknown } | null)?.keys;
+  if (!Array.isArray(keys)) throw new Error(`${path} is no key set: --jwks-file takes { "keys": [ … ] }, as kubectl get --raw /openid/v1/jwks prints it`);
+  return { keys: keys as Record<string, unknown>[] };
+}
+
+/** Where a binding's keys come from: the URL coffre fetches them from, or those uploaded with it, by `kid` (or thumbprint) and algorithm. */
+export function keysLine(binding: Pick<BindingPlan, 'jwksUri' | 'keys'>): string {
+  // A server before 0.7 says nothing of uploaded keys.
+  if (binding.keys == null) return binding.jwksUri;
+  return `uploaded: ${binding.keys.map((key) => `${key.kid ?? `thumbprint ${key.thumbprint}`} (${key.alg})`).join(', ')}`;
+}
+
 /** A binding, or a plan for one, as lines: what it trusts, every claim in full. */
-export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'claims'> & { scope: BindingPlan['scope'] | null }): string[] {
+export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'keys' | 'claims'> & { scope: BindingPlan['scope'] | null }): string[] {
   const width = Math.max(0, ...Object.keys(binding.claims).map((name) => name.length));
   const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? 'claims ' : '       '}  ${name.padEnd(width)}  ${claimValues(value).join(', ')}`);
-  return [`  profile  ${binding.profile}`, `  issuer   ${binding.issuer}`, `  keys     ${binding.jwksUri}`, ...claims, `  reaches  ${reaches(binding.scope)}`];
+  return [`  profile  ${binding.profile}`, `  issuer   ${binding.issuer}`, `  keys     ${keysLine(binding)}`, ...claims, `  reaches  ${reaches(binding.scope)}`];
+}
+
+/**
+ * What `coffre trust --replace-keys` would do, or did: the keys, and each
+ * binding on the issuer a new one replaces, as the server planned it or, once
+ * saved, as it answered, whatever changed between the two.
+ */
+export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: BindingView[]; replaced: string[] } | null): string {
+  const replaced = saved?.replaced ?? plan.replaces;
+  const count = replaced.length === 1 ? 'binding' : `${replaced.length} bindings`;
+  const lines = [
+    saved === null
+      ? `Would give ${shownMember(member)}'s ${count} on ${plan.issuer} these keys, each replaced by a binding the same but for them:`
+      : `Gave ${shownMember(member)}'s ${count} on ${plan.issuer} these keys:`,
+    `  keys     ${keysLine(plan)}`,
+    ...replaced.map((id, i) => (saved === null ? `  replaces ${id}` : `  ${saved.bindings[i]!.id} replaces ${id}`)),
+    saved === null
+      ? 'Credentials those bindings issued, five minutes each at most, would end at once.'
+      : 'Credentials the bindings replaced issued have ended.',
+  ];
+  return `${lines.join('\n')}\n`;
 }
 
 export function describePlan(member: string, plan: BindingPlan, applied: BindingView | null): string {
