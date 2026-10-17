@@ -106,10 +106,19 @@ also hides the parent's K. One fact, one record. Restoring the dismissal
 brings the inherited value back. A live row of the fork's own beats its
 dismissal, so writing a removed key gives it a value. Two records, the
 row and the dismissal, now describe one key, so one rule keeps them
-apart: every write to a fork's key ends its removal, in the write's own
-transaction, through one function (`endRemovals`) that each write calls
-(a value, a reference, a restored version). A later reset then lands on
-the parent's value, not on "removed".
+apart: whatever makes a fork's row live ends its key's removal, in the
+same transaction, through one function, `endRemovals`. A row becomes live
+in exactly four places, and each calls it: a write (a value or a
+reference), a restored version, an unarchive, and a rename onto the key.
+A later reset then lands on the parent's value, not on "removed".
+
+This is the design's one sharp edge. Reviewers found the missing call
+four times, a different path each time, before the list above was
+checked to be complete. A future fifth path has to call `endRemovals`
+too. The alternative is a removed state on the fork's own row, one record
+per key. It needs a new column, and every write path would have to clear
+it, so it has the same edge with no reuse. I kept dismissals, and a test
+per path.
 
 ### A personal config is a fork with an owner
 
@@ -200,8 +209,12 @@ override and prod's `STRIPE_SECRET_KEY` side by side: EU would quietly run
 on the US key. So a rename in a parent renames the same key's overrides
 and removals in every fork below it, in the same transaction, logging a
 `secret.rename` in each fork, personal configs included. A rename moves no
-value, so the renamer needs no access to the forks. If a fork already
-holds `STRIPE_SECRET_KEY`, the rename is refused and names that fork.
+value, so the renamer needs no access to the forks. If a shared fork
+already holds `STRIPE_SECRET_KEY`, the rename is refused and names that
+fork. A personal config is never named to anyone but its owner: there,
+the colliding key of its own is renamed out of the way
+(`STRIPE_SECRET_KEY_2`), the cascade goes through, and its owner is told
+on their next read and in their config's log.
 
 **A key moves to a folder.** Folders are per environment. A key the
 parent holds is shown in the parent's folder wherever it's inherited or
@@ -328,8 +341,9 @@ The audit page words it "cy read market/prod/STRIPE_KEY in
 market/prod-eu". `through` is the app's word, checked by the vault to be
 a live environment of the same project, other than the value's own. It's
 checked once, not again under the log's head as grants are, because it
-decides nothing: the worst a lying app does is file a read in the wrong
-fork's log, and only one it could already read. One gap remains. A read
+decides nothing: the vault doesn't ask whether the reader reads the fork
+it names. The worst a lying app does is file a read under another live
+environment of the same project, a read the reader was allowed anyway. One gap remains. A read
 of a reference that the fork inherits has three places (the source, the
 holder prod, the fork) and `also` names one, so it goes to the fork, and
 prod's log misses that read. That's acceptable for now. A list-valued

@@ -185,7 +185,9 @@ async function appendVersion(
 /**
  * A fork's keys that got a value or a reference of their own, which are
  * no longer removed: reset later, each inherits again (docs/design/forking.md).
- * Every write to a fork's key ends its removal here, under the head.
+ * A row becomes live in four places, each of which ends its key's removal
+ * here, under the head: a write (`setSecrets`), a restored version
+ * (`restoreVersion`), an unarchive and a rename onto the key (`patchSecret`).
  */
 async function endRemovals(
   ctx: ApiContext,
@@ -194,7 +196,7 @@ async function endRemovals(
   place: ResolvedPath,
   environment: Environment,
   keys: readonly string[],
-  operationId: string,
+  operationId: string | null,
 ): Promise<void> {
   if (place.environment!.parentId === null || keys.length === 0) return;
   const removed = new Set((await dismissalsIn(tx, environment.environmentId)).map((row) => row.key));
@@ -624,6 +626,8 @@ export async function patchSecret(
       }));
     }
     if (renaming) log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
+    // Live under its key again, or under a new one: in a fork, no longer removed.
+    if (!archived && (archiving || renaming)) await endRemovals(ctx, tx, log, place, environment, [renaming ? nextKey : secret.key], null);
     if (moving) {
       await fileSecrets(tx, [{ secretId: secret.id, folder }]);
       log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));

@@ -377,3 +377,16 @@ test('a reset key written again as the same reference, or previewed, overrides a
   const read = await values(root, 'market/prod-eu');
   assert.deepEqual([read.STRIPE_KEY, read.DATABASE_URL], ['billing-secret', 'postgres://eu']);
 });
+
+test('an override unarchived, or renamed onto a removed key, ends its removal as a write does', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu', EU_TOKEN: 'token' });
+  await root.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  await maintainer.environments.dismiss('market/prod-eu', { STRIPE_KEY: true, SENTRY_DSN: true });
+  await root.secrets.update('market/prod-eu/STRIPE_KEY', { archived: false });
+  await root.secrets.update('market/prod-eu/EU_TOKEN', { key: 'SENTRY_DSN' });
+  await root.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  await root.secrets.update('market/prod-eu/SENTRY_DSN', { archived: true });
+  const read = await values(maintainer, 'market/prod-eu');
+  assert.deepEqual([read.STRIPE_KEY, read.SENTRY_DSN], ['sk_live_1', 'https://sentry/prod']);
+});
