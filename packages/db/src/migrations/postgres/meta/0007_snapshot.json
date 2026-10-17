@@ -1,5 +1,5 @@
 {
-  "id": "bd9c13a6-1eae-42aa-a47f-9372e729a953",
+  "id": "db1e9c50-fd1c-4585-9491-7c2ff99b0644",
   "prevId": "b12cae6b-5c5d-421f-b58f-5d0fc48945a8",
   "version": "7",
   "dialect": "postgresql",
@@ -1153,9 +1153,37 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "owner": {
+          "name": "owner",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
+        "environments_parent_id_owner_key": {
+          "name": "environments_parent_id_owner_key",
+          "columns": [
+            {
+              "expression": "parent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "strpos(\"environments\".\"slug\", '~') = 0",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "environments_parent_idx": {
           "name": "environments_parent_idx",
           "columns": [
@@ -1230,6 +1258,10 @@
         "environments_parent_check": {
           "name": "environments_parent_check",
           "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
+        },
+        "environments_owner_check": {
+          "name": "environments_owner_check",
+          "value": "\"environments\".\"owner\" IS NULL OR (\"environments\".\"parent_id\" IS NOT NULL AND \"environments\".\"owner\" LIKE 'user:_%')"
         }
       },
       "isRLSEnabled": false
@@ -2202,24 +2234,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "recipe": {
-          "name": "recipe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pair_id": {
-          "name": "pair_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pair_half": {
-          "name": "pair_half",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {

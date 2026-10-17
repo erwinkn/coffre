@@ -407,7 +407,8 @@ function EditAccess({
   const rows = access.map(({ project, grants }) => {
     const environments = project.environments
       .filter(
-        (environment) => environment.details !== null && environment.details.archivedAt === null,
+        // Your personal config takes no grant: it is no place to give access to.
+        (environment) => environment.details !== null && environment.details.archivedAt === null && !environment.personal,
       )
       .map((environment) => environment.slug);
     const held = planFromGrants(grants, environments);

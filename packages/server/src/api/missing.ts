@@ -44,8 +44,9 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
   const here = live(place);
   const project = (await places(ctx.db)).find((each) => each.id === here.projectId)!;
   const below = forksBelow(project.environments, here.environmentId);
+  // Personal configs are nobody's siblings: theirs are no team's keys, and nobody else may learn what they hold.
   const others = project.environments.filter((environment) =>
-    environment.id !== here.environmentId && environment.archivedAt === null && !below.has(environment.id));
+    environment.id !== here.environmentId && environment.archivedAt === null && !below.has(environment.id) && environment.owner === null);
   const ids = project.environments.map((environment) => environment.id);
   const [present, liveKeys, removed, dismissals] = await Promise.all([
     environmentSecrets(ctx.db, here.environmentId),

@@ -57,6 +57,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /projects/:project/:environment/missing': {
     ui: [{ does: "an environment: the keys its siblings have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
   },
+  'GET /personal/:project': {
+    ui: [{ does: "a project › Environments › Personal configs: whose, of what, and their key names", in: 'pages/project-environments.tsx', call: 'environments.personal' }],
+  },
   'GET /projects/:project/:environment/version': {
     not: 'for programs that poll an environment before reading it, `coffre export --watch` first; a page has its listing, which it reloads',
   },

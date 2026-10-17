@@ -98,11 +98,11 @@ export async function inheritedRows(
  * not, nearest first: those a rename in it carries down to. Deleted ones
  * name no parent a rename could reach.
  */
-export async function descendantsOf(db: Queryable, environmentId: string): Promise<{ id: string; slug: string }[]> {
-  const found: { id: string; slug: string }[] = [];
+export async function descendantsOf(db: Queryable, environmentId: string): Promise<{ id: string; slug: string; owner: string | null }[]> {
+  const found: { id: string; slug: string; owner: string | null }[] = [];
   let level = [environmentId];
   for (let depth = 0; depth < MAX_PARENTS && level.length > 0; depth++) {
-    const next: { id: string; slug: string }[] = [];
+    const next: { id: string; slug: string; owner: string | null }[] = [];
     for (const id of level) next.push(...(await forksOf(db, id, { archived: true })));
     found.push(...next);
     level = next.map((fork) => fork.id);

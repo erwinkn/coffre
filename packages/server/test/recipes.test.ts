@@ -223,6 +223,21 @@ test("a parent's key renamed while a fork's regenerate of it is wrapped: checked
   assert.deepEqual(forked, [['JWT_PUBLIC_KEY', 'inherited'], ['SIGNING_KEY', 'inherited']]);
 });
 
+test("in a personal config, regenerating a key it reads from its environment writes the owner's own, never the environment's", async () => {
+  await root.secrets.set('market/dev', pairWrite());
+  const devBefore = (await root.secrets.list('market/dev')).keys.map(({ key, versionId }) => [key, versionId]);
+  // With no personal config yet, market/dev@me lists dev's own keys; the write makes one.
+  const regenerate = await regenerateOf('market/dev@me', ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY']);
+  assert.deepEqual((await regenerate.send()).keys, { JWT_PRIVATE_KEY: { version: 1 }, JWT_PUBLIC_KEY: { version: 1 } });
+  const mine = await root.secrets.list('market/dev@me');
+  assert.equal(mine.personal?.fallback, false);
+  assert.deepEqual(mine.keys.map(({ key, generated, parent }) => [key, generated, parent?.state]), [
+    ['JWT_PRIVATE_KEY', PAIR, 'overridden'],
+    ['JWT_PUBLIC_KEY', PAIR, 'overridden'],
+  ]);
+  assert.deepEqual((await root.secrets.list('market/dev')).keys.map(({ key, versionId }) => [key, versionId]), devBefore);
+});
+
 test('a recipe the database holds and no client could send makes no Regenerate', async () => {
   await root.secrets.set('market/dev', { TOKEN: { value: 'v', generated: { recipe: 'bytes:32' } } });
   // As the owner, with the erase-only guard lifted, as only someone around coffre could.

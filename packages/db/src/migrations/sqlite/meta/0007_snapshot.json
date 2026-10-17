@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "3c45be13-adbb-442e-bc3b-c0e82dfb7ea1",
+  "id": "e5d453e7-0e30-4d73-9725-d9165b41c23d",
   "prevId": "cd03b404-468a-4420-a828-b6a3e9d3f5a0",
   "tables": {
     "audit_chain_head": {
@@ -955,9 +955,25 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "owner": {
+          "name": "owner",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
+        "environments_parent_id_owner_key": {
+          "name": "environments_parent_id_owner_key",
+          "columns": [
+            "parent_id",
+            "owner"
+          ],
+          "isUnique": true,
+          "where": "instr(\"environments\".\"slug\", '~') = 0"
+        },
         "environments_parent_idx": {
           "name": "environments_parent_idx",
           "columns": [
@@ -1022,6 +1038,10 @@
         "environments_parent_check": {
           "name": "environments_parent_check",
           "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
+        },
+        "environments_owner_check": {
+          "name": "environments_owner_check",
+          "value": "\"environments\".\"owner\" IS NULL OR (\"environments\".\"parent_id\" IS NOT NULL AND \"environments\".\"owner\" LIKE 'user:_%')"
         }
       }
     },
@@ -1939,27 +1959,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "recipe": {
-          "name": "recipe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "pair_id": {
-          "name": "pair_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "pair_half": {
-          "name": "pair_half",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         }
       },

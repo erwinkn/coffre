@@ -19,6 +19,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'PATCH /projects/:project/:environment': 'write',
   'DELETE /projects/:project/:environment': null,
   'GET /projects/:project/:environment/missing': 'read',
+  'GET /personal/:project': 'read',
   'GET /projects/:project/:environment/version': 'read',
   'PATCH /projects/:project/:environment/dismissals': 'write',
   'GET /secrets/:project/:environment': 'read',

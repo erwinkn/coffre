@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { PersonalConfig } from '@coffre/client';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -6,14 +7,16 @@ import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
 import { archiveEnvironment, createEnvironment, environmentId, renameEnvironment } from '../lib/changes';
-import { keys, queries } from '../lib/queries';
+import { affects, keys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import { ArchiveBlocked, archiveBlockers } from '../components/references';
 import { hasEnvironmentDetails, isActiveAccessibleEnvironment, type ProjectEnvironment } from '../lib/project-environments';
 import { environmentSlugProblem } from '../lib/validation';
-import { ConfirmDialog, EmptyState, MenuPopup, Modal, Notice, Timestamp } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorLine, MenuPopup, Modal, Notice, Timestamp } from '../components/ui';
+import { Card } from '../components/page';
+import { useAction } from '../lib/use-action';
 import { DeletePlaceDialog } from '../components/delete-place';
 import { PrincipalAvatar } from '../components/principal';
 import { Archive, ChevronRight, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
@@ -103,10 +106,13 @@ function EnvironmentsPanel({
         <div className="table-actions">
           <NewEnvironment
             project={project.slug}
-            sources={current.filter(isActiveAccessibleEnvironment).map((environment) => environment.slug)}
+            // Your personal config is nobody's source: its values are yours alone.
+            sources={current.filter((environment) => isActiveAccessibleEnvironment(environment) && !environment.personal).map((environment) => environment.slug)}
           />
         </div>
       )}
+
+      {canManage && <PersonalConfigs project={project.slug} />}
 
       {archived.length > 0 && (
         <section aria-labelledby="archived-environments">
@@ -200,7 +206,8 @@ function EnvironmentCard({
   const deletable = manageable && isArchived && capabilities.runsInstance;
   const slugError = slug === '' ? null : environmentSlugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
-  const holders = holdersOf(grants, environment.slug);
+  // A personal config is its owner's alone: no grant reaches it, so none is shown on its card.
+  const holders = environment.personal === true ? [] : holdersOf(grants, environment.slug);
   // Scopes match environments by slug: a new one is said to move them before the rename is saved.
   const reslugged = slug !== environment.slug && slug !== '' && slugError === null;
 
@@ -222,7 +229,9 @@ function EnvironmentCard({
             <span className="env-card-name">{environment.slug}</span>
           )}
           {/* A fork: its keys are its parent's, but for those it sets or removes. An instance before 0.7 says nothing. */}
-          {environment.parent != null && <span className="tag tag-outline">inherits {environment.parent}</span>}
+          {environment.personal === true
+            ? <span className="tag tag-blue">yours alone</span>
+            : environment.parent != null && <span className="tag tag-outline">inherits {environment.parent}</span>}
         </span>
 
         {isArchived ? (
@@ -272,7 +281,8 @@ function EnvironmentCard({
 
       {pending && <RowPending status={state} />}
 
-      {manageable && !pending && (
+      {/* Your personal config is deleted from its own page; it is no environment of the team's to rename or archive. */}
+      {manageable && !pending && environment.personal !== true && (
         <Menu.Root>
           <Menu.Trigger
             className="act act-quiet env-card-menu"
@@ -427,6 +437,59 @@ function EnvironmentCard({
         onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
       />
     </div>
+  );
+}
+
+/**
+ * The project's personal configs, `dev@me` (docs/design/forking.md), for
+ * whoever manages its environments: that they exist, whose, of what, and
+ * their key names, never a value, which only their owners read. Delete is
+ * how offboarding cleans one up: its values are erased.
+ */
+function PersonalConfigs({ project }: { project: string }) {
+  const coffre = useCoffre();
+  const { data } = useQuery(queries.personal(coffre, project));
+  const [deleting, setDeleting] = useState<PersonalConfig | null>(null);
+  const { error, run } = useAction();
+  if (data === undefined || !data.ok || data.configs.length === 0) return null;
+  return (
+    <Card
+      labelledBy="personal-configs"
+      title="Personal configs"
+      description="Members' own forks of an environment, its keys and their values over it. Only their owner reads the values; you see whose they are and their key names."
+    >
+      {error !== null && <ErrorLine error={error} />}
+      {data.configs.map((config) => (
+        <div className="card-row" key={config.slug}>
+          <div>
+            <p className="card-row-title">
+              <span className="mono">{config.of}</span> · {config.owner.replace(/^user:/, '')}
+              {config.archived && <span className="tag tag-outline">archived</span>}
+            </p>
+            <p className="card-row-desc mono">{config.keys.length === 0 ? 'no keys of its own' : config.keys.join(', ')}</p>
+          </div>
+          <button type="button" className="btn btn-sm" onClick={() => setDeleting(config)}>
+            <Trash size={14} />
+            Delete…
+          </button>
+        </div>
+      ))}
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        title={<>Delete {deleting?.owner.replace(/^user:/, '')}'s <span className="mono">{deleting?.of}</span>?</>}
+        body={`Its ${deleting?.keys.length ?? 0} ${deleting?.keys.length === 1 ? 'value is' : 'values are'} erased for good; ${project}/${deleting?.of} itself is untouched.`}
+        confirmLabel="Delete"
+        onConfirm={() => {
+          const doomed = deleting!;
+          void run(() => coffre.environments.delete(`${project}/${doomed.slug}`), {
+            // The list, and the owner's own `dev@me` when it is theirs: its card and its keys go.
+            affects: [...affects.places(), ...affects.secrets({ project, environment: `${doomed.of}@me` })],
+            onSuccess: () => toast.success(`Deleted ${doomed.owner.replace(/^user:/, '')}'s ${doomed.of}`),
+          });
+        }}
+      />
+    </Card>
   );
 }
 

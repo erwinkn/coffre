@@ -109,6 +109,19 @@ function kms(fake: ReturnType<typeof fakeKms>, options: Partial<AwsKmsOptions> =
   return awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: fake.fetch, ...options });
 }
 
+test("a personal config's owner is in the KMS context: under another, or none, KMS refuses", async () => {
+  const fake = fakeKms();
+  const kek = kms(fake);
+  const ctx = { ...context(), owner: 'a'.repeat(64) };
+  const dek = randomBytes(32);
+  const wrapped = await kek.wrap(dek, ctx);
+  assert.equal((fake.calls[0]!.context as Record<string, string>)['coffre:owner'], 'a'.repeat(64));
+  assert.deepEqual(await kek.unwrap(wrapped, ctx), dek);
+  const { owner: _, ...without } = ctx;
+  await assert.rejects(kek.unwrap(wrapped, without));
+  await assert.rejects(kek.unwrap(wrapped, { ...ctx, owner: 'b'.repeat(64) }));
+});
+
 test('a data key goes to KMS with the secret as its context, and comes back only as that secret', async () => {
   const fake = fakeKms();
   const kek = kms(fake);

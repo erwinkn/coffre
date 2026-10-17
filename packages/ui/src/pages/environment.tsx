@@ -3,7 +3,7 @@ import { parseDotenv } from '@coffre/core/dotenv';
 import type { Generation } from '@coffre/core/recipe';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
@@ -84,6 +84,7 @@ import {
   Search,
   SlashCircle,
   Terminal,
+  Trash,
   Upload,
   X,
 } from '../components/icons';
@@ -133,6 +134,9 @@ export function EnvironmentPage() {
     );
   }
 
+  // `dev@me` while you have none: what one is, and making it, rather than dev's own keys under your name.
+  if (result.personal?.fallback === true) return <NoPersonalConfig project={project} of={result.personal.of} />;
+
   // Keyed by location: pending edits belong to the environment they were
   // started in. The route component is reused across params, so without the
   // key they would follow you into the next environment and be written there.
@@ -144,6 +148,7 @@ export function EnvironmentPage() {
       permissions={result.permissions}
       keys={result.keys}
       parents={result.parents ?? []}
+      personal={result.personal != null}
       rotateAfterDays={result.rotateAfterDays}
     />
   );
@@ -157,6 +162,7 @@ function EnvironmentLedger({
   permissions,
   keys,
   parents,
+  personal,
   rotateAfterDays,
 }: {
   project: string;
@@ -165,6 +171,8 @@ function EnvironmentLedger({
   keys: SecretKey[];
   /** The environments it inherits from, nearest first: a fork's (docs/design/forking.md). */
   parents: string[];
+  /** Your personal config, `dev@me`: its values yours alone. */
+  personal: boolean;
   /** Days a value may go unchanged before it is flagged for rotation; null for no flag. */
   rotateAfterDays: number | null;
 }) {
@@ -191,8 +199,9 @@ function EnvironmentLedger({
     if (sourceProject !== project || sourceEnvironment !== environment) continue;
     lentBy.set(key, [...(lentBy.get(key) ?? []), reference]);
   }
+  // A personal config is no reference's source: its values are its owner's alone.
   const readable = useShell().projects.flatMap((each) => each.environments
-    .filter(isActiveAccessibleEnvironment)
+    .filter((one) => isActiveAccessibleEnvironment(one) && !one.personal)
     .map((one) => `${each.slug}/${one.slug}`));
   const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
@@ -497,7 +506,23 @@ function EnvironmentLedger({
       <PageHeader
         tile={project}
         title={environment}
-        description={parents.length > 0 && (
+        actions={personal ? (
+          <DeletePersonal project={project} environment={environment} of={parents[0]!} />
+        ) : principal?.type === 'user' && canReveal && (
+          <Link className="btn btn-sm" to="/projects/$project/$environment" params={{ project, environment: `${environment}@me` }}>
+            <Key size={14} />
+            My own {environment}
+          </Link>
+        )}
+        description={personal ? (
+          <span className="inherits">
+            Your own{' '}
+            <Link className="mono" to="/projects/$project/$environment" params={{ project, environment: parents[0]! }}>
+              {project}/{parents[0]}
+            </Link>
+            : what you set here, only you read, while you read {parents[0]}; the rest is {parents[0]}'s, as it changes.
+          </span>
+        ) : parents.length > 0 && (
           <span className="inherits">
             Inherits from{' '}
             <Link className="mono" to="/projects/$project/$environment" params={{ project, environment: parents[0]! }}>
@@ -628,7 +653,8 @@ function EnvironmentLedger({
                       folders={folders}
                       onMove={(folder) => move({ key: entry.key, folder })}
                       lent={lentBy.get(entry.key) ?? []}
-                      environments={readable}
+                      // A personal config holds values only: no reference.
+                      environments={personal ? [] : readable}
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
@@ -1625,7 +1651,7 @@ function SecretRow({
                       Move to folder…
                     </Menu.Item>
                   )}
-                  {canWrite && !editing && !leaving && own && (
+                  {canWrite && !editing && !leaving && own && environments.length > 0 && (
                     <Menu.Item className="menu-item" onClick={() => setReferring(true)}>
                       <ArrowRight size={14} />
                       {reference === null ? 'Make a reference…' : 'Point elsewhere…'}
@@ -1775,6 +1801,78 @@ function SecretRow({
         columns={columns}
         onDismiss={() => status.state === 'failed' && onDismiss(status.mutationId)}
       />
+    </>
+  );
+}
+
+/** Delete your personal config, from its page: its values erased; dev itself untouched. */
+function DeletePersonal({ project, environment, of }: { project: string; environment: string; of: string }) {
+  const coffre = useCoffre();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const { error, run } = useAction();
+  return (
+    <>
+      <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+        <Trash size={14} />
+        Delete…
+      </button>
+      {error !== null && <ErrorLine error={error} />}
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        title={<>Delete your own <span className="mono">{of}</span>?</>}
+        body={`The values you set in ${project}/${environment} are erased for good. ${project}/${of} is untouched, and ${environment} reads it again.`}
+        confirmLabel="Delete"
+        onConfirm={() =>
+          void run(() => coffre.environments.delete(`${project}/${environment}`), {
+            affects: [...affects.secrets({ project, environment }), ...affects.places()],
+            onSuccess: () => {
+              toast.success(`Your own ${of} is deleted`);
+              void navigate({ to: '/projects/$project/$environment', params: { project, environment: of } });
+            },
+          })}
+      />
+    </>
+  );
+}
+
+/**
+ * `dev@me` while you have no personal dev: what one is, and Make, which
+ * makes it empty; your first write would make it too. A read of
+ * `market/dev@me` meanwhile is dev's, so scripts can name it either way.
+ */
+function NoPersonalConfig({ project, of }: { project: string; of: string }) {
+  const coffre = useCoffre();
+  const { pending, error, run } = useAction();
+  return (
+    <>
+      <PageHeader tile={project} title={`${of}@me`} />
+      <Card labelledBy="no-personal-config" title={`You have no personal ${of} yet`}>
+        <div className="card-row">
+          <div>
+            <p className="card-row-desc">
+              A personal config is your own <span className="mono">{project}/{of}</span>: it reads {of}'s keys as they change,
+              and the values you set or remove there are yours alone. No one else reads them, an Owner included, and you read
+              them only while you read {of}. Until you make one, <span className="mono">{project}/{of}@me</span> reads {of} itself,
+              so a script can name it either way.
+            </p>
+            {error !== null && <ErrorLine error={error} />}
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={pending}
+            onClick={() => void run(() => coffre.environments.create(`${project}/${of}@me`), {
+              affects: [...affects.secrets({ project, environment: `${of}@me` }), ...affects.places()],
+              onSuccess: () => toast.success(`Your own ${of} is made: what you set there is yours alone`),
+            })}
+          >
+            {pending ? <Spinner size={13} /> : <Plus size={14} />}
+            Make my own {of}
+          </button>
+        </div>
+      </Card>
     </>
   );
 }

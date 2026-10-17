@@ -214,7 +214,13 @@ export class AwsKmsKekProvider implements KekProvider {
  */
 function encryptionContext(ctx: SecretContext): Record<string, string> {
   checkContext(ctx);
-  return { 'coffre:project': ctx.projectId, 'coffre:environment': ctx.environmentId, 'coffre:secret': ctx.secretId };
+  return {
+    'coffre:project': ctx.projectId,
+    'coffre:environment': ctx.environmentId,
+    'coffre:secret': ctx.secretId,
+    // A personal config's owner, hashed: KMS refuses to decrypt under any other.
+    ...(ctx.owner === undefined ? {} : { 'coffre:owner': ctx.owner }),
+  };
 }
 
 /**

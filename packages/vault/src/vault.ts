@@ -24,9 +24,10 @@ import {
   type Role,
   type Scope,
   type ServiceAccount,
+  withinCredential,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { checkContext, type SecretContext } from '@coffre/core/envelope';
+import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
   DEK_BYTES,
@@ -279,6 +280,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   bad_claim: 'the key does not belong to this secret',
   deleted: 'this project or environment was deleted',
   ended: 'the reference read through was ended',
+  personal: "a personal config's values are its owner's alone",
   not_allowed: 'not allowed to change this',
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
@@ -845,9 +847,9 @@ class VaultService implements Vault {
         entry,
         input,
       },
-      () =>
+      (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
-          const key = await this.#open(wrapped, secret, operation);
+          const key = await this.#open(wrapped, contextOf(secret), operation);
           return key && { key, wipe: () => key.fill(0) };
         }),
       (opened) => ({
@@ -879,11 +881,11 @@ class VaultService implements Vault {
         entry,
         input,
       },
-      () =>
+      (contextOf) =>
         items.map(({ secret, key }) => async (operation: KeyOperation) => {
           const dek = Buffer.from(key, 'base64');
           try {
-            return { wrapped: serialisable(await this.#config.keks.wrap(dek, context(secret), operation)), wipe: () => {} };
+            return { wrapped: serialisable(await this.#config.keks.wrap(dek, contextOf(secret), operation)), wipe: () => {} };
           } finally {
             dek.fill(0);
           }
@@ -915,12 +917,12 @@ class VaultService implements Vault {
       this.#remote(this.#config.keks.primary) || items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
       { action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input },
-      () =>
+      (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
-          const key = await this.#open(wrapped, secret, operation);
+          const key = await this.#open(wrapped, contextOf(secret), operation);
           if (key === null) return null;
           try {
-            return { wrapped: serialisable(await this.#config.keks.wrap(key, context(secret), operation)), wipe: () => {} };
+            return { wrapped: serialisable(await this.#config.keks.wrap(key, contextOf(secret), operation)), wipe: () => {} };
           } finally {
             key.fill(0);
           }
@@ -974,9 +976,9 @@ class VaultService implements Vault {
    * that is not what it says. A key service that cannot answer is an outage,
    * not a verdict on the claim, and throws.
    */
-  async #open(wrapped: WrappedKey, secret: SecretRef, operation: KeyOperation): Promise<Buffer | null> {
+  async #open(wrapped: WrappedKey, context: SecretContext, operation: KeyOperation): Promise<Buffer | null> {
     try {
-      return await this.#config.keks.unwrap(unwrappable(wrapped), context(secret), operation);
+      return await this.#config.keks.unwrap(unwrappable(wrapped), context, operation);
     } catch (error) {
       if (error instanceof KekBadClaimError) return null;
       throw error;
@@ -1012,8 +1014,12 @@ class VaultService implements Vault {
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & Through & { purpose?: string };
     },
-    /** One per secret; null for a bad claim, an error for an outage or an unexpected fault. */
-    operations: () => ((operation: KeyOperation) => Promise<T | null>)[],
+    /**
+     * One per secret; null for a bad claim, an error for an outage or an
+     * unexpected fault. `context` is each secret's, as the decision read its
+     * environment: a personal config's binds its owner.
+     */
+    operations: (context: (secret: SecretRef) => SecretContext) => ((operation: KeyOperation) => Promise<T | null>)[],
     result: (done: T[]) => R,
   ): Promise<Outcome<R>> {
     const { action, principal, secrets, entry } = call;
@@ -1024,6 +1030,8 @@ class VaultService implements Vault {
         throw new Refused(refusal('wrong_kek', wrongKek), secrets.map((secret) => entry(secret, 'deny', 'wrong_kek')));
       });
     }
+    // Each personal config's owner, hashed, by environment, as the decision read them: what its keys' contexts bind.
+    const owners = new Map<string, string>();
     const check = async (d: Decision) => {
       const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
@@ -1031,9 +1039,17 @@ class VaultService implements Vault {
       // matches the slug there, and a place deleted on either side opens for none.
       const at = secrets.map((secret, i) => call.places?.[i] ?? secret);
       const environments = await store.environmentsById(d.tx, [...secrets, ...at].map((place) => place.environmentId));
+      // A personal config's parent, whose read its owner needs.
+      const parents = [...environments.values()].flatMap((environment) => (environment.owner === null || environment.parentId === null ? [] : [environment.parentId]));
+      for (const [id, parent] of await store.environmentsById(d.tx, parents)) environments.set(id, parent);
       const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
-      const codes: (RefusalCode | null)[] = secrets.map((secret, i) =>
-        refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!)));
+      owners.clear();
+      for (const [id, environment] of environments) if (environment.owner !== null) owners.set(id, ownerKey(environment.owner));
+      const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
+        const personal = personalRefusal(reader, principal, call.permission, secret, at[i]!, environments);
+        if (personal !== undefined) return personal;
+        return refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
+      });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
       }
@@ -1110,7 +1126,7 @@ class VaultService implements Vault {
           throw new Refused(refusal(first, MESSAGES[first]), secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', codes[item] ?? first)));
         });
       }
-      const { outcomes, expired } = await settle(operations(), this.#prepared.options.keyBudgetMs);
+      const { outcomes, expired } = await settle(operations((secret) => context(secret, owners.get(secret.environmentId))), this.#prepared.options.keyBudgetMs);
       const done = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
       try {
         const entries = () => secrets.map((secret, i) =>
@@ -1215,6 +1231,8 @@ class VaultService implements Vault {
         const source = sources.get(item.source.secretId);
         if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
         if (source.secretId === item.holder.secretId) return 'invalid';
+        // A personal config's values are bound to its owner: no reference holds one, nor reads one.
+        if (environments.get(item.holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
         return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder))
           ?? refuses(reader, 'secret.read', placeIn(source, environments), gone(source));
       });
@@ -2535,6 +2553,32 @@ function placeIn(place: SecretPlace, environments: ReadonlyMap<string, { project
  * deleted place is refused before any grant is asked, so no kind of grant,
  * on the project, the environment or every project, can reach into one.
  */
+/**
+ * A key of a personal config is its owner's alone (docs/design/forking.md,
+ * section 4): no grant or role opens or wraps it, an Owner's included,
+ * only its owner, while they read the environment it is a config of,
+ * whatever the call is. Nor does any reference reach into or out of one.
+ * Undefined for a key of any other environment, decided as ever.
+ */
+function personalRefusal(
+  reader: Standing,
+  principal: string,
+  permission: Permission,
+  secret: SecretPlace,
+  at: SecretPlace,
+  environments: ReadonlyMap<string, store.EnvironmentRow>,
+): RefusalCode | null | undefined {
+  const own = environments.get(secret.environmentId);
+  const held = at.environmentId === secret.environmentId ? own : environments.get(at.environmentId);
+  if (own?.owner == null && held?.owner == null) return undefined;
+  if (own !== held || principal !== own?.owner || own.parentId === null) return 'personal';
+  const parent = placeIn({ projectId: secret.projectId, environmentId: own.parentId }, environments);
+  const refused = refuses(reader, 'secret.read', parent, own.deleted || (environments.get(own.parentId)?.deleted ?? true));
+  if (refused !== null) return refused;
+  // The credential's scope caps the owner still: their viewer token on the parent reads, and wraps no key.
+  return withinCredential(reader.live, permission, parent) ? null : 'no_grant';
+}
+
 function refuses(reader: Standing, permission: Permission, where: Place, deleted: boolean): RefusalCode | null {
   if (reader.status === 'tampered') return 'tampered';
   if (reader.status === 'removed') return 'removed';
@@ -2732,8 +2776,9 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function context(secret: SecretRef): SecretContext {
-  return { projectId: secret.projectId, environmentId: secret.environmentId, secretId: secret.secretId };
+/** A secret's binding context: its ids, and a personal config's owner, hashed, as the decision read it. */
+function context(secret: SecretRef, owner?: string): SecretContext {
+  return { projectId: secret.projectId, environmentId: secret.environmentId, secretId: secret.secretId, ...(owner === undefined ? {} : { owner }) };
 }
 
 function unwrappable(wrapped: WrappedKey) {
