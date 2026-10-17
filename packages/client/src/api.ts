@@ -66,6 +66,7 @@ export type Api = {
           name: string;
           accessible: boolean;
           parent: string | null;
+          personal: boolean;
           details: null | {
             archivedAt: string | null;
             secretCount: number | null;
@@ -247,6 +248,10 @@ export type Api = {
         };
       }[];
       parents: string[];
+      personal: null | {
+        of: string;
+        fallback: boolean;
+      };
       rotateAfterDays: number | null;
     };
   };
@@ -1185,6 +1190,19 @@ export type Api = {
       app: null;
     };
   };
+  "GET /personal/:project": {
+    input: undefined;
+    output: {
+      configs: {
+        owner: string;
+        of: string;
+        slug: string;
+        keys: string[];
+        archived: boolean;
+        createdAt: string;
+      }[];
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
@@ -1670,6 +1688,7 @@ export type ProjectSummary = {
     name: string;
     accessible: boolean;
     parent: string | null;
+    personal: boolean;
     details: null | {
       archivedAt: string | null;
       secretCount: number | null;

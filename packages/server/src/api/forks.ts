@@ -49,6 +49,8 @@ export async function forkEnvironment(
     if (source?.environment == null || source.project.archivedAt !== null || source.environment.archivedAt !== null) {
       throw notFound(`${project.slug} has no environment ${from} to fork`);
     }
+    // A personal config's values are its owner's alone: nobody forks one, not even its owner.
+    if (source.environment.owner !== null) throw conflict(`${project.slug}/${from} is a personal config: fork the environment it is a config of`);
     const sourcePlace = { projectId: project.id, environmentId: source.environment.id };
     need(ctx, 'secret.read', placeOf(project, source.environment), 'environment.fork', { metadata: { from, slug } });
     if (input.inherit) return inheritFrom(ctx, place, slug, source, input.name);

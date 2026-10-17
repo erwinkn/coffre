@@ -203,6 +203,8 @@ export function createClient(options: ClientOptions) {
       delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
       /** The keys its sibling environments have and it lacks, read or not, and those its team dismissed. */
       missing: (path: string) => call('GET /projects/:project/:environment/missing', place(path)),
+      /** A project's personal configs, for whoever manages its environments: whose, of what, and their key names. */
+      personal: (project: string) => call('GET /personal/:project', place(project)),
       /** Dismiss missing keys (`true`) or restore them (`null`). */
       dismiss: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment/dismissals'>) =>
         call('PATCH /projects/:project/:environment/dismissals', place(path), patch),

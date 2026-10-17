@@ -1,5 +1,5 @@
 import { MCP_SCOPE_INFO, scopeString } from '@coffre/core/mcp';
-import { folderName, secretKey, slug } from '@coffre/core/schemas';
+import { environmentPath, folderName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { resolvePath, type ResolvedPath } from '../db/queries.ts';
@@ -8,6 +8,7 @@ import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
+import { makePersonal, ownerOf, resolveRead } from './personal.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
@@ -37,7 +38,8 @@ const compiled: Compiled[] = Object.entries(routes).map(([key, def]) => {
 /** What each named segment may hold. */
 const PARAMS: Record<string, z.ZodType<string>> = {
   project: slug,
-  environment: slug,
+  // A slug, or `<slug>@me` for the caller's personal config of it.
+  environment: environmentPath,
   key: secretKey,
   member: z.string().min(3).max(330),
   id: z.string().uuid(),
@@ -94,11 +96,21 @@ async function locate(
   ctx: ApiContext,
   def: AnyRoute,
   params: Record<string, string>,
+  query: unknown,
 ): Promise<ResolvedPath | null> {
   if (params.project === undefined) return null;
   const path = { project: params.project, environment: params.environment, key: params.key };
   const last = params.key !== undefined ? 'key' : params.environment !== undefined ? 'environment' : 'project';
-  const place = await resolvePath(ctx.db, path);
+  let place = await resolvePath(ctx.db, path, { owner: ownerOf(ctx) });
+  // `dev@me` while the caller has no personal config of dev: a read is of dev, a write that may make one makes it
+  // (a dry run makes nothing), and anything else finds none.
+  if (place?.personal !== undefined && place.environment === null) {
+    const dryRun = (query as { dryRun?: string } | undefined)?.dryRun !== undefined;
+    if (def.personal === 'falls back') place = await resolveRead(ctx, path);
+    else if (def.personal === 'makes' && !dryRun) place = (await makePersonal(ctx, place, def.action ?? 'environment.create')).place;
+    else if (def.personal === 'handles') return place;
+    else throw notFound(`you have no personal config of ${params.project}/${place.personal.of.slug}: a write to ${params.project}/${params.environment} makes one`);
+  }
   if (place === null) {
     if (def.creates && last === 'project') return null;
     throw notFound(`no project "${params.project}"`);
@@ -170,8 +182,10 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
         ? undefined
         : def.query.parse(Object.fromEntries(url.searchParams));
 
-    const place = await locate(ctx, def, found.params);
-    for (const check of checks(def, input, query)) {
+    const place = await locate(ctx, def, found.params, query);
+    // A personal config yet to be made: its handler checks what making one takes.
+    const unmade = place?.personal !== undefined && place.environment === null;
+    for (const check of unmade ? [] : checks(def, input, query)) {
       const permission = typeof check === 'string' ? check : check.permission;
       const scope = placeOf(place!.project, typeof check === 'string' ? place!.environment : null);
       if (can(ctx.caller, permission, scope)) continue;

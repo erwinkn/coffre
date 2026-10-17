@@ -15,6 +15,7 @@ import { getSettings, putSettings } from './settings.ts';
 import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
+import { listPersonal, makePersonal } from './personal.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
@@ -58,6 +59,12 @@ export type Route<Key extends string, S extends Schema, Output, Q extends Schema
   action?: string;
   /** The last level of the path may not exist yet: the route creates it. */
   creates?: true;
+  /**
+   * What `<env>@me` is while the caller has no personal config of it: dev
+   * itself (`falls back`, a read), a new one (`makes`, a write), or left to
+   * the handler (`handles`), which checks what it takes. Otherwise none: 404.
+   */
+  personal?: 'falls back' | 'makes' | 'handles';
   run: (
     ctx: ApiContext,
     call: { params: Params<Key>; place: PlaceOf<Key>; input: Parsed<S>; query: Parsed<Q> },
@@ -172,7 +179,16 @@ export const routes = {
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
+    // `market/dev@me`: your personal config of dev, made if you have none; it takes read on dev, nothing more.
+    personal: 'handles',
     run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; forked: Forked | null }> => {
+      if (place.personal !== undefined) {
+        if (input.from !== undefined || input.inherit !== undefined || input.references !== undefined) {
+          throw badRequest('a personal config inherits from the environment it is a config of: no `from`');
+        }
+        const made = place.environment === null ? await makePersonal(ctx, place, 'environment.create') : { place, created: false };
+        return { environment: { slug: params.environment, name: params.environment, archivedAt: null }, created: made.created, forked: null };
+      }
       // Not a slug a project's page has (`@coffre/core/pages`).
       environmentSlug.parse(params.environment);
       if (input.from === undefined && (input.inherit === true || input.references === true)) {
@@ -199,9 +215,17 @@ export const routes = {
     run: (ctx, { place, query }) => deletePlace(ctx, place, { dryRun: query.dryRun !== undefined }),
   }),
 
+  // A project's personal configs, for whoever manages its environments: whose, of what, and their key names, never values.
+  ...route('GET /personal/:project', {
+    needs: { permission: 'environment.manage', on: 'project' },
+    action: 'personal.list',
+    run: (ctx, { place }) => listPersonal(ctx, place),
+  }),
+
   // What an environment lacks of its siblings' keys, and what its team dismissed.
   ...route('GET /projects/:project/:environment/missing', {
     needs: 'secret.read',
+    personal: 'falls back',
     action: 'missing.list',
     run: (ctx, { place }) => missingKeys(ctx, place),
   }),
@@ -216,6 +240,7 @@ export const routes = {
   // Secrets
   ...route('GET /secrets/:project/:environment', {
     needs: 'secret.read',
+    personal: 'falls back',
     action: 'secret.list',
     run: (ctx, { place }) => listSecrets(ctx, place),
   }),
@@ -225,6 +250,8 @@ export const routes = {
     // `?dryRun=1` answers what the patch would do and writes nothing. Any
     // other query is refused, not ignored: a mistyped flag must not write.
     query: dryRunFlag,
+    // `market/dev@me` is made at its first write: your personal config of dev.
+    personal: 'makes',
     // Each key is checked against its own permission: archiving needs more
     // than writing. A dry run is a read, which it checks and logs itself.
     needs: (patch, { dryRun }) =>

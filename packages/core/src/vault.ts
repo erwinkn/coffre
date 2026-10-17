@@ -170,6 +170,12 @@ export type RefusalCode =
   | 'deleted'
   /** The reference read through was ended: broken, or replaced by a value. */
   | 'ended'
+  /**
+   * A personal config's value, which only its owner opens or writes, and
+   * only while they read the environment it is a config of: no grant or
+   * role reaches it, an Owner's included. Nor does any reference.
+   */
+  | 'personal'
   /** Not allowed to manage access, members or the log. */
   | 'not_allowed'
   /**

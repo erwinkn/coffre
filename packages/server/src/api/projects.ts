@@ -28,8 +28,8 @@ import {
   projectFolderOf,
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
+import { can, canAnywhere, permissionsAt, placeOf, seesProject, type Caller } from './caller.ts';
+import { allowed, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
 import { serviceSettingFor, setsUp } from './services.ts';
@@ -81,6 +81,12 @@ export type ProjectEnvironmentSummary = {
   /** The environment it inherits from, by slug: a fork's (docs/design/forking.md). Null for none. */
   parent: string | null;
   /**
+   * Your personal config of `parent`, listed as `dev@me`: nobody else's is
+   * listed here, as only its owner reads it (maintainers find them under
+   * `GET /personal/:project`).
+   */
+  personal: boolean;
+  /**
    * Omitted for environments that the caller may only know by name. A
    * fork's count is of the keys it resolves to: its own, and those it inherits.
    */
@@ -115,9 +121,11 @@ export async function me(ctx: ApiContext): Promise<Me> {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {
       if (environment.archivedAt !== null) continue;
+      // Someone else's personal config is no place of yours; your own goes by `dev@me`.
+      if (environment.owner !== null && !mine(caller, environment)) continue;
       const permissions = permissionsAt(caller, placeOf(project, environment));
       if (permissions.length === 0) continue;
-      reachable.push({ project: project.slug, environment: environment.slug, permissions });
+      reachable.push({ project: project.slug, environment: listedSlug(environment), permissions });
     }
   }
   return {
@@ -167,17 +175,21 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       archivedAt: iso(project.archivedAt),
       folder: folders.get(project.id) ?? null,
       permissions: permissionsAt(caller, scope),
-      environments: project.environments.map((environment) => {
+      // Someone else's personal config is not listed; your own is, as `dev@me`.
+      environments: project.environments.filter((environment) => environment.owner === null || mine(caller, environment)).map((environment) => {
         // Every role that writes or archives also reads, so read is the test.
         const secretAccess = can(caller, 'secret.read', placeOf(project, environment));
+        const personal = environment.owner !== null;
+        const slug = listedSlug(environment);
         if (!manages && !secretAccess) {
-          return { slug: environment.slug, name: environment.name, accessible: false, parent: parent(environment), details: null };
+          return { slug, name: slug, accessible: false, parent: parent(environment), personal, details: null };
         }
         return {
-          slug: environment.slug,
-          name: environment.name,
+          slug,
+          name: personal ? slug : environment.name,
           accessible: secretAccess,
           parent: parent(environment),
+          personal,
           details: {
             archivedAt: iso(environment.archivedAt),
             secretCount: secretAccess ? (resolved.get(environment.id)?.size ?? environment.secretCount) : null,
@@ -223,6 +235,16 @@ async function forkKeys(db: Queryable, known: readonly PlaceRow[]): Promise<Map<
   if (ids.length === 0) return new Map();
   const [live, dismissed] = await Promise.all([liveKeysIn(db, ids), dismissalsAcross(db, ids)]);
   return resolveKeys(forked.flatMap((project) => project.environments), live, dismissed);
+}
+
+/** Whether an environment is the caller's personal config. */
+function mine(caller: Caller, environment: { owner: string | null }): boolean {
+  return environment.owner !== null && caller.principal.type === 'user' && formatMember(caller.principal) === environment.owner;
+}
+
+/** An environment as lists name it: a personal config as `dev@me`, its generated slug never shown. */
+function listedSlug(environment: { slug: string; owner: string | null; parentSlug: string | null }): string {
+  return environment.owner === null ? environment.slug : `${environment.parentSlug ?? '?'}@me`;
 }
 
 export type PlaceView = {
@@ -476,7 +498,8 @@ export async function patchEnvironment(
       }
     }
     // A live fork reads its parent's keys: archiving the parent would leave it half empty (docs/design/forking.md).
-    const forks = archivedAt == null ? [] : (await forksOf(tx, environment.id)).map((fork) => fork.slug);
+    // A personal config is no such fork: it is archived and restored with its parent, below.
+    const forks = archivedAt == null ? [] : (await forksOf(tx, environment.id)).filter((fork) => fork.owner === null).map((fork) => fork.slug);
     if (forks.length > 0) {
       throw new Refusal(
         conflict(`${project.slug}/${environment.slug} is inherited by ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: archive ${forks.length === 1 ? 'it' : 'them'} first`),
@@ -505,6 +528,16 @@ export async function patchEnvironment(
         ...scope,
         metadata: { environmentSlug: renames.slug ?? environment.slug },
       }));
+      // Its personal configs go with it, and come back with it: private and derived, they stop nobody archiving.
+      const personal = (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null && (fork.archivedAt === null) !== (archivedAt === null));
+      for (const config of personal) {
+        await update(tx, environments, { id: config.id }, { archivedAt });
+        log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
+          projectId: project.id,
+          environmentId: config.id,
+          metadata: { environmentSlug: config.slug, personal: environment.slug, with: environment.slug },
+        }));
+      }
     }
     return {
       environment: {
@@ -514,6 +547,49 @@ export async function patchEnvironment(
       },
     };
   });
+}
+
+/**
+ * Delete a personal config for good: its owner may, and the project's
+ * maintainers (`environment.manage`), which is how offboarding cleans up.
+ * It need not be archived first, and holds no grant or reference to undo:
+ * its values are erased and its slug made a tombstone, as any place's.
+ */
+async function deletePersonal(ctx: ApiContext, place: ResolvedPath, { dryRun }: { dryRun: boolean }): Promise<DeletionResult> {
+  const { project, environment } = place;
+  const config = environment!;
+  const path = `${project.slug}/${config.parentSlug ?? '?'}@${config.owner!.replace(/^user:/, '')}`;
+  const doomed: Doomed = { projectId: project.id, environmentId: config.id };
+  return withRefusals(ctx, async () => {
+    const theirs = ctx.caller.principal.type === 'user' && formatMember(ctx.caller.principal) === config.owner;
+    if (!theirs && !can(ctx.caller, 'environment.manage', placeOf(project, null))) {
+      throw new Refusal(
+        forbidden(`a personal config is deleted by its owner, or by whoever manages ${project.slug}'s environments`),
+        denied(ctx, 'environment.delete', missing('environment.manage'), { ...doomed, metadata: { path } }),
+      );
+    }
+    const scope = await deletionScope(ctx.db, doomed);
+    const deletion = (tombstone: string, versions = scope.versions): Deletion => ({
+      path, tombstone, environments: [config.slug], keys: scope.keys, versions, grants: [], references: [], stranded: [],
+    });
+    if (dryRun) return { dryRun: true, deletion: deletion(await tombstoneSlug(ctx.db, config.slug, new Date(), { projectId: project.id })) };
+    const operationId = randomUUID();
+    return audited(ctx, async (tx, log) => {
+      const now = await resolvePath(tx, { project: project.slug, environment: config.slug });
+      if (now?.environment?.id !== config.id) throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
+      const erased = await erasePersonal(ctx, tx, doomed, config.slug, operationId, { path });
+      log.push(erased.entry);
+      return { dryRun: false, deletion: deletion(erased.tombstone, erased.versions) };
+    });
+  });
+}
+
+/** Erase a personal config's values and make its slug a tombstone, under the head: the entry that says so. */
+async function erasePersonal(ctx: ApiContext, tx: Transaction, doomed: Doomed, slug: string, operationId: string, metadata: Record<string, unknown>) {
+  const tombstone = await tombstoneSlug(tx, slug, new Date(), { projectId: doomed.projectId });
+  const versions = await eraseVersions(tx, doomed);
+  await update(tx, environments, { id: doomed.environmentId! }, { slug: tombstone });
+  return { tombstone, versions, entry: allowed(ctx, 'environment.delete', { ...doomed, operationId, metadata: { ...metadata, personal: true, tombstone, versions } }) };
 }
 
 /** What deleting a project or an environment takes, or took. */
@@ -572,11 +648,13 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
   // The place itself: an environment under an archived project is archived only once it is.
   const archived = (at: ResolvedPath) => (environment === null ? at.project.archivedAt : (at.environment?.archivedAt ?? null)) !== null;
 
+  if (environment?.owner != null) return deletePersonal(ctx, place, { dryRun });
   return withRefusals(ctx, async () => {
     requireInstance(ctx, action, fields, `delete ${what === 'project' ? 'a project' : 'an environment'} for good`);
     if (!archived(place)) throw notArchived();
     // A fork, archived or not, keeps its parent: deleted, it would leave the fork naming a tombstone forever.
-    const forked = async (db: Queryable) => (environment === null ? [] : (await forksOf(db, environment.id, { archived: true })).map((fork) => fork.slug));
+    // A personal config does not: it is deleted with it.
+    const forked = async (db: Queryable) => (environment === null ? [] : (await forksOf(db, environment.id, { archived: true })).filter((fork) => fork.owner === null).map((fork) => fork.slug));
     const parentOf = (forks: string[]) => new Refusal(
       conflict(`${path} is the parent of ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: delete ${forks.length === 1 ? 'it' : 'them'} first`),
       denied(ctx, action, 'inherited', { ...fields, metadata: { path, forks } }),
@@ -657,6 +735,11 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
       const versions = await eraseVersions(tx, doomed);
       if (environment === null) await update(tx, projects, { id: project.id }, { slug: tombstone });
       else await update(tx, environments, { id: environment.id }, { slug: tombstone });
+      // Its personal configs with it: none outlives the environment it is a config of.
+      for (const config of environment === null ? [] : await forksOf(tx, environment.id, { archived: true })) {
+        if (config.owner === null) continue;
+        log.push((await erasePersonal(ctx, tx, { projectId: project.id, environmentId: config.id }, config.slug, operationId, { path, with: environment!.slug })).entry);
+      }
       const done = deletion(tombstone, versions);
       log.push(allowed(ctx, action, {
         ...doomed,

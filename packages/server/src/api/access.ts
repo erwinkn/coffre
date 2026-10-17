@@ -93,6 +93,8 @@ export async function setAccess(
       if (want.environment === undefined) return { ...want, projectId: project.id, environmentId: null, place: placeOf(project, null) };
       const environment = project.environments.find((place) => place.slug === want.environment);
       if (environment === undefined) throw notFound(`no environment "${want.path}"`);
+      // A personal config is its owner's alone: a grant there would decide nothing, so none is made.
+      if (environment.owner !== null && want.role !== null) throw badRequest(`${want.path} is a personal config: no grant reaches its values`);
       return { ...want, projectId: project.id, environmentId: environment.id, place: placeOf(project, environment) };
     });
 
