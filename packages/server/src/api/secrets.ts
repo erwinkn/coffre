@@ -361,7 +361,8 @@ export async function setSecrets(
       if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
 
       const keys: Record<string, SetOutcome> = {};
-      for (const key of [...items, ...references].map((item) => item.key)) {
+      // A reference written again unchanged revives its key too.
+      for (const key of keysIn.filter((key) => patch[key] !== null)) {
         const row = byKey.get(key);
         if (row?.archivedAt == null) continue;
         await update(tx, secrets, { id: row.id }, { archivedAt: null });
@@ -529,9 +530,11 @@ export async function dryRunSecrets(
   return withRefusals(ctx, async () => {
     need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', { operationId, metadata: { dryRun: true } });
     const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
+    // In a fork, an archived key is an override reset to its parent's: writing it overrides again, a change.
+    const fork = place.environment!.parentId !== null;
     // Refuse what the write would refuse before opening anything.
     for (const [key, value] of Object.entries(patch)) {
-      if (value !== null && rows.get(key)?.archivedAt != null) {
+      if (value !== null && rows.get(key)?.archivedAt != null && !fork) {
         throw conflict(`${key} is archived; unarchive it before writing a new version`);
       }
     }
@@ -548,6 +551,10 @@ export async function dryRunSecrets(
       }
       if (secret === undefined) {
         keys[key] = 'added';
+        continue;
+      }
+      if (secret.archivedAt !== null) {
+        keys[key] = 'changed';
         continue;
       }
       // A reference, or a value over a reference: what it is now is not a value to compare.

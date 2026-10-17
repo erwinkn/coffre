@@ -361,3 +361,19 @@ test("forking a fork tells its forker no more of an unreadable parent than a rea
     return true;
   });
 });
+
+test('a reset key written again as the same reference, or previewed, overrides again', async () => {
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'Prod' });
+  await root.secrets.set('billing/prod', { SOURCE: 'billing-secret' });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.secrets.set('market/prod-eu', { STRIPE_KEY: { ref: 'billing/prod/SOURCE' }, DATABASE_URL: 'postgres://eu' });
+  await root.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  await root.secrets.update('market/prod-eu/DATABASE_URL', { archived: true });
+
+  // An import's preview: a reset key, written again with the value it had, is a change.
+  assert.deepEqual((await root.secrets.dryRun('market/prod-eu', { DATABASE_URL: 'postgres://eu' })).keys, { DATABASE_URL: 'changed' });
+  await root.secrets.set('market/prod-eu', { STRIPE_KEY: { ref: 'billing/prod/SOURCE' }, DATABASE_URL: 'postgres://eu' });
+  const read = await values(root, 'market/prod-eu');
+  assert.deepEqual([read.STRIPE_KEY, read.DATABASE_URL], ['billing-secret', 'postgres://eu']);
+});
