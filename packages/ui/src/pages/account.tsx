@@ -131,12 +131,8 @@ function PersonalTokens({ email }: { email: string }) {
       tokens={tokens === null ? [] : tokens.ok ? tokens.tokens : { error: tokens.error }}
       change={revokeCredential(client, member)}
       description="Tokens that act as you, for a script or an agent, within what each reaches and never beyond what you hold. Every entry one makes names it."
-      empty={
-        <div className="form">
-          <span>Make one with the CLI, for an hour unless told:</span>
-          <CopyLine value="coffre tokens issue --label cursor-agent --scope <project>/<environment>=viewer --expires-in 4h" label="Copy the command" />
-        </div>
-      }
+      empty="Make one with the CLI, for an hour unless told:"
+      emptyActions={<CopyLine value="coffre tokens issue --label cursor-agent --scope <project>/<environment>=viewer --expires-in 4h" label="Copy the command" />}
     />
   );
 }

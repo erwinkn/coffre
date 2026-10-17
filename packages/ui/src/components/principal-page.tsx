@@ -336,7 +336,6 @@ function MemberPersonalTokens({ member, tokens }: { member: string; tokens: Toke
       tokens={tokens}
       change={revokeMemberToken(useCoffre(), member)}
       description="Tokens they made, each acting as them within what it reaches. Removing them from coffre revokes every one."
-      empty={null}
     />
   );
 }

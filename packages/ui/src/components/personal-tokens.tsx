@@ -20,11 +20,15 @@ export function PersonalTokensCard<TData>({
   change,
   description,
   empty,
+  emptyActions,
 }: {
   tokens: TokenRow[] | { error: string };
   change: Change<TData, TokenRow, TokenRow, unknown>;
   description: ReactNode;
-  empty: ReactNode;
+  /** Said when there is none: phrasing, inside the empty state's paragraph. */
+  empty?: ReactNode;
+  /** Beneath it, what to do about it. */
+  emptyActions?: ReactNode;
 }) {
   const revoke = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
@@ -35,7 +39,9 @@ export function PersonalTokensCard<TData>({
           <ErrorLine error={tokens.error} />
         </div>
       ) : tokens.length === 0 ? (
-        <EmptyState title="No personal tokens">{empty}</EmptyState>
+        <EmptyState title="No personal tokens" actions={emptyActions}>
+          {empty}
+        </EmptyState>
       ) : (
         <div className="dt-wrap">
           <table className="dt stacks stacks-inline">
