@@ -266,7 +266,7 @@ test('the directory keeps which Owners the deployment names, for the tag and the
  * The environment page's reads, each held until the test answers it: the
  * order they are asked in, and how many are asked before the secrets answer.
  */
-function environmentClient({ accessible, secrets }: { accessible: boolean; secrets: () => Promise<unknown> }) {
+function environmentClient({ accessible, secrets, archivedAt = null }: { accessible: boolean; secrets: () => Promise<unknown>; archivedAt?: string | null }) {
   const calls: string[] = [];
   const asked = (route: string, value: () => Promise<unknown>) => () => {
     calls.push(route);
@@ -274,7 +274,7 @@ function environmentClient({ accessible, secrets }: { accessible: boolean; secre
   };
   const dev = { ...market.environments[0]!, accessible, details: accessible ? market.environments[0]!.details : null };
   const client = {
-    projects: { list: asked('GET /projects', async () => ({ projects: [{ ...market, environments: [dev] }] })) },
+    projects: { list: asked('GET /projects', async () => ({ projects: [{ ...market, archivedAt, environments: [dev] }] })) },
     secrets: { list: asked('GET /secrets/market/dev', secrets) },
     references: { list: asked('GET /references', async () => ({ references: [] })) },
     environments: { missing: asked('GET /missing', async () => ({ missing: [], dismissed: [] })) },
@@ -304,6 +304,20 @@ test('an environment the project tree does not open to you asks its secrets alon
     accessible: false,
     secrets: async () => {
       throw new CoffreError(403, 'forbidden', 'no grant covers market/dev');
+    },
+  });
+  const queryClient = createQueryClient();
+  const loaded = await loadEnvironment(queryClient, client, { project: 'market', environment: 'dev' });
+  assert.equal(loaded.ok, false);
+  assert.deepEqual(calls, ['GET /projects', 'GET /secrets/market/dev']);
+});
+
+test('an environment of an archived project asks its secrets alone, though you read it', async () => {
+  const { client, calls } = environmentClient({
+    accessible: true,
+    archivedAt: '2026-10-01T00:00:00.000Z',
+    secrets: async () => {
+      throw new CoffreError(404, 'not_found', 'unknown project or environment');
     },
   });
   const queryClient = createQueryClient();

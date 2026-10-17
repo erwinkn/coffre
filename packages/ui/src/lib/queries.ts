@@ -460,7 +460,10 @@ export async function loadEnvironment(queryClient: QueryClient, client: CoffreCl
       queryClient.fetchQuery(queries.missing(client, place)),
     ]);
   const found = projectOf(await queryClient.ensureQueryData(queries.projects(client)), place.project);
-  const here = found.ok ? found.project.environments.find((environment) => environment.slug === place.environment) : undefined;
+  // Neither in an archived project nor archived itself: the API serves neither.
+  const here = found.ok && found.project.archivedAt === null
+    ? found.project.environments.find((environment) => environment.slug === place.environment)
+    : undefined;
   if (here !== undefined && isActiveAccessibleEnvironment(here)) {
     const [secrets] = await Promise.all([queryClient.fetchQuery(queries.secrets(client, place)), others()]);
     return secrets;
