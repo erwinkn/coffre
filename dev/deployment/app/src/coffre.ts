@@ -6,6 +6,7 @@
 import { createCoffre, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
 import type { RateLimiter, Vault } from '@coffre/server/cloudflare';
+import { vaultKv } from '@coffre/server/plugins/vault-kv';
 
 export type Env = {
   HYPERDRIVE: { connectionString: string };
@@ -59,6 +60,9 @@ export const coffre = createCoffre((env: Env) => {
       },
     }),
     auditChainKey: env.COFFRE_APP_KEY,
+    // coffre as a Vault KV v2 mount, read only, at /v1 (routes/v1.$.ts): `VAULT_ADDR=http://127.0.0.1:3000
+    // VAULT_TOKEN=<a service token> vault kv get secret/market/prod` (docs/design/plugins.md).
+    plugins: [vaultKv()],
   };
 });
 

@@ -46,6 +46,11 @@
       "types": "./dist/routes.d.ts",
       "default": "./dist/routes.js"
     },
+    "./plugins/vault-kv": {
+      "coffre:source": "./src/plugins/vault-kv.ts",
+      "types": "./dist/plugins/vault-kv.d.ts",
+      "default": "./dist/plugins/vault-kv.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

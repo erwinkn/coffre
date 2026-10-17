@@ -53,6 +53,7 @@ before(async () => {
     waitUntil,
     schema: { migrated: true },
     rotateAfterDays: 365,
+    plugins: [],
   };
 });
 

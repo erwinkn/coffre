@@ -20,6 +20,7 @@ import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
 import { mcpEndpoint } from './mcp/endpoint.ts';
 import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
+import { pluginRoute } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
@@ -55,8 +56,8 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
 const PROVIDER_ROUTE = /^\/auth\/(signin|callback)\/([a-z0-9-]{1,32})$/;
 
 /**
- * coffre's own paths: health, sign-in and the API. Null for any other, a
- * page's, which the deployment's Start app renders.
+ * coffre's own paths, health, sign-in and the API, and its plugins'. Null
+ * for any other, a page's, which the deployment's Start app renders.
  */
 export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | null> {
   const { pathname } = new URL(request.url);
@@ -81,7 +82,7 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
       ? startSignin(request, runtime, sourceIp, id)
       : finishSignin(request, runtime, sourceIp, id);
   }
-  return null;
+  return pluginRoute(request, runtime, sourceIp);
 }
 
 /** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */

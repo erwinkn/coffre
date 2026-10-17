@@ -53,6 +53,7 @@ function appRuntime(auth: AuthConfig) {
     vault: vaultKnowing({}),
     db: null,
     schema: { migrated: true },
+    plugins: [],
   } as never;
 }
 
@@ -257,7 +258,7 @@ test('an unregistered identity is marked for the closed-door boundary', async ()
     requestId: 'unregistered-request',
     sourceIp: null,
     credentialId: null,
-    provenance: null, personalToken: null, via: null,
+    credentialExpiresAt: null, provenance: null, personalToken: null, via: null,
   });
 });
 
@@ -319,7 +320,7 @@ test('an active registered identity receives an auditable request context', asyn
       requestId: 'registered-request',
       sourceIp: null,
       credentialId: null,
-      provenance: null, personalToken: null, via: null,
+      credentialExpiresAt: null, provenance: null, personalToken: null, via: null,
     });
   }
 });

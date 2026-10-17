@@ -23,6 +23,9 @@ export const INTENDED = {
   'vite.config.ts': 'differs',
   // The dev stack's names, ports and bindings.
   'wrangler.jsonc': 'differs',
+  // The Vault KV adapter, an optional plugin the example leaves out (docs/design/plugins.md), and its route.
+  'src/routes/v1.$.ts': 'dev only',
+  'src/routeTree.gen.ts': 'differs',
 };
 
 /** An app's files, as git sees them: tracked, or new and not ignored, relative to `dir`. */

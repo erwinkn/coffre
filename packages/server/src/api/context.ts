@@ -59,6 +59,8 @@ export type ApiContext = {
    * entry the request writes names, for "ada via token 'cursor-agent'".
    */
   personalToken: PersonalToken | null;
+  /** When the credential the request came in on ends, ISO 8601: `GET /api/me` says it. Null without one, behind Cloudflare Access or through MCP. */
+  credentialExpiresAt: string | null;
   /** Days a value may go unchanged before it is flagged for rotation (`rotateAfterDays`), or null for no flag. */
   rotateAfterDays: number | null;
 };

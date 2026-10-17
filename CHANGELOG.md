@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Read coffre from tools that speak Vault.** An optional plugin, added in
+  the deployment's configuration (`plugins: [vaultKv()]` from
+  `@coffre/server/plugins/vault-kv`) and one route file (`routes/v1.$.ts`),
+  answers as a read-only HashiCorp Vault KV v2 store:
+  - `secret/data/market/prod` is that environment's values, and
+    `secret/data/market/prod/KEY` one of them.
+  - External Secrets Operator, the `vault` CLI, vals and Terraform read
+    with a coffre token as their Vault token.
+  - Each read is the API's own reveal, as the token's holder, and is
+    logged as one.
+  - Writes, listing, versions and response wrapping are refused, and 404
+    only ever means the place is not there, so that ESO never deletes a
+    target over anything else.
+  - Setup for each tool is in docs/vault.md.
+- **Plugins.** `createCoffre({ plugins: […] })` takes optional
+  integrations. A plugin answers paths of its own and reaches coffre only
+  through the API, as whoever a request's token names, so it can do no
+  more than that token's holder could with the CLI
+  (docs/design/plugins.md).
+- **`GET /api/me` says when its credential ends**, as `credentialExpiresAt`.
+  That covers a session, a service or personal token, or one a trust
+  binding issued, and is null behind Cloudflare Access.
+
 - **Ask whether an environment changed without reading it.** `coffre version
   market/prod`, or `GET /api/projects/market/prod/version`, answers a
   version of what a read of it would open: a value written, a key added,

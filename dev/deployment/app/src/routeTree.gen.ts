@@ -23,6 +23,7 @@ import { Route as SoloLoginRouteImport } from './routes/_solo/login'
 import { Route as SoloUnregisteredRouteImport } from './routes/_solo/unregistered'
 import { Route as ApiSplatRouteImport } from './routes/api.$'
 import { Route as AuthSplatRouteImport } from './routes/auth.$'
+import { Route as V1SplatRouteImport } from './routes/v1.$'
 import { Route as CoffreAccountIndexRouteImport } from './routes/_coffre/account.index'
 import { Route as CoffreAccountAppearanceRouteImport } from './routes/_coffre/account.appearance'
 import { Route as CoffreAccountAppsRouteImport } from './routes/_coffre/account.apps'
@@ -114,6 +115,11 @@ const ApiSplatRoute = ApiSplatRouteImport.update({
 const AuthSplatRoute = AuthSplatRouteImport.update({
   id: '/auth/$',
   path: '/auth/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const V1SplatRoute = V1SplatRouteImport.update({
+  id: '/v1/$',
+  path: '/v1/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CoffreAccountIndexRoute = CoffreAccountIndexRouteImport.update({
@@ -260,6 +266,7 @@ export interface FileRoutesByFullPath {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/v1/$': typeof V1SplatRoute
   '/account/appearance': typeof CoffreAccountAppearanceRoute
   '/account/apps': typeof CoffreAccountAppsRoute
   '/account/sessions': typeof CoffreAccountSessionsRoute
@@ -297,6 +304,7 @@ export interface FileRoutesByTo {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/v1/$': typeof V1SplatRoute
   '/account/appearance': typeof CoffreAccountAppearanceRoute
   '/account/apps': typeof CoffreAccountAppsRoute
   '/account/sessions': typeof CoffreAccountSessionsRoute
@@ -334,6 +342,7 @@ export interface FileRoutesById {
   '/_solo/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/v1/$': typeof V1SplatRoute
   '/_coffre/': typeof CoffreIndexRoute
   '/_coffre/account/appearance': typeof CoffreAccountAppearanceRoute
   '/_coffre/account/apps': typeof CoffreAccountAppsRoute
@@ -375,6 +384,7 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/v1/$'
     | '/account/appearance'
     | '/account/apps'
     | '/account/sessions'
@@ -412,6 +422,7 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/v1/$'
     | '/account/appearance'
     | '/account/apps'
     | '/account/sessions'
@@ -448,6 +459,7 @@ export interface FileRouteTypes {
     | '/_solo/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/v1/$'
     | '/_coffre/'
     | '/_coffre/account/appearance'
     | '/_coffre/account/apps'
@@ -484,6 +496,7 @@ export interface RootRouteChildren {
   DotwellKnownSplatRoute: typeof DotwellKnownSplatRoute
   ApiSplatRoute: typeof ApiSplatRoute
   AuthSplatRoute: typeof AuthSplatRoute
+  V1SplatRoute: typeof V1SplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -584,6 +597,13 @@ declare module '@tanstack/react-router' {
       path: '/auth/$'
       fullPath: '/auth/$'
       preLoaderRoute: typeof AuthSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/v1/$': {
+      id: '/v1/$'
+      path: '/v1/$'
+      fullPath: '/v1/$'
+      preLoaderRoute: typeof V1SplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_coffre/account/': {
@@ -891,6 +911,7 @@ const rootRouteChildren: RootRouteChildren = {
   DotwellKnownSplatRoute: DotwellKnownSplatRoute,
   ApiSplatRoute: ApiSplatRoute,
   AuthSplatRoute: AuthSplatRoute,
+  V1SplatRoute: V1SplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

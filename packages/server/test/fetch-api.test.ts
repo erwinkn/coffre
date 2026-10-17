@@ -48,6 +48,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     waitUntil,
     schema: { migrated: true },
     rotateAfterDays: 365,
+    plugins: [],
   };
 }
 
