@@ -125,6 +125,17 @@ test("a fork that inherits reads its parent's values live, as the API's reveal d
   assert.equal((await refused.text()).includes('eu-west-1'), false);
 });
 
+test("`<project>/<env>@me` is the caller's personal config over the environment, as the API reads it (R8)", async () => {
+  await clientFor(deps, ROOT).access.set(`user:${DEV}`, { 'market/staging': 'viewer' });
+  await clientFor(deps, DEV).secrets.set('market/staging@me', { DATABASE_URL: 'postgres://localhost/dev' });
+  const session = await sessionFor(DEV);
+  assert.deepEqual((await body(await vault('secret/data/market/staging@me', session))).data.data, { DATABASE_URL: 'postgres://localhost/dev' });
+  // Everyone else's `@me` without one of their own is the environment itself.
+  await clientFor(deps, ROOT).access.set('token:eso', { 'market/staging': 'viewer' });
+  const both = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'eso', { label: 'staging', expiresInDays: 1 })).token;
+  assert.deepEqual((await body(await vault('secret/data/market/staging@me', both))).data.data, STAGING);
+});
+
 test("a person's personal token reads within its scope, and lookup-self answers for it", async () => {
   await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: 'viewer' });
   const issued = await runtime.signin!.issuePersonalToken(await contextFor(deps, DEV), { label: 'vault-cli', expiresInMinutes: 60, scope: { 'market/staging': 'viewer' } });
