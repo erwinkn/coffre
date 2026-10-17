@@ -1,14 +1,14 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
-import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, moveSecret, restoreSecret, saveSecrets, UnsavedEdits } from '../lib/changes';
-import type { ItemStatus } from '../lib/optimistic';
+import { archiveSecret, moveSecret, restoreSecret, saveSecrets, UnsavedEdits, type SaveSecretsVars } from '../lib/changes';
+import { changeKey, type ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
@@ -162,6 +162,7 @@ function EnvironmentLedger({
   rotateAfterDays: number | null;
 }) {
   const coffre = useCoffre();
+  const queryClient = useQueryClient();
   const { principal } = useShell();
   const save = useChange(saveSecrets(coffre, { project, environment }, principal?.id ?? null));
   const restore = useChange(restoreSecret(coffre, { project, environment }));
@@ -300,6 +301,7 @@ function EnvironmentLedger({
     save(batch, {
       // What did not go comes back as it was, beside the other pending rows.
       onError: (error) => {
+        forgetRefusal(batch);
         const left = error instanceof UnsavedEdits ? error.outcome : batch;
         setDrafts((rows) => [...rows, ...left.drafts]);
         setChanges((current) => ({ ...current, ...left.changes }));
@@ -330,11 +332,16 @@ function EnvironmentLedger({
     setChanges({});
     setEditing(new Set());
     setSaveError(null);
-    // A refused save, given up: its rows stop saying so.
-    for (const entry of keys) {
-      const state = status(entry.key);
-      if (state.state === 'failed') dismiss(state.mutationId);
-    }
+  }
+
+  /**
+   * A refused save leaves its rows no failure of their own: its edits come
+   * back on them, and the bar under the table says why. Every other refused
+   * change, a move for one, says why beneath its row.
+   */
+  function forgetRefusal(batch: SaveSecretsVars) {
+    const saves = queryClient.getMutationCache().findAll({ mutationKey: changeKey(queryKeys.secrets({ project, environment })) });
+    for (const each of saves) if (each.state.variables === batch) dismiss(each.mutationId);
   }
 
   /**
@@ -353,6 +360,7 @@ function EnvironmentLedger({
     setSaveError(null);
     save(batch, {
       onError: (error) => {
+        forgetRefusal(batch);
         const left = error instanceof UnsavedEdits ? error.outcome : batch;
         setDrafts(left.drafts);
         setChanges(left.changes);
@@ -548,8 +556,6 @@ function EnvironmentLedger({
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
                       onDismiss={dismiss}
-                      // A refused save puts its edits back, and the bar under the table says why.
-                      failureShown={saveError === null || change === undefined}
                       columns={columns}
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
@@ -1069,7 +1075,6 @@ function SecretRow({
   status,
   disabled,
   onDismiss,
-  failureShown,
   columns,
   onEdit,
   onPatch,
@@ -1101,8 +1106,6 @@ function SecretRow({
   disabled: boolean;
   /** Forget a refused change once its row has said so. */
   onDismiss: (mutationId: number) => void;
-  /** Whether the row says why its change was refused, which it does unless the bar under the table does. */
-  failureShown: boolean;
   columns: number;
   onEdit: () => void;
   onPatch: (patch: Partial<SecretChange>) => void;
@@ -1599,13 +1602,11 @@ function SecretRow({
         </tr>
       ) : null}
 
-      {failureShown && (
-        <RowFailure
-          status={status}
-          columns={columns}
-          onDismiss={() => status.state === 'failed' && onDismiss(status.mutationId)}
-        />
-      )}
+      <RowFailure
+        status={status}
+        columns={columns}
+        onDismiss={() => status.state === 'failed' && onDismiss(status.mutationId)}
+      />
     </>
   );
 }
