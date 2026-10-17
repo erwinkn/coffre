@@ -52,6 +52,11 @@
       "types": "./dist/mcp.d.ts",
       "default": "./dist/mcp.js"
     },
+    "./recipe": {
+      "coffre:source": "./src/recipe.ts",
+      "types": "./dist/recipe.d.ts",
+      "default": "./dist/recipe.js"
+    },
     "./schemas": {
       "coffre:source": "./src/schemas.ts",
       "types": "./dist/schemas.d.ts",

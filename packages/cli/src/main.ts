@@ -20,6 +20,7 @@ import { bindingFrom, describeBindings, describeEvents, describeKeys, describePl
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
+import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
 import { clash, environmentPaths, listOf } from './environments.ts';
 import * as manage from './manage.ts';
@@ -879,7 +880,11 @@ async function list(args: string[]): Promise<void> {
       // How long ago its value was written, a reference's its source's; flagged past the instance's rotateAfterDays.
       const age = ageInDays(entry, now);
       const written = age === null ? '-' : age === 0 ? 'today' : `${age} day${age === 1 ? '' : 's'} ago`;
-      const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: rotate it)` : '';
+      // A generated value says how it was made, and that one command rotates it.
+      const recipe = entry.generated == null ? null : entry.generated.recipe;
+      const rotate = recipe === null ? 'rotate it' : `\`coffre regenerate ${project}/${environment}/${entry.key}\``;
+      const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: ${rotate})` : '';
+      const made = recipe === null ? '' : `  (generated, ${recipe})`;
       const archived = entry.archived ? '  (archived)' : '';
       // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
       const parent = entry.parent ?? null;
@@ -897,7 +902,7 @@ async function list(args: string[]): Promise<void> {
         process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
         continue;
       }
-      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${due}${archived}${standing}\n`);
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${due}${archived}${standing}\n`);
     }
   }
 }
@@ -910,13 +915,26 @@ function days(text: string): number {
 }
 
 async function set(args: string[]): Promise<void> {
-  const { values, positionals } = parse(args, { ref: { type: 'string' } }, ['<project>/<environment>/<KEY>', '[value]'], 1);
+  const { values, positionals } = parse(args, {
+    ref: { type: 'string' },
+    generate: { type: 'string' },
+    'public-key': { type: 'string' },
+  }, ['<project>/<environment>/<KEY>', '[value]'], 1);
   const [target, given] = positionals as [string, string | undefined];
   // A value on the command line is in the shell's history and `ps`: it is asked for.
   if (given !== undefined) fail('coffre set asks for the value: paste it, or pipe it in, never as an argument');
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre set <project>/<environment>/<KEY>');
+  if (values.ref !== undefined && values.generate !== undefined) fail('--ref or --generate: a key reads another secret, or holds a value made here, not both');
+  if (values['public-key'] !== undefined && values.generate === undefined) fail('--public-key goes with --generate and a key pair\'s recipe, as ecdsa:p-256');
+  // Made here, sent with its recipe, and never shown: nobody sees the value, and Regenerate makes the next one alike.
+  if (values.generate !== undefined) {
+    const patch = await generatedPatch(key, recipeFlag(values.generate), values['public-key']);
+    const result = await client().secrets.set(`${project}/${environment}`, patch);
+    process.stdout.write(`${generatedLines(patch, versionsOf(result.keys), 'generated').join('\n')}\n`);
+    return;
+  }
   // A reference names a secret, which is no secret: it may be a flag. A value is never one, so the two never mix.
   if (values.ref !== undefined) {
     const source = parsePath(values.ref);
@@ -932,6 +950,28 @@ async function set(args: string[]): Promise<void> {
   const outcome = result.keys[key];
 
   process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}\n`);
+}
+
+/**
+ * Regenerate a key by the recipe its current value was made by: a new value
+ * made here and written as a new version, never shown, and for a key pair's
+ * either half, both halves at once. Listing the environment reads no value.
+ */
+async function regenerate(args: string[]): Promise<void> {
+  const [target] = parse(args, {}, ['<project>/<environment>/<KEY>']).positionals as [string];
+  const { project, environment, key } = parsePath(target);
+  if (!key) fail('usage: coffre regenerate <project>/<environment>/<KEY>');
+  const path = `${project}/${environment}`;
+  const coffre = client();
+  const listed = (await coffre.secrets.list(path)).keys;
+  const patch = await regeneratedPatch(path, key, listed).catch((error: unknown) => fail((error as Error).message));
+  const result = await coffre.secrets.set(path, patch);
+  process.stdout.write(`${generatedLines(patch, versionsOf(result.keys), 'regenerated').join('\n')}\n`);
+}
+
+/** The version each key of a write got. */
+function versionsOf(keys: Record<string, { version: number } | { archived: true } | { reference: string }>): Record<string, number | null> {
+  return Object.fromEntries(Object.entries(keys).map(([key, outcome]) => [key, 'version' in outcome ? outcome.version : null]));
 }
 
 /**
@@ -1115,7 +1155,8 @@ async function history(args: string[]): Promise<void> {
 
   for (const version of result.versions) {
     process.stdout.write(
-      `v${String(version.version).padEnd(4)} ${version.createdAt.slice(0, 19).replace('T', ' ')}  ${version.createdBy.padEnd(24)}${version.current ? ' (current)' : ''}\n`,
+      // An instance before 0.7 says nothing of recipes.
+      `v${String(version.version).padEnd(4)} ${version.createdAt.slice(0, 19).replace('T', ' ')}  ${version.createdBy.padEnd(24)}${version.current ? ' (current)' : ''}${version.recipe == null ? '' : `  (generated, ${version.recipe})`}\n`,
     );
   }
 }
@@ -1633,6 +1674,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   list,
   get,
   set,
+  regenerate,
   run,
   export: exportEnv,
   version: (args) => manage.version(connect, args),

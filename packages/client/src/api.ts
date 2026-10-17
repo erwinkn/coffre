@@ -248,6 +248,14 @@ export type Api = {
         version: number | null;
         updatedAt: string | null;
         updatedBy: string | null;
+        versionId: string | null;
+        generated: null | {
+          recipe: string;
+          pair?: {
+            private: string;
+            public: string;
+          };
+        };
         parent: null | {
           from: string;
           state: "inherited" | "overridden" | "removed";
@@ -267,6 +275,16 @@ export type Api = {
   "PATCH /secrets/:project/:environment": {
     input: {
       [key: string]: string | null | {
+        value: string;
+        generated: {
+          recipe: string;
+          pair?: {
+            private: string;
+            public: string;
+          };
+        };
+        replaces?: string;
+      } | {
         ref: string;
       };
     };
@@ -312,6 +330,7 @@ export type Api = {
         createdBy: string;
         current: boolean;
         kek: string;
+        recipe: string | null;
       }[];
     };
   };
@@ -1924,6 +1943,14 @@ export type SecretKey = {
   version: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
+  versionId: string | null;
+  generated: null | {
+    recipe: string;
+    pair?: {
+      private: string;
+      public: string;
+    };
+  };
   parent: null | {
     from: string;
     state: "inherited" | "overridden" | "removed";
@@ -1939,6 +1966,7 @@ export type SecretVersion = {
   createdBy: string;
   current: boolean;
   kek: string;
+  recipe: string | null;
 };
 
 export type SessionRow = {

@@ -6,7 +6,9 @@ import { failureMessage, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
-import { applySecretEditBatch, companionsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
+import { regenerateWrite, type Generation } from '@coffre/core/recipe';
+import { regeneratedKeys, renamePairs } from './recipes.ts';
+import { applySecretEditBatch, companionsOf, generationsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
 
 /**
@@ -35,6 +37,7 @@ const ARCHIVING: Words = { pending: 'Archiving…', done: 'archived', failed: 'N
 const REVOKING: Words = { pending: 'Revoking…', done: 'revoked', failed: 'Not revoked.' };
 const DISCONNECTING: Words = { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' };
 const MOVING: Words = { pending: 'Moving…', done: 'moved', failed: 'Not moved.' };
+const REGENERATING: Words = { pending: 'Regenerating…', done: 'regenerated', failed: 'Not regenerated.' };
 
 const saving = (id: string): Target => ({ id, kind: 'saving' });
 const removing = (id: string): Target => ({ id, kind: 'removing' });
@@ -515,6 +518,8 @@ export function saveSecrets(
     removing: ARCHIVING,
     apply: (entries, vars) => {
       const now = new Date().toISOString();
+      // A value typed by hand has no recipe; a generated one has the one it was made by.
+      const generations = generationsOf(vars.active, vars.drafts, vars.changes);
       const bumped = (entry: SecretKey | undefined, key: string): SecretKey => {
         // In a fork, a value written over the parent's is an override, whose own version the list read back says.
         const inherited = entry?.parent != null && entry.parent.state !== 'overridden' && entry.key === key;
@@ -526,17 +531,24 @@ export function saveSecrets(
           reference: null,
           archived: false,
           version: inherited ? null : (entry?.version ?? 0) + 1,
+          // Known once the list is read back: until then, nothing regenerates it.
+          versionId: null,
           updatedAt: now,
           updatedBy: author,
+          generated: generations.get(key) ?? null,
           parent: entry?.parent == null || entry.key !== key ? null : { ...entry.parent, state: 'overridden', changed: false, reset: false },
         };
       };
+      const renames = new Map<string, string>();
       let next = entries.map((entry) => {
         const change = vars.changes[entry.key];
         if (change === undefined || change.archived) return entry;
         const key = change.key.trim();
+        if (key !== entry.key) renames.set(entry.key, key);
         return change.value === null ? { ...entry, key } : bumped(entry, key);
       });
+      // A rename moves no value: a pair it touches names the new key, in both halves.
+      next = renamePairs(next, renames);
       for (const draft of written(vars)) {
         const key = draft.key.trim();
         const existing = next.find((entry) => entry.key === key);
@@ -589,6 +601,54 @@ export function moveSecret(
     apply: (entries, vars) => entries.map((entry) => (entry.key === vars.key ? { ...entry, folder: vars.folder } : entry)),
     affects: () => affects.secrets(place),
     run: (vars) => client.secrets.update(`${place.project}/${place.environment}/${vars.key}`, { folder: vars.folder }),
+  };
+}
+
+/** What Regenerate is asked: the key, its recipe, and the version id of each key it writes, as listed. */
+export type RegenerateVars = { key: string; generated: Generation; versions: Readonly<Record<string, string>> };
+
+/**
+ * Regenerate a key by its recipe: the value made in this browser as the
+ * change runs, and sent at once, never on the page. Each key it writes, a
+ * key pair's two halves, shows it pending, so neither is edited, renamed
+ * or regenerated again until it lands. The server holds it to the versions
+ * listed, which settles a race with any other write.
+ */
+export function regenerateSecret(
+  client: CoffreClient,
+  place: { project: string; environment: string },
+  /** Who is regenerating, shown as the author until the list is read back. */
+  author: string | null,
+): Change<Secrets, SecretKey, RegenerateVars, unknown> {
+  const path = `${place.project}/${place.environment}`;
+  return {
+    list: secretsList(place),
+    saving: REGENERATING,
+    label: (vars) => regeneratedKeys(vars.key, vars.generated).join(' and '),
+    targets: (vars) => regeneratedKeys(vars.key, vars.generated).map(saving),
+    apply: (entries, vars) => {
+      const keys = new Set(regeneratedKeys(vars.key, vars.generated));
+      const now = new Date().toISOString();
+      return entries.map((entry) => {
+        if (!keys.has(entry.key)) return entry;
+        // In a fork, regenerating a key it inherits writes an override here, never the parent:
+        // its own version is the one the list read back says.
+        const inherited = entry.parent != null && entry.parent.state !== 'overridden';
+        return {
+          ...entry,
+          reference: null,
+          version: inherited ? null : (entry.version ?? 0) + 1,
+          versionId: null,
+          updatedAt: now,
+          updatedBy: author,
+          generated: vars.generated,
+          parent: entry.parent == null ? null : { ...entry.parent, state: 'overridden', changed: false, reset: false },
+        };
+      });
+    },
+    affects: () => affects.secrets(place),
+    // Each key replaces the version the page listed, or the server refuses the write.
+    run: async (vars) => client.secrets.set(path, await regenerateWrite(vars.key, vars.generated, (key) => (Object.hasOwn(vars.versions, key) ? vars.versions[key]! : null))),
   };
 }
 
