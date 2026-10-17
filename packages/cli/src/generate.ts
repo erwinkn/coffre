@@ -13,7 +13,7 @@ import { UsageError } from './manage.ts';
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 /** A listed key, as far as regenerating it goes; an instance before 0.7 says nothing of `generated`. */
-export type Listed = { key: string; archived: boolean; generated?: Generation | null };
+export type Listed = { key: string; archived: boolean; version: number | null; generated?: Generation | null };
 
 /** The recipe `--generate` names, or a usage error that says the syntax. */
 export function recipeFlag(text: string): Recipe {
@@ -59,7 +59,8 @@ export async function regeneratedPatch(path: string, key: string, listed: readon
         `\`coffre set ${path}/${key} --generate <recipe>\` gives it one`,
     );
   }
-  return regenerateWrite(key, entry.generated);
+  // Each key replaces the version listed, or the server refuses it: renamed or written since, it is not the one to regenerate.
+  return regenerateWrite(key, entry.generated, (name) => listed.find((each) => each.key === name && !each.archived)?.version ?? null);
 }
 
 /**

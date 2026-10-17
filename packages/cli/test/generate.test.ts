@@ -13,7 +13,7 @@ const TOKEN = `coffre_cli_${'g'.repeat(43)}`;
 
 type Generation = { recipe: string; pair?: { private: string; public: string } };
 type Held = { version: number; archived?: boolean; generated?: Generation | null };
-type Written = { value: string; generated?: Generation };
+type Written = { value: string; generated?: Generation; replaces?: number };
 
 /**
  * A coffre with one environment, app/prod, which lists its keys with their
@@ -150,6 +150,8 @@ test('regenerate makes a new value by the recipe the key has, and a key pair who
   assert.equal(run.stdout, 'TOKEN regenerated as version 5: 16 random bytes as 22 base64 URL characters (bytes:16:base64url)\n');
   assert.match(coffre.writes[0]!.TOKEN!.value, /^[A-Za-z0-9_-]{22}$/);
   assert.deepEqual(coffre.writes[0]!.TOKEN!.generated, { recipe: 'bytes:16:base64url' });
+  // It replaces the version listed, which the server holds it to.
+  assert.equal(coffre.writes[0]!.TOKEN!.replaces, 4);
 
   const halves = await coffre.coffre(['regenerate', 'app/prod/VERIFY_KEY']);
   assert.equal(halves.code, 0, halves.stderr);
@@ -159,7 +161,7 @@ test('regenerate makes a new value by the recipe the key has, and a key pair who
       'VERIFY_KEY regenerated as version 3: the public key of a new ECDSA P-384 pair with SIGNING_KEY (ecdsa:p-384)\n',
   );
   assert.deepEqual(Object.keys(coffre.writes[1]!), ['SIGNING_KEY', 'VERIFY_KEY']);
-  for (const written of Object.values(coffre.writes[1]!)) assert.deepEqual(written.generated, pair);
+  for (const written of Object.values(coffre.writes[1]!)) assert.deepEqual([written.generated, written.replaces], [pair, 2]);
   unseen({ stdout: run.stdout + halves.stdout, stderr: run.stderr + halves.stderr }, coffre.writes);
 });
 

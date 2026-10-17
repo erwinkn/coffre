@@ -14,7 +14,8 @@
   and the server keeps it with the version, so `coffre regenerate
   market/prod/SESSION_SECRET`, or Regenerate in the row's menu, rotates the
   secret: a new value, made the same way, where you are, never shown. A key
-  pair's either key regenerates both. A value typed or pasted over a generated
+  pair's either key regenerates both, and only if neither changed since it
+  was listed (409 otherwise). A value typed or pasted over a generated
   one clears its recipe; a rollback brings it back with the value. The row
   marks a generated key; its version history, `coffre history` and `coffre
   list` name each recipe; and `coffre list` says `coffre regenerate` for a generated value due

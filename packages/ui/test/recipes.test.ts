@@ -73,7 +73,7 @@ test("Regenerate is a save of every key it writes: both halves are pending until
   const sent: unknown[] = [];
   const client = { secrets: { set: async (path: string, patch: unknown) => (sent.push([path, patch]), { operationId: 'op', keys: {} }) } } as unknown as CoffreClient;
   const change = regenerateSecret(client, { project: 'market', environment: 'dev' }, 'ada@acme.example');
-  const vars = { key: 'JWT_PUBLIC_KEY', generated: PAIR };
+  const vars = { key: 'JWT_PUBLIC_KEY', generated: PAIR, versions: { JWT_PRIVATE_KEY: 1, JWT_PUBLIC_KEY: 1 } };
   // The page's status marks each target pending, and a row with a save on its way takes no edit.
   assert.deepEqual(change.targets(vars).map(({ id, kind }) => [id, kind]), [['JWT_PRIVATE_KEY', 'saving'], ['JWT_PUBLIC_KEY', 'saving']]);
   const busy = new Set(change.targets(vars).map((target) => target.id));
@@ -89,10 +89,11 @@ test("Regenerate is a save of every key it writes: both halves are pending until
 
   // The value is made as the change runs, and sent with its recipe, under the pair's names.
   await change.run(vars);
-  const [[path, patch]] = sent as [[string, Record<string, { generated: unknown }>]];
+  const [[path, patch]] = sent as [[string, Record<string, { generated: unknown; replaces: number }>]];
   assert.equal(path, 'market/dev');
   assert.deepEqual(Object.keys(patch), ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY']);
-  assert.deepEqual(patch.JWT_PUBLIC_KEY!.generated, PAIR);
+  // Each replaces the version the page listed: the server refuses it if either has changed since.
+  assert.deepEqual([patch.JWT_PUBLIC_KEY!.generated, patch.JWT_PRIVATE_KEY!.replaces, patch.JWT_PUBLIC_KEY!.replaces], [PAIR, 1, 1]);
 });
 
 test('Regenerate waits while either half is being edited, before any save is sent', () => {

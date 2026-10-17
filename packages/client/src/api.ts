@@ -257,6 +257,7 @@ export type Api = {
             public: string;
           };
         };
+        replaces?: number;
       } | {
         ref: string;
       };

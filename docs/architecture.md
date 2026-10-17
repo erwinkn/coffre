@@ -400,7 +400,10 @@ checks that the recipe reads, stores it, written canonical
 (`secret_versions.recipe`), and says it back in the listing as the key's
 `generated`, and in its version history. Regenerate, `coffre regenerate
 market/prod/SESSION_SECRET` or the row's menu, makes the next value by it, in
-the environment it is asked of, and nobody sees either. A value written
+the environment it is asked of, and nobody sees either. It addresses keys by
+name, so each value it sends says the version it `replaces`, as listed, and
+the server refuses the whole write (409) if any key is not at that version
+now: renamed, archived, typed over or regenerated meanwhile, by anyone. A value written
 without a recipe has none, by whichever client, so typing over a generated
 value ends what Regenerate does for it; a rollback brings an old value back
 with the recipe it had.

@@ -77,9 +77,11 @@ export type SecretVersion = {
 /**
  * A value, a value a client generated, with how (`@coffre/core/recipe`), or
  * a reference to another secret by path. A value written without a recipe
- * has none: writing one by hand ends what Regenerate can do.
+ * has none: writing one by hand ends what Regenerate can do. A regenerate
+ * says the version each key's value `replaces`, and is refused if that is
+ * not its current version.
  */
-export type SecretValue = string | { value: string; generated: Generation } | { ref: string };
+export type SecretValue = string | { value: string; generated: Generation; replaces?: number } | { ref: string };
 
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
 
@@ -355,6 +357,19 @@ export async function setSecrets(
     const currently = await currentReferences(ctx.db, heads.filter((row) => row.currentVersionId === null).map((row) => row.id));
     // Each key's newest reference, which the transaction checks no write replaced meanwhile.
     const newestBefore = newestReferences(await referenceRows(ctx.db, { holderSecretIds: heads.map((row) => row.id) }));
+    // A regenerate replaces the versions it was listed with, or nothing: a key renamed, archived
+    // or written meanwhile is no longer the one it regenerates. Checked again under the head,
+    // as any prepared write, by `PrepareAgain`.
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null || typeof value !== 'object' || !('replaces' in value) || value.replaces === undefined) continue;
+      const row = prepared.get(key);
+      if (row !== undefined && row.archivedAt === null && row.currentVersionId !== null && row.currentVersion === value.replaces) continue;
+      throw conflict(
+        row === undefined || row.currentVersionId === null
+          ? `${key} has no value of its own to regenerate now: it was renamed, or made a reference, since it was listed. Nothing was written`
+          : `${key} changed since it was listed: it is version ${row.currentVersion}${row.archivedAt === null ? '' : ', archived'}, not ${value.replaces}. Nothing was written`,
+      );
+    }
     const archived = (key: string) => {
       const row = prepared.get(key);
       if (row?.archivedAt == null) return;

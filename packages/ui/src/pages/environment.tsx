@@ -233,6 +233,12 @@ function EnvironmentLedger({
   const archived = keys.filter((entry) => entry.archived);
   const existing = new Set(keys.map((entry) => entry.key));
   const versionOf = (key: string) => keys.find((entry) => entry.key === key.trim())?.version ?? null;
+  /** The listed version of each key, those with one: what a regenerate replaces. */
+  const versionsOf = (names: readonly string[]) =>
+    Object.fromEntries(names.flatMap((name) => {
+      const version = active.find((entry) => entry.key === name)?.version ?? null;
+      return version === null ? [] : [[name, version] as const];
+    }));
 
   const changedEntries = active.filter(
     (entry) => secretChangeFor(changes, entry.key) !== undefined,
@@ -540,11 +546,17 @@ function EnvironmentLedger({
                       environment={environment}
                       entry={entry}
                       generated={liveGeneration(entry, active)}
-                      // Being edited, or with a save on its way: a key pair's Regenerate waits for both halves.
-                      busy={(key) => status(key).state === 'pending' || editing.has(key) || secretChangeFor(changes, key) !== undefined}
+                      // Being edited, written by a new row or its companion, or with a save on its way:
+                      // a key pair's Regenerate waits for both halves.
+                      busy={(key) =>
+                        status(key).state === 'pending' ||
+                        editing.has(key) ||
+                        secretChangeFor(changes, key) !== undefined ||
+                        drafts.some((draft) => draft.key.trim() === key || draft.companion?.key.trim() === key)
+                      }
                       onRegenerate={(generated) =>
                         regenerate(
-                          { key: entry.key, generated },
+                          { key: entry.key, generated, versions: versionsOf(regeneratedKeys(entry.key, generated)) },
                           { onSuccess: () => toast.success(`Regenerated ${regeneratedKeys(entry.key, generated).join(' and ')}`) },
                         )
                       }

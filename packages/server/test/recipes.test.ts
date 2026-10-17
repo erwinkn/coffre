@@ -129,6 +129,33 @@ test('a recipe the server cannot read, or a key pair not written whole, is refus
   assert.equal((await db.owner.select().from(secrets)).length, 0);
 });
 
+test('a regenerate replaces the versions it was listed with, or writes nothing', async () => {
+  await root.secrets.set('market/dev', pairWrite());
+  const regenerate = (replaces: { private: number; public: number }, names = PAIR.pair) => {
+    const write = pairWrite(names);
+    return root.secrets.set('market/dev', {
+      [names.private]: { ...write[names.private]!, replaces: replaces.private },
+      [names.public]: { ...write[names.public]!, replaces: replaces.public },
+    });
+  };
+  assert.deepEqual((await regenerate({ private: 1, public: 1 })).keys, { JWT_PRIVATE_KEY: { version: 2 }, JWT_PUBLIC_KEY: { version: 2 } });
+  // The same listing again: both have moved on since.
+  await assert.rejects(regenerate({ private: 1, public: 1 }), { status: 409, message: /JWT_PRIVATE_KEY changed since it was listed: it is version 2, not 1/ });
+
+  // One half renamed since the page listed it: its old name is no half of the pair.
+  await root.secrets.rename('market/dev/JWT_PRIVATE_KEY', 'SIGNING_KEY');
+  await assert.rejects(regenerate({ private: 2, public: 2 }), { status: 409, message: /JWT_PRIVATE_KEY has no value of its own to regenerate now/ });
+  // Typed over, or archived, since.
+  await root.secrets.set('market/dev', { JWT_PUBLIC_KEY: 'typed' });
+  await assert.rejects(regenerate({ private: 2, public: 2 }, { private: 'SIGNING_KEY', public: 'JWT_PUBLIC_KEY' }), { status: 409, message: /JWT_PUBLIC_KEY changed/ });
+  await root.secrets.set('market/dev', { SIGNING_KEY: null });
+  await assert.rejects(regenerate({ private: 2, public: 3 }, { private: 'SIGNING_KEY', public: 'JWT_PUBLIC_KEY' }), { status: 409, message: /SIGNING_KEY changed since it was listed: it is version 2, archived/ });
+
+  // Nothing of those refused was written: no JWT_PRIVATE_KEY again, and the versions are as the writes left them.
+  const listed = (await root.secrets.list('market/dev')).keys.map(({ key, version, archived }) => [key, version, archived]);
+  assert.deepEqual(listed, [['JWT_PUBLIC_KEY', 3, false], ['SIGNING_KEY', 2, true]]);
+});
+
 test('a recipe the database holds and no client could send makes no Regenerate', async () => {
   await root.secrets.set('market/dev', { TOKEN: { value: 'v', generated: { recipe: 'bytes:32' } } });
   // As the owner, with the erase-only guard lifted, as only someone around coffre could.

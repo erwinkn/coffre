@@ -231,17 +231,23 @@ test('a write of a generated value carries its recipe, and a key pair names both
   assert.deepEqual(Object.keys(named), ['SIGNER', 'SIGNER_PEER']);
 });
 
-test('regenerating either half of a key pair makes the pair again, under the names it has', async () => {
+test('regenerating either half of a key pair makes the pair again, under the names it has, replacing the versions listed', async () => {
   const generated = { recipe: 'ecdsa:p-384', pair: { private: 'SIGNING_KEY', public: 'SIGNING_KEY_PUB' } };
+  const versions = new Map([['SIGNING_KEY', 4], ['SIGNING_KEY_PUB', 3], ['TOKEN', 7], ['__proto__', 1]]);
+  const versionOf = (key: string) => versions.get(key) ?? null;
   for (const key of ['SIGNING_KEY', 'SIGNING_KEY_PUB']) {
-    const write = await regenerateWrite(key, generated);
+    const write = await regenerateWrite(key, generated, versionOf);
     assert.deepEqual(Object.keys(write), ['SIGNING_KEY', 'SIGNING_KEY_PUB']);
     assert.deepEqual(write.SIGNING_KEY!.generated, generated);
+    assert.deepEqual([write.SIGNING_KEY!.replaces, write.SIGNING_KEY_PUB!.replaces], [4, 3]);
   }
-  const once = await regenerateWrite('TOKEN', { recipe: 'bytes:16:base64url' });
+  const once = await regenerateWrite('TOKEN', { recipe: 'bytes:16:base64url' }, versionOf);
   assert.deepEqual(Object.keys(once), ['TOKEN']);
   assert.match(once.TOKEN!.value, /^[A-Za-z0-9_-]{22}$/);
-  await assert.rejects(() => regenerateWrite('KEY', { recipe: 'ecdsa:p-256' }), /no pair is named/);
+  assert.equal(once.TOKEN!.replaces, 7);
+  await assert.rejects(() => regenerateWrite('KEY', { recipe: 'ecdsa:p-256' }, versionOf), /no pair is named/);
+  // A half not listed with a version of its own is no pair to regenerate.
+  await assert.rejects(() => regenerateWrite('A', { recipe: 'ecdh:p-256', pair: { private: 'A', public: 'TOKEN' } }, versionOf), /A is not listed/);
   // A key named __proto__ is a key like any other.
-  assert.deepEqual(Object.keys(await regenerateWrite('__proto__', { recipe: 'aes:256' })), ['__proto__']);
+  assert.deepEqual(Object.keys(await regenerateWrite('__proto__', { recipe: 'aes:256' }, versionOf)), ['__proto__']);
 });

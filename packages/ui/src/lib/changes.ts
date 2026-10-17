@@ -579,18 +579,22 @@ export function moveSecret(
   };
 }
 
+/** What Regenerate is asked: the key, its recipe, and the version of each key it writes, as listed. */
+export type RegenerateVars = { key: string; generated: Generation; versions: Readonly<Record<string, number>> };
+
 /**
  * Regenerate a key by its recipe: the value made in this browser as the
  * change runs, and sent at once, never on the page. Each key it writes, a
  * key pair's two halves, shows it pending, so neither is edited, renamed
- * or regenerated again until it lands.
+ * or regenerated again until it lands. The server holds it to the versions
+ * listed, which settles a race with any other write.
  */
 export function regenerateSecret(
   client: CoffreClient,
   place: { project: string; environment: string },
   /** Who is regenerating, shown as the author until the list is read back. */
   author: string | null,
-): Change<Secrets, SecretKey, { key: string; generated: Generation }, unknown> {
+): Change<Secrets, SecretKey, RegenerateVars, unknown> {
   const path = `${place.project}/${place.environment}`;
   return {
     list: secretsList(place),
@@ -607,7 +611,8 @@ export function regenerateSecret(
       );
     },
     affects: () => affects.secrets(place),
-    run: async (vars) => client.secrets.set(path, await regenerateWrite(vars.key, vars.generated)),
+    // Each key replaces the version the page listed, or the server refuses the write.
+    run: async (vars) => client.secrets.set(path, await regenerateWrite(vars.key, vars.generated, (key) => (Object.hasOwn(vars.versions, key) ? vars.versions[key]! : null))),
   };
 }
 
