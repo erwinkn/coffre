@@ -9,7 +9,6 @@ import { ACCESS_JWT_HEADER } from '@coffre/core/identity';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
 import { fetchApi } from './fetch-api.ts';
-import { readLimitedJson } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** One plugin, as its constructor returns it: `vaultKv({ mount: 'secret' })`. */
@@ -36,16 +35,18 @@ export type PluginContext = {
    */
   api(token: string): CoffreClient;
   /**
-   * A workload's ID token for a credential of the service account it names
-   * that lasts five minutes, through that account's trust bindings: what
-   * `POST /api/auth/oidc` does, in process, with its limits, the token spent
-   * so that it signs in once, and its audit. A refusal throws a `CoffreError`.
+   * The request as a workload's sign-in: its body, a workload's ID token,
+   * for a credential of the service account it names that lasts five
+   * minutes, through that account's trust bindings. This is `POST
+   * /api/auth/oidc` on the plugin's own request, in process: its limits
+   * first, then the body, read only to its limit, then the token spent so
+   * that it signs in once, and its audit. `asked` says what the body asks
+   * for, `{ service, token }`, in the plugin's words. A refusal throws a
+   * `CoffreError`, a body that does not say 400.
    */
-  exchange(input: { service: string; token: string }): Promise<{ token: string; expiresAt: string }>;
+  exchange(asked: (body: unknown) => { service: unknown; token: unknown }): Promise<{ token: string; expiresAt: string }>;
   /** End the credential `token` is, as `POST /api/auth/logout` with it does. A refusal throws a `CoffreError`. */
   signOut(token: string): Promise<void>;
-  /** The request's JSON body, read only to `max` bytes. Throws when it is larger, or not JSON. */
-  json(max: number): Promise<unknown>;
 };
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
@@ -81,21 +82,18 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
   if (routes === undefined) return null;
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
-  // One of coffre's own routes outside the API, in process: its answer, or its refusal as the client throws one.
-  const ask = async (path: string, init: RequestInit, route: typeof logout): Promise<unknown> => {
-    const response = await route(new Request(`${runtime.publicUrl}${path}`, { method: 'POST', ...init }), runtime, sourceIp);
+  // One of coffre's own routes outside the API's, in process: its answer, or its refusal as the client throws one.
+  const answer = async (response: Response): Promise<unknown> => {
     const body = (await response.json()) as { error?: string; message?: string; reason?: string };
     if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
     return body;
   };
   return routes.fetch(request, {
     publicUrl: runtime.publicUrl,
-    exchange: async (input) =>
-      (await ask('/api/auth/oidc', { headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }, exchangeWorkloadToken)) as { token: string; expiresAt: string },
+    exchange: async (asked) => (await answer(await exchangeWorkloadToken(request, runtime, sourceIp, asked))) as { token: string; expiresAt: string },
     signOut: async (token) => {
-      await ask('/api/auth/logout', { headers: carrying(token) }, logout);
+      await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));
     },
-    json: (max) => readLimitedJson(request, max),
     api: (token) => {
       let checked: Promise<AuthenticatedIdentity | Response> | undefined;
       return createClient({

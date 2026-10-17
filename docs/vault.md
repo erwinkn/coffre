@@ -166,6 +166,9 @@ cluster stores no coffre token.
      --claim kubernetes.io.serviceaccount.uid="$UID_"
    ```
 
+   This previews the binding: its issuer, its keys by `kid` and its claims.
+   Check them, then run it again with `--apply` to save it.
+
 2. Point the SecretStore's auth at it. The role is the coffre service
    account, and the audience is coffre's URL, which the binding expects:
 

@@ -61,7 +61,8 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
   }
   // The writes it takes: signing in, at any auth mount's `login` (`kubernetes`, `jwt` or the deployment's own name), and out.
   const writes = request.method === 'PUT' || request.method === 'POST';
-  const signing = (/^auth\/[^/]+\/login$/.test(path) && path !== 'auth/token/login') || path === 'auth/token/revoke-self';
+  // A mount may be several segments deep, `kubernetes/cluster-a`; Vault's token auth has no login.
+  const signing = (/^auth\/.+\/login$/.test(path) && path !== 'auth/token/login') || path === 'auth/token/revoke-self';
   if (signing && !writes) return failure(405, 'sign in and out with PUT or POST');
   if (request.method !== 'GET' && request.method !== 'HEAD' && !signing) return failure(405, "coffre's Vault API is read only");
   const login = signing && path !== 'auth/token/revoke-self';
@@ -109,32 +110,25 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
   }
 }
 
-/** What a login's body holds, as Vault's Kubernetes and JWT auth both take it: no larger than a token's exchange takes. */
-const LOGIN_BYTES = 16 * 1024;
-
 /**
- * `auth/<mount>/login`, as ESO's Kubernetes and JWT auth send it: the role
- * names a coffre service account, and the JWT is a workload's ID token,
- * which the exchange takes through that account's trust bindings: a
- * Kubernetes service account's projected token, a GitHub run's. The
- * exchange checks it, spends it and issues a credential of five minutes,
- * never this plugin: it holds no key of any issuer's, and sees no token
- * but the one it passes on. The answer is Vault's `auth` block, not
- * renewable: ESO signs in again for its next read.
+ * `auth/<mount>/login`, as ESO's Kubernetes and JWT auth send it, `{ role,
+ * jwt }`: the role names a coffre service account, and the JWT is a
+ * workload's ID token, which the exchange takes through that account's
+ * trust bindings: a Kubernetes service account's projected token, a GitHub
+ * run's. The exchange admits the request, reads its body, checks the token,
+ * spends it and issues a credential of five minutes, never this plugin: it
+ * holds no key of any issuer's, and only says what the body names. The
+ * answer is Vault's `auth` block, not renewable: ESO signs in again for its
+ * next read.
  */
 async function logIn(coffre: PluginContext): Promise<Response> {
-  let body: unknown;
+  let role: unknown;
   try {
-    body = await coffre.json(LOGIN_BYTES);
-  } catch {
-    return failure(400, `a login's body is JSON of at most ${LOGIN_BYTES} bytes: { "role", "jwt" }`);
-  }
-  const { role, jwt } = (body ?? {}) as { role?: unknown; jwt?: unknown };
-  if (typeof role !== 'string' || role === '' || typeof jwt !== 'string' || jwt === '') {
-    return failure(400, 'a login names its role, the coffre service account, and its jwt, the workload\'s ID token');
-  }
-  try {
-    const issued = await coffre.exchange({ service: `token:${role}`, token: jwt });
+    const issued = await coffre.exchange((body) => {
+      const login = (body ?? {}) as { role?: unknown; jwt?: unknown };
+      role = login.role;
+      return { service: typeof role === 'string' ? `token:${role}` : role, token: login.jwt };
+    });
     const left = Math.max(0, Math.floor((Date.parse(issued.expiresAt) - Date.now()) / 1000));
     return success(null, {
       client_token: issued.token,
@@ -151,6 +145,7 @@ async function logIn(coffre: PluginContext): Promise<Response> {
     });
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
+    if (error.status === 400) return failure(400, `a login's body is JSON, { "role", "jwt" }: ${error.message}`);
     // An instance that trusts no workloads says 404: no place a read names, so not Vault's 404 either.
     return error.status === 404 ? failure(400, error.message) : refused(error);
   }

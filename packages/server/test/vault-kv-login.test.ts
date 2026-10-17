@@ -153,10 +153,12 @@ test("ESO's Kubernetes auth: a login, a read with its token, then lookup-self an
   assert.equal(exchanged!.actor, `token:${SERVICE}`);
 });
 
-test("vault-action's JWT auth at its own mount, by POST, signs in the same way", async () => {
+test("vault-action's JWT auth at its own mount, by POST, and a mount several segments deep, sign in the same way", async () => {
   const signedIn = await login(projected(), SERVICE, 'jwt', 'POST');
   assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body));
   assert.match(signedIn.body!.auth.client_token, /^coffre_svc_/);
+  // ESO's `mountPath: kubernetes/cluster-a`.
+  assert.equal((await login(projected(), SERVICE, 'kubernetes/cluster-a')).status, 200);
 });
 
 test('a token signs in once, and only as an account whose bindings trust it: refusals are 403, with the reason', async () => {
@@ -193,6 +195,8 @@ test('limits and an instance that trusts no workloads: 429, and 400, never 404',
   open = false;
   const busy = await login(projected());
   assert.equal(busy.status, 429);
+  // Admission first, as `/api/auth/oidc`'s: a body past the limits is never read, malformed or not.
+  assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: 'not json' })).status, 429);
   open = true;
   assert.equal((await login(projected())).status, 200);
   const none = await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE, jwt: projected() }, on: { ...runtime, workloads: null } });
