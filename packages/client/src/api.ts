@@ -1185,6 +1185,12 @@ export type Api = {
       app: null;
     };
   };
+  "GET /projects/:project/:environment/version": {
+    input: undefined;
+    output: {
+      version: string;
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {

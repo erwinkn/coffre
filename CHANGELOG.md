@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Ask whether an environment changed without reading it.** `coffre version
+  market/prod`, or `GET /api/projects/market/prod/version`, answers a
+  version of what a read of it would open: a value written, a key added,
+  archived or renamed, a reference's source rotated and, in a fork,
+  anything it inherits change it; filing a key in a folder does not. It
+  reads no value, so it is not logged, and it takes what a read takes:
+  read on the environment, and on each parent a fork inherits from.
+- **`coffre export --output-file` and `--watch`.** `--output-file .env`
+  writes the export to a 0600 file, whole or not at all. `--watch` keeps it
+  current: it asks the version every minute (`--interval`), reads only once
+  it changed, rewrites the file only when its contents change, then runs
+  `--on-change '<command>'`. A failed round keeps the file and backs off,
+  up to 15 minutes.
 - **`coffre run --keep-existing`.** `coffre run` still sets every key of the
   environments it names over a variable of the same name in your shell. With
   `--keep-existing`, a variable already set there keeps its value, an empty one

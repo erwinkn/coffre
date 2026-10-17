@@ -28,6 +28,7 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /projects': [{ params: {} }],
     'GET /secrets/:project/:environment': places.map((params) => ({ params })),
     'GET /projects/:project/:environment/missing': places.map((params) => ({ params })),
+    'GET /projects/:project/:environment/version': places.map((params) => ({ params })),
     'GET /secrets/:project/:environment/:key/versions': secrets.map((params) => ({ params })),
     'GET /members': [
       { params: {} },
@@ -75,6 +76,7 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'PATCH /projects/:project/:environment': true,
   'DELETE /projects/:project/:environment': true,
   'GET /projects/:project/:environment/missing': true,
+  'GET /projects/:project/:environment/version': true,
   'PATCH /projects/:project/:environment/dismissals': true,
   'GET /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment': true,

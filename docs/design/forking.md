@@ -504,6 +504,14 @@ listed again as archived.
 personal config, to those who may see it. A fork's count is of the keys
 it resolves to.
 
+`GET /api/projects/market/prod-eu/version` is a version of what a read
+of the fork would open (`coffre version`, and `coffre export --watch`
+polls it). It hashes the read's own resolution, `readableValues`, key by
+key with the version each resolves to, so an inherited value rotated in
+prod, an override, a removal or a reset changes it, with no code of its
+own for forks. A personal config's layer changes it the same way once
+reads resolve `market/dev@me`, asked of that same path.
+
 ### MCP
 
 The tools take paths, so `market/prod-eu` and `market/dev@me` work as

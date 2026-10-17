@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
@@ -31,7 +31,7 @@ import {
   secretFolderOf,
 } from '../db/queries.ts';
 import { can, permissionsAt, placeOf } from './caller.ts';
-import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
@@ -1026,4 +1026,34 @@ export async function reveal(
     }
     return { operationId, values: { ...values } };
   });
+}
+
+/**
+ * A version of what a read of the environment would open, for whoever
+ * polls it before reading (`coffre export --watch`): it changes whenever
+ * that does, and opens nothing, so it is not logged. Each key counts with
+ * the version it resolves to, its own, its reference's source's or a
+ * parent's, and each key that cannot be read with why; never a value or
+ * its ciphertext. It hashes the read's own resolution (`readableValues`),
+ * so whatever a read comes to resolve through changes it too. Inherited
+ * keys need read on their parent, as a read does: their version would
+ * say when the parent's value changed, which the listing tells only
+ * that parent's readers.
+ */
+export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): Promise<{ version: string }> {
+  const environment = requireLive(place);
+  const read = await readableValues(ctx.db, place, environment);
+  const unread = unreadParents(ctx, environment.projectId, read);
+  if (unread.size > 0) {
+    const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
+    await refuse(ctx, new Refusal(
+      forbidden(`${place.project.slug}/${place.environment!.slug} inherits ${which.join('; ')}, which you cannot read`),
+      denied(ctx, 'secret.version', 'parent_unreadable', { ...environment, metadata: { parents: [...unread.keys()] } }),
+    ));
+  }
+  // Key names hold no NUL or newline (`secretKey`), and every reason comes last on its line.
+  const hash = createHash('sha256');
+  for (const item of read.items) hash.update(`${item.key}\0${item.secretVersionId}\n`);
+  for (const unreadable of read.unreadable) hash.update(`!${unreadable.key ?? ''}\0${unreadable.reason}\n`);
+  return { version: hash.digest('base64url') };
 }
