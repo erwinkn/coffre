@@ -7,7 +7,7 @@ import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
 import { archiveEnvironment, createEnvironment, environmentId, renameEnvironment } from '../lib/changes';
-import { keys, queries } from '../lib/queries';
+import { affects, keys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
 import type { GrantRow, ProjectSummary } from '../shared/models';
@@ -482,7 +482,8 @@ function PersonalConfigs({ project }: { project: string }) {
         onConfirm={() => {
           const doomed = deleting!;
           void run(() => coffre.environments.delete(`${project}/${doomed.slug}`), {
-            affects: [keys.personal(project)],
+            // The owner's own `dev@me` too, when it is theirs: its card and its keys go.
+            affects: [keys.personal(project), ...affects.places(), ...affects.secrets({ project, environment: `${doomed.of}@me` })],
             onSuccess: () => toast.success(`Deleted ${doomed.owner.replace(/^user:/, '')}'s ${doomed.of}`),
           });
         }}

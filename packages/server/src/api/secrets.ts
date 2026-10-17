@@ -271,7 +271,8 @@ async function appendVersion(
  * here, under the head: a write (`setSecrets`), a restored version
  * (`restoreVersion`), an unarchive and a rename onto the key (`patchSecret`),
  * and an override undoing a reset (`inheritSecret`). A rename in a parent
- * carries removals down itself (`renameBelow`).
+ * carries removals down itself (`renameBelow`), and ends the removal of the
+ * name a personal config's key is moved aside to.
  */
 async function endRemovals(
   ctx: ApiContext,
@@ -790,6 +791,11 @@ async function renameBelow(
       const aside = await asideKey(tx, fork.id, nextKey);
       await update(tx, secrets, { id: taken.id }, { key: aside, updatedAt: new Date() });
       log.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: aside, parent, aside: true } }));
+      // Live under its new name, it is no longer removed there, as any row made live (`endRemovals`).
+      if ((await dismissalsIn(tx, fork.id)).some((row) => row.key === aside)) {
+        await update(tx, dismissedKeys, { environmentId: fork.id, key: aside }, { restoredAt: new Date(), restoredBy: ctx.caller.principal.id });
+        log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: aside, renamed: nextKey, parent } }));
+      }
     } else if (taken !== undefined) {
       throw new Refusal(
         conflict(`${place.project.slug}/${fork.slug} inherits ${key} and holds a ${nextKey} of its own: rename or archive that one first`),

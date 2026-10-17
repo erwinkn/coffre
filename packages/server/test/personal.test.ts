@@ -249,3 +249,15 @@ test("your own personal config's log is found by dev@me", async () => {
   const { entries } = await root.audit.list({ path: 'market/dev@me' });
   assert.ok(entries.some((entry) => entry.action === 'secret.write'));
 });
+
+test('a key moved aside onto a name the personal config removed is no longer removed there', async () => {
+  await root.secrets.set('market/dev', { OLD: 'old' });
+  await ada.secrets.set('market/dev@me', { NEXT: 'ada-own' });
+  await ada.environments.dismiss('market/dev@me', { NEXT_2: true });
+  await root.secrets.update('market/dev/OLD', { key: 'NEXT' });
+  assert.equal((await values(ada, 'market/dev@me')).NEXT_2, 'ada-own');
+  // Reset later, dev's NEXT_2 shows through rather than stay removed.
+  await root.secrets.set('market/dev', { NEXT_2: 'dev-next-2' });
+  await ada.secrets.inherit('market/dev@me/NEXT_2', true);
+  assert.equal((await values(ada, 'market/dev@me')).NEXT_2, 'dev-next-2');
+});
