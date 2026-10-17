@@ -44,6 +44,7 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'DELETE /members/:member/tokens/:id': false,
   'GET /members/:member/bindings': false,
   'POST /members/:member/bindings': false,
+  'POST /members/:member/bindings/keys': false,
   'GET /workloads/lookup': false,
   'GET /workloads/repositories': false,
   'DELETE /members/:member/bindings/:id': false,
