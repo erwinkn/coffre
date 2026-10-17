@@ -1,9 +1,9 @@
 import type { MissingKey } from '@coffre/client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
 
 import { dismissMissing, missingList, restoreMissing } from '../lib/changes';
-import { failureMessage, useCoffre } from '../lib/coffre';
+import { useCoffre } from '../lib/coffre';
+import { dismissWithUndo } from '../lib/dismissal';
 import { changeOptions } from '../lib/optimistic';
 import { queries } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
@@ -45,17 +45,9 @@ export function MissingKeys({
   const columns = canWrite ? 3 : 2;
 
   // Gone from the list at once, and said so at once, each dismissal with its
-  // own Undo. A refused one takes its word back and puts its rows back,
-  // saying why beneath them.
-  const dismiss = (entries: MissingKey[]) => {
-    const said = toast.success(entries.length === 1 ? `${entries[0]!.key} dismissed` : `${entries.length} keys dismissed`, {
-      action: {
-        label: 'Undo',
-        onClick: () => void restoreKeys(entries).catch((error: unknown) => toast.error(`Not restored. ${failureMessage(error)}`)),
-      },
-    });
-    dismissKeys(entries).catch(() => toast.dismiss(said));
-  };
+  // own Undo. A refused one puts its rows back, saying why beneath them, and
+  // its toast says why too (`dismissWithUndo`).
+  const dismiss = (entries: MissingKey[]) => void dismissWithUndo(entries, { dismiss: dismissKeys, restore: restoreKeys });
 
   return (
     <>

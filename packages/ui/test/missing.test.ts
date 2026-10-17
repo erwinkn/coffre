@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 
 import { CoffreError, type CoffreClient, type MissingKey } from '@coffre/client';
 import { MutationObserver, QueryObserver, type QueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 
 import { announcements } from '../src/lib/announce.ts';
 import { dismissMissing, missingList, restoreMissing } from '../src/lib/changes.ts';
 import { changeKey, changeOptions, itemStatus, type ChangeContext } from '../src/lib/optimistic.ts';
+import { dismissWithUndo } from '../src/lib/dismissal.ts';
 import { createQueryClient, queries } from '../src/lib/queries.ts';
 
 const place = { project: 'market', environment: 'dev' };
@@ -159,5 +161,32 @@ test('undo lists dismissed keys again at once, in name order, and a refused one 
   await refused;
   await settle();
   assert.deepEqual(listed(queryClient), ['FEATURE_FLAGS', 'MAILGUN_KEY'], 'not restored: dismissed still');
+  stop();
+});
+
+test('a dismissal refused as the connection drops still says why, though reading the list again fails too', async () => {
+  let online = true;
+  const offline = () => Promise.reject(new TypeError('Failed to fetch'));
+  const client = {
+    environments: {
+      missing: () => (online ? Promise.resolve({ missing: [key('MAILGUN_KEY')], dismissed: [] }) : offline()),
+      dismiss: () => offline(),
+    },
+  } as unknown as CoffreClient;
+  const queryClient = createQueryClient();
+  const stop = await onScreen(queryClient, client);
+  const dismiss = new MutationObserver(queryClient, changeOptions(queryClient, dismissMissing(client, place)));
+  const restore = new MutationObserver(queryClient, changeOptions(queryClient, restoreMissing(client, place)));
+
+  online = false;
+  const said = dismissWithUndo([key('MAILGUN_KEY')], { dismiss: (entries) => dismiss.mutate(entries), restore: (entries) => restore.mutate(entries) });
+  assert.equal(toast.getHistory().find((each) => each.id === said)?.title, 'MAILGUN_KEY dismissed');
+  for (let turn = 0; turn < 5; turn++) await settle();
+
+  assert.deepEqual(listed(queryClient), [], 'the list could not be read again, so the panel has no rows to say it under');
+  const shown = toast.getHistory().find((each) => each.id === said) as { type?: string; title?: unknown; action?: unknown } | undefined;
+  assert.equal(shown?.type, 'error');
+  assert.equal(shown?.title, 'Not dismissed. The request could not be sent. Nothing was changed.');
+  assert.equal(shown?.action, undefined, 'no Undo for what did not happen');
   stop();
 });
