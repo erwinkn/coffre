@@ -21,13 +21,8 @@ export function RecipeMark({ generated }: { generated: Generation }) {
   );
 }
 
-/** The keys regenerating a key writes: itself, or a key pair's two halves. */
-export function regeneratedKeys(key: string, generated: Generation): string[] {
-  return generated.pair === undefined ? [key] : [generated.pair.private, generated.pair.public];
-}
-
 /**
- * Asks before regenerating a key by its recipe (`regenerateWrite`, which
+ * Asks before regenerating a key by its recipe (`regenerateSecret`, which
  * the row runs on confirm): a new value made in this browser, written as
  * its next version, and never shown. A key pair's either half makes the
  * pair again, both keys in one write, in the environment the page is on.

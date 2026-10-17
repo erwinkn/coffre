@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient, SecretKey } from '@coffre/client';
 
-import { saveSecrets } from '../src/lib/changes.ts';
+import { regenerateSecret, saveSecrets } from '../src/lib/changes.ts';
 import { liveGeneration, regenerateWaits } from '../src/lib/recipes.ts';
 
 const PAIR = { recipe: 'ecdsa:p-256', pair: { private: 'JWT_PRIVATE_KEY', public: 'JWT_PUBLIC_KEY' } };
@@ -67,4 +67,35 @@ test("a pair's Regenerate waits while a save of either half is on its way, its r
   const token = shown.find((entry) => entry.key === 'TOKEN')!;
   assert.equal(regenerateWaits('TOKEN', token.generated!, (key) => saving.has(key)), false);
   assert.equal(regenerateWaits('TOKEN', token.generated!, (key) => key === 'TOKEN'), true);
+});
+
+test("Regenerate is a save of every key it writes: both halves are pending until it lands, so neither is renamed meanwhile", async () => {
+  const sent: unknown[] = [];
+  const client = { secrets: { set: async (path: string, patch: unknown) => (sent.push([path, patch]), { operationId: 'op', keys: {} }) } } as unknown as CoffreClient;
+  const change = regenerateSecret(client, { project: 'market', environment: 'dev' }, 'ada@acme.example');
+  const vars = { key: 'JWT_PUBLIC_KEY', generated: PAIR };
+  // The page's status marks each target pending, and a row with a save on its way takes no edit.
+  assert.deepEqual(change.targets(vars).map(({ id, kind }) => [id, kind]), [['JWT_PRIVATE_KEY', 'saving'], ['JWT_PUBLIC_KEY', 'saving']]);
+  const busy = new Set(change.targets(vars).map((target) => target.id));
+  assert.equal(regenerateWaits('JWT_PRIVATE_KEY', PAIR, (key) => busy.has(key)), true, 'nor regenerated again');
+
+  // Shown at once as the next versions, still a pair; nothing of the value.
+  const shown = change.apply!(pair(), vars);
+  assert.deepEqual(shown.map(({ key, version, generated }) => [key, version, generated]), [
+    ['JWT_PRIVATE_KEY', 2, PAIR],
+    ['JWT_PUBLIC_KEY', 2, PAIR],
+    ['TOKEN', 1, { recipe: 'bytes:32:base62' }],
+  ]);
+
+  // The value is made as the change runs, and sent with its recipe, under the pair's names.
+  await change.run(vars);
+  const [[path, patch]] = sent as [[string, Record<string, { generated: unknown }>]];
+  assert.equal(path, 'market/dev');
+  assert.deepEqual(Object.keys(patch), ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY']);
+  assert.deepEqual(patch.JWT_PUBLIC_KEY!.generated, PAIR);
+});
+
+test('Regenerate waits while either half is being edited, before any save is sent', () => {
+  assert.equal(regenerateWaits('JWT_PUBLIC_KEY', PAIR, (key) => key === 'JWT_PRIVATE_KEY'), true);
+  assert.equal(regenerateWaits('JWT_PUBLIC_KEY', PAIR, () => false), false);
 });

@@ -1,6 +1,6 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import { regenerateWrite, type Generation } from '@coffre/core/recipe';
+import type { Generation } from '@coffre/core/recipe';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -8,7 +8,7 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, moveSecret, restoreSecret, saveSecrets, UnsavedEdits, type SaveSecretsVars } from '../lib/changes';
+import { archiveSecret, moveSecret, regenerateSecret, restoreSecret, saveSecrets, UnsavedEdits, type SaveSecretsVars } from '../lib/changes';
 import { changeKey, type ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
@@ -53,8 +53,8 @@ import {
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
-import { RecipeMark, RegenerateSecret, regeneratedKeys } from '../components/regenerate';
-import { liveGeneration, regenerateWaits } from '../lib/recipes';
+import { RecipeMark, RegenerateSecret } from '../components/regenerate';
+import { liveGeneration, regeneratedKeys, regenerateWaits } from '../lib/recipes';
 import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
@@ -171,6 +171,7 @@ function EnvironmentLedger({
   const restore = useChange(restoreSecret(coffre, { project, environment }));
   const archive = useChange(archiveSecret(coffre, { project, environment }));
   const move = useChange(moveSecret(coffre, { project, environment }));
+  const regenerate = useChange(regenerateSecret(coffre, { project, environment }, principal?.id ?? null));
   // The references that read this environment's secrets from elsewhere, and the environments you read.
   const { data: references } = useQuery(queries.references(coffre, `${project}/${environment}`));
   const lentBy = new Map<string, ListedReference[]>();
@@ -539,7 +540,14 @@ function EnvironmentLedger({
                       environment={environment}
                       entry={entry}
                       generated={liveGeneration(entry, active)}
-                      pending={(key) => status(key).state === 'pending'}
+                      // Being edited, or with a save on its way: a key pair's Regenerate waits for both halves.
+                      busy={(key) => status(key).state === 'pending' || editing.has(key) || secretChangeFor(changes, key) !== undefined}
+                      onRegenerate={(generated) =>
+                        regenerate(
+                          { key: entry.key, generated },
+                          { onSuccess: () => toast.success(`Regenerated ${regeneratedKeys(entry.key, generated).join(' and ')}`) },
+                        )
+                      }
                       rotateAfterDays={rotateAfterDays}
                       change={change ?? { key: entry.key, value: null, archived: false }}
                       editing={
@@ -1055,7 +1063,8 @@ function SecretRow({
   environment,
   entry,
   generated,
-  pending,
+  busy,
+  onRegenerate,
   rotateAfterDays,
   change,
   editing,
@@ -1084,8 +1093,10 @@ function SecretRow({
   entry: SecretKey;
   /** Its recipe, as the page may regenerate it by: a key pair's while both halves are listed alike (`liveGeneration`). */
   generated: Generation | null;
-  /** Whether a save of a key in this environment is on its way. */
-  pending: (key: string) => boolean;
+  /** Whether a key in this environment is being edited, or has a save on its way. */
+  busy: (key: string) => boolean;
+  /** Regenerate it by its recipe, a tracked save of every key it writes. */
+  onRegenerate: (generated: Generation) => void;
   rotateAfterDays: number | null;
   change: SecretChange;
   editing: boolean;
@@ -1469,7 +1480,7 @@ function SecretRow({
                   {canWrite && !editing && !leaving && generated !== null && (
                     <Menu.Item
                       className="menu-item"
-                      disabled={regenerateWaits(entry.key, generated, pending)}
+                      disabled={regenerateWaits(entry.key, generated, busy)}
                       onClick={() => setRegenerating(true)}
                     >
                       <Generate size={14} />
@@ -1542,11 +1553,7 @@ function SecretRow({
           generated={generated}
           onConfirm={() => {
             setReveal(null);
-            // Made here at the moment of confirming, and sent at once: the value is never on the page.
-            act(async () => coffre.secrets.set(`${project}/${environment}`, await regenerateWrite(entry.key, generated)), {
-              affects: affects.secrets({ project, environment }),
-              onSuccess: () => toast.success(`Regenerated ${regeneratedKeys(entry.key, generated).join(' and ')}`),
-            });
+            onRegenerate(generated);
           }}
         />
       )}

@@ -6,7 +6,8 @@ import { failureMessage, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
-import { renamePairs } from './recipes.ts';
+import { regenerateWrite, type Generation } from '@coffre/core/recipe';
+import { regeneratedKeys, renamePairs } from './recipes.ts';
 import { applySecretEditBatch, companionsOf, generationsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
 
@@ -36,6 +37,7 @@ const ARCHIVING: Words = { pending: 'Archiving…', done: 'archived', failed: 'N
 const REVOKING: Words = { pending: 'Revoking…', done: 'revoked', failed: 'Not revoked.' };
 const DISCONNECTING: Words = { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' };
 const MOVING: Words = { pending: 'Moving…', done: 'moved', failed: 'Not moved.' };
+const REGENERATING: Words = { pending: 'Regenerating…', done: 'regenerated', failed: 'Not regenerated.' };
 
 const saving = (id: string): Target => ({ id, kind: 'saving' });
 const removing = (id: string): Target => ({ id, kind: 'removing' });
@@ -574,6 +576,38 @@ export function moveSecret(
     apply: (entries, vars) => entries.map((entry) => (entry.key === vars.key ? { ...entry, folder: vars.folder } : entry)),
     affects: () => affects.secrets(place),
     run: (vars) => client.secrets.update(`${place.project}/${place.environment}/${vars.key}`, { folder: vars.folder }),
+  };
+}
+
+/**
+ * Regenerate a key by its recipe: the value made in this browser as the
+ * change runs, and sent at once, never on the page. Each key it writes, a
+ * key pair's two halves, shows it pending, so neither is edited, renamed
+ * or regenerated again until it lands.
+ */
+export function regenerateSecret(
+  client: CoffreClient,
+  place: { project: string; environment: string },
+  /** Who is regenerating, shown as the author until the list is read back. */
+  author: string | null,
+): Change<Secrets, SecretKey, { key: string; generated: Generation }, unknown> {
+  const path = `${place.project}/${place.environment}`;
+  return {
+    list: secretsList(place),
+    saving: REGENERATING,
+    label: (vars) => regeneratedKeys(vars.key, vars.generated).join(' and '),
+    targets: (vars) => regeneratedKeys(vars.key, vars.generated).map(saving),
+    apply: (entries, vars) => {
+      const keys = new Set(regeneratedKeys(vars.key, vars.generated));
+      const now = new Date().toISOString();
+      return entries.map((entry) =>
+        keys.has(entry.key)
+          ? { ...entry, reference: null, version: (entry.version ?? 0) + 1, updatedAt: now, updatedBy: author, generated: vars.generated }
+          : entry,
+      );
+    },
+    affects: () => affects.secrets(place),
+    run: async (vars) => client.secrets.set(path, await regenerateWrite(vars.key, vars.generated)),
   };
 }
 
