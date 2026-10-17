@@ -1016,6 +1016,10 @@ export type Api = {
         environment: string | null;
         key: string | null;
         version: number | null;
+        secrets: null | {
+          key: string | null;
+          version: number | null;
+        }[];
         operationId: string | null;
         relatedSeq: number | null;
         requestId: string | null;
@@ -1033,6 +1037,7 @@ export type Api = {
           [key: string]: unknown;
         };
       }[];
+      more: boolean;
       hidden?: {
         action: string;
         count: number;
@@ -1355,6 +1360,10 @@ export type AuditEntryView = {
   environment: string | null;
   key: string | null;
   version: number | null;
+  secrets: null | {
+    key: string | null;
+    version: number | null;
+  }[];
   operationId: string | null;
   relatedSeq: number | null;
   requestId: string | null;

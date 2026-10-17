@@ -4,7 +4,7 @@ import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/va
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { entryColumns } from '@coffre/db/log';
+import { entryColumns, withinBytes } from '@coffre/db/log';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -293,11 +293,18 @@ export async function everyProjectHolders(db: Queryable): Promise<string[]> {
 /** The action of an entry that releases a key, which the bulk limit counts. */
 export const RELEASE = 'secret.read';
 
-/** How many keys the vault has released to `principal` since `after`. */
+/**
+ * How many keys the vault has released to `principal` since `after`: one
+ * for an entry about one secret, and as many as it lists for one about
+ * several (`secrets`), a read logged once per place.
+ */
 export async function releasesSince(db: Queryable, principal: string, after: number): Promise<number> {
   const { auditLog } = tablesOf(db);
+  const listed = engineOf(db) === 'postgres'
+    ? sql`jsonb_array_length((${auditLog.metadata})::jsonb -> 'secrets')`
+    : sql`json_array_length(${auditLog.metadata}, '$.secrets')`;
   const [{ n }] = await db
-    .select({ n: count() })
+    .select({ n: sql<string | number | null>`SUM(COALESCE(${listed}, 1))` })
     .from(auditLog)
     .where(
       and(
@@ -308,7 +315,7 @@ export async function releasesSince(db: Queryable, principal: string, after: num
         gt(auditLog.occurredAt, after),
       ),
     );
-  return Number(n);
+  return Number(n ?? 0);
 }
 
 /** Rows of the log as the chain's codec reads them: `author` and `decision` are checked by the table. */
@@ -319,24 +326,27 @@ function stored(rows: object[]): StoredEntry[] {
 /** Up to `limit` entries of either author from `fromSeq`, oldest first: the chain as it runs. */
 export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
+  const batch = await withinBytes(db, gte(auditLog.seq, fromSeq), limit);
+  if (batch === null) return [];
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(gte(auditLog.seq, fromSeq))
-    .orderBy(asc(auditLog.seq))
-    .limit(limit);
+    .where(and(gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
+    .orderBy(asc(auditLog.seq));
   return stored(rows);
 }
 
 /** Up to `limit` of the vault's entries after `afterSeq`, oldest first: every one, whatever its action or decision. */
 export async function vaultEntriesAfter(db: Queryable, afterSeq: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
+  const vault = eq(auditLog.author, 'vault' satisfies Author);
+  const batch = await withinBytes(db, and(vault, gt(auditLog.seq, afterSeq)), limit);
+  if (batch === null) return [];
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault' satisfies Author), gt(auditLog.seq, afterSeq)))
-    .orderBy(asc(auditLog.seq))
-    .limit(limit);
+    .where(and(vault, gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
+    .orderBy(asc(auditLog.seq));
   return stored(rows);
 }
 
