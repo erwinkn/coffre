@@ -18,6 +18,7 @@ import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
+  environmentVersion,
   inheritSecret,
   listSecrets,
   listVersions,
@@ -233,6 +234,12 @@ export const routes = {
     needs: 'secret.read',
     action: 'missing.list',
     run: (ctx, { place }) => missingKeys(ctx, place),
+  }),
+  // A version of what a read of it would open, which changes whenever that does: pollers ask it before reading.
+  ...route('GET /projects/:project/:environment/version', {
+    needs: 'secret.read',
+    action: 'secret.version',
+    run: (ctx, { place }) => environmentVersion(ctx, place),
   }),
   ...route('PATCH /projects/:project/:environment/dismissals', {
     // `true` dismisses a missing key, `null` restores it.
