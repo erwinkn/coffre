@@ -1,3 +1,5 @@
+import type { Generation } from '@coffre/core/recipe';
+
 /**
  * A second secret a row writes with its own value, in the same patch: a
  * generated key pair's public key, beside its private key. It is part of
@@ -5,7 +7,14 @@
  */
 export type Companion = { key: string; value: string };
 
-export type SecretDraft = { id: number; key: string; value: string; companion?: Companion };
+export type SecretDraft = {
+  id: number;
+  key: string;
+  value: string;
+  companion?: Companion;
+  /** The recipe a generated value was made by, saved with it; typing over the value drops it. */
+  recipe?: string;
+};
 
 export type SecretChange = {
   key: string;
@@ -13,12 +22,62 @@ export type SecretChange = {
   archived: boolean;
   /** Only beside a new value. */
   companion?: Companion;
+  /** Only beside a generated value. */
+  recipe?: string;
 };
 
 type ActiveSecret = { key: string };
 
-/** A merge patch: a string sets a key, adding it if it is new; `null` archives it. */
-export type SecretPatch = Record<string, string | null>;
+/**
+ * A merge patch: a string sets a key, adding it if it is new; a value with
+ * how it was generated sets it with its recipe; `null` archives it.
+ */
+export type SecretPatch = Record<string, string | { value: string; generated: Generation } | null>;
+
+/**
+ * How a row's generated value was made, as its write says it: its recipe,
+ * and for a key pair the names both halves are saved under.
+ */
+function generationOf(key: string, edit: { recipe?: string; companion?: Companion }): Generation | undefined {
+  if (edit.recipe === undefined) return undefined;
+  return edit.companion === undefined
+    ? { recipe: edit.recipe }
+    : { recipe: edit.recipe, pair: { private: key, public: edit.companion.key.trim() } };
+}
+
+/** What a row writes under each key: its value, and its companion's beside it. */
+function rowPatch(key: string, value: string, edit: { recipe?: string; companion?: Companion }): SecretPatch {
+  const generated = generationOf(key, edit);
+  const entry = (each: string) => (generated === undefined ? each : { value: each, generated });
+  const patch: SecretPatch = Object.create(null);
+  patch[key] = entry(value);
+  if (edit.companion !== undefined) patch[edit.companion.key.trim()] = entry(edit.companion.value);
+  return patch;
+}
+
+/**
+ * The recipe each key a save writes will hold, by its name after the save:
+ * what the list shows of it until it is read back.
+ */
+export function generationsOf(
+  active: readonly ActiveSecret[],
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+): Map<string, Generation> {
+  const out = new Map<string, Generation>();
+  const add = (key: string, edit: { recipe?: string; companion?: Companion }) => {
+    const generated = generationOf(key, edit);
+    if (generated === undefined) return;
+    out.set(key, generated);
+    if (edit.companion !== undefined) out.set(edit.companion.key.trim(), generated);
+  };
+  for (const draft of drafts) add(draft.key.trim(), draft);
+  for (const entry of active) {
+    const change = secretChangeFor(changes, entry.key);
+    if (change !== undefined && !change.archived && change.value !== null) add(change.key.trim(), change);
+  }
+  return out;
+}
 
 type SecretEditOperations = {
   rename: (key: string, nextKey: string) => Promise<void>;
@@ -139,9 +198,9 @@ export async function applySecretEditBatch({
         applied += 1;
         if (change.value !== null) remainingChanges[key] = { ...change, key };
       }
-      if (change.value !== null) patch[key] = change.value;
+      if (change.value !== null) Object.assign(patch, rowPatch(key, change.value, change));
     }
-    for (const draft of [...drafts, ...companionsOf(active, drafts, changes)]) patch[draft.key.trim()] = draft.value;
+    for (const draft of drafts) Object.assign(patch, rowPatch(draft.key.trim(), draft.value, draft));
 
     const written = Object.keys(patch).length;
     if (written > 0) await operations.write({ ...patch });

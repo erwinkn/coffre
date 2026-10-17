@@ -299,6 +299,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | fork an environment: a new one with each key's current value and folder, read and written in the caller's name | `PUT /api/projects/market/staging {"from": "prod"}` |
 | list an environment's secrets, never their values: who wrote each value and when (a reference's, its source's current version), and the deployment's `rotateAfterDays` | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
+| set a secret to a value the client generated, with its recipe (below) | `PATCH /api/secrets/market/prod {"SESSION_SECRET": {"value": "…", "generated": {"recipe": "bytes:32:hex"}}}` |
 | what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |
 | rename a secret | `PATCH /api/secrets/market/prod/DB_URL {"key": "DATABASE_URL"}` |
 | file a secret or a project in a folder, or in none | `PATCH /api/secrets/market/prod/STRIPE_KEY {"folder": "stripe"}`, `PATCH /api/projects/acme {"folder": null}` |
@@ -379,6 +380,46 @@ whether they are still a member, and the grants they hold
 (`vault.access`). Every permission check after that is a plain function,
 `can()`, over that answer, and a path resolves to its project, environment
 and secret in one read.
+
+### Generated values
+
+A value can be made rather than typed, by a recipe, short text that the CLI
+and the pages read and write with the same code (`@coffre/core/recipe`):
+
+| Recipe | Makes |
+|---|---|
+| `bytes:32`, `bytes:32:hex` | 1 to 256 random bytes, as base62 unless named, hex, base64 or base64url |
+| `aes:256`, `aes:128` | an AES-GCM key: the raw key, base64 |
+| `ecdsa:p-256`, `ecdh:p-384` | a key pair on P-256, P-384 or P-521: the private key PKCS #8, the public key SPKI, both base64 |
+
+The client makes the value, with Web Crypto's CSPRNG, and sends it with its
+recipe: `coffre set market/prod/SESSION_SECRET --generate bytes:32:hex`, or
+the Generate dialog of a secret's value field. The server makes no value. It
+checks that the recipe reads, stores it, written canonical
+(`bytes:32:base62` for `BYTES:32`), beside the version it made
+(`secret_versions.recipe`), and says it back in the listing as the key's
+`generated`, and in its version history. Regenerate, `coffre regenerate
+market/prod/SESSION_SECRET` or the row's menu, makes the next value by it, in
+the environment it is asked of, and nobody sees either. A value written
+without a recipe has none, by whichever client, so typing over a generated
+value ends what Regenerate does for it; a rollback brings an old value back
+with the recipe it had.
+
+A key pair is two keys, written in one patch, each naming both:
+`"generated": {"recipe": "ecdsa:p-256", "pair": {"private": "JWT_PRIVATE_KEY",
+"public": "JWT_PUBLIC_KEY"}}` on each. Half a pair, or halves that disagree,
+are refused (400). The two versions share a fresh `pair_id`, each with its
+`pair_half`, and a listing names a key's pair only while the other key's
+current version is the other half of the same pair. Typing over, archiving or
+rolling back either half leaves both without a recipe until the pair is made
+again; renaming one keeps it, as a rename moves no value.
+
+A recipe is no secret: the listing, the version history and its write's
+audit entry name it. It is as trustworthy as the database that holds it, and
+someone who writes there around coffre could weaken one, as the versions'
+erase-only trigger keeps coffre's own logins from doing. So Regenerate says
+the recipe: the page asks with it, and `coffre regenerate` prints the one it
+used.
 
 ## The vault
 

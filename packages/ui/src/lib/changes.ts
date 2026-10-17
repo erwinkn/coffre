@@ -6,7 +6,7 @@ import { failureMessage, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
-import { applySecretEditBatch, companionsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
+import { applySecretEditBatch, companionsOf, generationsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
 
 /**
@@ -497,6 +497,8 @@ export function saveSecrets(
     removing: ARCHIVING,
     apply: (entries, vars) => {
       const now = new Date().toISOString();
+      // A value typed by hand has no recipe; a generated one has the one it was made by.
+      const generations = generationsOf(vars.active, vars.drafts, vars.changes);
       const bumped = (entry: SecretKey | undefined, key: string): SecretKey => ({
         key,
         // A rename keeps its folder; a new secret is in none.
@@ -507,6 +509,7 @@ export function saveSecrets(
         version: (entry?.version ?? 0) + 1,
         updatedAt: now,
         updatedBy: author,
+        generated: generations.get(key) ?? null,
       });
       let next = entries.map((entry) => {
         const change = vars.changes[entry.key];

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
+import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
 import type { HolderRef, SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
@@ -13,6 +14,7 @@ import {
   insert,
   insertIfAbsent,
   lock,
+  recipeRow,
   referenceRows,
   resolvePath,
   secretHeads,
@@ -22,12 +24,14 @@ import {
   update,
   type ResolvedPath,
   type SecretPlaceRow,
+  type SecretRow,
+  type VersionRecipe,
   fileSecrets,
   secretFolderOf,
 } from '../db/queries.ts';
 import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
-import { conflict, notFound, vaultRefused } from './errors.ts';
+import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, type ReferenceView, type Resolved } from './references.ts';
@@ -52,6 +56,12 @@ export type SecretKey = {
   updatedAt: string | null;
   /** Who wrote its own current version; null for a reference. */
   updatedBy: string | null;
+  /**
+   * How its current value was made, when a client generated it: what
+   * Regenerate makes the next one by. A key pair's half has it only while
+   * the other half's current value is from the same pair.
+   */
+  generated: Generation | null;
 };
 
 export type SecretVersion = {
@@ -60,11 +70,18 @@ export type SecretVersion = {
   createdBy: string;
   current: boolean;
   kek: string;
+  /** The recipe that made it, when it was generated. */
+  recipe: string | null;
 };
 
+/**
+ * A value, a value a client generated, with how (`@coffre/core/recipe`), or
+ * a reference to another secret by path. A value written without a recipe
+ * has none: writing one by hand ends what Regenerate can do.
+ */
+export type SecretValue = string | { value: string; generated: Generation } | { ref: string };
+
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
-/** A value, or a reference to another secret by path. */
-export type SecretValue = string | { ref: string };
 
 export type SetOutcome = { version: number } | { archived: true } | { reference: string };
 export type SetResult = { operationId: string; keys: Record<string, SetOutcome> };
@@ -149,6 +166,7 @@ export async function listSecrets(
     const reference = references.get(row.id);
     return reference?.state === 'live' ? reference.source!.currentVersionAt : null;
   };
+  const generated = generations(rows);
   return {
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys: rows.map((row) => ({
@@ -159,9 +177,99 @@ export async function listSecrets(
       version: row.current?.version ?? null,
       updatedAt: writtenAt(row)?.toISOString() ?? null,
       updatedBy: row.current?.createdBy ?? null,
+      generated: generated.get(row.id) ?? null,
     })),
     rotateAfterDays: ctx.rotateAfterDays,
   };
+}
+
+/**
+ * How each live key's current value was made, by secret id, for those a
+ * client generated. A key pair's half is one only beside the other: a live
+ * key whose current version shares its pair id and holds the other half.
+ * Typed over, archived, or restored to another pair's version, either half
+ * breaks the pair, and neither has a recipe until the pair is made again.
+ */
+export function generations(rows: readonly SecretRow[]): Map<string, Generation> {
+  const live = rows.filter((row) => row.archivedAt === null && row.current?.recipe != null);
+  const halves = new Map<string, { private?: SecretRow; public?: SecretRow }>();
+  for (const row of live) {
+    const pair = row.current!.recipe!.pair;
+    if (pair === null) continue;
+    const both = halves.get(pair.id) ?? {};
+    both[pair.half] = row;
+    halves.set(pair.id, both);
+  }
+  // What the database holds is checked as a write's would be: a recipe that does not parse makes nothing.
+  const kindOf = (recipe: string) => (recipeProblem(recipe) === null ? parseRecipe(recipe).kind : null);
+  const out = new Map<string, Generation>();
+  for (const row of live) {
+    const { recipe, pair } = row.current!.recipe!;
+    const kind = kindOf(recipe);
+    if (pair === null) {
+      if (kind !== null && kind !== 'pair') out.set(row.id, { recipe });
+      continue;
+    }
+    const both = halves.get(pair.id)!;
+    if (kind !== 'pair' || both.private === undefined || both.public === undefined) continue;
+    if (both.private.current!.recipe!.recipe !== recipe || both.public.current!.recipe!.recipe !== recipe) continue;
+    out.set(row.id, { recipe, pair: { private: both.private.key, public: both.public.key } });
+  }
+  return out;
+}
+
+/**
+ * What is wrong with a patch's generated values, or null. A key pair's
+ * recipe writes its two keys at once, each naming both: `{ private, public }`,
+ * the same on both, with the same recipe. Any other recipe names no pair.
+ */
+export function generationProblem(patch: Readonly<Record<string, unknown>>): string | null {
+  const generationOf = (value: unknown): Generation | null =>
+    value !== null && typeof value === 'object' && 'generated' in value ? (value as { generated: Generation }).generated : null;
+  for (const [key, value] of Object.entries(patch)) {
+    const generated = generationOf(value);
+    if (generated === null) continue;
+    const problem = recipeProblem(generated.recipe);
+    if (problem !== null) return `${key}: ${problem}`;
+    const recipe = formatRecipe(parseRecipe(generated.recipe));
+    const { pair } = generated;
+    if (parseRecipe(recipe).kind !== 'pair') {
+      if (pair !== undefined) return `${key}: ${recipe} makes one value, not a key pair`;
+      continue;
+    }
+    if (pair === undefined) return `${key}: ${recipe} makes a key pair: name its private and public keys`;
+    if (pair.private === pair.public) return `${key}: a key pair's two keys need different names`;
+    if (key !== pair.private && key !== pair.public) return `${key}: it is neither key of the pair it names, ${pair.private} and ${pair.public}`;
+    const other = key === pair.private ? pair.public : pair.private;
+    const theirs = Object.hasOwn(patch, other) ? generationOf(patch[other]) : null;
+    if (theirs === null || recipeProblem(theirs.recipe) !== null || formatRecipe(parseRecipe(theirs.recipe)) !== recipe
+      || theirs.pair?.private !== pair.private || theirs.pair.public !== pair.public) {
+      return `${key}: a key pair is written whole: ${other} needs the same recipe and pair in the same patch`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The recipe each generated key's new version stores: canonical, and for a
+ * key pair a fresh id its two halves share. Checked by `generationProblem`.
+ */
+function recipesOf(patch: Readonly<Record<string, SecretValue | null>>): Map<string, VersionRecipe> {
+  const pairIds = new Map<string, string>();
+  const out = new Map<string, VersionRecipe>();
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null || typeof value !== 'object' || !('generated' in value)) continue;
+    const { recipe, pair } = value.generated;
+    const canonical = formatRecipe(parseRecipe(recipe));
+    if (pair === undefined) {
+      out.set(key, { recipe: canonical, pair: null });
+      continue;
+    }
+    const names = `${pair.private}/${pair.public}`;
+    if (!pairIds.has(names)) pairIds.set(names, randomUUID());
+    out.set(key, { recipe: canonical, pair: { id: pairIds.get(names)!, half: key === pair.private ? 'private' : 'public' } });
+  }
+  return out;
 }
 
 /**
@@ -174,9 +282,10 @@ async function appendVersion(
   version: number,
   envelope: Envelope,
   createdBy: string,
+  recipe: VersionRecipe | null,
 ): Promise<void> {
   const id = randomUUID();
-  await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy });
+  await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy, ...recipeRow(recipe) });
   await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: new Date() });
 }
 
@@ -232,8 +341,12 @@ export async function setSecrets(
 ): Promise<SetResult> {
   const environment = requireLive(place);
   const keysIn = Object.keys(patch);
-  const writes = Object.entries(patch).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
-  const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' ? [{ key, ref: value.ref }] : []));
+  const problem = generationProblem(patch);
+  if (problem !== null) throw badRequest(problem);
+  const recipes = recipesOf(patch);
+  const writes = Object.entries(patch).flatMap(([key, value]): [string, string][] =>
+    typeof value === 'string' ? [[key, value]] : value !== null && 'value' in value ? [[key, value.value]] : []);
+  const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'ref' in value ? [{ key, ref: value.ref }] : []));
   const archives = keysIn.filter((key) => patch[key] === null);
   const result = await optimistic(ctx, async () => {
     const operationId = randomUUID();
@@ -336,11 +449,16 @@ export async function setSecrets(
 
       const keys: Record<string, SetOutcome> = {};
       const versions = items.map(({ key, secret }, i) => {
+        const recipe = recipes.get(key) ?? null;
         log.push(allowed(ctx, 'secret.write', {
-          ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i], metadata: { key, version: secret.version },
+          ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
+          metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }) },
         }));
         keys[key] = { version: secret.version };
-        return { id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i], createdBy: ctx.caller.principal.id };
+        return {
+          id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i],
+          createdBy: ctx.caller.principal.id, ...recipeRow(recipe),
+        };
       });
       await insert(tx, secretVersions, versions);
       const now = new Date();
@@ -518,6 +636,7 @@ export async function dryRunSecrets(
         continue;
       }
       // A reference, or a value over a reference: what it is now is not a value to compare.
+      // A generated value is new by making, and opens nothing to say so.
       if (typeof value !== 'string' || secret.current === null) {
         keys[key] = 'changed';
         continue;
@@ -638,6 +757,7 @@ export async function listVersions(
       createdBy: row.createdBy,
       current: row.id === secret.currentVersionId,
       kek: `${row.envelope.kekProvider}:${row.envelope.kekId}`,
+      recipe: row.recipe?.recipe ?? null,
     })),
   };
 }
@@ -690,7 +810,9 @@ export async function restoreVersion(
       const [current] = await lock(tx, secrets, { id: secret.id });
       if (current === undefined || current.currentVersion !== fromVersion || current.currentVersionId !== prepared.currentVersionId
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
-      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id);
+      // The old value comes back with how it was made. A key pair's half comes back with its
+      // pair's id, which pairs it again only beside the other half of the same pair.
+      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe);
       log.push(allowed(ctx, 'secret.restore', {
         ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion },
       }));

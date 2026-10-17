@@ -1,5 +1,6 @@
 import { MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
+import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
 import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -18,6 +19,7 @@ import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
+  generationProblem,
   listSecrets,
   listVersions,
   patchSecret,
@@ -87,6 +89,21 @@ const secretValue = z
   .string()
   .max(64 * 1024)
   .refine((value) => !value.includes('\0'), 'a value cannot contain NUL bytes');
+
+/**
+ * A value a client generated, and how: the server checks the recipe's shape
+ * and that a key pair comes whole (`generationProblem`), and makes nothing.
+ */
+const generatedValue = z.object({
+  value: secretValue,
+  generated: z.object({
+    recipe: z.string().max(MAX_RECIPE_LENGTH).superRefine((recipe, issues) => {
+      const problem = recipeProblem(recipe);
+      if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
+    }),
+    pair: z.object({ private: secretKey, public: secretKey }).strict().optional(),
+  }).strict(),
+}).strict();
 
 const role = z.enum(ROLE_NAMES);
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
@@ -210,8 +227,13 @@ export const routes = {
     run: (ctx, { place }) => listSecrets(ctx, place),
   }),
   ...route('PATCH /secrets/:project/:environment', {
-    // A string is a value; `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
-    input: z.record(secretKey, z.union([secretValue, z.object({ ref: z.string().max(400) }).strict()]).nullable()),
+    // A string is a value; `{ "value", "generated": { "recipe": "bytes:32:hex" } }` one a client
+    // generated; `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
+    input: z.record(secretKey, z.union([secretValue, generatedValue, z.object({ ref: z.string().max(400) }).strict()]).nullable())
+      .superRefine((patch, issues) => {
+        const problem = generationProblem(patch);
+        if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
+      }),
     // `?dryRun=1` answers what the patch would do and writes nothing. Any
     // other query is refused, not ignored: a mistyped flag must not write.
     query: dryRunFlag,

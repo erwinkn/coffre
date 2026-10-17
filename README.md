@@ -127,6 +127,9 @@ coffre list     market/dev                  # keys, who wrote each value and how
 coffre get      market/dev/DATABASE_URL     # the value; piped, exactly its bytes, no newline added (a terminal gets one)
 coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it piped in
 coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a reference: billing reads market's, live
+coffre set      market/prod/SESSION_SECRET --generate bytes:32:hex   # a value made here, never shown; the recipe is kept
+coffre set      market/prod/JWT_PRIVATE_KEY --generate ecdsa:p-256  # a key pair: JWT_PUBLIC_KEY beside it, in one write
+coffre regenerate market/prod/SESSION_SECRET   # rotates it: a new value by its recipe, a key pair both keys at once
 coffre references market/prod               # what reads it through references; references break ends one
 coffre run      market/dev -- printenv
 coffre run      market/prod auth/prod -- ./deploy   # several: their keys together; a key in two of them stops it

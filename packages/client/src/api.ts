@@ -235,6 +235,13 @@ export type Api = {
         version: number | null;
         updatedAt: string | null;
         updatedBy: string | null;
+        generated: null | {
+          recipe: string;
+          pair?: {
+            private: string;
+            public: string;
+          };
+        };
       }[];
       rotateAfterDays: number | null;
     };
@@ -242,6 +249,15 @@ export type Api = {
   "PATCH /secrets/:project/:environment": {
     input: {
       [key: string]: string | null | {
+        value: string;
+        generated: {
+          recipe: string;
+          pair?: {
+            private: string;
+            public: string;
+          };
+        };
+      } | {
         ref: string;
       };
     };
@@ -286,6 +302,7 @@ export type Api = {
         createdBy: string;
         current: boolean;
         kek: string;
+        recipe: string | null;
       }[];
     };
   };
@@ -1695,6 +1712,13 @@ export type SecretKey = {
   version: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
+  generated: null | {
+    recipe: string;
+    pair?: {
+      private: string;
+      public: string;
+    };
+  };
 };
 
 export type SecretVersion = {
@@ -1703,6 +1727,7 @@ export type SecretVersion = {
   createdBy: string;
   current: boolean;
   kek: string;
+  recipe: string | null;
 };
 
 export type ServiceTokenRow = {

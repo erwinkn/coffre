@@ -93,6 +93,21 @@ export const SECTIONS = [
         about: ['a reference: whoever reads its environment reads that', "secret's current value through it; you need read on it"],
       },
       {
+        command: 'set',
+        usage: [`set       ${P}/<KEY> --generate <recipe> [--public-key <KEY>]`],
+        about: [
+          'a value made here and never shown, by a recipe: bytes:32,',
+          'bytes:32:hex (or base64, base64url), aes:256, or a key pair,',
+          'ecdsa:p-256 or ecdh:p-384, its public key in JWT_PUBLIC_KEY',
+          'beside JWT_PRIVATE_KEY, or --public-key; kept, for regenerate',
+        ],
+      },
+      {
+        command: 'regenerate',
+        usage: [`regenerate ${P}/<KEY>`],
+        about: ['a new value by the recipe its value was made by, never shown;', 'a key pair, both its keys at once'],
+      },
+      {
         command: 'references',
         usage: ['references <project>[/<environment>[/<KEY>]] [--json]'],
         about: ['the references into and out of it, and who reads through them'],
@@ -346,7 +361,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'PATCH /projects/:project/:environment': { commands: ['environments rename', 'environments archive', 'environments unarchive'] },
   'DELETE /projects/:project/:environment': { commands: ['environments delete'] },
   'GET /secrets/:project/:environment': { commands: ['list'] },
-  'PATCH /secrets/:project/:environment': { commands: ['set', 'import'] },
+  'PATCH /secrets/:project/:environment': { commands: ['set', 'regenerate', 'import'] },
   'DELETE /secrets/:project/:environment/:key/reference': { commands: ['references break'] },
   'PATCH /folders/:folder': { commands: ['folders rename'] },
   'DELETE /folders/:folder': { commands: ['folders remove'] },

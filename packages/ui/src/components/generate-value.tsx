@@ -3,17 +3,18 @@ import {
   DEFAULT_RECIPE,
   ENCODINGS,
   encodedLength,
+  formatRecipe,
   generate,
   MAX_BYTES,
   MIN_BYTES,
   PAIRS,
-  pairNameProblem,
   publicKeyName,
   type AesSize,
   type Encoding,
   type Generated,
   type Recipe,
-} from '../lib/generate';
+} from '@coffre/core/recipe';
+import { pairNameProblem } from '../lib/generate';
 import type { Companion } from '../lib/secret-edit-batch';
 import { secretKeyProblem } from '../lib/validation';
 import { Eye, EyeOff, Shuffle } from './icons';
@@ -22,9 +23,10 @@ import { ErrorLine, Modal } from './ui';
 
 /**
  * What Use hands the row: its value, its name as the dialog left it (only a
- * new row's can change), and for a key pair the public key it saves with it.
+ * new row's can change), the recipe it was made by, which the row saves
+ * with it for Regenerate, and for a key pair the public key it saves too.
  */
-export type GeneratedUse = { value: string; name: string; companion?: Companion };
+export type GeneratedUse = { value: string; name: string; recipe: string; companion?: Companion };
 
 type Kind = Recipe['kind'];
 
@@ -99,7 +101,8 @@ function GenerateForm({
   const [size, setSize] = useState<AesSize>(256);
   const [pair, setPair] = useState(0);
   const [round, setRound] = useState(0);
-  const [generated, setGenerated] = useState<Generated | null>(null);
+  // With the recipe it was made by, which Use saves: never the one picked a moment later.
+  const [generated, setGenerated] = useState<(Generated & { recipe: string }) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [privateName, setPrivateName] = useState(name);
   // Follows the private key's name until it is typed in, or the row it replaces names it.
@@ -118,7 +121,7 @@ function GenerateForm({
     setGenerated(null);
     setError(null);
     generate(recipe).then(
-      (made) => current && setGenerated(made),
+      (made) => current && setGenerated({ ...made, recipe: formatRecipe(recipe) }),
       (failure: unknown) =>
         current && setError(failure instanceof Error ? failure.message : 'The browser made no value.'),
     );
@@ -139,9 +142,10 @@ function GenerateForm({
         ? {
             value: generated.value,
             name: privateName.trim(),
+            recipe: generated.recipe,
             companion: { key: publicKey.trim(), value: generated.publicKey },
           }
-        : { value: generated.value, name },
+        : { value: generated.value, name, recipe: generated.recipe },
     );
   }
 
@@ -277,6 +281,10 @@ function GenerateForm({
           value={generated?.value ?? null}
         />
       )}
+
+      <p className="hint">
+        Saved with its recipe, <span className="mono">{formatRecipe(recipe)}</span>, so Regenerate makes the next one alike.
+      </p>
 
       <ErrorLine error={error} />
 

@@ -1,5 +1,6 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
+import { regenerateWrite } from '@coffre/core/recipe';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -52,6 +53,7 @@ import {
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
+import { RecipeMark, RegenerateSecret, regeneratedKeys } from '../components/regenerate';
 import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
@@ -1112,6 +1114,7 @@ function SecretRow({
   const [moving, setMoving] = useState(false);
   const [referring, setReferring] = useState(false);
   const [breaking, setBreaking] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
   const [lentOpen, setLentOpen] = useState(false);
   // Archiving a key others read through references waits until they are broken (D41).
   const [archiveBlocked, setArchiveBlocked] = useState(false);
@@ -1274,6 +1277,7 @@ function SecretRow({
           ) : (
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
+              {entry.generated !== null && <RecipeMark generated={entry.generated} />}
               {leaving && <span className="tag tag-red">Will be archived</span>}
               {lent.length > 0 && (
                 <button
@@ -1303,9 +1307,9 @@ function SecretRow({
                     placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
                     disabled={disabled}
                     autoFocus={!focusName}
-                    // A value typed over a generated private key no longer matches its public key.
+                    // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
                     onChange={(value) =>
-                      onPatch({ value: value === (editBase?.value ?? '') ? null : value, companion: undefined })
+                      onPatch({ value: value === (editBase?.value ?? '') ? null : value, companion: undefined, recipe: undefined })
                     }
                     onEscape={onUndo}
                     generate={{
@@ -1313,7 +1317,7 @@ function SecretRow({
                       name: change.key,
                       renamable: false,
                       companion: change.companion,
-                      onUse: ({ value, companion }) => onPatch({ value, companion }),
+                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe }),
                     }}
                   />
                   <CompanionNote companion={change.companion} versionOf={versionOf} />
@@ -1453,6 +1457,12 @@ function SecretRow({
                       Rename
                     </Menu.Item>
                   )}
+                  {canWrite && !editing && !leaving && entry.generated !== null && (
+                    <Menu.Item className="menu-item" onClick={() => setRegenerating(true)}>
+                      <Generate size={14} />
+                      Regenerate…
+                    </Menu.Item>
+                  )}
                   {canWrite && !editing && !leaving && (
                     <Menu.Item className="menu-item" onClick={() => setMoving(true)}>
                       <Folder size={14} />
@@ -1507,6 +1517,25 @@ function SecretRow({
               onSuccess: () => toast.success(`${entry.key} reads ${source}`),
             })
           }
+        />
+      )}
+
+      {canWrite && entry.generated !== null && (
+        <RegenerateSecret
+          open={regenerating}
+          onOpenChange={setRegenerating}
+          place={`${project}/${environment}`}
+          entry={entry}
+          generated={entry.generated}
+          onConfirm={() => {
+            const generated = entry.generated!;
+            setReveal(null);
+            // Made here at the moment of confirming, and sent at once: the value is never on the page.
+            act(async () => coffre.secrets.set(`${project}/${environment}`, await regenerateWrite(entry.key, generated)), {
+              affects: affects.secrets({ project, environment }),
+              onSuccess: () => toast.success(`Regenerated ${regeneratedKeys(entry.key, generated).join(' and ')}`),
+            });
+          }}
         />
       )}
 
@@ -1753,14 +1782,14 @@ function DraftRow({
                 value={draft.value}
                 placeholder="Value"
                 disabled={disabled}
-                // A value typed over a generated private key no longer matches its public key.
-                onChange={(value) => onChange({ value, companion: undefined })}
+                // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
+                onChange={(value) => onChange({ value, companion: undefined, recipe: undefined })}
                 onEscape={onRemove}
                 generate={{
                   name: draft.key,
                   renamable: true,
                   companion: draft.companion,
-                  onUse: ({ value, name, companion }) => onChange({ key: name, value, companion }),
+                  onUse: ({ value, name, companion, recipe }) => onChange({ key: name, value, companion, recipe }),
                 }}
               />
               <CompanionNote companion={draft.companion} versionOf={versionOf} />
@@ -2002,7 +2031,14 @@ function VersionHistory({
                   <td className="nowrap">
                     <Timestamp iso={version.createdAt} />
                   </td>
-                  <td>{version.createdBy}</td>
+                  <td>
+                    {version.createdBy}
+                    {version.recipe !== null && (
+                      <span className="cell-muted">
+                        {' '}· generated, <span className="mono">{version.recipe}</span>
+                      </span>
+                    )}
+                  </td>
                   <td className="cell-mono cell-muted nowrap">{version.kek}</td>
                   <td className="col-actions">
                     {canWrite && !version.current && (

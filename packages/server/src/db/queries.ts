@@ -1230,6 +1230,31 @@ const envelopeColumns = (secretVersions: Tables['secretVersions']) => ({
   ciphertext: secretVersions.ciphertext,
 });
 
+/**
+ * How a version's value was made, when a client generated it: its recipe
+ * (`@coffre/core/recipe`), and for a key pair the id its two halves share
+ * and which half this is. Null for a typed value.
+ */
+export type VersionRecipe = { recipe: string; pair: { id: string; half: PairHalf } | null };
+export type PairHalf = 'private' | 'public';
+
+const recipeColumns = (secretVersions: Tables['secretVersions']) => ({
+  recipe: secretVersions.recipe,
+  pairId: secretVersions.pairId,
+  pairHalf: secretVersions.pairHalf,
+});
+
+/** The columns a version stores its recipe in, from what a write made. */
+export function recipeRow(made: VersionRecipe | null): { recipe: string | null; pairId: string | null; pairHalf: PairHalf | null } {
+  return { recipe: made?.recipe ?? null, pairId: made?.pair?.id ?? null, pairHalf: made?.pair?.half ?? null };
+}
+
+function recipeOf(row: { recipe: string | null; pairId: string | null; pairHalf: string | null }): VersionRecipe | null {
+  if (row.recipe === null) return null;
+  const half = row.pairHalf === 'private' || row.pairHalf === 'public' ? row.pairHalf : null;
+  return { recipe: row.recipe, pair: row.pairId === null || half === null ? null : { id: row.pairId, half } };
+}
+
 function envelopeOf(row: Envelope): Envelope {
   return {
     envelopeVersion: row.envelopeVersion,
@@ -1256,6 +1281,7 @@ export type SecretRow = {
     createdAt: Date;
     createdBy: string;
     envelope: Envelope;
+    recipe: VersionRecipe | null;
   } | null;
 };
 
@@ -1281,6 +1307,7 @@ export async function environmentSecrets(
       createdAt: secretVersions.createdAt,
       createdBy: secretVersions.createdBy,
       ...envelopeColumns(secretVersions),
+      ...recipeColumns(secretVersions),
     })
     .from(secrets)
     .innerJoin(projects, eq(projects.id, secrets.projectId))
@@ -1307,6 +1334,7 @@ export async function environmentSecrets(
             createdAt: row.createdAt!,
             createdBy: row.createdBy!,
             envelope: envelopeOf(row as Envelope),
+            recipe: recipeOf(row),
           },
   }));
 }
@@ -1315,7 +1343,7 @@ export async function environmentSecrets(
 export async function secretHistory(
   db: Queryable,
   secretId: string,
-): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope }[]> {
+): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope; recipe: VersionRecipe | null }[]> {
   const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({
@@ -1324,6 +1352,7 @@ export async function secretHistory(
       createdAt: secretVersions.createdAt,
       createdBy: secretVersions.createdBy,
       ...envelopeColumns(secretVersions),
+      ...recipeColumns(secretVersions),
     })
     .from(secretVersions)
     .where(eq(secretVersions.secretId, secretId))
@@ -1334,6 +1363,7 @@ export async function secretHistory(
     createdAt: row.createdAt,
     createdBy: row.createdBy,
     envelope: envelopeOf(row),
+    recipe: recipeOf(row),
   }));
 }
 

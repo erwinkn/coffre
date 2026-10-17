@@ -144,6 +144,14 @@ export const secretVersions = pgTable(
     kekVersion: text('kek_version').notNull(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
+    // How a client made this value, `bytes:32:hex` (`@coffre/core/recipe`),
+    // when it was generated rather than typed: Regenerate makes the next one
+    // the same way. Null for a typed value, so writing one by hand clears it.
+    recipe: text(),
+    // A generated key pair's two versions, written together, share an id,
+    // and each says which half it holds: 'private' or 'public'.
+    pairId: uuid('pair_id'),
+    pairHalf: text('pair_half'),
   },
   (table) => [
     unique('secret_versions_secret_id_version_key').on(table.secretId, table.version),
