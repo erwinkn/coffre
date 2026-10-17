@@ -5,7 +5,7 @@ import { INSTANCE_ROLES, ROLE_NAMES, ROLES, scopeInWords, unscoped, type Role } 
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
-import { directoryList } from '../lib/changes';
+import { directoryList, revokeMemberToken } from '../lib/changes';
 import { affects, hasAppsTab, keys, listsAccess, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { useMounted } from '../lib/mounted';
@@ -25,7 +25,7 @@ import {
   type AccessChange,
   type AccessPlan,
 } from '../lib/access-plan';
-import type { MemberAccess } from '@coffre/client';
+import type { MemberAccess, TokenRow } from '@coffre/client';
 import type { DirectoryPrincipal, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
@@ -33,6 +33,7 @@ import { GrantRowView, GrantsTable } from './grants';
 import { ExpiryField } from './expiry-field';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
+import { PersonalTokensCard } from './personal-tokens';
 import { PrincipalAvatar } from './principal';
 import { Tile } from './tile';
 import { Activity, Archive, Clock, Folder, Key, Link as LinkIcon, Pencil, Users, X } from './icons';
@@ -321,7 +322,22 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
       )}
 
       {found !== null && <PrincipalReportCards report={found} />}
+      {found !== null && !removed && found.personalTokens.length > 0 && (
+        <MemberPersonalTokens member={memberRef(principalType, principalId)} tokens={found.personalTokens} />
+      )}
     </>
+  );
+}
+
+/** A person's personal tokens, for whoever runs the instance, who reads their report and may revoke any of them. */
+function MemberPersonalTokens({ member, tokens }: { member: string; tokens: TokenRow[] }) {
+  return (
+    <PersonalTokensCard
+      tokens={tokens}
+      change={revokeMemberToken(useCoffre(), member)}
+      description="Tokens they made, each acting as them within what it reaches. Removing them from coffre revokes every one."
+      empty={null}
+    />
   );
 }
 

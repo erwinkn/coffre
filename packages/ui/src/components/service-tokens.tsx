@@ -1,4 +1,4 @@
-import type { ServiceTokenRow } from '@coffre/client';
+import type { TokenRow } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
@@ -19,8 +19,8 @@ const LIFETIMES = [30, 90, 180, 365] as const;
  * OIDC. A value exists in exactly
  * one place, this dialog, for as long as it stays open: coffre keeps a hash.
  */
-export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string; tokens: ServiceTokenRow[]; grants: HeldGrant[] }) {
-  const change = revokeCredential(useCoffre(), serviceId);
+export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string; tokens: TokenRow[]; grants: HeldGrant[] }) {
+  const change = revokeCredential(useCoffre(), memberRef('service', serviceId));
   const revoke = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
 

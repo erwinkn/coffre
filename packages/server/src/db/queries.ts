@@ -971,6 +971,27 @@ export async function exchangesOf(db: Queryable, credentialIds: readonly string[
 }
 
 /**
+ * The personal tokens these credentials are, by credential ID: each one's
+ * label, as its `token.create` entry logged it. One read through
+ * `audit_log_token_create_idx`, whose expression this repeats.
+ */
+export async function personalTokensOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { label: string }>> {
+  if (credentialIds.length === 0) return new Map();
+  const { auditLog } = tablesOf(db);
+  const credentialId = dialect.engineOf(db) === 'postgres'
+    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'targetCredentialId')`
+    : sql<string>`json_extract(${auditLog.metadata}, '$.targetCredentialId')`;
+  const rows = await db
+    .select({ credentialId, metadata: auditLog.metadata })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'), inArray(credentialId, [...credentialIds])));
+  return new Map(rows.flatMap((row) => {
+    const { kind, label } = JSON.parse(row.metadata) as { kind?: unknown; label?: unknown };
+    return kind === 'personal' && typeof label === 'string' ? [[row.credentialId, { label }]] : [];
+  }));
+}
+
+/**
  * Whether this token, by its signing input's hash, was exchanged already.
  * Uncached, as `standingBinding` is: a cached "not yet" would send a replay
  * on to the vault and the commit, which refuses it only there.

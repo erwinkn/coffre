@@ -12,13 +12,14 @@ import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Notice, Timestamp } f
 import { Link as LinkIcon, Monitor, ProviderMark, SignOut, Sun, Terminal, User, X } from '../components/icons';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { useOneTime } from '../lib/one-time';
-import { useCoffre } from '../lib/coffre';
+import { memberRef, useCoffre } from '../lib/coffre';
 import { useMounted } from '../lib/mounted';
-import { disconnectApp, endSession, unlinkIdentity } from '../lib/changes';
+import { disconnectApp, endSession, revokeCredential, unlinkIdentity } from '../lib/changes';
 import { queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
 import { ConnectedAppsCard } from '../components/connected-apps';
+import { PersonalTokensCard } from '../components/personal-tokens';
 import { pageRoute } from '../lib/page-route';
 import type { accountProfile } from '../options';
 
@@ -107,12 +108,37 @@ export function AccountProfilePage() {
   );
 }
 
-/** Where you are signed in, browsers and command lines. */
+/** Where you are signed in, browsers and command lines, and the personal tokens that act as you. */
 export function AccountSessionsPage() {
-  const { auth } = useShell();
+  const { auth, principal } = useShell();
   const { data: sessions } = useSuspenseQuery(queries.sessions(useCoffre()));
   if (!sessions.ok) return <ErrorLine error={sessions.error} />;
-  return <Sessions sessions={sessions.sessions} providers={auth.signin?.providers ?? []} />;
+  return (
+    <>
+      <Sessions sessions={sessions.sessions} providers={auth.signin?.providers ?? []} />
+      {principal?.type === 'user' && <PersonalTokens email={principal.id} />}
+    </>
+  );
+}
+
+/** The personal tokens you made, for a script or an agent: each acts as you, within what it reaches, until it expires or you revoke it. */
+function PersonalTokens({ email }: { email: string }) {
+  const client = useCoffre();
+  const member = memberRef('user', email);
+  const { data: tokens } = useSuspenseQuery(queries.credentials(client, member, true));
+  return (
+    <PersonalTokensCard
+      tokens={tokens === null ? [] : tokens.ok ? tokens.tokens : { error: tokens.error }}
+      change={revokeCredential(client, member)}
+      description="Tokens that act as you, for a script or an agent, within what each reaches and never beyond what you hold. Every entry one makes names it."
+      empty={
+        <div className="form">
+          <span>Make one with the CLI, for an hour unless told:</span>
+          <CopyLine value="coffre tokens issue --label cursor-agent --scope <project>/<environment>=viewer --expires-in 4h" label="Copy the command" />
+        </div>
+      }
+    />
+  );
 }
 
 /** How to connect Claude, then the apps you connected. */

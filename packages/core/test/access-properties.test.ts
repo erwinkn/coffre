@@ -7,6 +7,8 @@ import {
   allows,
   assignableToEnvironment,
   covers,
+  DELEGABLE_ROLES,
+  givesService,
   grantKind,
   inScope,
   isCredentialScope,
@@ -16,6 +18,7 @@ import {
   mayManageAccess,
   normalScope,
   ownsInstance,
+  readsWholeLog,
   roleGrants,
   runsInstance,
   type Filter,
@@ -194,6 +197,25 @@ test('a scope narrows only the role: grants reach past it, and a project is in i
   // A slug not read is in no scope that names environments.
   assert.equal(inScope(scope, { projectId: 'market', environmentId: 'market/dev', environmentSlug: null }), false);
   assert.equal(inScope({ projects: 'all', environments: 'all' }, { projectId: 'market', environmentId: 'market/dev', environmentSlug: null }), true);
+});
+
+test("a person's personal token holds their places within its scope, and nothing of the instance's: no running it, whole log, new project or service account", () => {
+  const everywhere: Scope = { projects: 'all', environments: 'all' };
+  const owner: Holdings = { role: 'owner', scope: everywhere, grants: [] };
+  const token: Holdings = { ...owner, credentialScope: [{ projectId: 'market', environmentId: null, role: 'maintainer' }] };
+  const dev: Place = { projectId: 'market', environmentId: 'market/dev', environmentSlug: 'dev' };
+  assert.deepEqual([runsInstance(owner), readsWholeLog(owner), makesProjects(owner)], [true, true, true]);
+  assert.deepEqual([runsInstance(token), readsWholeLog(token), makesProjects(token)], [false, false, false]);
+  assert.equal(allows(token, 'secret.write', dev), true);
+  assert.equal(allows(token, 'audit.read', dev), false, 'a maintainer reads no log');
+  assert.equal(allows(token, 'secret.read', { projectId: 'billing' }), false);
+  // Where people set up service accounts, a Developer gives one what they hold; through a token, never.
+  const developer: Holdings = { role: 'developer', scope: everywhere, grants: [] };
+  assert.equal(givesService(developer, everywhere, 'viewer', dev), true);
+  assert.equal(givesService({ ...developer, credentialScope: [{ projectId: 'market', environmentId: 'market/dev', role: 'developer' }] }, everywhere, 'viewer', dev), false);
+  // No role it may name manages access, so it gives and takes no grant anywhere.
+  assert.deepEqual(DELEGABLE_ROLES, ['viewer', 'developer', 'maintainer', 'auditor']);
+  assert.ok(DELEGABLE_ROLES.every((role) => !roleGrants(role, 'grant.manage')));
 });
 
 test('a grant whose fields name no coherent place covers nothing', () => {

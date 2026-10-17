@@ -50,10 +50,10 @@ const NAMED = {
   RemovedMember: 'api/members.ts',
   SecretKey: 'api/secrets.ts',
   SecretVersion: 'api/secrets.ts',
-  ServiceTokenRow: 'api/signin.ts',
   SessionRow: 'api/signin.ts',
   SetResult: 'api/secrets.ts',
   TokenPlan: 'api/signin.ts',
+  TokenRow: 'api/signin.ts',
 } as const;
 
 const PROBE = `${root}__api_probe.ts`;

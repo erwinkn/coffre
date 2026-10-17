@@ -5,7 +5,7 @@ import type { Access } from '@coffre/core/vault';
 import { callerFrom, loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
-import { CredentialUncheckable } from './api/signin.ts';
+import { CredentialUncheckable, type PersonalToken } from './api/signin.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -19,8 +19,10 @@ export type AuthenticatedIdentity = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
-  /** That credential, when a trust binding issued it for a CI run: every entry the request writes names it. */
+  /** That credential, when a trust binding issued it for a CI run, or it is a personal token: every entry the request writes names it. */
   provenance: string | null;
+  /** The personal token the request came in on, which acts as its person within its scope; null for anything else. */
+  personalToken: PersonalToken | null;
   /** The MCP connection a tool's call came through; null for every other request. */
   via: McpVia | null;
 };
@@ -119,6 +121,7 @@ export async function authenticateRequest(
   let credentialGeneration: number | undefined;
   let exchanged = false;
   let credentialScope: CredentialScope | null = null;
+  let personalToken: PersonalToken | null = null;
   let checked: Access | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
@@ -127,8 +130,9 @@ export async function authenticateRequest(
       access?: Access;
       exchanged?: boolean;
       credentialScope?: CredentialScope | null;
+      personalToken?: PersonalToken | null;
     };
-    ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, ...principal } = verified);
+    ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
@@ -153,7 +157,8 @@ export async function authenticateRequest(
       requestId,
       sourceIp,
       credentialId,
-      provenance: exchanged ? credentialId : null,
+      provenance: exchanged || personalToken !== null ? credentialId : null,
+      personalToken,
       via: null,
     };
   } catch (error) {
