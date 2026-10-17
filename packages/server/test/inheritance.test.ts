@@ -571,3 +571,10 @@ test("projects list each environment's parent, and count what a fork resolves to
     ['prod-eu', 'prod', 3],
   ]);
 });
+
+test('a project that holds forks is archived and deleted whole, its forks with it', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.projects.update('market', { archived: true });
+  await root.projects.delete('market');
+  assert.equal((await root.projects.list()).projects.some((project) => project.slug === 'market'), false);
+});
