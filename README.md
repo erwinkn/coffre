@@ -163,6 +163,8 @@ coffre fork     market/prod staging         # a new environment, each key a copy
 coffre fork     market/prod prod-eu --inherit   # copies nothing: reads prod's keys live, but for those it sets or removes
 coffre reset    market/prod-eu/DATABASE_URL # in a fork, back to prod's value; --undo serves its own again
 coffre remove   market/prod-eu/SENTRY_DSN   # in a fork, does without prod's key; --undo inherits it again
+coffre set      market/dev@me/DATABASE_URL  # your personal dev: values only you read; reads of dev@me are dev's while you have none
+coffre personal market                      # the project's personal configs: whose, of what, key names; for its maintainers
 coffre roles                                # the instance roles and the project roles, and their permissions
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants

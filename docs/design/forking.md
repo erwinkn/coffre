@@ -49,9 +49,9 @@ market/dev    DATABASE_URL=postgres://dev    STRIPE_KEY=sk_test_1
   access.
 - **Status.** Erwin agreed to the three recommendations below (no
   lending, owner-only personal configs, explicit `@me`). Forks that
-  inherit shipped first, as 0.7's first PR: section 7 says what it built.
-  Personal configs are the second PR; their `owner` column comes with
-  their own migration.
+  inherit shipped first, as 0.7's first PR; personal configs second, with
+  their `owner` column in a migration of their own. Section 7 says what
+  each built, and where the build differs from this design.
 
 ## 1. The model
 
@@ -598,12 +598,59 @@ Forks that inherit, everywhere but personal configs:
 
 Left out, on purpose or for later:
 
-- personal configs (PR 2);
 - the page's filter chips, the switcher's indenting, "Compare with prod",
   and preselecting "Inheriting from" in Add environment: an empty
   environment stays the default, as the CLI's copy does;
 - a list-valued `also`, so a read of a reference a fork inherits also
   reaches the fork's log, redacted (section 3).
+
+### What 0.7's second PR built: personal configs
+
+- **Schema.** `0005_personal_configs` adds `environments.owner`, its check
+  (an owner needs a parent, and is a `user:`), and a unique index on
+  `(parent_id, owner)` that leaves out tombstones. The app's login has no
+  UPDATE on it, so an owner never changes.
+- **The vault's binding.** `SecretContext` takes an optional `owner`, the
+  SHA-256 of `user:<email>` (`ownerKey`), which the local KEK's wrap AAD and
+  KMS's encryption context (`coffre:owner`) carry. Every key operation
+  reads each environment's owner from the database before deciding
+  (`#keys`), and for a personal config's key decides `personal` for anyone
+  but its owner, and for the owner, their read on the parent. The wrap and
+  unwrap then bind the owner the decision read: a forged or cleared owner
+  column fails to open. No reference holds or reads one (`personal`).
+- **The app's rule.** `can()` decides a personal config's `secret.*`
+  permissions on its owner and their read on the parent, never on grants
+  or roles there; anything else as at the parent. A grant on one is
+  refused.
+- **`@me`.** `market/dev@me` resolves to the caller's personal config of
+  dev. With none, a read (list, reveal, `run`, `export`, `get`, missing
+  keys) is of dev, the list saying `personal: { of, fallback: true }`; a
+  write to `PATCH /secrets/market/dev@me` makes one, and `PUT
+  /projects/market/dev@me` makes one empty; anything else is 404, and a
+  dry run makes nothing. A service account keeps none: its `@me` is dev.
+- **Privacy.** Lists show you your own as `dev@me` and nobody else's;
+  missing keys compare none. Maintainers (`environment.manage`) list a
+  project's personal configs, `GET /personal/:project`: whose, of what,
+  their key names and the slug that deletes one. The offboarding report
+  lists a member's. The log files a personal config's entries under it,
+  so its project's auditors see its key names, as maintainers do.
+- **Lifecycle.** Its owner or a maintainer deletes one, without archiving
+  it first, its values erased. It is archived, restored and deleted with
+  its parent, and stops none of these. A rename in the parent renames its
+  override and removal; its own key of the new name moves aside,
+  `NEXT_KEY_2`, logged in it, rather than name it to the renamer.
+- **Surfaces.** The UI: "My own dev" on dev's page, `dev@me`'s page (with
+  Make, and Delete), "yours alone" on its card, Personal configs in
+  project settings; the CLI: `@me` in every path, `coffre personal`, and a
+  note on `list` when `@me` fell back; MCP's read tools take `@me` paths.
+- **Tests.** `packages/server/test/personal.test.ts`, on both engines, and
+  the conformance check `personal configs`.
+
+Where the build differs from the design above: a rename's collision is
+logged in the personal config, not announced on the owner's next read;
+MCP's write tools take no `@me` path; and a release before 0.7 rolled back
+to fails closed only for the values themselves, since it would list a
+personal config as an environment of the project.
 
 ## 8. Recommendation
 

@@ -97,6 +97,44 @@ export async function inheritance({ admin, reader }: People, canaries: Canaries)
   return "a fork that inherits prod reads prod's values, copies none, and lends none to a reader of the fork alone";
 }
 
+/** The key the reader keeps in their personal dev, which goes with it once checked. */
+const PERSONAL = 'CONFORMANCE_PERSONAL';
+
+/**
+ * A personal config's values are its owner's alone (docs/design/forking.md,
+ * R8): the reader, a viewer on dev, keeps a value in `dev@me` and reads it;
+ * the admin, an Owner of the whole instance, sees that it exists and its
+ * key's name, and reads none of it, and their own `dev@me` is dev; and a
+ * row made the admin's around coffre, in the database, opens nothing,
+ * since the vault bound the value to its owner.
+ */
+export async function personalConfigs(deployment: Deployment, { admin, reader }: People): Promise<string> {
+  const mine = `${DEV}@me`;
+  const value = canary();
+  await reader.api.secrets.set(mine, { [PERSONAL]: value });
+  try {
+    expect((await reader.api.secrets.reveal(`${mine}/${PERSONAL}`)).values[PERSONAL] === value, 'the reader did not read their own personal value');
+    const config = (await admin.api.environments.personal(PROJECT)).configs.find((each) => each.owner === reader.member);
+    expect(config?.keys.includes(PERSONAL) === true, "the reader's personal config, or its key's name, is not listed to the admin", config);
+    expect((await outcome(admin.api.secrets.reveal(`${PROJECT}/${config!.slug}`))).startsWith('403 '), "an Owner of the instance read a member's personal config");
+    const theirs = await admin.api.secrets.reveal(mine);
+    expect(!(PERSONAL in theirs.values), "the admin's dev@me read the reader's personal value");
+
+    const owner = async (member: string) => using(deployment.database(), (sql) =>
+      query(sql, 'UPDATE environments SET owner = $1 WHERE slug = $2', [member, config!.slug]));
+    await owner(admin.member);
+    try {
+      const forged = await outcome(admin.api.secrets.reveal(`${mine}/${PERSONAL}`));
+      expect(forged !== 'let through', 'a personal config made the admin\'s in the database opened for them');
+    } finally {
+      await owner(reader.member);
+    }
+  } finally {
+    await reader.api.environments.delete(mine);
+  }
+  return "a personal value is read by its owner alone: an Owner sees its key's name, reads none of it, and a forged owner opens nothing";
+}
+
 /** The key in dev the reference check makes, archived once checked. */
 const HELD = 'CONFORMANCE_REFERENCE';
 const FORGED = 'CONFORMANCE_FORGED';

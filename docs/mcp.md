@@ -60,6 +60,8 @@ With **Read**, a connected client can, as you:
 - `whoami`: who it acts as, and what it may do.
 - `list_projects`, `list_secrets`, `secret_history`: projects,
   environments, keys, versions, and who changed what. Never a value.
+  Read tools take `market/dev@me` for your personal config of dev, which
+  is dev while you have none.
 - `list_access`, `describe_member`: who has access, and what a member
   holds.
 - `read_audit_log`: the log, 50 entries a call.
