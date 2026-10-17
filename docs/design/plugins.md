@@ -279,11 +279,12 @@ plugins: [
 | `GET /v1/auth/token/lookup-self` | Who the token is: `type: "service"`, `ttl: 0`, `expire_time: null`, no `namespace_path` |
 | `GET /v1/sys/internal/ui/mounts/<mount>[/…]` | The mount, KV version `"2"`. No token is needed: it holds no secret, and Vault's UI asks for it unauthenticated too |
 | Any other method (PUT, POST, PATCH, DELETE) | 405 `coffre's Vault API is read only` |
-| `?version=N` | 400: coffre serves current values only |
-| `?list=true` | 405: no listing (see decision 6) |
+| Any query on a read: `?version=N`, `?read_snapshot_id=…` | 400 before anything is read: coffre serves current values only |
+| `?list=true`, on any path (HashiCorp's client sends LIST that way; ESO's `find` asks it of `secret/metadata/`) | 405: no listing (see decision 6) |
+| `X-Vault-Wrap-TTL` (`vault kv get -wrap-ttl=5m`) | 400 before anything is read: the client expects a wrapping token, not values |
 | A non-empty `X-Vault-Namespace` | 400. An empty one passes, since vault-action always sends one |
 | A path naming no environment (`secret/data/market`) | 400, never 404, so that a typo in an ExternalSecret does not make ESO delete its target |
-| Any other path | 404 |
+| Any other path: `secret/metadata/…`, another mount | 400 |
 
 The mount is `secret` by default, as in Vault (`vaultKv({ mount: 'kv' })`
 changes it). The metadata in a data response has `version: 0`: Vault's
@@ -298,11 +299,13 @@ A fork that inherits (#238) reads through the adapter as it does through
 resolve live from the parent and need read on the parent. A token that
 reads only the fork gets 403, never a partial map. A test holds both.
 
-**Errors.** coffre's 401 and 403 become Vault's `403 permission denied`
-with coffre's reason after it. A 404 becomes `404 {"errors":[]}`, which the
-Go client reads as "no secret" and ESO as deleted. Anything else keeps its
-status: an outage is 503, never 404, so ESO never mistakes one for a
-deletion.
+**Errors.** One rule: **404 means only that the environment or key a read
+names is not there**, because ESO reads a 404 as the secret deleted, and
+with `deletionPolicy: Delete` it deletes its target. So the API's 404 on a
+read becomes `404 {"errors":[]}`, and nothing else does. Whatever coffre
+does not serve is a 400 or a 405: a path, a query, a header, a method. An
+outage keeps its 503. coffre's 401 and 403 become Vault's `403 permission
+denied`, with coffre's reason after it.
 
 **Why a GET may reveal here.** coffre's own API reveals only to a POST, so
 that a link, a prefetch or another site's `<img>` cannot trigger a read

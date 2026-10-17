@@ -140,14 +140,23 @@ test('read only: every other method is 405, and changes nothing', async () => {
 
 test('what coffre does not serve says so, and never as 404 on a path a client meant as a secret', async () => {
   assert.equal((await vault('secret/data/market/prod?version=2')).status, 400);
+  // A snapshot's values, which coffre has not: refused before anything is read, never answered with today's.
+  assert.equal((await vault('secret/data/market/prod?read_snapshot_id=snap-1')).status, 400);
+  assert.deepEqual(await entries('secret.read'), []);
   assert.equal((await vault('secret/data/market/prod?list=true')).status, 405);
+  // ESO's dataFrom.find, as HashiCorp's client sends LIST: a 404 here would read as every secret gone.
+  assert.equal((await vault('secret/metadata/market/?list=true')).status, 405);
+  assert.equal((await vault('secret/metadata/?list=true')).status, 405);
   // Too short or too deep names no environment: a configuration mistake, which must not delete ESO's target.
   assert.equal((await vault('secret/data/market')).status, 400);
   assert.equal((await vault('secret/data/market/prod/KEY/more')).status, 400);
   assert.equal((await vault('secret/data/market/prod', eso, { headers: { 'x-vault-namespace': 'team-a' } })).status, 400);
   // vault-action sends an empty namespace with every request.
   assert.equal((await vault('secret/data/market/prod', eso, { headers: { 'x-vault-namespace': '' } })).status, 200);
-  assert.equal((await vault('secret/metadata/market/prod')).status, 404);
+  // metadataPolicy: Fetch, another mount, any path coffre does not serve: 400, never 404.
+  assert.equal((await vault('secret/metadata/market/prod')).status, 400);
+  assert.equal((await vault('kv/data/market/prod')).status, 400);
+  assert.equal((await vault('auth/token/lookup')).status, 400);
   // `vault kv get -wrap-ttl=5m` expects a wrapping token, never the values themselves.
   const wrapped = await vault('secret/data/market/prod', eso, { headers: { 'x-vault-wrap-ttl': '5m' } });
   assert.equal(wrapped.status, 400);

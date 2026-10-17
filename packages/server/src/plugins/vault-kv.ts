@@ -16,7 +16,8 @@
  *   GET /v1/auth/token/lookup-self          who the token is
  *   GET /v1/sys/internal/ui/mounts/secret   that `secret` is KV v2, for `vault kv get`
  *
- * Read only: anything else is refused. The token comes from `X-Vault-Token`
+ * Read only, and current values only: anything else is refused, never with
+ * 404, which only says that the place a read names is not there. The token comes from `X-Vault-Token`
  * alone, never a cookie, and no CORS answer lets another site's page send
  * one, so these GETs can reveal what coffre's own API reveals only to a POST.
  * Each read is the API's reveal, as the token's holder: the same checks, the
@@ -53,6 +54,8 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
     return failure(400, 'the path is not valid percent-encoding');
   }
   if (request.method !== 'GET' && request.method !== 'HEAD') return failure(405, "coffre's Vault API is read only");
+  // HashiCorp's client sends LIST as `GET …?list=true`, on any path: ESO's `dataFrom.find` asks it of `<mount>/metadata/`.
+  if (url.searchParams.has('list')) return failure(405, 'coffre does not list environments through its Vault API');
   // Vault Enterprise's namespaces: an empty header is what some clients always send.
   if ((request.headers.get('x-vault-namespace') ?? '') !== '') return failure(400, 'coffre has no Vault namespaces');
   // Response wrapping (`vault kv get -wrap-ttl=5m`): the client expects a single-use token, not the values. Refused before anything is read.
@@ -72,8 +75,8 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
     if (path === 'auth/token/lookup-self') return success(lookupSelf(await api.me()));
     const data = `${mount}/data/`;
     if (path.startsWith(data)) {
-      if (url.searchParams.has('list')) return failure(405, 'coffre does not list environments through its Vault API');
-      if (url.searchParams.has('version')) return failure(400, 'coffre serves current values only: leave out version');
+      // `version`, `read_snapshot_id` and whatever Vault adds next each ask for other values than the current ones: none is taken.
+      if (url.search !== '') return failure(400, 'coffre serves current values only, and takes no query: leave out version and the like');
       const place = path.slice(data.length);
       // A path that names no environment is a mistake in the client's configuration: 400, which ESO does not read as the secret gone.
       const depth = place.split('/').length;
@@ -81,7 +84,8 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
       const { values, version } = await api.secrets.reveal(place);
       return success({ data: values, metadata: metadata(version) });
     }
-    return failure(404);
+    // Only a read of a place that is not there is 404, which ESO reads as the secret gone: anything else coffre does not serve is 400.
+    return failure(400, `coffre's Vault API serves ${data}<project>/<environment>[/<KEY>] and auth/token/lookup-self`);
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
     return refused(error);
