@@ -21,7 +21,7 @@ import type { ApiContext } from './context.ts';
 import { forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 
-/** Entries the full check reads at once: some ten megabytes, within a Worker's memory, and few round trips. */
+/** Entries the full check reads at once, at most, and no more than `BATCH_BYTES` of what they say (`auditRange`): within a Worker's memory, and few round trips. */
 const VERIFY_BATCH = 10_000;
 
 export type AuditEntryView = {
@@ -371,7 +371,6 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
         entries += result.entries;
         previousHash = result.head;
         nextSequence = result.nextSeq;
-        if (batch.length < VERIFY_BATCH) break;
       }
       if (nextSequence !== head.nextSeq) {
         const missing = head.nextSeq - nextSequence;

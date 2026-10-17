@@ -1523,8 +1523,8 @@ async function audit(args: string[]): Promise<void> {
   }
 
   for (const entry of result.entries.reverse()) {
-    // A read of several secrets at one place is one entry: its place and how many it read.
-    const read = entry.secrets === null ? '' : ` (${entry.secrets.length} secrets)`;
+    // A read of several secrets at one place is one entry: its place and how many it read. A server before 0.7 says nothing of them.
+    const read = entry.secrets == null ? '' : ` (${entry.secrets.length} secrets)`;
     const place = ([entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-') + read;
     // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
     // An instance before 0.7 sends no `token`.

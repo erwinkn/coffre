@@ -2261,6 +2261,7 @@ class VaultService implements Vault {
     let keys: readonly string[] = [];
     for (let after = -1n; ; ) {
       const batch = await store.vaultEntriesAfter(tx, after, VERIFY_BATCH);
+      if (batch.length === 0) return { ok: true };
       for (const entry of batch) {
         const result = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: logKeys });
         if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
@@ -2269,7 +2270,6 @@ class VaultService implements Vault {
       if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
       keys = moved.keys;
       for (const entry of batch) findings.add(entry);
-      if (batch.length < VERIFY_BATCH) return { ok: true };
       after = batch[batch.length - 1]!.seq;
     }
   }

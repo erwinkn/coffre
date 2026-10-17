@@ -22,7 +22,7 @@ import { EVERYWHERE, type Scope } from '@coffre/core/access';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
-import { appendEntries, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
+import { appendEntries, BATCH_BYTES, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, sql } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
@@ -1546,6 +1546,24 @@ test('a rewrite sealed again with the vault\'s key is found against the head it 
   // A vault that never saw the head before cannot tell: whoever holds the
   // key can seal anything. The heads checkpoints signed can; see below.
   assert.equal((await (await fresh()).verifyLog({})).ok, true);
+});
+
+test('a log of large entries is checked whole and signed, a batch of it in memory at a time', async () => {
+  const w = await world();
+  // A read of thousands of secrets lists them all: a few such entries outrun one batch's bytes.
+  const listing = 'x'.repeat(Math.ceil(BATCH_BYTES / 3));
+  for (let i = 0; i < 7; i++) {
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ listing }) }]));
+  }
+  const fresh = await openLocalVault(db.vault, configure());
+  const verified = await fresh.verifyLog({});
+  const { auditLog } = tablesOf(db.owner);
+  const written = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.author, 'vault'));
+  assert.deepEqual(verified, { ok: true, entries: written.length }, 'the check stopped short of the last entry');
+  const signed = await fresh.checkpoint();
+  assert.ok(signed.ok, JSON.stringify(signed));
+  const [head] = await store.vaultPage(db.owner, undefined, 1);
+  assert.equal(signed.checkpoint.seq, Number(head!.seq) - 1, 'the checkpoint signs every entry before its own');
 });
 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {

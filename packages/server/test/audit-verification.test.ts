@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { deriveLogKey, entryHash } from '@coffre/core/audit';
-import { appendEntries, LogHeadMismatch } from '@coffre/db/log';
+import { appendEntries, BATCH_BYTES, batchThrough, LogHeadMismatch } from '@coffre/db/log';
 import { eq } from 'drizzle-orm';
 
 import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
@@ -99,6 +99,24 @@ async function write(entries: number): Promise<void> {
     await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, Array.from({ length: batch }, () => entry)));
   }
 }
+
+test('a log of large entries is verified whole, in batches that hold no more than BATCH_BYTES between them', async () => {
+  // A read of thousands of secrets lists them all: a few such entries of each author's outrun one batch's bytes.
+  const listing = 'x'.repeat(Math.ceil(BATCH_BYTES / 3));
+  const vaultKey = deriveLogKey('vault', deps.vault.signingKey);
+  for (let i = 0; i < 4; i++) {
+    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ ...entry, metadata: { listing } }]));
+    await db.owner.transaction((tx) => appendEntries(tx, vaultKey, [{ actor: 'user:root@acme.example', action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ listing }) }]));
+    await write(2);
+  }
+  const [head] = await db.owner.select().from(auditChainHead);
+  const first = await batchThrough(db.owner, 0n, 10_000);
+  assert.ok(first !== null && first < head.nextSeq - 1n, 'one batch held every large entry');
+  const verified = await root.audit.verify();
+  assert.ok(verified.ok, JSON.stringify(verified));
+  // Through every entry: the large ones, and those the request itself wrote after them.
+  assert.ok(verified.through !== null && verified.through >= Number(head.nextSeq - 1n) && verified.entries === verified.through + 1, JSON.stringify(verified));
+});
 
 test('audit verification reports live key operations without calling the log broken', async () => {
   await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', deps.vault.signingKey), [{

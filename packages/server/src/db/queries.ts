@@ -4,11 +4,12 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { batchThrough } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -1691,15 +1692,16 @@ function shown<Row extends { occurredAt: number }>(row: Row): Omit<Row, 'occurre
   return { ...row, occurredAt: new Date(row.occurredAt).toISOString() };
 }
 
-/** Rows in chain order from `fromSeq`, with every field as it was hashed. */
+/** Rows in chain order from `fromSeq`, with every field as it was hashed: a batch of a full check, at most `limit` and `BATCH_BYTES` of metadata. */
 export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
   const { auditLog } = tablesOf(db);
+  const through = await batchThrough(db, fromSeq, limit);
+  if (through === null) return [];
   const rows = await db
     .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
     .from(auditLog)
-    .where(gte(auditLog.seq, fromSeq))
-    .orderBy(asc(auditLog.seq))
-    .limit(limit);
+    .where(and(gte(auditLog.seq, fromSeq), lte(auditLog.seq, through)))
+    .orderBy(asc(auditLog.seq));
   return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
 }
 
