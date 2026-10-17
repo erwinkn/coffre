@@ -950,19 +950,32 @@ async function readEnvironments(paths: readonly string[]): Promise<[string, stri
 /**
  * Fetch every secret of the environments named and exec a command with them
  * in its environment: one audited read per environment, and one audit row
- * per secret injected.
+ * per secret injected. A variable the shell already sets is overwritten,
+ * unless --keep-existing keeps it. (`export` prints values for a tool to
+ * apply, so it has no shell environment to defer to.)
  */
 async function run(args: string[]): Promise<void> {
   const separator = args.indexOf('--');
   if (separator === -1 || separator === args.length - 1) {
-    fail('usage: coffre run <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
+    fail('usage: coffre run [--keep-existing] <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
   }
 
-  const { positionals } = parseArgs({ args: args.slice(0, separator), options: {}, allowPositionals: true, strict: true });
+  const { values: flags, positionals } = parseArgs({
+    args: args.slice(0, separator),
+    options: { 'keep-existing': { type: 'boolean', default: false } },
+    allowPositionals: true,
+    strict: true,
+  });
   const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
   const values = Object.fromEntries(await readEnvironments(paths));
+  // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and is in the audit log).
+  const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
+  for (const key of kept) delete values[key];
+  if (kept.length > 0) {
+    process.stderr.write(`coffre: kept the value already set in your environment for ${kept.sort().join(', ')}, not coffre's\n`);
+  }
 
   const child = spawn(command[0], command.slice(1), {
     // Secrets are passed through the environment of the child only. They are
