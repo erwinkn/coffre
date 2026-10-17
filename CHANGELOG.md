@@ -54,7 +54,7 @@
 - **What others see of them.** Lists show you yours, as `dev@me`, and
   nobody else's, and missing keys compare none. Whoever manages a
   project's environments lists its personal configs (`coffre personal
-  market`, or Personal configs in its settings): whose, of what, and their
+  market`, or Personal configs on its Environments tab): whose, of what, and their
   key names, never a value; they and the owner may delete one, erasing its
   values. They are archived, restored and deleted with their parent, hold
   no reference, and take no grant.

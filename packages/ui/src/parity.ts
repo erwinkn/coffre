@@ -58,7 +58,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [{ does: "an environment: the keys its siblings have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
   },
   'GET /personal/:project': {
-    ui: [{ does: "a project › Settings › Personal configs: whose, of what, and their key names", in: 'pages/project-settings.tsx', call: 'environments.personal' }],
+    ui: [{ does: "a project › Environments › Personal configs: whose, of what, and their key names", in: 'pages/project-environments.tsx', call: 'environments.personal' }],
   },
   'PATCH /projects/:project/:environment/dismissals': {
     ui: [

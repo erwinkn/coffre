@@ -195,8 +195,9 @@ function EnvironmentLedger({
     if (sourceProject !== project || sourceEnvironment !== environment) continue;
     lentBy.set(key, [...(lentBy.get(key) ?? []), reference]);
   }
+  // A personal config is no reference's source: its values are its owner's alone.
   const readable = useShell().projects.flatMap((each) => each.environments
-    .filter(isActiveAccessibleEnvironment)
+    .filter((one) => isActiveAccessibleEnvironment(one) && !one.personal)
     .map((one) => `${each.slug}/${one.slug}`));
   const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
