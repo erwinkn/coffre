@@ -24,6 +24,7 @@ import {
   type Role,
   type Scope,
   type ServiceAccount,
+  withinCredential,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
@@ -1044,7 +1045,7 @@ class VaultService implements Vault {
       owners.clear();
       for (const [id, environment] of environments) if (environment.owner !== null) owners.set(id, ownerKey(environment.owner));
       const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
-        const personal = personalRefusal(reader, principal, secret, at[i]!, environments);
+        const personal = personalRefusal(reader, principal, call.permission, secret, at[i]!, environments);
         if (personal !== undefined) return personal;
         return refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
       });
@@ -2561,6 +2562,7 @@ function placeIn(place: SecretPlace, environments: ReadonlyMap<string, { project
 function personalRefusal(
   reader: Standing,
   principal: string,
+  permission: Permission,
   secret: SecretPlace,
   at: SecretPlace,
   environments: ReadonlyMap<string, store.EnvironmentRow>,
@@ -2569,8 +2571,11 @@ function personalRefusal(
   const held = at.environmentId === secret.environmentId ? own : environments.get(at.environmentId);
   if (own?.owner == null && held?.owner == null) return undefined;
   if (own !== held || principal !== own?.owner || own.parentId === null) return 'personal';
-  const parent = { projectId: secret.projectId, environmentId: own.parentId };
-  return refuses(reader, 'secret.read', placeIn(parent, environments), own.deleted || (environments.get(own.parentId)?.deleted ?? true));
+  const parent = placeIn({ projectId: secret.projectId, environmentId: own.parentId }, environments);
+  const refused = refuses(reader, 'secret.read', parent, own.deleted || (environments.get(own.parentId)?.deleted ?? true));
+  if (refused !== null) return refused;
+  // The credential's scope caps the owner still: their viewer token on the parent reads, and wraps no key.
+  return withinCredential(reader.live, permission, parent) ? null : 'no_grant';
 }
 
 function refuses(reader: Standing, permission: Permission, where: Place, deleted: boolean): RefusalCode | null {

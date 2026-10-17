@@ -283,3 +283,20 @@ test("dev@me's version is dev's while you have none, and your config's once you 
   const [config] = await db.owner.select().from(environments).where(eq(environments.owner, `user:${BO}`));
   await assert.rejects(root.environments.version(`market/${config!.slug}`), { status: 403 });
 });
+
+test("the vault holds an owner's scoped credential to its role on dev: a viewer's opens their personal value, and wraps none", async () => {
+  await ada.secrets.set('market/dev@me', { DATABASE_URL: 'postgres://localhost/ada' });
+  const config = await adasConfig();
+  const [version] = await db.owner
+    .select({ id: secretVersions.id, secretId: secretVersions.secretId, version: secretVersions.version })
+    .from(secretVersions)
+    .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+    .where(eq(secrets.environmentId, config.id));
+  const credentialScope = [{ projectId: config.projectId, environmentId: config.parentId!, role: 'viewer' as const }];
+  const read = await deps.vault.unwrap({ principal: `user:${ADA}`, purpose: 'run', credentialScope, items: [{ secretVersionId: version!.id }] });
+  assert.equal(read.ok, true);
+  const secret = { projectId: config.projectId, environmentId: config.id, secretId: version!.secretId, version: version!.version + 1, path: 'market/dev@me/DATABASE_URL' };
+  const wrapped = await deps.vault.wrap({ principal: `user:${ADA}`, credentialScope, items: [{ secret, key: Buffer.alloc(32, 1).toString('base64') }] });
+  assert.equal(wrapped.ok ? null : wrapped.refusal.code, 'no_grant');
+  assert.equal((await deps.vault.wrap({ principal: `user:${ADA}`, items: [{ secret, key: Buffer.alloc(32, 1).toString('base64') }] })).ok, true);
+});

@@ -1,6 +1,7 @@
 import {
   allows,
   instanceRoleGrants,
+  withinCredential,
   PERMISSIONS,
   roleGrants,
   type GrantPlace,
@@ -90,8 +91,10 @@ export function can(caller: Caller, permission: Permission, place: Place): boole
   const parent = { projectId: place.projectId, ...place.personal.parent };
   // A personal config's values: its owner's alone, while they read its parent; no grant or role reaches them,
   // an Owner's included (docs/design/forking.md, section 3). The vault decides the same.
+  // A credential's scope caps it still: an owner's viewer token on the parent reads their config, and writes nothing.
   if (SECRET_PERMISSIONS.includes(permission)) {
-    return caller.principal.type === 'user' && formatMember(caller.principal) === place.personal.owner && allows(caller, 'secret.read', parent);
+    return caller.principal.type === 'user' && formatMember(caller.principal) === place.personal.owner
+      && allows(caller, 'secret.read', parent) && withinCredential(caller, permission, parent);
   }
   // Anything else, as at its parent: its log, to whoever reads the parent's.
   return allows(caller, permission, parent);
