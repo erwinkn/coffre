@@ -273,3 +273,13 @@ test('an archived key moved aside leaves the removal of its new name as it was: 
   const read = await values(ada, 'market/dev@me');
   assert.deepEqual([read.NEXT, read.NEXT_2], ['old', undefined]);
 });
+
+test("dev@me's version is dev's while you have none, and your config's once you have one", async () => {
+  const dev = (await bo.environments.version('market/dev')).version;
+  assert.equal((await bo.environments.version('market/dev@me')).version, dev);
+  await bo.secrets.set('market/dev@me', { DATABASE_URL: 'postgres://localhost/bo' });
+  assert.notEqual((await bo.environments.version('market/dev@me')).version, dev);
+  // Nobody else's version of it: it would say when its values changed.
+  const [config] = await db.owner.select().from(environments).where(eq(environments.owner, `user:${BO}`));
+  await assert.rejects(root.environments.version(`market/${config!.slug}`), { status: 403 });
+});

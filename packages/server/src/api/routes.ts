@@ -262,6 +262,8 @@ export const routes = {
   // A version of what a read of it would open, which changes whenever that does: pollers ask it before reading.
   ...route('GET /projects/:project/:environment/version', {
     needs: 'secret.read',
+    // What a read of `dev@me` would open: dev's while you have no personal config of it.
+    personal: 'falls back',
     action: 'secret.version',
     run: (ctx, { place }) => environmentVersion(ctx, place),
   }),
