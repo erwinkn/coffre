@@ -235,7 +235,7 @@ const typeLines = (steps: { name: string; field: string; first: string; second: 
     node.dispatchEvent(new Event('input', { bubbles: true }));
     node.setSelectionRange(text.length, text.length);
   };
-  button('New secret')?.click();
+  button('Add secret')?.click();
   const named = await shown('Name of the new secret');
   if (named === null) return { field: null };
   typed(named, name);
@@ -277,7 +277,7 @@ export async function pastedValues(deployment: Deployment, admin: Person, browse
   const chrome = await Chrome.open(executable);
   try {
     const caret = added.length;
-    const adding = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'New secret', name: 'PASTED_KEY', field: 'Value for PASTED_KEY', text: added, save: 'Save PASTED_KEY now' }));
+    const adding = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'Add secret', name: 'PASTED_KEY', field: 'Value for PASTED_KEY', text: added, save: 'Save PASTED_KEY now' }));
     expect(adding.errors.length === 0, `${page} reported errors in the browser`, adding.errors.join('\n'));
     expect(
       JSON.stringify(adding.answer) === JSON.stringify({ field: 'textarea', label: 'Value for PASTED_KEY', caret: [caret, caret] }),

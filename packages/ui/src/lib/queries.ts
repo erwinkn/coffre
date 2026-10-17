@@ -4,6 +4,7 @@ import { QueryClient, queryOptions, type QueryKey } from '@tanstack/react-query'
 
 import { deriveUiCapabilities } from './capabilities.ts';
 import { memberRef, statusOf, uiResult } from './coffre.ts';
+import { isActiveAccessibleEnvironment } from './project-environments.ts';
 import type { DirectoryPrincipal, GrantRow, Me, ProjectSummary } from '../shared/models';
 
 /**
@@ -421,6 +422,30 @@ export function projectOf(projects: ProjectsResult, slug: string) {
 export async function loadProject(queryClient: QueryClient, client: CoffreClient, slug: string) {
   const found = projectOf(await queryClient.fetchQuery(queries.projects(client)), slug);
   if (found.ok && found.managesAccess) await queryClient.fetchQuery(queries.grants(client, slug));
+}
+
+/**
+ * What an environment's page reads: its secrets and, for whoever reads them,
+ * the references that read them from elsewhere and the keys it lacks,
+ * rendered with them. Where the project tree the shell holds says you read
+ * it, all three are asked at once, one round trip; elsewhere the others wait
+ * for the secrets, so a refused visit is one refusal in the log, not three.
+ */
+export async function loadEnvironment(queryClient: QueryClient, client: CoffreClient, place: Place) {
+  const others = () =>
+    Promise.all([
+      queryClient.fetchQuery(queries.references(client, `${place.project}/${place.environment}`)),
+      queryClient.fetchQuery(queries.missing(client, place)),
+    ]);
+  const found = projectOf(await queryClient.ensureQueryData(queries.projects(client)), place.project);
+  const here = found.ok ? found.project.environments.find((environment) => environment.slug === place.environment) : undefined;
+  if (here !== undefined && isActiveAccessibleEnvironment(here)) {
+    const [secrets] = await Promise.all([queryClient.fetchQuery(queries.secrets(client, place)), others()]);
+    return secrets;
+  }
+  const secrets = await queryClient.fetchQuery(queries.secrets(client, place));
+  if (secrets.ok) await others();
+  return secrets;
 }
 
 /** The directory pages' read: the directory, for owners. */

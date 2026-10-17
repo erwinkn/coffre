@@ -134,10 +134,7 @@ export async function listSecrets(
   place: ResolvedPath,
 ): Promise<{ permissions: Permission[]; keys: SecretKey[]; rotateAfterDays: number | null }> {
   const environment = requireLive(place);
-  const [rows, folders] = await Promise.all([
-    environmentSecrets(ctx.db, environment.environmentId),
-    secretFolderOf(ctx.db, environment.environmentId),
-  ]);
+  const rows = await environmentSecrets(ctx.db, environment.environmentId);
   const references = await currentReferences(ctx.db, rows.filter((row) => row.current === null).map((row) => row.id));
   const referenceOf = (secretId: string): SecretKey['reference'] => {
     const reference = references.get(secretId);
@@ -157,7 +154,7 @@ export async function listSecrets(
     keys: rows.map((row) => ({
       key: row.key,
       reference: referenceOf(row.id),
-      folder: folders.get(row.id) ?? null,
+      folder: row.folder,
       archived: row.archivedAt !== null,
       version: row.current?.version ?? null,
       updatedAt: writtenAt(row)?.toISOString() ?? null,

@@ -407,7 +407,7 @@ have. The environment's page shows a strip above its secrets:
 2 keys from other environments aren't here
   STRIPE_WEBHOOK_SECRET   in prod, staging     [Add] [Dismiss]
   SENTRY_DSN              in prod              [Add] [Dismiss]
-                                               [Dismiss all]   Dismissed (1)
+                                               [Dismiss all]
 ```
 
 - **Every sibling is compared, read or not.** Within a project, key
@@ -419,9 +419,13 @@ have. The environment's page shows a strip above its secrets:
   folder the key is in elsewhere, when they agree, and moving it there is a
   step of its own. Copying a value from another environment is a separate,
   deliberate reveal.
-- **Dismiss** is shared: stored, logged, and listed under "Dismissed",
-  each with who and when, and a Restore, while a sibling still has the
-  key. Archived keys are not missing: archiving one was a decision.
+- **Dismiss** is shared: stored, logged, with who and when, and listed
+  by `coffre missing --dismissed` while a sibling still has the key. It
+  leaves the strip at once, with Undo in a toast for a moment after; past
+  that, `coffre missing restore` brings it back. With nothing left
+  missing, dismissed or not, the strip is not there at all. Archived keys
+  are not missing: archiving one was a decision. (Until 0.6.2, the strip
+  listed the dismissed keys too, each with a Restore.)
 
 ```
 GET   /api/projects/market/dev/missing         {"missing": [{"key", "in": ["prod"], "folder"}], "dismissed": [...]}
@@ -466,7 +470,7 @@ one. It reads nothing it should not, since its vault knows no `via`.
 - **Projects page:** folder headings, foldable; "Move to folder…" in a
   project's settings.
 - **Environment page:** folder groups as heading rows in the secrets
-  table; the missing-keys strip and its Dismissed list above it; "Fork"
+  table; the missing-keys strip above it, while something is missing; "Fork"
   beside the environment's name, opening a dialog with the new name and
   the choice "Copy values" (default) or "Reference each key". The second
   says what it means before anyone confirms: "Whoever can read staging

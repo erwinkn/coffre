@@ -1,18 +1,22 @@
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import type { MissingKey } from '@coffre/client';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 
-import { useCoffre } from '../lib/coffre';
-import { affects, queries } from '../lib/queries';
-import { useAction } from '../lib/use-action';
+import { dismissMissing, missingList, restoreMissing } from '../lib/changes';
+import { failureMessage, useCoffre } from '../lib/coffre';
+import { changeOptions } from '../lib/optimistic';
+import { queries } from '../lib/queries';
+import { useChangeStatus } from '../lib/use-change';
 import { Card } from './page';
-import { ErrorLine, Timestamp } from './ui';
+import { RowFailure, rowClass } from './row-state';
 
 /**
  * Keys the environment's siblings have and it lacks, by name, whether you
- * read them or not (docs/design/environments.md): each with Add, which opens a new row with
- * its name, and Dismiss, which the whole team then sees, and below them
- * Dismiss all and what was dismissed, each with Restore. Nothing shows when
- * nothing is missing or dismissed.
+ * read them or not (docs/design/environments.md): each with Add, which opens
+ * a new row with its name, and Dismiss, which the whole team then sees, and
+ * below them Dismiss all. Nothing shows when nothing is missing, dismissed
+ * keys included: they are restored from the CLI (`coffre missing
+ * --dismissed`), or by Undo right after dismissing.
  */
 export function MissingKeys({
   project,
@@ -29,82 +33,82 @@ export function MissingKeys({
   const coffre = useCoffre();
   const place = { project, environment };
   const { data } = useQuery(queries.missing(coffre, place));
-  const { run, pending, error } = useAction();
-  const [showDismissed, setShowDismissed] = useState(false);
-  if (data?.ok !== true || (data.missing.length === 0 && data.dismissed.length === 0)) return null;
-  const { missing, dismissed } = data;
-  const path = `${project}/${environment}`;
-  const dismiss = (patch: Record<string, true | null>) => void run(() => coffre.environments.dismiss(path, patch), { affects: affects.secrets(place) });
+  const queryClient = useQueryClient();
+  // Each call's own promise, which `mutate`'s callbacks are not: they follow only the latest call.
+  const dismissKeys = useMutation(changeOptions(queryClient, dismissMissing(coffre, place))).mutateAsync;
+  const restoreKeys = useMutation(changeOptions(queryClient, restoreMissing(coffre, place))).mutateAsync;
+  const list = missingList(place);
+  const { status, dismiss: forget } = useChangeStatus(list.queryKey);
+  // What is missing, and only that: the dismissed are not listed.
+  const missing = data === undefined ? [] : list.items(data);
+  if (missing.length === 0) return null;
+  const columns = canWrite ? 3 : 2;
+
+  // Gone from the list at once, and said so at once, each dismissal with its
+  // own Undo. A refused one takes its word back and puts its rows back,
+  // saying why beneath them.
+  const dismiss = (entries: MissingKey[]) => {
+    const said = toast.success(entries.length === 1 ? `${entries[0]!.key} dismissed` : `${entries.length} keys dismissed`, {
+      action: {
+        label: 'Undo',
+        onClick: () => void restoreKeys(entries).catch((error: unknown) => toast.error(`Not restored. ${failureMessage(error)}`)),
+      },
+    });
+    dismissKeys(entries).catch(() => toast.dismiss(said));
+  };
 
   return (
     <>
       <Card
         wide
         labelledBy="missing-keys"
-        title={missing.length === 0 ? 'Nothing missing' : `${missing.length} ${missing.length === 1 ? 'key' : 'keys'} from other environments ${missing.length === 1 ? "isn't" : "aren't"} here`}
+        title={`${missing.length} ${missing.length === 1 ? 'key' : 'keys'} from other environments ${missing.length === 1 ? "isn't" : "aren't"} here`}
         description="Compared with every other environment of the project, by key name."
       >
         <div className="dt-wrap">
           <table className="dt stacks missing-keys">
             <tbody>
-              {missing.map((entry) => (
-                <tr key={entry.key}>
-                  <td className="mono" data-label="Key">{entry.key}</td>
-                  <td className="cell-muted" data-label="In">
-                    In {entry.in.join(', ')}
-                    {entry.folder !== null && <>, in {entry.folder}/</>}
-                  </td>
-                  {canWrite && (
-                    <td className="col-actions">
-                      <div className="acts">
-                        <button type="button" className="btn btn-sm" onClick={() => onAdd(entry.key)}>
-                          Add
-                        </button>
-                        <button type="button" className="btn btn-sm btn-quiet" disabled={pending} onClick={() => dismiss({ [entry.key]: true })}>
-                          Dismiss
-                        </button>
-                      </div>
+              {missing.map((entry) => {
+                const state = status(entry.key);
+                return [
+                  <tr key={entry.key} className={rowClass(state)}>
+                    <td className="mono" data-label="Key">{entry.key}</td>
+                    <td className="cell-muted" data-label="In">
+                      In {entry.in.join(', ')}
+                      {entry.folder !== null && <>, in {entry.folder}/</>}
                     </td>
-                  )}
-                </tr>
-              ))}
-              {showDismissed && dismissed.length > 0 && (
-                <tr className="folder-row">
-                  <th colSpan={canWrite ? 3 : 2} scope="rowgroup">Dismissed</th>
-                </tr>
-              )}
-              {showDismissed && dismissed.map((entry) => (
-                <tr key={`dismissed:${entry.key}`}>
-                  <td className="mono" data-label="Key">{entry.key}</td>
-                  <td className="cell-muted" data-label="Dismissed">
-                    By {entry.dismissedBy} <Timestamp iso={entry.dismissedAt} display="relative" />; in {entry.in.join(', ')}
-                  </td>
-                  {canWrite && (
-                    <td className="col-actions">
-                      <button type="button" className="btn btn-sm" disabled={pending} onClick={() => dismiss({ [entry.key]: null })}>
-                        Restore
-                      </button>
-                    </td>
-                  )}
-                </tr>
-              ))}
+                    {canWrite && (
+                      <td className="col-actions">
+                        <div className="acts">
+                          <button type="button" className="btn btn-sm" onClick={() => onAdd(entry.key)}>
+                            Add
+                          </button>
+                          <button type="button" className="btn btn-sm btn-quiet" onClick={() => dismiss([entry])}>
+                            Dismiss
+                          </button>
+                        </div>
+                      </td>
+                    )}
+                  </tr>,
+                  <RowFailure
+                    key={`failure:${entry.key}`}
+                    status={state}
+                    columns={columns}
+                    onDismiss={() => state.state === 'failed' && forget(state.mutationId)}
+                  />,
+                ];
+              })}
             </tbody>
           </table>
         </div>
-        {error !== null && <ErrorLine error={error} />}
       </Card>
-      <div className="table-actions">
-        {canWrite && missing.length > 1 && (
-          <button type="button" className="btn" disabled={pending} onClick={() => dismiss(Object.fromEntries(missing.map((entry) => [entry.key, true])))}>
+      {canWrite && missing.length > 1 && (
+        <div className="table-actions">
+          <button type="button" className="btn" onClick={() => dismiss(missing)}>
             Dismiss all
           </button>
-        )}
-        {dismissed.length > 0 && (
-          <button type="button" className="btn btn-quiet" aria-expanded={showDismissed} onClick={() => setShowDismissed((open) => !open)}>
-            {showDismissed ? 'Hide dismissed' : `Dismissed (${dismissed.length})`}
-          </button>
-        )}
-      </div>
+        </div>
+      )}
     </>
   );
 }

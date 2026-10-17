@@ -1246,6 +1246,8 @@ function envelopeOf(row: Envelope): Envelope {
 export type SecretRow = {
   id: string;
   key: string;
+  /** The folder it is listed in, if any. */
+  folder: string | null;
   archivedAt: Date | null;
   /** Null before the first version. */
   current: {
@@ -1272,6 +1274,7 @@ export async function environmentSecrets(
     .select({
       id: secrets.id,
       key: secrets.key,
+      folder: secrets.folder,
       archivedAt: secrets.archivedAt,
       versionId: secretVersions.id,
       version: secretVersions.version,
@@ -1293,6 +1296,7 @@ export async function environmentSecrets(
   return rows.map((row) => ({
     id: row.id,
     key: row.key,
+    folder: row.folder,
     archivedAt: row.archivedAt,
     current:
       row.versionId === null
@@ -1345,12 +1349,12 @@ export async function dismissalsIn(db: Queryable, environmentId: string) {
     .where(and(eq(dismissedKeys.environmentId, environmentId), isNull(dismissedKeys.restoredAt)));
 }
 
-/** The live keys of these environments, with each secret's id. */
+/** The live keys of these environments, each with its folder. */
 export async function liveKeysIn(db: Queryable, environmentIds: readonly string[]) {
   if (environmentIds.length === 0) return [];
   const { secrets } = tablesOf(db);
   return db
-    .select({ id: secrets.id, environmentId: secrets.environmentId, key: secrets.key })
+    .select({ environmentId: secrets.environmentId, key: secrets.key, folder: secrets.folder })
     .from(secrets)
     .where(and(inArray(secrets.environmentId, [...environmentIds]), isNull(secrets.archivedAt)));
 }

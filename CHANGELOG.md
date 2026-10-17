@@ -10,6 +10,27 @@
 - **A revealed value breaks only at its newlines.** A long token no longer wraps
   mid-word; it scrolls sideways inside the value, so the row and its buttons
   keep their place. A multi-line value, a PEM for one, shows one line per line.
+- **Missing keys stay out of the way once handled.** The panel shows only
+  while something is missing: with every difference dismissed it is gone,
+  "Nothing missing" included. The Dismissed list and its Restore buttons are
+  gone too; `coffre missing --dismissed` lists the dismissed keys, and
+  `coffre missing restore` brings them back. Dismiss and Dismiss all now act
+  at once: the keys leave the list before the server answers, a toast offers
+  Undo, and a refusal puts the keys back with the reason beneath them.
+- **Unsaved changes are saved at the foot of the table.** The floating bar at
+  the bottom of the page is now part of the secrets table: under its last
+  row, and stuck to the bottom of the window while the table runs past it.
+  Cmd/Ctrl+Enter and Escape are as they were.
+- **Add secret, and Add folder beside it.** New secret is now Add secret, a
+  split button whose chevron opens a menu with Add folder: name a folder and
+  pick the secrets to file in it. A folder exists while it holds a secret, so
+  it is made with its first ones.
+- **Switching environments takes one round trip.** The page asked for an
+  environment's secrets, then for its references and missing keys. It now asks
+  all three at once wherever the project list already says you read the
+  environment; elsewhere it still asks the secrets first, so a refused visit
+  is logged once. The missing-keys read lost a query per sibling environment,
+  and the secrets list a second query for folders.
 
 ## 0.6.1 (2026-10-16)
 

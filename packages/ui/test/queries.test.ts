@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { CoffreClient } from '@coffre/client';
+import { CoffreError, type CoffreClient } from '@coffre/client';
 import { QueryObserver, type QueryClient } from '@tanstack/react-query';
 
 import {
@@ -10,6 +10,7 @@ import {
   FRESH_MS,
   keys,
   loadDirectory,
+  loadEnvironment,
   loadProject,
   loadShell,
   queries,
@@ -202,4 +203,54 @@ test('the directory keeps which Owners the deployment names, for the tag and the
   const result = await queries.directory(client, true).queryFn!({} as never);
   assert.ok(result.ok);
   assert.equal(result.principals[0]?.declared, true);
+});
+
+/**
+ * The environment page's reads, each held until the test answers it: the
+ * order they are asked in, and how many are asked before the secrets answer.
+ */
+function environmentClient({ accessible, secrets }: { accessible: boolean; secrets: () => Promise<unknown> }) {
+  const calls: string[] = [];
+  const asked = (route: string, value: () => Promise<unknown>) => () => {
+    calls.push(route);
+    return value();
+  };
+  const dev = { ...market.environments[0]!, accessible, details: accessible ? market.environments[0]!.details : null };
+  const client = {
+    projects: { list: asked('GET /projects', async () => ({ projects: [{ ...market, environments: [dev] }] })) },
+    secrets: { list: asked('GET /secrets/market/dev', secrets) },
+    references: { list: asked('GET /references', async () => ({ references: [] })) },
+    environments: { missing: asked('GET /missing', async () => ({ missing: [], dismissed: [] })) },
+  } as unknown as CoffreClient;
+  return { client, calls };
+}
+
+test('an environment you read is read in one round trip: its secrets, references and missing keys at once', async () => {
+  let answer!: (value: unknown) => void;
+  const { client, calls } = environmentClient({
+    accessible: true,
+    secrets: () => new Promise((resolve) => (answer = resolve)),
+  });
+  const queryClient = createQueryClient();
+  await queryClient.fetchQuery(queries.projects(client));
+  calls.length = 0;
+
+  const loaded = loadEnvironment(queryClient, client, { project: 'market', environment: 'dev' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls.sort(), ['GET /missing', 'GET /references', 'GET /secrets/market/dev'], 'all three before the secrets answer');
+  answer({ keys: [], permissions: [], rotateAfterDays: null });
+  assert.equal((await loaded).ok, true);
+});
+
+test('an environment the project tree does not open to you asks its secrets alone, so a refusal is logged once', async () => {
+  const { client, calls } = environmentClient({
+    accessible: false,
+    secrets: async () => {
+      throw new CoffreError(403, 'forbidden', 'no grant covers market/dev');
+    },
+  });
+  const queryClient = createQueryClient();
+  const loaded = await loadEnvironment(queryClient, client, { project: 'market', environment: 'dev' });
+  assert.equal(loaded.ok, false);
+  assert.deepEqual(calls, ['GET /projects', 'GET /secrets/market/dev']);
 });
