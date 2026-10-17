@@ -32,7 +32,8 @@ test('isCoffreToken accepts generated tokens and nothing shaped otherwise', () =
 });
 
 test('tokenKind reads the kind a token says, and nothing from anything else', () => {
-  for (const kind of ['browser', 'cli', 'service'] as const) assert.equal(tokenKind(generateToken(kind)), kind);
+  for (const kind of ['browser', 'cli', 'service', 'personal'] as const) assert.equal(tokenKind(generateToken(kind)), kind);
+  assert.match(generateToken('personal'), /^coffre_pat_/);
   assert.equal(tokenKind(`coffre_key_${'A'.repeat(43)}`), null);
   assert.equal(tokenKind('eyJhbGciOiJSUzI1NiJ9.e30.sig'), null);
 });

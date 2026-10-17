@@ -2,6 +2,122 @@
 
 ## Unreleased
 
+- **Ask whether an environment changed without reading it.** `coffre version
+  market/prod`, or `GET /api/projects/market/prod/version`, answers a
+  version of what a read of it would open: a value written, a key added,
+  archived or renamed, a reference's source rotated and, in a fork,
+  anything it inherits change it; filing a key in a folder does not. It
+  reads no value, so it is not logged, and it takes what a read takes:
+  read on the environment, and on each parent a fork inherits from.
+- **`coffre export --output-file` and `--watch`.** `--output-file .env`
+  writes the export to a 0600 file, whole or not at all. `--watch` keeps it
+  current: it asks the version every minute (`--interval`, from 5s to
+  24h), reads only once it changed, rewrites the file only when its
+  contents change, then runs `--on-change '<command>'`. A failed round
+  keeps the file and waits twice as long each time, up to 15 minutes or
+  the interval, whichever is longer.
+- **A read of a whole environment answers its version.** `POST
+  /api/reveals` of `market/prod` answers the `version` of exactly what it
+  opened (null for one key's): a poller keeps that one, not the version it
+  asked before reading, since a change undone in between brings that back.
+- **`coffre run --keep-existing`.** `coffre run` still sets every key of the
+  environments it names over a variable of the same name in your shell. With
+  `--keep-existing`, a variable already set there keeps its value, an empty one
+  included, and coffre's is dropped. One line on stderr names the keys kept,
+  never a value. Every value is still read, and every read is audited.
+- **Forks that inherit.** An environment can now be made as a fork of
+  another in its project that keeps reading its parent's keys, live:
+  `coffre fork market/prod prod-eu --inherit`, "Inheriting from prod" in
+  Add environment, or MCP's `create_environment` with `inherits`. A key
+  added to or rotated in prod reaches prod-eu on its next read. prod-eu
+  overrides a key by writing it, adds keys of its own, and removes one it
+  should not have (`coffre remove`, or Remove in the key's menu).
+  `coffre reset`, or Reset to prod, goes back to the parent's value and
+  keeps the override, which `--undo` serves again. Forks of forks are
+  allowed, at most three parents up.
+- **A fork lends nothing.** Reading what a fork inherits takes read on the
+  parent, by your own grants: a reader of prod-eu alone gets a 403 that
+  names the inherited keys. Each inherited value is logged as a read of
+  prod's key, "in market/prod-eu", in both environments' logs; one read
+  through prod's own reference stays in its source's log and prod's. To
+  lend values across that line, use references, as before.
+- **The environment page shows where each key comes from.** "from prod"
+  for an inherited key, "overrides prod" for an override, flagged "prod
+  changed since" when prod wrote a newer value, and removed keys struck
+  through, with Restore. `coffre list` says the same, and
+  `GET /secrets/...` gives each key a `parent` and the environment its
+  `parents`.
+- **Renames and missing keys follow.** Renaming a key in a parent renames
+  the forks' overrides and removals of it. Missing keys compare what each
+  environment resolves to: a fork misses nothing it inherits, and a parent
+  misses no key that only its forks hold.
+- **Guards.** An environment that live forks inherit from cannot be
+  archived, and one any fork names cannot be deleted; a fork is restored
+  only while its parent is live. A reference to a key a fork only
+  inherits is refused, naming the parent's key to refer to instead.
+- **Migration** `0004_environment_parents` adds `environments.parent_id`,
+  nullable, with a same-project foreign key on Postgres. It only adds:
+  the previous release runs on it. Rolled back to 0.6 after forks exist, a
+  fork reads as holding only its own keys, so archive forks before rolling
+  back.
+- **Personal tokens: hand a script or an agent part of what you hold, for
+  an afternoon.** `coffre tokens issue --label cursor-agent --scope
+  market/dev=developer --expires-in 4h` makes a bearer token, `coffre_pat_…`,
+  that acts as you on what its scope names: never more than you held when
+  you made it, and at each request no more than you hold then. Losing a
+  grant narrows it, gaining one widens nothing, and being removed ends it.
+  It lasts a minute to a week, an hour unless told. Its scope names only
+  roles that manage no access (viewer, developer, maintainer, auditor), and
+  it reaches your secrets and places alone: it makes no token, session,
+  connected app, grant, member, service account or trust binding, changes
+  no setting, approves no sign-in, deletes nothing for good, and runs no
+  instance, whatever your role. Every entry it writes, the vault's too,
+  names it, and the audit log shows "ada via token 'cursor-agent'", in the
+  pages and in `coffre audit`. `coffre tokens` lists yours and `coffre
+  tokens revoke <id>` ends one; so does `coffre logout` signed in with it.
+  Your account's Sessions tab lists them, with Revoke; a person's page lists
+  theirs for whoever runs the instance, and their removal revokes them
+  ([docs/design/personal-tokens.md](docs/design/personal-tokens.md)).
+- **A credential with a scope holds nothing of the instance's.** A request
+  on one runs no instance, reads no whole log, makes no project and sets up
+  no service account under the instance's setting. Service accounts' tokens
+  could not before either; an Owner's personal token cannot now.
+- **API.** `GET`, `POST` and `DELETE /api/members/user:<email>/tokens` list,
+  make and revoke personal tokens; a personal token's `POST` takes `label`,
+  `expiresInMinutes` and `scope`, all three required. `GET /api/me` says
+  which personal token a request came in on (`personalToken`), and each
+  audit entry made with one carries it (`token`). The member report lists a
+  person's (`personalTokens`), and `ServiceTokenRow` is now `TokenRow`.
+- **Schema.** `0005_personal_tokens` widens `credentials`' kind check to
+  `personal` and indexes the log's `token.create` entries by the credential
+  they made. Nothing is removed or tightened, and 0.6 refuses a personal
+  token during the deploy, as no token of its own.
+- **Trust bindings for issuers coffre cannot reach.** A binding may carry its
+  issuer's public keys, uploaded with it, instead of fetching them:
+  `coffre trust <service> --issuer <iss> --jwks-file <path> --claim …`, or
+  Keys under "Other issuer" in the Trust dialog. coffre then fetches nothing,
+  so the issuer is any string its tokens name, matched exactly: a private
+  Kubernetes cluster's, at a `.local` name or a private address, works.
+  The keys are checked when uploaded (RS256 of 2048 bits or more, ES256 on
+  P-256, public keys only), and are under the binding's MAC. Such a binding
+  refuses a token that lives over an hour, `exp` minus `iat` (`too_long`),
+  besides the age limit and single use every token keeps.
+- **Replacing keys when the issuer rotates them.** `coffre trust <service>
+  --issuer <iss> --replace-keys --jwks-file <path>`, or Replace keys under a
+  binding's Claims, gives every binding of the service on the issuer the
+  new keys. Each is replaced by one the same but for them, and the
+  credentials the old one issued end. A set that holds the old key and the
+  new takes tokens signed by either while the issuer moves over.
+- **Nested claims.** A binding names a claim nested in the token by its
+  path, as `kubernetes.io.serviceaccount.uid`, beside `sub` and the rest.
+  It matches only when the path reads one way in the token.
+- **Kubernetes.** [docs/kubernetes.md](docs/kubernetes.md) shows how a pod
+  signs in with a projected service-account token for coffre's audience:
+  the cluster's keys from `kubectl get --raw /openid/v1/jwks`, the account
+  pinned by its UID, and a rotation.
+- **Migration** `0006_uploaded_keys` adds `jwks` to `service_bindings`, a
+  nullable column the app inserts and never updates. 0.6 keeps serving on
+  it.
 - **Generate a secret's value from the CLI, and regenerate it in one step.**
   `coffre set market/prod/SESSION_SECRET --generate bytes:32:hex` makes the
   value in the CLI and writes it; nobody sees it, the terminal included. A
@@ -15,7 +131,8 @@
   market/prod/SESSION_SECRET`, or Regenerate in the row's menu, rotates the
   secret: a new value, made the same way, where you are, never shown. A key
   pair's either key regenerates both, and only if neither changed since it
-  was listed (409 otherwise). A value typed or pasted over a generated
+  was listed (409 otherwise). In a fork, regenerating a key it inherits
+  overrides it there; the parent keeps its value. A value typed or pasted over a generated
   one clears its recipe; a rollback brings it back with the value. The row
   marks a generated key; its version history, `coffre history` and `coffre
   list` name each recipe; and `coffre list` says `coffre regenerate` for a generated value due
@@ -23,7 +140,7 @@
 - **One recipe, in `@coffre/core/recipe`.** The page's generator, the CLI and
   the server's checks share it: the server makes no value, and refuses a
   recipe it cannot read, or a key pair not written whole (400).
-- **Schema.** `0004_recipes` adds `recipe`, `pair_id` and `pair_half` to
+- **Schema.** `0007_recipes` adds `recipe`, `pair_id` and `pair_half` to
   `secret_versions`, nullable, and extends the versions' erase-only trigger
   to them. 0.6 serves on it unchanged; its writes store no recipe.
 

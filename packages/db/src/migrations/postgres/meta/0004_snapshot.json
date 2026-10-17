@@ -1,5 +1,5 @@
 {
-  "id": "7dab5f2b-0496-4912-946e-c57cee52ffd3",
+  "id": "bb1f5bf0-5e72-4375-8fac-8fbda2a9cf92",
   "prevId": "59e5ba04-f7a0-4e7d-a349-9e47da2bf28e",
   "version": "7",
   "dialect": "postgresql",
@@ -1131,9 +1131,31 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "environments_parent_idx": {
+          "name": "environments_parent_idx",
+          "columns": [
+            {
+              "expression": "parent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "environments_project_id_fkey": {
           "name": "environments_project_id_fkey",
@@ -1146,6 +1168,21 @@
             "id"
           ],
           "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "environments_parent_in_project": {
+          "name": "environments_parent_in_project",
+          "tableFrom": "environments",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "parent_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -1173,6 +1210,10 @@
         "environments_slug_check": {
           "name": "environments_slug_check",
           "value": "\"environments\".\"slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$'"
+        },
+        "environments_parent_check": {
+          "name": "environments_parent_check",
+          "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
         }
       },
       "isRLSEnabled": false
@@ -2145,24 +2186,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "recipe": {
-          "name": "recipe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pair_id": {
-          "name": "pair_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pair_half": {
-          "name": "pair_half",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {

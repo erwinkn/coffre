@@ -265,8 +265,9 @@ key import or failure. Two first exchanges each fetch.
   as section 2 says, is what bounds them together.
 
 **When the issuer is down,** the answer is a 503 with `Retry-After`. Fresh
-cached keys work until they expire. No copy of the keys is kept in the
-database: an issuer that can't serve its keys can rarely mint tokens.
+cached keys work until they expire. No copy of fetched keys is kept in the
+database: an issuer that can't serve its keys can rarely mint tokens. Keys
+uploaded with a binding are a different case, fetched never (section 8).
 
 ## 5. Threats
 
@@ -374,6 +375,8 @@ and masks both.
 - Kubernetes. A name in `sub` can be reused, and the immutable UID is nested. A deleted account's
   tokens stay valid offline, without TokenReview. A projected token is read again on each call,
   which single use refuses. A later profile would need a typed UID path and TokenRequest.
+  0.7 serves it without a profile of its own: keys uploaded with a binding, and nested claims
+  (section 8).
 - CircleCI. A fork build can carry the same project and ref. A profile
   would require `oidc.circleci.com/vcs-origin`, and refuse tokens without
   it, with a fork case tested.
@@ -385,6 +388,72 @@ and masks both.
 - Google Cloud as a profile of its own: `custom`, by the service account's
   unique `sub`, covers it.
 - Patterns; nested or non-string claims; narrower grants per binding.
+  Nested claims came in 0.7 (section 8); narrower grants per binding in 0.5.
+
+## 8. Uploaded keys (0.7)
+
+An issuer on a private network, a Kubernetes cluster's above all, has no
+public `https` URL for its keys, so section 4's discovery cannot reach it.
+A binding may carry its issuer's public keys instead, uploaded with it
+(`coffre trust --jwks-file`, or pasted in the dialog). The general recipe is
+in [ci.md](../ci.md#issuers-coffre-cannot-reach), and Kubernetes' in
+[kubernetes.md](../kubernetes.md).
+
+- **Nothing is fetched.** Not at bind time, not at an exchange. The issuer
+  is then any string a token's `iss` holds, matched exactly, with no
+  control character or space at either end, at most 400 bytes. github.com's
+  and gitlab.com's issuers are refused: they rotate their keys, so coffre
+  always fetches theirs.
+- **The keys are checked at upload** (`uploadedKeys` in core): RSA of 2048
+  bits or more for RS256, P-256 for ES256, at most 32. An RSA key's modulus
+  must be odd and its exponent odd and at least 65537, each in its fewest
+  bytes: jose takes an exponent of 1, under which a signature is its own
+  message and anyone can forge one. Each key keeps `kty`, `kid`, `use`,
+  `alg` and its public parameters, in a fixed order, and the keys are sorted
+  by thumbprint, so one set has one digest however it is listed. A token
+  that names no `kid` verifies under whichever key of the set signed it. Keys for
+  encryption are left out, as from a fetched set. A private or symmetric key
+  refuses the whole set.
+- **Where they live.** A nullable `service_bindings.jwks` holds them, as that
+  canonical JSON. `jwks_uri`, still `NOT NULL`, holds `sha256:<hex>` of it.
+  So "a service's bindings on one issuer share one key source" (section 1)
+  compares one column, whether the keys are fetched or uploaded. The MAC
+  covers the keys as a tuple of its own kind, `uploaded_service_bindings`
+  (section 6), so keys swapped in the database fail it. The column has no
+  UPDATE grant: like the rest of the binding, they never change in place.
+- **Rotation replaces bindings.** Bindings stay immutable. New keys for an
+  issuer, `--replace-keys` or Replace keys in the pages, replace every live
+  binding of the service on it, in one step, each by one the same but for
+  its keys, its scope inherited as any replacement's. The old one's
+  `token.unbind`, reason `keys_replaced`, is its tombstone. Its credentials
+  end with it. A binding whose keys differ from its siblings' on the issuer
+  is refused unless it replaces them, rather than replacing them silently
+  as a moved key URL does. During the issuer's overlap, a set of old and new
+  keys takes tokens of both. A token signed by a key the binding does not
+  hold is a 401 `unknown_key` that says to replace the keys, never the
+  fetch cooldown's 503.
+- **An hour's lifetime.** With uploaded keys, coffre can ask nobody whether
+  a token still stands, so a token whose `exp` is over an hour past its
+  `iat` is refused, `too_long`, however recently it was issued. Every token
+  keeps the age limit of section 3 and single use. Fetched issuers are not
+  held to the lifetime: GitLab's `id_tokens` live as long as the job's
+  timeout.
+- **Nested claims.** A claim name may be a path, its keys joined by dots,
+  for every profile. `kubernetes.io` holds a dot itself, so a name is read
+  every way its dots split it, and matches only when exactly one reading
+  reaches a value in the token. A top-level name with dots,
+  `oidc.circleci.com/vcs-origin`, still reads as before.
+- **Verification is one function.** `WorkloadService.verify(member, token)`
+  is steps 2 to 4 of section 2 without the spend: the binding that matched
+  and the verified claims. The exchange calls it before it checks for
+  replay and commits. A plugin that signs a workload in another way calls it
+  too.
+
+Findings 8 and 9 of the review, for Kubernetes: the UID is a nested claim a
+binding names; there is still no TokenReview, which the recipe says; and a
+projected token signs in once, which the recipe answers with a short
+projection, wrapping the work in one `coffre run`, and the kubelet's
+refresh.
 
 ## Review responses
 

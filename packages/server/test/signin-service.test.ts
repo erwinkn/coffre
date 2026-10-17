@@ -334,6 +334,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     credentialGeneration: 0,
     exchanged: false,
     credentialScope: null,
+    personalToken: null,
   });
   // What the vault said of them, which the request's caller is: no second call.
   assert.deepEqual([access.principal, access.status, access.generation], [`user:${DEV}`, 'active', 0]);
@@ -789,6 +790,7 @@ test('owners issue service tokens that verify as the service', async () => {
     credentialGeneration: 0,
     exchanged: false,
     credentialScope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
+    personalToken: null,
   });
   assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
 
@@ -881,20 +883,20 @@ test('owners and the service itself list its live tokens; nobody else does', asy
   const revoked = await signin.issueServiceToken(root, SERVICE, { label: 'revoked', expiresInDays: 30 });
   await signin.revokeCredential(root, revoked.id);
 
-  const listed = await signin.listServiceTokens(lead, SERVICE);
+  const listed = await signin.listTokens(lead, { type: 'service', id: SERVICE });
   assert.deepEqual(listed.map((row) => [row.id, row.label, row.createdBy]), [
     [second.id, 'second', ROOT],
     [first.id, 'first', LEAD],
   ]);
   assert.equal(listed[0].hint, `coffre_svc_…${second.token.slice(-4)}`);
   assert.deepEqual(
-    (await signin.listServiceTokens(await as(SERVICE, 'service'), SERVICE)).map((row) => row.id),
+    (await signin.listTokens(await as(SERVICE, 'service'), { type: 'service', id: SERVICE })).map((row) => row.id),
     [second.id, first.id],
   );
-  assert.equal((await signin.listServiceTokens(root, SERVICE)).length, 2);
+  assert.equal((await signin.listTokens(root, { type: 'service', id: SERVICE })).length, 2);
 
-  await assert.rejects(signin.listServiceTokens(dev, SERVICE), { status: 403 });
-  await assert.rejects(signin.listServiceTokens(await as(RETIRED, 'service'), SERVICE), { status: 403 });
+  await assert.rejects(signin.listTokens(dev, { type: 'service', id: SERVICE }), { status: 403 });
+  await assert.rejects(signin.listTokens(await as(RETIRED, 'service'), { type: 'service', id: SERVICE }), { status: 403 });
 });
 
 // --- device flow ------------------------------------------------------------------
@@ -955,6 +957,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     credentialGeneration: 0,
     exchanged: false,
     credentialScope: null,
+    personalToken: null,
   });
   assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);
 
@@ -1155,7 +1158,8 @@ test('service tokens are issued, listed and revoked through the API, in signin m
   assert.equal((await clientFor(deps, SERVICE, 'service').tokens.list(member)).tokens.length, 1);
 
   await assert.rejects(clientFor(deps, DEV).tokens.list(member), { status: 403 });
-  await assert.rejects(owner.tokens.list(`user:${DEV}`), { status: 404 }, 'a person holds no service tokens');
+  assert.deepEqual((await owner.tokens.list(`user:${DEV}`)).tokens, [], "a person's are personal tokens, which an admin of the whole instance lists");
+  await assert.rejects(clientFor(deps, DEV).tokens.list(`user:${LEAD}`), { status: 403 });
   await assert.rejects(owner.tokens.issue(member, { label: null, expiresInDays: 367 }), { status: 400 });
 
   assert.deepEqual(await owner.tokens.revoke(member, issued.id), { revoked: true });

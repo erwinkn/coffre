@@ -1,5 +1,5 @@
-import { MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
-import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
+import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
 import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -7,19 +7,21 @@ import { z } from 'zod';
 import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
-import { notFound } from './errors.ts';
+import { badRequest, forbidden, notFound } from './errors.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { managedAccount } from './services.ts';
-import type { IssuedServiceToken, TokenPlan } from './signin.ts';
+import type { IssuedToken, PersonalTokenInput, TokenPlan } from './signin.ts';
 import { getSettings, putSettings } from './settings.ts';
 import { missingKeys, setDismissals } from './missing.ts';
-import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
+import { formatMember, parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
+  environmentVersion,
   generationProblem,
+  inheritSecret,
   listSecrets,
   listVersions,
   patchSecret,
@@ -143,6 +145,9 @@ const authorizationRequest = z.object({
   resource: z.string().max(2048).optional(),
 });
 
+/** An issuer's public keys, uploaded with a binding: a JWKS, whose keys `uploadedKeys` checks one by one. */
+const keySet = z.object({ keys: z.array(z.record(z.string().max(64), z.unknown())).min(1).max(MAX_KEYS) });
+
 /** Trust bindings for CI runs: on when the deployment's sign-in says so. */
 function workloads(ctx: ApiContext) {
   if (ctx.workloads === null) throw notFound("this instance trusts no workloads: the deployment's signin({ workloads }) turns them on");
@@ -153,6 +158,32 @@ function serviceId(member: string): string {
   const ref = parseMember(member);
   if (ref.type !== 'service') throw notFound('only tokens hold service tokens');
   return ref.id;
+}
+
+/** What a token is made with, as `POST /members/:member/tokens` takes it: a service's or a person's. */
+const tokenInput = z.object({
+  // Printed in lists, the log and terminals: no control character, which could rewrite what is shown around it.
+  label: z.string().trim().min(1).max(120).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
+  // A service token's lifetime, in days.
+  expiresInDays: z.number().int().min(1).max(366).optional(),
+  // A personal token's, in minutes: an afternoon's script or agent, a week at most.
+  expiresInMinutes: z.number().int().min(1).max(MAX_PERSONAL_TOKEN_MINUTES).optional(),
+  scope: credentialScope,
+});
+
+/**
+ * A personal token's input, from a person for themselves: its label,
+ * lifetime and scope all said, since a token reaching all its person holds
+ * for months is what it is there to avoid.
+ */
+function personalInput(ctx: ApiContext, person: string, input: z.output<typeof tokenInput>): PersonalTokenInput {
+  if (ctx.caller.principal.type !== 'user' || ctx.caller.principal.id !== person) {
+    throw forbidden('a person makes personal tokens for themselves alone');
+  }
+  if (input.label === null) throw badRequest('a personal token needs a label, which every entry it makes names');
+  if (input.expiresInMinutes === undefined || input.expiresInDays !== undefined) throw badRequest('a personal token lasts expiresInMinutes, not days');
+  if (input.scope === undefined) throw badRequest('a personal token needs a scope: what it reaches, by path');
+  return { label: input.label, expiresInMinutes: input.expiresInMinutes, scope: input.scope };
 }
 
 /**
@@ -184,17 +215,26 @@ export const routes = {
   }),
   ...route('PUT /projects/:project/:environment', {
     // `from` forks a sibling: its keys, values and folders, without history.
-    // With `references`, each key a reference to its parent's instead of a copy.
-    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional() }),
+    // With `references`, each key a reference to its parent's instead of a copy;
+    // with `inherit`, no key at all: it reads its parent's, live, but for those it sets or removes.
+    input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional(), inherit: z.boolean().optional() }),
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
     run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; forked: Forked | null }> => {
       // Not a slug a project's page has (`@coffre/core/pages`).
       environmentSlug.parse(params.environment);
+      if (input.from === undefined && (input.inherit === true || input.references === true)) {
+        throw badRequest('a fork names the environment it forks: `from`');
+      }
       return input.from === undefined
         ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
-        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from, references: input.references === true });
+        : forkEnvironment(ctx, place, params.environment, {
+            name: input.name,
+            from: input.from,
+            references: input.references === true,
+            inherit: input.inherit === true,
+          });
     },
   }),
   ...route('PATCH /projects/:project/:environment', {
@@ -213,6 +253,12 @@ export const routes = {
     needs: 'secret.read',
     action: 'missing.list',
     run: (ctx, { place }) => missingKeys(ctx, place),
+  }),
+  // A version of what a read of it would open, which changes whenever that does: pollers ask it before reading.
+  ...route('GET /projects/:project/:environment/version', {
+    needs: 'secret.read',
+    action: 'secret.version',
+    run: (ctx, { place }) => environmentVersion(ctx, place),
   }),
   ...route('PATCH /projects/:project/:environment/dismissals', {
     // `true` dismisses a missing key, `null` restores it.
@@ -253,15 +299,18 @@ export const routes = {
       query.dryRun !== undefined ? dryRunSecrets(ctx, place, input) : setSecrets(ctx, place, input),
   }),
   ...route('PATCH /secrets/:project/:environment/:key', {
-    input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable() }).partial().strict()
-      .refine((patch) => patch.key !== undefined || patch.archived !== undefined || patch.folder !== undefined,
-        'provide a key, an archived flag or a folder'),
+    // In a fork, `inherit: true` resets a key to its parent's value, archiving its own;
+    // `false` overrides it again with the value it had (docs/design/forking.md).
+    input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable(), inherit: z.boolean() }).partial().strict()
+      .refine((patch) => patch.key !== undefined || patch.archived !== undefined || patch.folder !== undefined || patch.inherit !== undefined,
+        'provide a key, an archived flag, a folder or inherit')
+      .refine((patch) => patch.inherit === undefined || Object.keys(patch).length === 1, 'inherit goes alone'),
     needs: (patch) => [
-      ...(patch.key !== undefined || patch.folder !== undefined ? ['secret.write' as const] : []),
+      ...(patch.key !== undefined || patch.folder !== undefined || patch.inherit !== undefined ? ['secret.write' as const] : []),
       ...(patch.archived !== undefined ? ['secret.archive' as const] : []),
     ],
     action: 'secret.update',
-    run: (ctx, { place, input }) => patchSecret(ctx, place, input),
+    run: (ctx, { place, input }) => (input.inherit === undefined ? patchSecret(ctx, place, input) : inheritSecret(ctx, place, input.inherit)),
   }),
   ...route('GET /secrets/:project/:environment/:key/versions', {
     needs: 'secret.read',
@@ -334,29 +383,34 @@ export const routes = {
   ...route('DELETE /members/:member', {
     run: (ctx, { params }) => removeMember(ctx, parseMember(params.member)),
   }),
+  // A member's tokens: a service account's bearer tokens, or a person's personal tokens, which act as them.
   ...route('GET /members/:member/tokens', {
     run: async (ctx, { params }) => ({
-      tokens: await signin(ctx).listServiceTokens(ctx, serviceId(params.member)),
+      tokens: await signin(ctx).listTokens(ctx, parseMember(params.member)),
     }),
   }),
   ...route('POST /members/:member/tokens', {
-    input: z.object({
-      label: z.string().trim().min(1).max(120).nullable().default(null),
-      expiresInDays: z.number().int().min(1).max(366),
-      scope: credentialScope,
-    }),
+    input: tokenInput,
     // `?dryRun=1` answers what the token would reach, and issues nothing.
     query: dryRunFlag,
-    run: (ctx, { params, input, query }): Promise<TokenPlan | IssuedServiceToken> =>
-      query.dryRun !== undefined
-        ? signin(ctx).planServiceToken(ctx, serviceId(params.member), input)
-        : signin(ctx).issueServiceToken(ctx, serviceId(params.member), input),
+    run: (ctx, { params, input, query }): Promise<TokenPlan | IssuedToken> => {
+      const member = parseMember(params.member);
+      if (member.type === 'user') {
+        const personal = personalInput(ctx, member.id, input);
+        return query.dryRun !== undefined ? signin(ctx).planPersonalToken(ctx, personal) : signin(ctx).issuePersonalToken(ctx, personal);
+      }
+      if (input.expiresInDays === undefined || input.expiresInMinutes !== undefined) throw badRequest('a service token lasts expiresInDays');
+      const service = { label: input.label, expiresInDays: input.expiresInDays, scope: input.scope };
+      return query.dryRun !== undefined
+        ? signin(ctx).planServiceToken(ctx, member.id, service)
+        : signin(ctx).issueServiceToken(ctx, member.id, service);
+    },
   }),
   ...route('DELETE /members/:member/tokens/:id', {
     run: async (ctx, { params }) => {
-      const service = serviceId(params.member);
-      const { managed } = await managedAccount(ctx, ctx.caller, service);
-      return signin(ctx).revokeCredential(ctx, params.id, managed ? service : null);
+      const member = parseMember(params.member);
+      const managed = member.type === 'service' && (await managedAccount(ctx, ctx.caller, member.id)).managed;
+      return signin(ctx).revokeCredential(ctx, params.id, { member: formatMember(member), managed });
     },
   }),
   ...route('GET /members/:member/bindings', {
@@ -376,11 +430,21 @@ export const routes = {
       scope: credentialScope,
       label: z.string().trim().min(1).max(120).nullable().default(null),
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
+      // The issuer's keys, for one coffre asks nothing: then the issuer is any string its tokens name.
+      jwks: keySet.optional(),
     }).strict(),
     // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
     query: dryRunFlag,
     run: (ctx, { params, input, query }) =>
-      workloads(ctx).bind(ctx, serviceId(params.member), input, { dryRun: query.dryRun !== undefined }),
+      workloads(ctx).bind(ctx, serviceId(params.member), { ...input, jwks: input.jwks as JSONWebKeySet | undefined }, { dryRun: query.dryRun !== undefined }),
+  }),
+  // New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them.
+  ...route('POST /members/:member/bindings/keys', {
+    input: z.object({ issuer: z.string().min(1).max(400), jwks: keySet }).strict(),
+    // `?dryRun=1` checks the keys and says which bindings would be replaced, and writes nothing.
+    query: dryRunFlag,
+    run: (ctx, { params, input, query }) =>
+      workloads(ctx).replaceKeys(ctx, serviceId(params.member), { issuer: input.issuer, jwks: input.jwks as JSONWebKeySet }, { dryRun: query.dryRun !== undefined }),
   }),
   ...route('GET /workloads/lookup', {
     input: z.object({

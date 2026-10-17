@@ -300,6 +300,7 @@ BEGIN
         'UPDATE service_bindings SET claims = claims',
         'UPDATE service_bindings SET issuer = issuer',
         'UPDATE service_bindings SET jwks_uri = jwks_uri',
+        'UPDATE service_bindings SET jwks = jwks',
         'UPDATE service_bindings SET profile = profile',
         'UPDATE service_bindings SET principal = principal',
         'UPDATE service_bindings SET generation = generation',

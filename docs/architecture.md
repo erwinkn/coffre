@@ -296,6 +296,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
 | delete an archived project or environment for good, owners only (`?dryRun=1` says what it would take) | `DELETE /api/projects/market`, `DELETE /api/projects/market/prod` |
 | the keys an environment lacks of those its siblings have, read or not, by name; dismiss or restore them | `GET /api/projects/market/dev/missing`, `PATCH /api/projects/market/dev/dismissals {"SENTRY_DSN": true, "OLD": null}` |
+| a version of what reading an environment would open, which changes whenever that does, inherited keys included: for pollers, with read on it and on each parent it inherits from; it reads no value and is not logged. A poller compares it with the version its last read answered, not with one asked before that read: a change undone in between brings that one back | `GET /api/projects/market/prod/version` → `{"version": "…"}` |
 | fork an environment: a new one with each key's current value and folder, read and written in the caller's name | `PUT /api/projects/market/staging {"from": "prod"}` |
 | list an environment's secrets, never their values: who wrote each value and when (a reference's, its source's current version), and the deployment's `rotateAfterDays` | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
@@ -306,13 +307,14 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | rename a folder, everything in it re-filed, or remove one, everything out | `PATCH /api/folders/Clients {"name": "Customers"}`, `DELETE /api/folders/market/prod/stripe` |
 | a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
-| decrypt a secret or a whole environment | `POST /api/reveals {"path": "market/prod"}` |
+| decrypt a secret or a whole environment; a whole environment's read also answers the `version` of what it opened (null for one secret's), the one a poller keeps | `POST /api/reveals {"path": "market/prod"}` → `{"operationId": "…", "values": {…}, "version": "…"}` |
 | make a key a reference to another secret, read live through it | `PATCH /api/secrets/billing/prod {"DATABASE_URL": {"ref": "market/prod/DATABASE_URL"}}` |
 | the references into and out of a place, and who reads through them; break one | `GET /api/references?path=market/prod`, `DELETE /api/secrets/billing/prod/DATABASE_URL/reference` |
 | list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | a member's instance role and scope, and the grants you manage, in one query | `GET /api/members/user:ada@acme.example/access` |
 | list, issue (`?dryRun=1` to preview what it reaches) or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
+| list, make or revoke your personal tokens, which act as you within their scope ([design](design/personal-tokens.md)); whoever runs the instance lists and revokes anyone's | `GET` / `POST /api/members/user:ada@acme.example/tokens {"label": "cursor-agent", "expiresInMinutes": 240, "scope": {"market/dev": "viewer"}}`, `DELETE …/tokens/:id` |
 | list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
 | a GitHub repository's or GitLab project's IDs, for a binding: a public one, or one the deployment's GitHub App is installed on | `GET /api/workloads/lookup?github=acme/api` |
 | the repositories the deployment's GitHub App is installed on, private ones too ([github-app.md](github-app.md)) | `GET /api/workloads/repositories` |
@@ -403,7 +405,11 @@ market/prod/SESSION_SECRET` or the row's menu, makes the next value by it, in
 the environment it is asked of, and nobody sees either. It addresses keys by
 name, so each value it sends says the version it `replaces`, as listed, and
 the server refuses the whole write (409) if any key is not at that version
-now: renamed, archived, typed over or regenerated meanwhile, by anyone. A value written
+now: renamed, archived, typed over or regenerated meanwhile, by anyone.
+In a fork, a key it inherits lists the recipe of the parent's value it
+reads, to a reader of that parent, as its version; regenerating it writes
+an override in the fork, never the parent, and `replaces` is the inherited
+version. A value written
 without a recipe has none, by whichever client, so typing over a generated
 value ends what Regenerate does for it; a rollback brings an old value back
 with the recipe it had.

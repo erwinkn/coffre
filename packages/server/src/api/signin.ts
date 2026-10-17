@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import type { CredentialScope } from '@coffre/core/access';
+import { MAX_PERSONAL_TOKEN_MINUTES, runsInstance, type CredentialScope } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -32,15 +32,27 @@ import {
   memberStanding,
   places,
   principalOf,
+  type PlaceRow,
   revokePriorMembership,
   update,
   updateAuth,
 } from '../db/queries.ts';
-import type { PrincipalRef } from './caller.ts';
+import { callerFrom, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember } from './paths.ts';
-import { issuedScope, managedAccount, notManager, readScope, scopeByPath, sealCredentials, sealScopes, storedScope, type ScopeByPath } from './services.ts';
+import {
+  issuedScope,
+  managedAccount,
+  notManager,
+  personalScope,
+  readScope,
+  scopeByPath,
+  sealCredentials,
+  sealScopes,
+  storedScope,
+  type ScopeByPath,
+} from './services.ts';
 
 export type SigninServiceDeps = {
   db: Database;
@@ -117,11 +129,17 @@ const PENDING_TTL_SECONDS = 10 * 60;
 
 export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
-/** A service token as issued: its value, once, and what it reaches, by path. */
-export type IssuedServiceToken = IssuedCredential & { scope: ScopeByPath };
+/** A service or personal token as issued: its value, once, and what it reaches, by path. */
+export type IssuedToken = IssuedCredential & { scope: ScopeByPath };
 
-/** What issuing a service token would make: what it reaches, by path. */
+/** What issuing a token would make: what it reaches, by path. */
 export type TokenPlan = { scope: ScopeByPath };
+
+/** What a personal token is made with: all three said, none assumed. */
+export type PersonalTokenInput = { label: string; expiresInMinutes: number; scope: ScopeByPath };
+
+/** The personal token a request came in on: its row's id, its label and when it ends. */
+export type PersonalToken = { id: string; label: string; expiresAt: string };
 
 export type SigninResult =
   | { ok: true; principal: PrincipalRef; credential: IssuedCredential }
@@ -143,10 +161,12 @@ export type CredentialPrincipal = Principal & {
   credentialId: string;
   credentialGeneration: number;
   access: Access;
-  /** Its scope, a service token's or its binding's, past which nothing it asks reaches; null for a session's. */
+  /** Its scope, a service or personal token's or its binding's, past which nothing it asks reaches; null for a session's. */
   credentialScope: CredentialScope | null;
   /** Whether a trust binding issued it, for a CI run: the request's entries then name it. */
   exchanged: boolean;
+  /** A personal token, which acts as its person within its scope: the request's entries name it too. Null for anything else. */
+  personalToken: PersonalToken | null;
 };
 
 export type ClientMeta = {
@@ -177,7 +197,8 @@ export type IdentityRow = {
   lastSignInAt: string | null;
 };
 
-export type ServiceTokenRow = {
+/** A service account's bearer token, or a person's personal token, as its list shows it: never its value. */
+export type TokenRow = {
   id: string;
   label: string | null;
   hint: string;
@@ -186,7 +207,7 @@ export type ServiceTokenRow = {
   expiresAt: string;
   lastUsedAt: string | null;
   lastUsedIp: string | null;
-  /** What it reaches, of what its account holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
+  /** What it reaches, of what its account or person holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
   scope: ScopeByPath | null;
 };
 
@@ -231,6 +252,31 @@ function userCode(): string {
     }
   }
   return `${chars.slice(0, 4).join('')}-${chars.slice(4).join('')}`;
+}
+
+/** Whether a credential is a member's token, a service account's or a person's, rather than a session. */
+function isToken(row: { kind: string }): boolean {
+  return row.kind === 'service' || row.kind === 'personal';
+}
+
+type HeldCredential = NonNullable<Awaited<ReturnType<typeof members>>[number]>['credentials'][number];
+
+/** A member's live tokens, as their list shows them, newest first: never a session, nor what a trust binding issued a CI run for five minutes. */
+export function tokenRows(held: readonly HeldCredential[], known: readonly PlaceRow[]): TokenRow[] {
+  return held
+    .filter((row) => isToken(row) && issuingBinding(row.createdBy) === null)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .map((row) => ({
+      id: row.id,
+      label: row.label,
+      hint: row.tokenHint,
+      createdAt: row.createdAt.toISOString(),
+      createdBy: row.createdBy,
+      expiresAt: row.expiresAt.toISOString(),
+      lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+      lastUsedIp: row.lastUsedIp,
+      scope: scopeByPath(readScope(row.scope), known),
+    }));
 }
 
 /** Accept what a person types: any case, with or without the dash. */
@@ -405,7 +451,8 @@ export class SigninService {
     profile: SignedInAccount,
   ): Promise<{ ok: true } | { ok: false; reason: SigninRefusal }> {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
-    if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
+    // An account linked through a personal token would sign in with all its person holds, for good.
+    if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) throw forbidden('only people link sign-in accounts, signed in as themselves');
     const access = await this.#standing(ctx.caller.principal);
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);
@@ -587,6 +634,7 @@ export class SigninService {
           access,
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
+          personalToken: null,
         }
       : {
           type: 'user',
@@ -597,7 +645,9 @@ export class SigninService {
           credentialGeneration: row.generation,
           exchanged: false,
           access,
-          credentialScope: null,
+          // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
+          credentialScope: row.kind === 'personal' ? readScope(row.scope) ?? [] : null,
+          personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,
         };
   }
 
@@ -625,18 +675,19 @@ export class SigninService {
         decision: 'allow',
         requestId: meta.requestId,
         sourceIp: meta.sourceIp,
-        // A run's credential signing itself out is the run's act, too.
-        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) === null ? {} : { credentialId: row.id }) },
+        // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
+        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' ? { credentialId: row.id } : {}) },
       });
     });
   }
 
   /**
    * Revoke one credential: your own; or anyone's, if you run the instance;
-   * or a token of `managed`, a service account the caller manages
-   * (`managedAccount`, asked before: no vault call runs in a transaction).
+   * or, `of` a service account the caller manages (`managedAccount`, asked
+   * before: no vault call runs in a transaction), one of its tokens. With
+   * `of`, a credential that is not one of the member's tokens is unknown.
    */
-  async revokeCredential(ctx: Asker, credentialId: string, managed: string | null = null): Promise<{ revoked: true }> {
+  async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | null = null): Promise<{ revoked: true }> {
     return audited(this.#deps, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
       const unknown = () =>
@@ -645,10 +696,10 @@ export class SigninService {
           denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { targetCredentialId: credentialId } }),
         );
       if (row === null || row.revokedAt !== null) throw unknown();
+      if (of !== null && (row.principal !== of.member || !isToken(row))) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principal === principalOf(principal);
-      const theirs = managed !== null && row.principal === `token:${managed}` && row.kind === 'service';
-      if (!own && !theirs) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
+      if (!own && of?.managed !== true) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
       const revoked = await updateAuth(
         tx,
         this.#deps.chainKey,
@@ -733,31 +784,25 @@ export class SigninService {
 
   // --- service tokens -------------------------------------------------------
 
-  async listServiceTokens(ctx: Asker, serviceId: string): Promise<ServiceTokenRow[]> {
+  /**
+   * A member's live tokens: a service account's bearer tokens, for the
+   * account itself and those who manage it; a person's personal tokens, for
+   * them and for whoever runs the instance, as their sessions are.
+   */
+  async listTokens(ctx: Asker, member: PrincipalRef): Promise<TokenRow[]> {
     const { principal } = ctx.caller;
-    const self = principal.type === 'service' && principal.id === serviceId;
-    if (!self && !(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) {
+    const self = principal.type === member.type && principal.id === member.id;
+    if (member.type === 'service' && !self && !(await managedAccount(this.#deps, ctx.caller, member.id)).managed) {
       throw forbidden('only those who manage this service account may see its tokens');
     }
-    const [[service], known] = await Promise.all([
-      members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date()),
+    if (member.type === 'user' && !self && !runsInstance(ctx.caller)) {
+      throw forbidden("only admins and owners of the whole instance may see other people's tokens");
+    }
+    const [[held], known] = await Promise.all([
+      members(this.#deps.db, this.#deps.chainKey, { member }, new Date()),
       places(this.#deps.db),
     ]);
-    return (service?.credentials ?? [])
-      // Those its trust bindings issued are a CI run's for five minutes, not tokens anyone keeps.
-      .filter((row) => issuingBinding(row.createdBy) === null)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-      .map((row) => ({
-        id: row.id,
-        label: row.label,
-        hint: row.tokenHint,
-        createdAt: row.createdAt.toISOString(),
-        createdBy: row.createdBy,
-        expiresAt: row.expiresAt.toISOString(),
-        lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-        lastUsedIp: row.lastUsedIp,
-        scope: scopeByPath(readScope(row.scope), known),
-      }));
+    return tokenRows(held?.credentials ?? [], known);
   }
 
   /**
@@ -771,7 +816,7 @@ export class SigninService {
     ctx: Asker,
     serviceId: string,
     input: { label: string | null; expiresInDays: number; scope?: ScopeByPath },
-  ): Promise<IssuedServiceToken> {
+  ): Promise<IssuedToken> {
     if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > MAX_SERVICE_TOKEN_DAYS) {
       throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
     }
@@ -816,6 +861,67 @@ export class SigninService {
     );
     if (standing.status !== 'active') throw refusal();
     return { standing, refusal, ...await issuedScope(this.#deps.db, ctx, setting, standing, wanted, { action: 'token.create', metadata: details }) };
+  }
+
+  // --- personal tokens ------------------------------------------------------
+
+  /**
+   * Mint a personal token: a bearer token that acts as the caller, within
+   * `scope`, until it expires or they revoke it. Each grant of its scope is
+   * a role they hold all of at its place now, one that manages no access
+   * (`personalScope`); a request made with it holds what both the scope
+   * and its person hold then (`allows`), so their losing a grant narrows
+   * it, and their leaving ends it. Made from a session only: a token never
+   * makes another. The value is returned once and kept nowhere.
+   */
+  async issuePersonalToken(ctx: Asker, input: PersonalTokenInput): Promise<IssuedToken> {
+    return withRefusals(this.#deps, async () => {
+      const { access, scope, byPath, details } = await this.#personalScope(ctx, input);
+      return audited(this.#deps, async (tx, log) => {
+        const standing = await this.#currentCaller(tx, ctx, access);
+        if (standing === null) {
+          throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
+        }
+        const person = ctx.caller.principal;
+        const credential = await this.#issue(tx, 'personal', person, {
+          generation: standing.generation,
+          identityId: null,
+          label: input.label,
+          createdBy: person.id,
+          expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000),
+          scope,
+        });
+        log.push(
+          allowed(ctx, 'token.create', {
+            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
+          }),
+        );
+        return { ...credential, scope: byPath };
+      });
+    });
+  }
+
+  /** What a personal token made now would reach, checked as making one is (`issuePersonalToken`); makes nothing. */
+  async planPersonalToken(ctx: Asker, input: PersonalTokenInput): Promise<TokenPlan> {
+    return withRefusals(this.#deps, async () => ({ scope: (await this.#personalScope(ctx, input)).byPath }));
+  }
+
+  /** Who may make a personal token, a person on a session of theirs, and what it would reach (`personalScope`). */
+  async #personalScope(ctx: Asker, input: PersonalTokenInput) {
+    if (!Number.isInteger(input.expiresInMinutes) || input.expiresInMinutes < 1 || input.expiresInMinutes > MAX_PERSONAL_TOKEN_MINUTES) {
+      throw badRequest(`a personal token lasts between a minute and ${MAX_PERSONAL_TOKEN_MINUTES / 1440} days`);
+    }
+    const person = ctx.caller.principal;
+    const details = { kind: 'personal', principalType: person.type, principalId: person.id, label: input.label };
+    // A personal token, or a service's credential, carries a scope: what it made would outlive it.
+    if (person.type !== 'user' || ctx.caller.credentialScope !== null) {
+      throw new Refusal(
+        forbidden('only a person makes a personal token, signed in as themselves: a token never makes another'),
+        denied(ctx, 'token.create', 'personal_token', { metadata: details }),
+      );
+    }
+    const access = await this.#standing(person);
+    return { access, details, ...await personalScope(this.#deps.db, ctx, callerFrom(person, access), input.scope, details) };
   }
 
   /**
@@ -911,7 +1017,8 @@ export class SigninService {
   async decideDevice(ctx: Asker, userCodeInput: string, approve: boolean): Promise<{ decided: true }> {
     const action = approve ? 'device.approve' : 'device.deny';
     const code = normalizeUserCode(userCodeInput);
-    if (ctx.caller.principal.type !== 'user') throw forbidden('only people approve sign-ins');
+    // A personal token approving one would make a session with all its person holds.
+    if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) throw forbidden('only people approve sign-ins, signed in as themselves');
     const access = await this.#standing(ctx.caller.principal);
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);

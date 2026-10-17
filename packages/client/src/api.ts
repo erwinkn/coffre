@@ -45,6 +45,14 @@ export type Api = {
         mcp: string | null;
         workloads: boolean;
       };
+      personalToken: null | {
+        id: string;
+        label: string;
+        expiresAt: string;
+        scope: {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
+      };
       environments: {
         project: string;
         environment: string;
@@ -65,6 +73,7 @@ export type Api = {
           slug: string;
           name: string;
           accessible: boolean;
+          parent: string | null;
           details: null | {
             archivedAt: string | null;
             secretCount: number | null;
@@ -131,6 +140,7 @@ export type Api = {
       name?: string;
       from?: string;
       references?: boolean;
+      inherit?: boolean;
     };
     output: {
       environment: {
@@ -144,6 +154,7 @@ export type Api = {
         keys: number;
         references: number;
         copied: string[];
+        inherits: boolean;
       };
     };
   };
@@ -242,7 +253,15 @@ export type Api = {
             public: string;
           };
         };
+        parent: null | {
+          from: string;
+          state: "inherited" | "overridden" | "removed";
+          changed: boolean;
+          reset: boolean;
+          held: boolean;
+        };
       }[];
+      parents: string[];
       rotateAfterDays: number | null;
     };
   };
@@ -285,6 +304,7 @@ export type Api = {
       key?: string;
       archived?: boolean;
       folder?: string | null;
+      inherit?: boolean;
     };
     output: {
       key: string;
@@ -394,6 +414,7 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      version: string | null;
     };
   };
   "GET /members": {
@@ -498,6 +519,19 @@ export type Api = {
         lastUsedAt: string | null;
         lastUsedIp: string | null;
         expiresAt: string;
+      }[];
+      personalTokens: {
+        id: string;
+        label: string | null;
+        hint: string;
+        createdAt: string;
+        createdBy: string;
+        expiresAt: string;
+        lastUsedAt: string | null;
+        lastUsedIp: string | null;
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
       }[];
       references: {
         id: string;
@@ -623,6 +657,19 @@ export type Api = {
           lastUsedIp: string | null;
           expiresAt: string;
         }[];
+        personalTokens: {
+          id: string;
+          label: string | null;
+          hint: string;
+          createdAt: string;
+          createdBy: string;
+          expiresAt: string;
+          lastUsedAt: string | null;
+          lastUsedIp: string | null;
+          scope: null | {
+            [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          };
+        }[];
         references: {
           id: string;
           holder: string;
@@ -657,8 +704,9 @@ export type Api = {
   };
   "POST /members/:member/tokens": {
     input: {
-      expiresInDays: number;
       label?: string | null;
+      expiresInDays?: number;
+      expiresInMinutes?: number;
       scope?: {
         [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
       };
@@ -690,6 +738,11 @@ export type Api = {
         profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
         issuer: string;
         jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
         claims: {
           [key: string]: string | string[];
         };
@@ -715,11 +768,21 @@ export type Api = {
       };
       label?: string | null;
       replaces?: string[];
+      jwks?: {
+        keys: {
+          [key: string]: unknown;
+        }[];
+      };
     };
     output: {
       profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
       issuer: string;
       jwksUri: string;
+      keys: null | {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
       claims: {
         [key: string]: string | string[];
       };
@@ -736,6 +799,11 @@ export type Api = {
         profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
         issuer: string;
         jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
         claims: {
           [key: string]: string | string[];
         };
@@ -975,6 +1043,10 @@ export type Api = {
             [key: string]: string | number;
           };
         };
+        token: null | {
+          id: string;
+          label: string;
+        };
         metadata: {
           [key: string]: unknown;
         };
@@ -1191,6 +1263,55 @@ export type Api = {
       app: null;
     };
   };
+  "GET /projects/:project/:environment/version": {
+    input: undefined;
+    output: {
+      version: string;
+    };
+  };
+  "POST /members/:member/bindings/keys": {
+    input: {
+      issuer: string;
+      jwks: {
+        keys: {
+          [key: string]: unknown;
+        }[];
+      };
+    };
+    output: {
+      issuer: string;
+      jwksUri: string;
+      keys: {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
+      replaces: string[];
+    } | {
+      bindings: {
+        id: string;
+        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        issuer: string;
+        jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
+        claims: {
+          [key: string]: string | string[];
+        };
+        scope: null | {
+          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        };
+        label: string | null;
+        createdAt: string;
+        createdBy: string;
+        lastUsedAt: string | null;
+      }[];
+      replaced: string[];
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
@@ -1261,6 +1382,10 @@ export type AuditEntryView = {
       [key: string]: string | number;
     };
   };
+  token: null | {
+    id: string;
+    label: string;
+  };
   metadata: {
     [key: string]: unknown;
   };
@@ -1307,6 +1432,11 @@ export type BindingPlan = {
   profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
   issuer: string;
   jwksUri: string;
+  keys: null | {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
   claims: {
     [key: string]: string | string[];
   };
@@ -1324,6 +1454,11 @@ export type BindingView = {
   profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
   issuer: string;
   jwksUri: string;
+  keys: null | {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
   claims: {
     [key: string]: string | string[];
   };
@@ -1346,6 +1481,17 @@ export type ConnectedApp = {
   lastUsedAt: string | null;
   lastUsedIp: string | null;
   expiresAt: string;
+};
+
+export type KeysPlan = {
+  issuer: string;
+  jwksUri: string;
+  keys: {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
+  replaces: string[];
 };
 
 export type Deletion = {
@@ -1443,6 +1589,13 @@ export type IdentityRow = {
   lastSignInAt: string | null;
 };
 
+export type InheritResult = {
+  key: string;
+  archived: boolean;
+  folder: string | null;
+  from: string;
+};
+
 export type Me = {
   principal: {
     type: "service" | "user";
@@ -1481,6 +1634,14 @@ export type Me = {
   features: {
     mcp: string | null;
     workloads: boolean;
+  };
+  personalToken: null | {
+    id: string;
+    label: string;
+    expiresAt: string;
+    scope: {
+      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    };
   };
   environments: {
     project: string;
@@ -1630,6 +1791,19 @@ export type OffboardingReport = {
     lastUsedIp: string | null;
     expiresAt: string;
   }[];
+  personalTokens: {
+    id: string;
+    label: string | null;
+    hint: string;
+    createdAt: string;
+    createdBy: string;
+    expiresAt: string;
+    lastUsedAt: string | null;
+    lastUsedIp: string | null;
+    scope: null | {
+      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    };
+  }[];
   references: {
     id: string;
     holder: string;
@@ -1668,6 +1842,7 @@ export type ProjectSummary = {
     slug: string;
     name: string;
     accessible: boolean;
+    parent: string | null;
     details: null | {
       archivedAt: string | null;
       secretCount: number | null;
@@ -1720,6 +1895,13 @@ export type SecretKey = {
       public: string;
     };
   };
+  parent: null | {
+    from: string;
+    state: "inherited" | "overridden" | "removed";
+    changed: boolean;
+    reset: boolean;
+    held: boolean;
+  };
 };
 
 export type SecretVersion = {
@@ -1729,20 +1911,6 @@ export type SecretVersion = {
   current: boolean;
   kek: string;
   recipe: string | null;
-};
-
-export type ServiceTokenRow = {
-  id: string;
-  label: string | null;
-  hint: string;
-  createdAt: string;
-  createdBy: string;
-  expiresAt: string;
-  lastUsedAt: string | null;
-  lastUsedIp: string | null;
-  scope: null | {
-    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
-  };
 };
 
 export type SessionRow = {
@@ -1773,6 +1941,20 @@ export type SetResult = {
 
 export type TokenPlan = {
   scope: {
+    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+  };
+};
+
+export type TokenRow = {
+  id: string;
+  label: string | null;
+  hint: string;
+  createdAt: string;
+  createdBy: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  scope: null | {
     [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
   };
 };

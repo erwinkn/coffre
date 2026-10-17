@@ -85,16 +85,26 @@ export const environments = sqliteTable(
     name: text().notNull(),
     createdAt: createdAt(),
     archivedAt: time('archived_at'),
+    parentId: text('parent_id'),
   },
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
     check('environments_slug_check', isPlaceSlug(table.slug)),
+    // An environment is never its own parent. Longer loops, written around the app, are refused at read (`parentsOf`).
+    check('environments_parent_check', sql`${table.parentId} IS NULL OR ${table.parentId} <> ${table.id}`),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],
       foreignColumns: [projects.id],
     }).onDelete('restrict'),
+    // Checked at the end of a statement, not at each row: one that deletes a fork and its parent together is no orphan.
+    foreignKey({
+      name: 'environments_parent_in_project',
+      columns: [table.parentId, table.projectId],
+      foreignColumns: [table.id, table.projectId],
+    }).onDelete('no action'),
+    index('environments_parent_idx').on(table.parentId),
   ],
 );
 
@@ -372,6 +382,10 @@ export const auditLog = sqliteTable(
     index('audit_log_exchange_idx')
       .on(sql`json_extract(${table.metadata}, '$.credentialId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.exchange' AND ${table.decision} = 'allow'`),
+    // The token a credential is, when one was issued: its creation's entry, by the credential's ID, whose label names a personal token's entries.
+    index('audit_log_token_create_idx')
+      .on(sql`json_extract(${table.metadata}, '$.targetCredentialId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'token.create' AND ${table.decision} = 'allow'`),
     index('audit_log_reference_end_idx')
       .on(table.relatedSeq)
       .where(sql`${table.author} = 'vault' AND ${table.action} = 'reference.end' AND ${table.decision} = 'allow'`),
@@ -484,8 +498,11 @@ export const serviceBindings = sqliteTable(
     generation: integer().notNull(),
     profile: text().notNull(),
     issuer: text().notNull(),
-    // From the issuer's discovery when the binding was made, never refetched.
+    // From the issuer's discovery when the binding was made, never refetched;
+    // or, for keys uploaded with the binding, `sha256:<hex>` of `jwks`.
     jwksUri: text('jwks_uri').notNull(),
+    // The issuer's public keys, uploaded with the binding (`uploadedKeys`), JSON; null when they are fetched.
+    jwks: text(),
     // JSON, sorted by claim name.
     claims: text().notNull(),
     // What the credentials it issues reach (`CredentialScope`), JSON; null on a binding of 0.4 the app has not sealed yet.
@@ -649,7 +666,7 @@ export const credentials = sqliteTable(
     // The member it acts as, `user:<email>` or `token:<id>`, under the generation it was issued in.
     principal: text().notNull(),
     identityId: text('identity_id'),
-    // What a service token reaches (`CredentialScope`), JSON: null for a session, one a binding issued (its binding's), or one of 0.4 the app has not sealed yet.
+    // What a service or personal token reaches (`CredentialScope`), JSON: null for a session, one a binding issued (its binding's), or one of 0.4 the app has not sealed yet.
     scope: text(),
     label: text(),
     createdAt: createdAt(),
@@ -662,7 +679,7 @@ export const credentials = sqliteTable(
   },
   (table) => [
     unique('credentials_token_hash_key').on(table.tokenHash),
-    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service')`),
+    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal')`),
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
     check('credentials_kind_matches_principal', sql`(${table.kind} = 'service') = (${table.principal} LIKE 'token:%')`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),

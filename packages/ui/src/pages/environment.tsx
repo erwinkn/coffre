@@ -8,7 +8,7 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, moveSecret, regenerateSecret, restoreSecret, saveSecrets, UnsavedEdits, type SaveSecretsVars } from '../lib/changes';
+import { archiveSecret, forkKey, moveSecret, regenerateSecret, restoreSecret, saveSecrets, UnsavedEdits, type ForkAction, type SaveSecretsVars } from '../lib/changes';
 import { changeKey, type ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
@@ -143,6 +143,7 @@ export function EnvironmentPage() {
       environment={environment}
       permissions={result.permissions}
       keys={result.keys}
+      parents={result.parents ?? []}
       rotateAfterDays={result.rotateAfterDays}
     />
   );
@@ -155,12 +156,15 @@ function EnvironmentLedger({
   environment,
   permissions,
   keys,
+  parents,
   rotateAfterDays,
 }: {
   project: string;
   environment: string;
   permissions: Permission[];
   keys: SecretKey[];
+  /** The environments it inherits from, nearest first: a fork's (docs/design/forking.md). */
+  parents: string[];
   /** Days a value may go unchanged before it is flagged for rotation; null for no flag. */
   rotateAfterDays: number | null;
 }) {
@@ -172,6 +176,13 @@ function EnvironmentLedger({
   const archive = useChange(archiveSecret(coffre, { project, environment }));
   const move = useChange(moveSecret(coffre, { project, environment }));
   const regenerate = useChange(regenerateSecret(coffre, { project, environment }, principal?.id ?? null));
+  // A fork's keys, against its parent's: each action shows at once, with its opposite as Undo.
+  const forkChanges = {
+    remove: useChange(forkKey(coffre, { project, environment }, 'remove')),
+    restore: useChange(forkKey(coffre, { project, environment }, 'restore')),
+    reset: useChange(forkKey(coffre, { project, environment }, 'reset')),
+    override: useChange(forkKey(coffre, { project, environment }, 'override')),
+  };
   // The references that read this environment's secrets from elsewhere, and the environments you read.
   const { data: references } = useQuery(queries.references(coffre, `${project}/${environment}`));
   const lentBy = new Map<string, ListedReference[]>();
@@ -204,15 +215,17 @@ function EnvironmentLedger({
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
   const folders = foldersOf(active);
+  // In a fork, an inherited key is filed where its parent files it: only the keys held here are filed here.
+  const heldHere = (entry: SecretKey) => entry.parent === null || entry.parent.state === 'overridden';
   // What can be filed now: not a secret whose save is on its way, which may
   // not exist yet, nor one with an edit pending, as its menu offers no move
   // while it is edited.
-  const settled = active.filter((entry) => status(entry.key).state !== 'pending' && secretChangeFor(changes, entry.key) === undefined);
+  const settled = active.filter((entry) => heldHere(entry) && status(entry.key).state !== 'pending' && secretChangeFor(changes, entry.key) === undefined);
   // Renaming or removing a folder: everything in it at once, the keys staying where they are.
   const refile = useAction();
   const place = `${project}/${environment}`;
   const folderMenu = (folder: string, count: number) =>
-    canWrite && (
+    canWrite && count > 0 && (
       <FolderMenu
         folder={folder}
         count={count}
@@ -397,6 +410,31 @@ function EnvironmentLedger({
     );
   }
 
+  /**
+   * In a fork, a key against its parent's: removed, restored, reset to the
+   * parent's value or overriding it again. Each is undone by its opposite,
+   * so it gets an Undo rather than a confirmation dialog in front of it.
+   */
+  function forkAction(entry: SecretKey, action: ForkAction) {
+    const from = entry.parent?.from ?? parents[0] ?? 'its parent';
+    const undo: Record<ForkAction, ForkAction> = { remove: 'restore', restore: 'remove', reset: 'override', override: 'reset' };
+    const said: Record<ForkAction, string> = {
+      remove: `${entry.key} removed: ${environment} does without ${from}'s`,
+      restore: `${entry.key} inherited from ${from} again`,
+      reset: `${entry.key} reads ${from}'s value again; its own is kept`,
+      override: `${entry.key} overrides ${from} again`,
+    };
+    forkChanges[action](
+      { key: entry.key },
+      {
+        onSuccess: () =>
+          toast.success(said[action], {
+            action: { label: 'Undo', onClick: () => forkChanges[undo[action]]({ key: entry.key }) },
+          }),
+      },
+    );
+  }
+
   // Cmd/Ctrl+Enter saves from anywhere on the page while edits are pending,
   // but for an open dialog, such as Generate's.
   const saveRef = useRef(saveChanges);
@@ -428,6 +466,8 @@ function EnvironmentLedger({
         return { key: entry.key, what: withCompanion(`→ ${change.key.trim()}, new value`, change.companion) };
       }
       if (renamed) return { key: entry.key, what: `→ ${change.key.trim()}` };
+      // In a fork, a value written over the parent's overrides it.
+      if (entry.parent !== null && entry.parent.state !== 'overridden') return { key: entry.key, what: withCompanion(`overrides ${entry.parent.from}`, change.companion) };
       return { key: entry.key, what: withCompanion('new value', change.companion) };
     }),
   ];
@@ -453,7 +493,20 @@ function EnvironmentLedger({
 
   return (
     <>
-      <PageHeader tile={project} title={environment} />
+      <PageHeader
+        tile={project}
+        title={environment}
+        description={parents.length > 0 && (
+          <span className="inherits">
+            Inherits from{' '}
+            <Link className="mono" to="/projects/$project/$environment" params={{ project, environment: parents[0]! }}>
+              {project}/{parents[0]}
+            </Link>
+            {parents.length > 1 && <>, which inherits from {parents.slice(1).map((parent) => `${project}/${parent}`).join(', then ')}</>}
+            : its keys, as they change, but for those set or removed here.
+          </span>
+        )}
+      />
 
       {(active.length > 0 || drafts.length > 0) && (
         <div className="toolbar">
@@ -534,7 +587,7 @@ function EnvironmentLedger({
               </thead>
               <tbody>
                 {byFolder(listed).flatMap(([folder, entries]) => [
-                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} actions={folderMenu(folder, entries.length)} />]),
+                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} actions={folderMenu(folder, entries.filter(heldHere).length)} />]),
                   ...entries.map((entry) => {
                   const change = secretChangeFor(changes, entry.key);
                   const state = status(entry.key);
@@ -578,6 +631,7 @@ function EnvironmentLedger({
                       disabled={state.state === 'pending'}
                       onDismiss={dismiss}
                       columns={columns}
+                      onFork={(action) => forkAction(entry, action)}
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
                       onUndo={() => dropChange(entry.key)}
@@ -1091,6 +1145,7 @@ function SecretRow({
   disabled,
   onDismiss,
   columns,
+  onFork,
   onEdit,
   onPatch,
   onUndo,
@@ -1128,6 +1183,8 @@ function SecretRow({
   /** Forget a refused change once its row has said so. */
   onDismiss: (mutationId: number) => void;
   columns: number;
+  /** In a fork, the key against its parent's: removed, restored, reset or overriding it again. */
+  onFork: (action: ForkAction) => void;
   onEdit: () => void;
   onPatch: (patch: Partial<SecretChange>) => void;
   onUndo: () => void;
@@ -1153,9 +1210,20 @@ function SecretRow({
   const blockers = archiveBlockers(`${project}/${environment}/${entry.key}`, lent);
   // Making or breaking a reference: its refusal shows under the row, as a reveal's does.
   const { run: act, error: actError } = useAction();
-  const { reference } = entry;
+  const { reference, parent } = entry;
+  // In a fork (docs/design/forking.md): a key it inherits has no row of its
+  // own, one it overrides has, and one it removed is not served.
+  const inherited = parent?.state === 'inherited';
+  const removed = parent?.state === 'removed';
+  const overridden = parent?.state === 'overridden';
+  const own = !inherited && !removed;
+  // Inherited from a parent you do not read: its name is yours to know, its value is not.
+  const parentHidden = inherited && entry.version === null && reference === null;
+  const canRead = canReveal && !removed && !parentHidden;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
+  // And where that version is held: a reset, an override or a new reference changes it under the same number.
+  const readFrom = `${inherited ? parent!.from : '.'}:${reference?.source ?? ''}`;
   const holderPath = `${project}/${environment}/${entry.key}`;
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
@@ -1166,10 +1234,10 @@ function SecretRow({
   // different version -- saved here, rolled back, or written by someone else
   // and picked up on refresh -- the old plaintext is not the value any more,
   // and must not stay on screen pretending to be.
-  const shown = revealIsCurrent(reveal, readVersion) ? reveal : null;
+  const shown = revealIsCurrent(reveal, readVersion, readFrom) ? reveal : null;
   useEffect(() => {
-    if (reveal !== null && !revealIsCurrent(reveal, readVersion)) setReveal(null);
-  }, [reveal, readVersion]);
+    if (reveal !== null && !revealIsCurrent(reveal, readVersion, readFrom)) setReveal(null);
+  }, [reveal, readVersion, readFrom]);
 
   useEffect(() => {
     if (reveal === null) return;
@@ -1179,7 +1247,7 @@ function SecretRow({
 
   const secondsLeft = useSecondsLeft(shown);
 
-  const editBase = editing && revealIsCurrent(base, readVersion) ? base : null;
+  const editBase = editing && revealIsCurrent(base, readVersion, readFrom) ? base : null;
   useEffect(() => {
     if (!editing) setBase(null);
   }, [editing]);
@@ -1191,7 +1259,7 @@ function SecretRow({
       const value = await fetchValue();
       dispatch({
         type: 'read-succeeded',
-        reveal: show ? { value, version: readVersion, at: Date.now() } : null,
+        reveal: show ? { value, version: readVersion, from: readFrom, at: Date.now() } : null,
       });
       return value;
     } catch (failure) {
@@ -1251,12 +1319,12 @@ function SecretRow({
   const [focusName, setFocusName] = useState(false);
   async function startEdit({ name = false } = {}) {
     setFocusName(name);
-    if (canReveal) {
+    if (canRead) {
       setOpening(true);
       const value = await readValue({ show: false });
       setOpening(false);
       if (value === null) return;
-      setBase({ value, version: readVersion, at: Date.now() });
+      setBase({ value, version: readVersion, from: readFrom, at: Date.now() });
     }
     setReveal(null);
     onEdit();
@@ -1272,7 +1340,11 @@ function SecretRow({
       ? ' is-changed'
       : shown !== null
         ? ' is-revealed'
-        : '';
+        : removed
+          ? ' is-removed'
+          : inherited
+            ? ' is-inherited'
+            : '';
   const version = entry.version ?? 0;
 
   return (
@@ -1280,7 +1352,8 @@ function SecretRow({
       <tr className={`secret-row${state} ${rowClass(status)}`}>
         <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
-          {editing && canWrite ? (
+          {/* An inherited key has no row here to rename: overriding it keeps its name. */}
+          {editing && canWrite && own ? (
             <div className="edit-stack">
               <input
                 className="input input-mono"
@@ -1311,6 +1384,7 @@ function SecretRow({
               <span>{breakAfterUnderscores(entry.key)}</span>
               {generated !== null && <RecipeMark generated={generated} />}
               {leaving && <span className="tag tag-red">Will be archived</span>}
+              {parent !== null && <Standing project={project} secretKey={entry.key} parent={parent} />}
               {lent.length > 0 && (
                 <button
                   type="button"
@@ -1353,6 +1427,9 @@ function SecretRow({
                     }}
                   />
                   <CompanionNote companion={change.companion} versionOf={versionOf} />
+                  {!overridden && parent !== null && (
+                    <span className="edit-note">Saved here, over {parent.from}'s value</span>
+                  )}
                   {reference !== null && reference.state === 'live' && (
                     <span className="edit-note">
                       Saving a value stops following <span className="mono">{reference.source}</span>
@@ -1370,6 +1447,8 @@ function SecretRow({
                   </span>
                   <span className="revealed-meter" aria-hidden />
                 </div>
+              ) : removed ? (
+                <span className="cell-muted">Not served here</span>
               ) : reference !== null ? (
                 <ReferenceValue reference={reference} />
               ) : (
@@ -1403,13 +1482,20 @@ function SecretRow({
                       </button>
                     </Tip>
                   </>
+                ) : removed ? (
+                  canWrite && (
+                    <button type="button" className="btn btn-sm" onClick={() => onFork('restore')} disabled={disabled}>
+                      Restore
+                    </button>
+                  )
                 ) : (
                   <>
                     {/* Copy sits left of Reveal, hidden or shown, so Hide stays where
                         Reveal was clicked. Hidden, it copies without showing the value;
                         as for Reveal, it takes secret.read, and a reference copies the
-                        value it reads through. */}
-                    <SecretReadOnly canReveal={canReveal}>
+                        value it reads through; an inherited key, its parent's, which
+                        takes read there too. */}
+                    <SecretReadOnly canReveal={canRead}>
                       <CopyButton variant="act" copier={copier} onCopy={copyValue} label={`Copy ${entry.key}`} />
                       <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                         <button
@@ -1429,12 +1515,12 @@ function SecretRow({
                       </Tip>
                     </SecretReadOnly>
                     {canWrite && (
-                      <Tip label="Edit">
+                      <Tip label={inherited ? `Override ${parent!.from}'s` : 'Edit'}>
                         <button
                           className="act act-icon"
                           onClick={() => void startEdit()}
                           disabled={disabled || revealing}
-                          aria-label={`Edit ${entry.key}`}
+                          aria-label={inherited ? `Override ${entry.key}` : `Edit ${entry.key}`}
                         >
                           {opening ? <Spinner size={13} /> : <Pencil size={14} />}
                         </button>
@@ -1448,26 +1534,33 @@ function SecretRow({
         </td>
 
         <td className="col-version" data-label="Version">
-          {editing && valueChanged ? (
+          {editing && valueChanged && !overridden && parent !== null ? (
+            <span className="version-shift">
+              <b>own</b>
+            </span>
+          ) : editing && valueChanged ? (
             <span className="version-shift">
               v{version} → <b>v{version + 1}</b>
             </span>
           ) : (
-            <span className="version-shift" title={reference === null ? undefined : "The source's version"}>
+            <span
+              className="version-shift"
+              title={inherited ? `${parent!.from}'s version` : reference === null ? undefined : "The source's version"}
+            >
               {readVersion === null ? '—' : `v${readVersion}`}
             </span>
           )}
         </td>
 
         <td className="col-written" data-label="Last written">
-          <Written entry={entry} rotateAfterDays={rotateAfterDays} />
+          {!removed && <Written entry={entry} rotateAfterDays={rotateAfterDays} />}
         </td>
 
         <td className="col-actions">
           {status.state === 'pending' ? (
             <RowPending status={status} />
           ) : (
-            (canReveal || (canWrite && !editing && !leaving) || (canArchive && !leaving)) && (
+            !removed && (canReveal || (canWrite && !editing && !leaving) || (canArchive && !leaving && own && !overridden)) && (
               <Menu.Root>
                 <Menu.Trigger
                   className="act act-icon act-quiet"
@@ -1477,13 +1570,37 @@ function SecretRow({
                   <MoreHorizontal size={16} />
                 </Menu.Trigger>
                 <MenuPopup align="end">
-                  <SecretReadOnly canReveal={canReveal}>
+                  <SecretReadOnly canReveal={canReveal && own}>
                     <Menu.Item className="menu-item" onClick={() => setHistoryOpen((open) => !open)}>
                       <History size={14} />
                       {historyOpen ? 'Hide history' : 'Version history'}
                     </Menu.Item>
                   </SecretReadOnly>
-                  {canWrite && !editing && !leaving && (
+                  {canWrite && !editing && inherited && (
+                    <>
+                      <Menu.Item className="menu-item" onClick={() => void startEdit()}>
+                        <Pencil size={14} />
+                        Override…
+                      </Menu.Item>
+                      {parent!.reset && (
+                        <Menu.Item className="menu-item" onClick={() => onFork('override')}>
+                          <RotateBack size={14} />
+                          Use its own value again
+                        </Menu.Item>
+                      )}
+                      <Menu.Item className="menu-item" onClick={() => onFork('remove')}>
+                        <SlashCircle size={14} />
+                        Remove from {environment}
+                      </Menu.Item>
+                    </>
+                  )}
+                  {canWrite && !editing && !leaving && overridden && (
+                    <Menu.Item className="menu-item" onClick={() => onFork('reset')}>
+                      <RotateBack size={14} />
+                      Reset to {parent!.from}
+                    </Menu.Item>
+                  )}
+                  {canWrite && !editing && !leaving && own && (
                     <Menu.Item className="menu-item" onClick={() => void startEdit({ name: true })}>
                       <Pencil size={14} />
                       Rename
@@ -1499,25 +1616,26 @@ function SecretRow({
                       Regenerate…
                     </Menu.Item>
                   )}
-                  {canWrite && !editing && !leaving && (
+                  {canWrite && !editing && !leaving && own && (
                     <Menu.Item className="menu-item" onClick={() => setMoving(true)}>
                       <Folder size={14} />
                       Move to folder…
                     </Menu.Item>
                   )}
-                  {canWrite && !editing && !leaving && (
+                  {canWrite && !editing && !leaving && own && (
                     <Menu.Item className="menu-item" onClick={() => setReferring(true)}>
                       <ArrowRight size={14} />
                       {reference === null ? 'Make a reference…' : 'Point elsewhere…'}
                     </Menu.Item>
                   )}
-                  {canWrite && !editing && !leaving && reference !== null && reference.state === 'live' && (
+                  {canWrite && !editing && !leaving && own && reference !== null && reference.state === 'live' && (
                     <Menu.Item className="menu-item" onClick={() => setBreaking(holderPath)}>
                       <SlashCircle size={14} />
                       Break reference…
                     </Menu.Item>
                   )}
-                  {canArchive && !leaving && (
+                  {/* An override's way out is Reset, which keeps it; archiving there would be the same, by more. */}
+                  {canArchive && !leaving && own && !overridden && (
                     <>
                       {(canReveal || canWrite) && <Menu.Separator className="menu-sep" />}
                       <Menu.Item
@@ -1656,6 +1774,38 @@ function SecretRow({
       />
     </>
   );
+}
+
+/**
+ * Where a fork's key stands to its parent's (docs/design/forking.md):
+ * inherited from it, overriding it, perhaps since it changed, or removed.
+ * The parent links to its own row of the key.
+ */
+function Standing({ project, secretKey, parent }: { project: string; secretKey: string; parent: NonNullable<SecretKey['parent']> }) {
+  const from = (
+    <Link className="tag-link" to="/projects/$project/$environment" params={{ project, environment: parent.from }} search={{ filter: secretKey }}>
+      {parent.from}
+    </Link>
+  );
+  switch (parent.state) {
+    case 'inherited':
+      return <span className="tag tag-outline">from {from}</span>;
+    case 'removed':
+      return <span className="tag tag-outline">removed · {from} {parent.held ? 'has it' : 'dropped it'}</span>;
+    case 'overridden':
+      return (
+        <>
+          <span className="tag tag-outline">overrides {from}</span>
+          {parent.changed && (
+            <Tip label={`${parent.from} has written a newer value since this one: check the override still holds`}>
+              <span className="tag tag-amber" tabIndex={0}>
+                {parent.from} changed since
+              </span>
+            </Tip>
+          )}
+        </>
+      );
+  }
 }
 
 /**

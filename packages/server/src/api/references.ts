@@ -4,10 +4,14 @@ import type { Place } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
-import type { Queryable } from '@coffre/db';
+import type { Database, Queryable } from '@coffre/db';
+import { SNAPSHOT } from '@coffre/db/dialect';
 
 import {
+  dismissalsIn,
   environmentSecrets,
+  MAX_PARENTS,
+  parentsOf,
   referenceRows,
   resolvePath,
   secretPlaces,
@@ -247,38 +251,126 @@ export function unreadable({ view, holder, source, row, state }: Resolved): stri
   }
 }
 
-/** A value to open: its own version, or a source's through a reference (`via`). */
-export type Readable = { key: string; secretVersionId: string; secret: SecretRef; envelope: Envelope; via?: Via };
+/**
+ * A value to open: its own version, or a source's through a reference
+ * (`via`). An inherited one names the parent it comes from, and `through`,
+ * the fork it was read in, which the vault logs it in too.
+ */
+export type Readable = {
+  key: string;
+  /** The folder it is listed in, where it is held. */
+  folder: string | null;
+  secretVersionId: string;
+  secret: SecretRef;
+  envelope: Envelope;
+  via?: Via;
+  through?: string;
+  parent?: { environmentId: string; slug: string };
+};
+
+/** What a read cannot open, and why; and the parent it would be inherited from, which the reader must read to be told. */
+export type Unreadable = { reason: string; key?: string; parent?: { environmentId: string; slug: string } };
 
 /**
- * What a read of an environment, or of one secret in it, opens: each live
+ * What a read of an environment, or of one key in it, opens: each live
  * key's current value, and for a key that is a reference, its source's
- * current value through it. A reference that cannot be read is named in
- * `unreadable`, and its reader decides: a read refuses whole rather than
- * go without it.
+ * current value through it. A fork's keys come first, then each parent's
+ * in turn for the keys no nearer environment holds or removed (a dismissal,
+ * docs/design/forking.md), all read in one snapshot, so a write meanwhile
+ * is seen whole or not at all; the snapshot is closed before anything is
+ * opened. An environment with no parent needs none: a read of it opens no
+ * transaction. A key that cannot be read is named in `unreadable`, and its
+ * reader decides: a read refuses whole rather than go without it.
  */
 export async function readableValues(
-  db: Queryable,
+  db: Database,
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
-  secretId?: string,
-): Promise<{ items: Readable[]; unreadable: string[] }> {
-  const rows = (await environmentSecrets(db, environment.environmentId, secretId)).filter((row) => row.archivedAt === null);
+  key?: string,
+): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
+  if (place.environment!.parentId === null) return resolveValues(db, place, environment, key);
+  return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
+}
+
+async function resolveValues(
+  tx: Queryable,
+  place: ResolvedPath,
+  environment: { projectId: string; environmentId: string },
+  key?: string,
+): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
+  const here = `${place.project.slug}/${place.environment!.slug}`;
+  const parents = await parentsOf(tx, environment.environmentId);
+  if (parents === null) return { items: [], unreadable: [{ reason: `${here}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre` }] };
+  const layers = [{ id: environment.environmentId, slug: place.environment!.slug, archivedAt: null, deleted: false }, ...parents];
+  const items: Readable[] = [];
+  const refused: Unreadable[] = [];
+  // The keys a nearer environment settled: holds, or removed.
+  const settled = new Set<string>();
+  for (const [depth, layer] of layers.entries()) {
+    const parent = depth === 0 ? undefined : { environmentId: layer.id, slug: layer.slug };
+    if (layer.deleted || layer.archivedAt !== null) {
+      refused.push({ reason: `${here} inherits from ${place.project.slug}/${layer.slug}, which is ${layer.deleted ? 'deleted' : 'archived'}` });
+      break;
+    }
+    const own = await valuesIn(tx, place.project.slug, { projectId: environment.projectId, environmentId: layer.id, slug: layer.slug }, key);
+    for (const item of own.items) {
+      if (settled.has(item.key)) continue;
+      items.push(parent === undefined ? item : { ...item, through: environment.environmentId, parent });
+    }
+    for (const unread of own.unreadable) if (!settled.has(unread.key)) refused.push({ ...unread, ...(parent === undefined ? {} : { parent }) });
+    for (const settles of [...own.items, ...own.unreadable]) settled.add(settles.key);
+    if (depth < layers.length - 1) for (const dismissed of await dismissalsIn(tx, layer.id)) settled.add(dismissed.key);
+  }
+  items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { items, unreadable: refused };
+}
+
+/**
+ * The inherited keys a caller cannot be told of, by the parent each comes
+ * from: values, and unreadable keys alike, since why a key cannot be read
+ * (a broken reference's source, who broke it) is the parent's to tell.
+ * Reading what a fork inherits takes read on that parent, by the caller's
+ * own grants: a fork lends nothing.
+ */
+export function unreadParents(
+  ctx: ApiContext,
+  projectId: string,
+  read: { items: readonly Readable[]; unreadable: readonly Unreadable[] },
+): Map<string, string[]> {
+  const unread = new Map<string, string[]>();
+  for (const row of [...read.items, ...read.unreadable]) {
+    if (row.parent === undefined || row.key === undefined) continue;
+    const parent = { projectId, environmentId: row.parent.environmentId, environmentSlug: row.parent.slug };
+    if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key].sort());
+  }
+  return unread;
+}
+
+/** One environment's own values, without what it inherits: `readableValues`, a layer at a time. */
+async function valuesIn(
+  db: Queryable,
+  project: string,
+  environment: { projectId: string; environmentId: string; slug: string },
+  key?: string,
+): Promise<{ items: Readable[]; unreadable: { key: string; reason: string }[] }> {
+  const rows = (await environmentSecrets(db, environment.environmentId, key === undefined ? undefined : { key })).filter((row) => row.archivedAt === null);
   const references = await currentReferences(db, rows.filter((row) => row.current === null).map((row) => row.id));
   const live = [...references.values()].filter((reference) => reference.state === 'live');
   const envelopes = await versionEnvelopes(db, live.map((reference) => reference.source!.currentVersionId!));
   const items: Readable[] = [];
-  const refused: string[] = [];
+  const refused: { key: string; reason: string }[] = [];
   for (const row of rows) {
     if (row.current !== null) {
       items.push({
         key: row.key,
+        folder: row.folder,
         secretVersionId: row.current.id,
         secret: {
-          ...environment,
+          projectId: environment.projectId,
+          environmentId: environment.environmentId,
           secretId: row.id,
           version: row.current.version,
-          path: `${place.project.slug}/${place.environment!.slug}/${row.key}`,
+          path: `${project}/${environment.slug}/${row.key}`,
         },
         envelope: row.current.envelope,
       });
@@ -289,11 +381,12 @@ export async function readableValues(
     const source = reference.source!;
     const opened = reference.state === 'live' ? envelopes.get(source.currentVersionId!) : undefined;
     if (opened === undefined) {
-      refused.push(unreadable(reference));
+      refused.push({ key: row.key, reason: unreadable(reference) });
       continue;
     }
     items.push({
       key: row.key,
+      folder: row.folder,
       secretVersionId: source.currentVersionId!,
       // Opened as the source it is: its value is bound to the source's ids.
       secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source) },

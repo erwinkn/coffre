@@ -122,6 +122,10 @@ coffre whoami                               # who you are, where, and why there
 coffre use                                  # the instances you are signed in to, and the directories pinned to each
 coffre sessions                             # where you are signed in; sessions revoke <id> signs one out
 coffre identities                           # the accounts you sign in with
+coffre tokens issue --label cursor-agent --scope market/dev=developer --expires-in 4h
+                                            # a personal token: acts as you, for a script or an agent, within
+                                            # its scope and never past what you hold (docs/design/personal-tokens.md)
+coffre tokens                               # your personal tokens; tokens revoke <id> ends one
 
 coffre list     market/dev                  # keys, who wrote each value and how long ago; --stale, those due for rotation
 coffre get      market/dev/DATABASE_URL     # the value; piped, exactly its bytes, no newline added (a terminal gets one)
@@ -133,7 +137,10 @@ coffre regenerate market/prod/SESSION_SECRET   # rotates it: a new value by its 
 coffre references market/prod               # what reads it through references; references break ends one
 coffre run      market/dev -- printenv
 coffre run      market/prod auth/prod -- ./deploy   # several: their keys together; a key in two of them stops it
+coffre run --keep-existing market/dev -- ./app      # a variable already set in your shell (empty too) wins over coffre's
 coffre export   market/dev --format dotenv  # or json, shell, github; several environments, as run
+coffre export   market/prod --output-file .env --watch --on-change 'systemctl reload app'   # kept current, read only once it changed
+coffre version  market/prod                 # what a read would open, as a version that changes when it would; reads no value
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
 coffre import   market/dev --file .env      # previews; --apply writes
@@ -162,6 +169,9 @@ coffre environments rename market/dev --slug development
 coffre environments archive market/dev
 coffre environments unarchive market/dev
 coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history; --reference follows prod
+coffre fork     market/prod prod-eu --inherit   # copies nothing: reads prod's keys live, but for those it sets or removes
+coffre reset    market/prod-eu/DATABASE_URL # in a fork, back to prod's value; --undo serves its own again
+coffre remove   market/prod-eu/SENTRY_DSN   # in a fork, does without prod's key; --undo inherits it again
 coffre roles                                # the instance roles and the project roles, and their permissions
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
@@ -178,6 +188,8 @@ coffre tokens issue api-deploy --output-file token   # a new 0600 file, reaching
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
                                             # the CI runs trusted to sign in as service:api-deploy, by OIDC;
                                             # previews the claims, --apply saves (docs/design/oidc.md)
+coffre trust api-deploy --issuer <iss> --jwks-file jwks.json --claim sub=…
+                                            # an issuer coffre cannot reach, by its keys: a Kubernetes cluster (docs/kubernetes.md)
 coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --apply removes it
                                             # anyone with access does these for what they hold, where
 coffre settings service-accounts --except-environments prod   # this lets them: prod's take an Admin
@@ -205,6 +217,20 @@ The default `dotenv` format is data for `.env` parsers, including coffre's
 import, with escaped line breaks. Do not source it as shell code. For a shell,
 use `--format shell`, which quotes values literally, including quotes and
 newlines, or use `coffre run` to pass them directly to a child process.
+
+`--output-file .env` writes the export to a file only you can read (0600),
+whole or not at all: beside it, then renamed over it. With `--watch`, coffre
+keeps that file current. Every minute (`--interval`, from 5s to 24h) it asks
+each environment's version, `coffre version market/prod`, which reads no
+value and is not logged, and reads the values only once a version changed:
+a value written, a key added, archived or renamed, or for a fork, anything
+it inherits. It rewrites the file only when what it holds changed, then
+runs `--on-change`, through the shell, without any value in its
+environment. A round that fails keeps the file as it was, says why on
+stderr, and waits twice as long before the next, up to 15 minutes or the
+interval, whichever is longer; a first round that fails ends it, as an
+export would. Each read is logged as any export's, and answers the version
+of what it read, which the watch compares the next with.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
 (mode 0600), and can be revoked from the account page.

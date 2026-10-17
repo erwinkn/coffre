@@ -1734,22 +1734,34 @@ a.crumb-link:hover {
 }
 
 .claims-table {
+  /* Fixed, so that a long claim name, a nested one's path, never squeezes its value to a column of letters. */
+  width: 100%;
   margin-top: 0.25rem;
   border-collapse: collapse;
   font-size: 0.75rem;
+  table-layout: fixed;
 }
 
-.claims-table th {
+/* Inside a binding's row, as plain as in the dialog: none of the data table's own cells. */
+table.claims-table th {
+  height: auto;
   padding: 0.125rem 0.75rem 0.125rem 0;
+  border: 0;
+  background: none;
   color: var(--ink-2);
+  font-size: inherit;
   font-weight: 550;
   text-align: left;
-  white-space: nowrap;
   vertical-align: top;
+  width: 38%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.claims-table td {
+table.claims-table td {
   padding: 0.125rem 0;
+  border: 0;
+  vertical-align: top;
   overflow-wrap: anywhere;
 }
 
@@ -2561,6 +2573,34 @@ a.crumb-link:hover {
   text-decoration: line-through;
   text-decoration-color: var(--red);
   text-decoration-thickness: 1.5px;
+}
+
+/* In a fork (docs/design/forking.md): a key it inherits reads as its
+   parent's, muted; one it removed is struck through, not served. */
+.secret-row.is-inherited .cell-key > .key-cell > span:first-child,
+.secret-row.is-inherited .mask {
+  color: var(--ink-3);
+}
+
+.secret-row.is-removed .cell-key > .key-cell > span:first-child {
+  color: var(--ink-3);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+/* The parent a tag names, linking to its own row of the key. */
+.tag-link {
+  position: relative;
+  z-index: 1;
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+.tag-link:hover {
+  color: var(--ink);
+  text-decoration-color: currentColor;
 }
 
 .key-cell {

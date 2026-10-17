@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, SetResult, TokenPlan } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, InheritResult, KeysPlan, SetResult, TokenPlan } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -30,6 +30,8 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
+  InheritResult,
+  KeysPlan,
   ListedReference,
   Me,
   Member,
@@ -41,10 +43,10 @@ export type {
   RemovedMember,
   SecretKey,
   SecretVersion,
-  ServiceTokenRow,
   SessionRow,
   SetResult,
   TokenPlan,
+  TokenRow,
   WorkloadIds,
 } from './api.ts';
 
@@ -202,6 +204,12 @@ export function createClient(options: ClientOptions) {
       delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
       /** The keys its sibling environments have and it lacks, read or not, and those its team dismissed. */
       missing: (path: string) => call('GET /projects/:project/:environment/missing', place(path)),
+      /**
+       * A version of what reading it would open: it changes whenever a read
+       * would, and reads no value, so it is not logged. Poll it, and read
+       * only when it changed.
+       */
+      version: (path: string) => call('GET /projects/:project/:environment/version', place(path)),
       /** Dismiss missing keys (`true`) or restore them (`null`). */
       dismiss: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment/dismissals'>) =>
         call('PATCH /projects/:project/:environment/dismissals', place(path), patch),
@@ -232,6 +240,12 @@ export function createClient(options: ClientOptions) {
         call('PATCH /secrets/:project/:environment/:key', place(path), { key }),
       update: (path: string, patch: RouteInput<'PATCH /secrets/:project/:environment/:key'>) =>
         call('PATCH /secrets/:project/:environment/:key', place(path), patch),
+      /**
+       * In a fork, a key back to its parent's value (`true`), its own kept,
+       * or its own served again (`false`); `from` holds the parent's.
+       */
+      inherit: (path: string, inherit: boolean) =>
+        call('PATCH /secrets/:project/:environment/:key', place(path), { inherit }) as Promise<InheritResult>,
     },
 
     /**
@@ -258,6 +272,10 @@ export function createClient(options: ClientOptions) {
       remove: (member: string) => call('DELETE /members/:member', { member }),
     },
 
+    /**
+     * A member's tokens: a service account's bearer tokens, or a person's
+     * personal tokens (`user:<email>`), which act as them within their scope.
+     */
     tokens: {
       list: (member: string) => call('GET /members/:member/tokens', { member }),
       /** What the token would reach, as the server would issue it now; issues nothing. */
@@ -281,6 +299,14 @@ export function createClient(options: ClientOptions) {
       },
       create: (member: string, input: RouteInput<'POST /members/:member/bindings'>) =>
         call('POST /members/:member/bindings', { member }, input) as Promise<{ binding: BindingView; replaced: string[] }>,
+      /** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. */
+      previewKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) => {
+        const [method, route] = address('POST /members/:member/bindings/keys', { member });
+        return send(method, `${route}?dryRun=1`, input) as Promise<KeysPlan>;
+      },
+      /** New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them. */
+      replaceKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) =>
+        call('POST /members/:member/bindings/keys', { member }, input) as Promise<{ bindings: BindingView[]; replaced: string[] }>,
       remove: (member: string, id: string) => call('DELETE /members/:member/bindings/:id', { member, id }),
       /** A GitHub repository's or GitLab project's IDs, which bindings name: a public one's, or one the deployment's GitHub App is installed on. */
       lookup: (input: RouteInput<'GET /workloads/lookup'>) => call('GET /workloads/lookup', {}, input),

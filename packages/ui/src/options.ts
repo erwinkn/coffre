@@ -323,7 +323,11 @@ export const accountSessions = {
   loader: async ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
     if (!(await ownSignIn(context))) throw redirect({ to: '/account' });
-    await queryClient.fetchQuery(queries.sessions(coffre));
+    const { principal } = await loadShell(queryClient, coffre);
+    await Promise.all([
+      queryClient.fetchQuery(queries.sessions(coffre)),
+      ...(principal?.type === 'user' ? [queryClient.fetchQuery(queries.credentials(coffre, memberRef('user', principal.id), true))] : []),
+    ]);
   },
 };
 

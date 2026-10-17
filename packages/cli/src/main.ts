@@ -16,7 +16,7 @@ import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
-import { bindingFrom, describeBindings, describeEvents, describePlan, reaches, scopeFrom, serviceMember, TRUST_USAGE } from './trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
@@ -26,6 +26,7 @@ import { clash, environmentPaths, listOf } from './environments.ts';
 import * as manage from './manage.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
+import { interval, replaceFile, watch } from './watch.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   choose,
@@ -68,7 +69,7 @@ import {
   Unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { assignableToEnvironment, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, credentialScopeInWords, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
@@ -214,7 +215,7 @@ async function cloudflaredToken(origin: string): Promise<string> {
     if (token === '' || token.includes(' ')) throw new Error(stdout);
     return token;
   } catch {
-    fail(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
+    throw new Error(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
   }
 }
 
@@ -260,8 +261,23 @@ type Hint = (status: number, reason: string | null) => string | null;
 function client(to: Target = target(), hint?: Hint, handled: readonly number[] = []): CoffreClient {
   return createClient({
     url: to.origin,
-    headers: () => headersFor(to),
+    headers: () => headersFor(to).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error))),
     transport: (request) => send(request, to, hint, handled),
+  });
+}
+
+/**
+ * The API, for one instance, where every refusal and failure comes back to
+ * the command as an error, said in the server's words, and none ends the
+ * CLI: for `export --watch`, which outlives a failed round.
+ */
+function enduringClient(to: Target): CoffreClient {
+  return createClient({
+    url: to.origin,
+    headers: () => headersFor(to),
+    transport: (request) => fetch(request, { redirect: 'manual' }).catch((error: unknown) => {
+      throw new Error(unreachable(to.origin, error));
+    }),
   });
 }
 
@@ -622,7 +638,7 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
 
 /** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
-  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
+  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
   await saveRun({ origin, mode: 'signin', by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
@@ -759,6 +775,11 @@ async function whoami(args: string[]): Promise<void> {
     service: "the run's ID token, as --service",
   }[to.by];
   process.stdout.write(`${named(me.principal.type, me.principal.id)} on ${to.origin}${why}, via ${via}\n`);
+  // An instance before 0.7 says nothing of one.
+  if (me.personalToken) {
+    const { label, expiresAt, scope } = me.personalToken;
+    process.stdout.write(`  personal token "${label}", ends ${expiresAt.slice(0, 16).replace('T', ' ')} UTC, reaching ${credentialScopeInWords(scope)}\n`);
+  }
   if (to.by === 'person' && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
@@ -861,14 +882,23 @@ async function list(args: string[]): Promise<void> {
       const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: ${rotate})` : '';
       const made = recipe === null ? '' : `  (generated, ${recipe})`;
       const archived = entry.archived ? '  (archived)' : '';
+      // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
+      const parent = entry.parent ?? null;
+      const standing = parent === null
+        ? ''
+        : parent.state === 'inherited'
+          ? `  (from ${parent.from}${parent.reset ? '; its own reset, and kept' : ''})`
+          : parent.state === 'removed'
+            ? `  (removed: ${parent.from} ${parent.held === false ? 'dropped it' : 'has it'})`
+            : `  (overrides ${parent.from}${parent.changed ? `; ${parent.from} changed since` : ''})`;
       const { reference } = entry;
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
         continue;
       }
-      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${due}${archived}\n`);
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${due}${archived}${standing}\n`);
     }
   }
 }
@@ -959,50 +989,73 @@ async function readValue(key: string): Promise<string> {
  * first, which opens no value: one the caller may not read, a reference in
  * it that cannot be read, or a key two of them define stops here, before
  * anything is read. Then each is read, one audited read apiece, and what
- * came back is checked again, for an environment changed in between.
+ * came back is checked again, for an environment changed in between. What
+ * stops it is thrown, for the command to end on or, watching, to outlive.
  */
-async function readEnvironments(paths: readonly string[]): Promise<[string, string][]> {
+async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<{ entries: [string, string][]; version: string }> {
   if (paths.length > 1) {
-    const listing = client(target(), undefined, [403, 404]);
     const keys: [string, string[]][] = [];
     for (const path of paths) {
-      const listed = await listing.secrets.list(path).catch((error: unknown) =>
-        fail(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`),
-      );
+      const listed = await api.list.secrets.list(path).catch((error: unknown) => {
+        throw new Error(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`);
+      });
       const live = listed.keys.filter(({ archived }) => !archived);
       // A key without a value of its own reads through its reference, which reveal refuses for the whole environment when it cannot.
       const stuck = live.find(({ version, reference }) => version === null && reference !== null && reference.state !== 'live');
       if (stuck !== undefined) {
-        fail(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
+        throw new Error(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
       }
       keys.push([path, live.filter(({ version, reference }) => version !== null || reference !== null).map(({ key }) => key)]);
     }
     const shared = clash(keys);
-    if (shared !== null) fail(`${shared}: a key comes from one environment only. Nothing was read`);
+    if (shared !== null) throw new Error(`${shared}: a key comes from one environment only. Nothing was read`);
   }
-  const read: [string, Record<string, string>][] = [];
-  for (const path of paths) read.push([path, (await client().secrets.reveal(path)).values]);
-  const shared = clash(read.map(([path, values]) => [path, Object.keys(values)]));
-  if (shared !== null) fail(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
-  return read.flatMap(([, values]) => Object.entries(values));
+  const read: [string, { values: Record<string, string>; version: string | null }][] = [];
+  for (const path of paths) read.push([path, await api.read.secrets.reveal(path)]);
+  const shared = clash(read.map(([path, { values }]) => [path, Object.keys(values)]));
+  if (shared !== null) throw new Error(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
+  // The environments' versions, of what was read: as `coffre version` answers them, together.
+  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' ') };
+}
+
+/** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
+function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
+  const api = { read: client(), list: client(target(), undefined, [403, 404]) };
+  return readEnvironments(paths, api).then(
+    (read) => read.entries,
+    (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
+  );
 }
 
 /**
  * Fetch every secret of the environments named and exec a command with them
  * in its environment: one audited read per environment, and one audit row
- * per secret injected.
+ * per secret injected. A variable the shell already sets is overwritten,
+ * unless --keep-existing keeps it. (`export` prints values for a tool to
+ * apply, so it has no shell environment to defer to.)
  */
 async function run(args: string[]): Promise<void> {
   const separator = args.indexOf('--');
   if (separator === -1 || separator === args.length - 1) {
-    fail('usage: coffre run <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
+    fail('usage: coffre run [--keep-existing] <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
   }
 
-  const { positionals } = parseArgs({ args: args.slice(0, separator), options: {}, allowPositionals: true, strict: true });
+  const { values: flags, positionals } = parseArgs({
+    args: args.slice(0, separator),
+    options: { 'keep-existing': { type: 'boolean', default: false } },
+    allowPositionals: true,
+    strict: true,
+  });
   const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
-  const values = Object.fromEntries(await readEnvironments(paths));
+  const values = Object.fromEntries(await readOrEnd(paths));
+  // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
+  const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
+  for (const key of kept) delete values[key];
+  if (kept.length > 0) {
+    process.stderr.write(`coffre: kept the value already set in your environment for ${kept.sort().join(', ')}, not coffre's\n`);
+  }
 
   const child = spawn(command[0], command.slice(1), {
     // Secrets are passed through the environment of the child only. They are
@@ -1027,31 +1080,60 @@ async function run(args: string[]): Promise<void> {
 async function exportEnv(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: { format: { type: 'string', default: 'dotenv' } },
+    options: {
+      format: { type: 'string', default: 'dotenv' },
+      'output-file': { type: 'string' },
+      watch: { type: 'boolean', default: false },
+      interval: { type: 'string' },
+      'on-change': { type: 'string' },
+    },
     allowPositionals: true,
   });
-  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--format dotenv|json|shell|github]';
+  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--format dotenv|json|shell|github] [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]';
   const format = values.format;
   if (format !== 'dotenv' && format !== 'json' && format !== 'shell' && format !== 'github') fail(usage);
   const paths = environmentPaths(positionals);
+  const file = values['output-file'];
   const githubEnv = process.env.GITHUB_ENV;
   if (format === 'github' && !githubEnv) fail('--format github requires GITHUB_ENV (run it in a GitHub Actions step)');
+  if (format === 'github' && file !== undefined) fail('--format github appends to GITHUB_ENV, and writes no other file');
+  if (values.watch && file === undefined) fail('--watch keeps a file current: name it, --output-file <file>');
+  if (!values.watch && (values.interval !== undefined || values['on-change'] !== undefined)) fail('--interval and --on-change are for --watch');
+  const text = (entries: [string, string][]) =>
+    format === 'json' ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n` : format === 'shell' ? formatShellExports(entries) : formatDotenv(entries);
+  const byKey = (entries: [string, string][]) => entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 
-  const entries = (await readEnvironments(paths)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  if (values.watch) {
+    const intervalMs = attempt(() => interval(values.interval ?? '60s'));
+    const to = target();
+    if (to.by === 'run' || to.credential.kind === 'workload') fail("--watch outlives a CI run's credential, which lasts five minutes: watch with a session or a bearer token");
+    const api = enduringClient(to);
+    process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
+    await watch({
+      version: async () => (await Promise.all(paths.map((path) => api.environments.version(path)))).map((answer) => answer.version).join(' '),
+      read: async () => {
+        const { entries, version } = await readEnvironments(paths, { read: api, list: api });
+        return { text: text(byKey(entries)), version };
+      },
+      file: file!,
+      intervalMs,
+      onChange: values['on-change'] ?? null,
+      say: (line) => process.stderr.write(`coffre: ${line}\n`),
+    }).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  }
+
+  const entries = byKey(await readOrEnd(paths));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.
     process.stdout.write(githubMasks([...(await workloadSecrets()), ...entries]));
     attempt(() => appendFileSync(githubEnv!, githubEnvironment(entries), { encoding: 'utf8', mode: 0o600 }));
-  } else process.stdout.write(
-    format === 'json'
-      ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`
-      : attempt(() => (format === 'shell' ? formatShellExports(entries) : formatDotenv(entries))),
-  );
+  } else if (file !== undefined) attempt(() => replaceFile(file, text(entries)));
+  else process.stdout.write(attempt(() => text(entries)));
   if (process.stderr.isTTY) {
     const count = entries.length;
     process.stderr.write(
-      `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}; each read is in the audit log under your name\n`,
+      `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}${file === undefined ? '' : ` into ${file}`}; each read is in the audit log under your name\n`,
     );
   }
 }
@@ -1222,6 +1304,7 @@ function waysIn(
     ? [
         plural(counts.grants, 'grant'),
         plural(counts.sessions, 'session'),
+        ...(counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
         plural(counts.identities, 'linked account'),
         plural(counts.apps, 'connected app'),
       ].join(', ')
@@ -1260,6 +1343,8 @@ async function trust(args: string[]): Promise<void> {
       scope: { type: 'string', multiple: true },
       label: { type: 'string' },
       replace: { type: 'string', multiple: true },
+      'jwks-file': { type: 'string' },
+      'replace-keys': { type: 'boolean' },
       apply: { type: 'boolean', default: false },
     },
     allowPositionals: true,
@@ -1274,9 +1359,31 @@ async function trust(args: string[]): Promise<void> {
   if (positionals.length > 1) throw new UsageError(`too many arguments: ${positionals.slice(1).join(' ')}`);
   const member = serviceMember(service);
   const coffre = client();
-  const { scope: scopeFlags, label, replace, apply, ...flags } = values;
-  if (Object.keys(flags).length === 0) {
+  const { scope: scopeFlags, label, replace, apply, 'jwks-file': jwksFile, 'replace-keys': replaceKeys, ...flags } = values;
+  if (Object.keys(flags).length === 0 && jwksFile === undefined && replaceKeys === undefined) {
     process.stdout.write(describeBindings(member, (await coffre.bindings.list(member)).bindings));
+    return;
+  }
+  const jwks = (() => {
+    if (jwksFile === undefined) return undefined;
+    try {
+      return keySetFrom(readFileSync(jwksFile, 'utf8'), jwksFile);
+    } catch (error) {
+      return fail((error as NodeJS.ErrnoException).code === undefined ? (error as Error).message : `could not read ${jwksFile}: ${(error as Error).message}`);
+    }
+  })();
+  if (replaceKeys === true) {
+    const { issuer, ...others } = flags;
+    if (issuer === undefined || jwks === undefined) throw new UsageError('--replace-keys takes --issuer <iss> and --jwks-file <path>: whose bindings get which keys');
+    const extra = [...Object.keys(others), ...(scopeFlags === undefined ? [] : ['scope']), ...(label === undefined ? [] : ['label']), ...(replace === undefined ? [] : ['replace'])];
+    if (extra.length > 0) throw new UsageError(`--replace-keys changes only the keys of the bindings on --issuer, not --${extra.join(', --')}`);
+    const plan = await coffre.bindings.previewKeys(member, { issuer, jwks });
+    if (!apply) {
+      process.stdout.write(`${describeKeys(member, plan, null)}Run it again with --apply to save it.\n`);
+      return;
+    }
+    const saved = await coffre.bindings.replaceKeys(member, { issuer, jwks });
+    process.stdout.write(describeKeys(member, plan, saved));
     return;
   }
   // A repository or project the lookup cannot see comes back here, for bindingFrom to say how to give its IDs.
@@ -1291,7 +1398,7 @@ async function trust(args: string[]): Promise<void> {
       throw new UsageError((error as Error).message);
     }
   })();
-  const input = { ...binding, ...(scope === undefined ? {} : { scope }), label: label ?? null, replaces: replace ?? [] };
+  const input = { ...binding, ...(scope === undefined ? {} : { scope }), ...(jwks === undefined ? {} : { jwks }), label: label ?? null, replaces: replace ?? [] };
   const plan = await coffre.bindings.preview(member, input);
   const events = describeEvents(plan);
   if (!apply) {
@@ -1380,6 +1487,16 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
+  // An instance before 0.7 lists none.
+  const personalTokens = report.personalTokens ?? [];
+  if (personalTokens.length > 0) {
+    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${personalTokens.length})\n`);
+    for (const token of personalTokens) {
+      const used = token.lastUsedAt === null ? 'never used' : `last used ${token.lastUsedAt.slice(0, 10)}`;
+      process.stdout.write(`  "${token.label ?? ''}" ${token.hint}, reaching ${reaches(token.scope)}, ${used}, expires ${token.expiresAt.slice(0, 16).replace('T', ' ')} UTC\n`);
+    }
+  }
+
   if (report.issuedTokens.length > 0) {
     process.stdout.write(`\nBearer tokens ${they} issued to service accounts, which still work\n`);
     for (const token of report.issuedTokens) {
@@ -1446,9 +1563,10 @@ async function audit(args: string[]): Promise<void> {
 
   for (const entry of result.entries.reverse()) {
     const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
-    process.stdout.write(
-      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${(entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId).padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`,
-    );
+    // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
+    // An instance before 0.7 sends no `token`.
+    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}`;
+    process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
   }
 }
 
@@ -1551,12 +1669,15 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   regenerate,
   run,
   export: exportEnv,
+  version: (args) => manage.version(connect, args),
   history,
   rollback,
   import: importEnv,
   rename: (args) => manage.renameSecret(connect, args),
   archive: (args) => manage.archiveSecret(connect, args, true),
   unarchive: (args) => manage.archiveSecret(connect, args, false),
+  reset: (args) => manage.resetSecret(connect, args),
+  remove: (args) => manage.removeSecret(connect, args),
   move: (args) => manage.move(connect, args),
   folders: (args) => manage.folders(connect, args),
   'folders rename': (args) => manage.foldersRename(connect, args),

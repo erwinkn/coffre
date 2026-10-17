@@ -191,7 +191,7 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.deepEqual(Object.keys(entry!.metadata).sort(), ['bindingId', 'credentialId', 'expiresAt', 'generation', 'issuer', 'run']);
   assert.deepEqual((entry!.metadata.run as Record<string, unknown>).run_id, '7001');
   // The service's token list is for tokens people keep.
-  assert.deepEqual((await runtime.signin!.listServiceTokens(await contextFor(deps, ROOT), SERVICE)), []);
+  assert.deepEqual((await runtime.signin!.listTokens(await contextFor(deps, ROOT), { type: 'service', id: SERVICE })), []);
   const [binding] = await db.owner.select().from(serviceBindings);
   assert.notEqual(binding!.lastUsedAt, null);
   // An ES256 issuer is the same.
@@ -831,4 +831,177 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   assert.equal(entries.find((entry) => entry.action === 'token.exchange')!.run!.claims.run_id, '7001');
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
+});
+
+// --- Keys uploaded with a binding ----------------------------------------------
+
+/** A private Kubernetes cluster: an issuer coffre could not fetch from, which names a `.local` host. */
+const CLUSTER = 'https://kubernetes.default.svc.cluster.local';
+const UID = '4f1c8d2a-7b3e-4c1d-9a2f-0e6b5c4d3a21';
+/** `deploy` of namespace `ci`, by its name and its UID: a deleted account made again under the same name has another. */
+const ACCOUNT: BindingClaims = { sub: 'system:serviceaccount:ci:deploy', 'kubernetes.io.serviceaccount.uid': UID };
+
+/** A projected service-account token, as the kubelet writes it: an hour's lifetime unless told. */
+function projected(by: Key, claims: Record<string, unknown> = {}): string {
+  const iat = seconds() - 5;
+  return token(by, {
+    iss: CLUSTER,
+    sub: ACCOUNT.sub,
+    iat,
+    exp: iat + 3600,
+    'kubernetes.io': { namespace: 'ci', pod: { name: 'deploy-7f9c', uid: 'p-1' }, serviceaccount: { name: 'deploy', uid: UID } },
+    ...claims,
+  });
+}
+
+async function bindCluster(keys: Key[], claims: BindingClaims = ACCOUNT, replaces: string[] = []) {
+  return runtime.workloads!.bind(
+    await contextFor(deps, ROOT),
+    SERVICE,
+    { profile: 'custom', issuer: CLUSTER, claims, label: 'cluster', replaces, jwks: { keys: keys.map((each) => each.jwk) } as never },
+    { dryRun: false },
+  );
+}
+
+const replaceKeys = async (keys: Key[], dryRun = false, at = CLUSTER) =>
+  runtime.workloads!.replaceKeys(await contextFor(deps, ROOT), SERVICE, { issuer: at, jwks: { keys: keys.map((each) => each.jwk) } as never }, { dryRun });
+
+test('a binding that carries its keys takes a private issuer\'s tokens, by a nested claim, and fetches nothing', async () => {
+  issuer.fetches = 0;
+  const made = await bindCluster([rsa]);
+  assert.ok('binding' in made);
+  assert.match(made.binding.jwksUri, /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual(made.binding.keys?.map(({ kid, alg }) => [kid, alg]), [['rs-1', 'RS256']]);
+  const ok = await trade(projected(rsa));
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(issuer.fetches, 0, 'neither discovery nor keys');
+  assert.equal(((await appEntries('token.exchange')).at(-1)!.metadata.run as Record<string, unknown>)['kubernetes.io.pod.name'], 'deploy-7f9c');
+  const bound = await appEntries('token.bind');
+  assert.deepEqual((bound.at(-1)!.metadata.keys as { kid: string }[]).map(({ kid }) => kid), ['rs-1']);
+
+  const refused = async (jwt: string) => {
+    const { status, body } = await trade(jwt);
+    return [status, body.reason, body.message];
+  };
+  // Another account under the same name, made again: its UID differs, and the claim is named, never its value.
+  const [, reason, message] = await refused(projected(rsa, { 'kubernetes.io': { serviceaccount: { name: 'deploy', uid: 'another' } } }));
+  assert.equal(reason, 'no_match');
+  assert.match(message as string, /kubernetes\.io\.serviceaccount\.uid differ/);
+  assert.doesNotMatch(message as string, new RegExp(UID));
+  // A key outside the set: no fetch, a 401 that says to replace the keys.
+  assert.deepEqual((await refused(projected(ec))).slice(0, 2), [401, 'unknown_key']);
+  assert.match((await refused(projected(ec)))[2] as string, /not among those uploaded for https:\/\/kubernetes\.default\.svc\.cluster\.local/);
+  // Longer than an hour, iat to exp, though issued just now.
+  const long = seconds() - 5;
+  assert.deepEqual((await refused(projected(rsa, { iat: long, exp: long + 3601 }))).slice(0, 2), [401, 'too_long']);
+  // Spent once, as any token.
+  const once = projected(rsa);
+  assert.equal((await trade(once)).status, 200);
+  assert.deepEqual((await refused(once)).slice(0, 2), [401, 'replayed']);
+  assert.equal(issuer.fetches, 0);
+  // A binding without uploaded keys still needs an issuer coffre can fetch.
+  await assert.rejects(
+    runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'custom', issuer: CLUSTER, claims: ACCOUNT, label: null, replaces: [] }, { dryRun: true }),
+    /the issuer must be a public host name/,
+  );
+});
+
+test("uploaded keys are checked when bound: public keys alone, of the two algorithms, never for github.com's issuer", async () => {
+  const bindWith = async (jwks: unknown, issuer = CLUSTER, profile: WorkloadProfile = 'custom', claims: BindingClaims = ACCOUNT) =>
+    runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile, issuer, claims, label: null, replaces: [], jwks: jwks as never }, { dryRun: true });
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await assert.rejects(bindWith({ keys: [privateKey.export({ format: 'jwk' })] }), { status: 400, message: /private or a secret key/ });
+  await assert.rejects(bindWith({ keys: [{ kty: 'oct', k: 'c2VjcmV0' }] }), { status: 400, message: /private or a secret key/ });
+  await assert.rejects(bindWith({ keys: [generateKeyPairSync('ec', { namedCurve: 'P-384' }).publicKey.export({ format: 'jwk' })] }), { status: 400, message: /RSA key for RS256 or a P-256 key for ES256/ });
+  await assert.rejects(bindWith({ keys: [generateKeyPairSync('rsa', { modulusLength: 1024 }).publicKey.export({ format: 'jwk' })] }), { status: 400, message: /under 2048 bits/ });
+  await assert.rejects(bindWith({ keys: [{ ...rsa.jwk, use: 'enc' }] }), { status: 400, message: /no key that signs/ });
+  await assert.rejects(bindWith({ keys: [rsa.jwk, { ...ec.jwk, kid: rsa.kid }] }), { status: 400, message: /two keys are key rs-1/ });
+  await assert.rejects(bindWith({ keys: [rsa.jwk] }, ISSUER, 'github', DEPLOY), { status: 400, message: /publishes its keys/ });
+  // The same keys, however written, are one set: extra members and their order change nothing.
+  const plain = await bindWith({ keys: [rsa.jwk] });
+  const written = await bindWith({ keys: [{ x5c: ['MIIB'], ...Object.fromEntries(Object.entries(rsa.jwk).reverse()) }] });
+  assert.ok('jwksUri' in plain && 'jwksUri' in written);
+  assert.equal(plain.jwksUri, written.jwksUri);
+  // Any issuer string at all, matched exactly.
+  const named = await bindWith({ keys: [rsa.jwk] }, 'kapsule:fr-par:5f2a');
+  assert.ok('issuer' in named && named.issuer === 'kapsule:fr-par:5f2a');
+  await assert.rejects(bindWith({ keys: [rsa.jwk] }, ' kapsule'), { status: 400 });
+});
+
+test("replacing an issuer's keys replaces each binding on it, the same but for them; a set of old and new takes both while it rotates", async () => {
+  const first = await bindCluster([rsa]);
+  const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
+  assert.ok('binding' in first && 'binding' in other);
+  const credential = (await trade(projected(rsa))).body.token!;
+  // A binding of other keys on the issuer would leave the others behind: refused, unless it replaces them.
+  await assert.rejects(bindCluster([ec], { sub: 'system:serviceaccount:ci:seed' }), { status: 409, message: /verify with other keys/ });
+
+  const plan = await replaceKeys([rsa, ec], true);
+  assert.ok(!('bindings' in plan));
+  assert.deepEqual(plan.replaces, [first.binding.id, other.binding.id]);
+  assert.deepEqual(plan.keys.map(({ kid }) => kid).sort(), ['es-1', 'rs-1']);
+  assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null).length, 3, 'a dry run writes nothing');
+
+  const done = await replaceKeys([rsa, ec]);
+  assert.ok('bindings' in done);
+  assert.deepEqual(done.replaced, plan.replaces);
+  assert.deepEqual(done.bindings.map((binding) => [binding.label, binding.claims, binding.scope]), [
+    [first.binding.label, first.binding.claims, first.binding.scope],
+    [other.binding.label, other.binding.claims, other.binding.scope],
+  ]);
+  assert.equal(await caller(credential), 401, 'the credentials the old bindings issued ended with them');
+  assert.equal((await trade(projected(rsa))).status, 200);
+  assert.equal((await trade(projected(ec))).status, 200);
+  assert.deepEqual(
+    (await appEntries('token.unbind')).map((entry) => [entry.metadata.bindingId, entry.metadata.reason]),
+    [[first.binding.id, 'keys_replaced'], [other.binding.id, 'keys_replaced']],
+  );
+
+  // The rotation done: the old key goes.
+  await replaceKeys([ec]);
+  assert.equal((await trade(projected(rsa))).body.reason, 'unknown_key');
+  assert.equal((await trade(projected(ec))).status, 200);
+  // Nothing to do, or nobody bound there.
+  await assert.rejects(replaceKeys([ec]), { status: 409, message: /carry these keys already/ });
+  await assert.rejects(replaceKeys([ec], false, 'https://elsewhere.local'), { status: 404 });
+  // GitHub's binding, on the same service, kept its fetched keys throughout.
+  assert.equal((await trade(token(rsa))).status, 200);
+});
+
+test("a binding's uploaded keys are under its MAC: keys swapped in the database verify nothing", async () => {
+  const made = await bindCluster([rsa]);
+  assert.ok('binding' in made);
+  await db.owner.update(serviceBindings).set({ jwks: JSON.stringify({ keys: [ec.jwk] }) }).where(eq(serviceBindings.id, made.binding.id));
+  const { status, body } = await trade(projected(ec));
+  assert.deepEqual([status, body.reason], [401, 'no_match']);
+  assert.deepEqual((await runtime.workloads!.listBindings(await contextFor(deps, ROOT), SERVICE)).map((binding) => binding.id), [bound]);
+});
+
+test('replacing keys keeps which binding a run matches: of two that take the same token, the older still wins', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  for (const environment of ['dev', 'prod']) await root.environments.create(`market/${environment}`, { name: environment });
+  await root.access.set(MEMBER, { 'market/dev': 'viewer', 'market/prod': 'viewer' });
+  const scoped = async (label: string, path: string) => {
+    const made = await runtime.workloads!.bind(
+      await contextFor(deps, ROOT),
+      SERVICE,
+      { profile: 'custom', issuer: CLUSTER, claims: ACCOUNT, scope: { [path]: 'viewer' }, label, replaces: [], jwks: { keys: [rsa.jwk] } as never },
+      { dryRun: false },
+    );
+    assert.ok('binding' in made);
+    return made.binding.id;
+  };
+  await scoped('dev', 'market/dev');
+  await scoped('prod', 'market/prod');
+  const matched = async () => {
+    assert.equal((await trade(projected(rsa))).status, 200);
+    const id = (await appEntries('token.exchange')).at(-1)!.metadata.bindingId;
+    return (await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id as string)))[0]!.label;
+  };
+  assert.equal(await matched(), 'dev');
+  for (let rotation = 0; rotation < 4; rotation++) {
+    await replaceKeys(rotation % 2 === 0 ? [rsa, ec] : [rsa]);
+    assert.equal(await matched(), 'dev', `after rotation ${rotation + 1}`);
+  }
 });

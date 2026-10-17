@@ -73,14 +73,19 @@ its answer says so first. The consent page warns before you grant it.
 With **Write**, it can ask to change secrets and places:
 `request_secret_value`, `generate_secret_value`, `rename_secret`, `archive_secret`,
 `unarchive_secret`, `restore_secret_version`, `create_project` and
-`create_environment`. With **Manage access**: `set_access`, `admit_member`,
+`create_environment`, which with `inherits` makes a fork that reads
+another environment's keys live (docs/design/forking.md). With **Manage access**: `set_access`, `admit_member`,
 `offboard_member`, `issue_service_token`, `revoke_service_token`,
 `trust_workload` and `untrust_workload`.
 
 To use secrets in a command, a client with a shell runs it in your
 terminal as `coffre run market/staging -- npm test`, which sets them for
 that process only: the values never enter the conversation. The CLI must be
-signed in (`coffre login`), and the MCP connection grants it nothing.
+signed in (`coffre login`), and the MCP connection grants it nothing. An
+agent with a CLI of its own, in a home of its own, signs it in with a
+personal token piped to `coffre login <url> --token`, which reaches only
+what you name and lasts an hour unless told
+([design/personal-tokens.md](design/personal-tokens.md)).
 
 Each tool is coffre's API called as you, so a tool can do no more than you
 could with the CLI.

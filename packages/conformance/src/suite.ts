@@ -7,7 +7,7 @@ import { bulkLimit, crossSite, grantScoping, instanceRoles, membersOnly, offboar
 import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValue, revealAudited, rewrittenEntry, verification, writesAgree } from './checks/audit.ts';
 import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { deletion } from './checks/deletion.ts';
-import { folders, forks, missingKeys, references } from './checks/environments.ts';
+import { folders, forks, inheritance, missingKeys, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
 import { mcpRead, mcpChanges, mcpConnect, mcpValues } from './checks/mcp.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
@@ -18,7 +18,7 @@ import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrup
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { pagesInBrowser, pastedValues, signinErrorOnce } from './checks/pages.ts';
 import { browserBundle, headers, health } from './checks/surface.ts';
-import { cliSignsIn, exchangesLimited, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
+import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
 /** The names of the checks that failed. */
 export async function conform(deployment: Deployment, options: { bulkLimit: number; browser: string | null }): Promise<string[]> {
@@ -39,6 +39,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('grant scoping', all, ({ people, canaries }) => grantScoping(people, canaries));
   await report.check('folders', all, ({ people, canaries }) => folders(people, canaries));
   await report.check('forks', all, ({ people, canaries }) => forks(people, canaries));
+  await report.check('inheritance', all, ({ people, canaries }) => inheritance(people, canaries));
   await report.check('references', all, ({ people, canaries }) => references(deployment, people, canaries));
   await report.check('missing keys', { people }, ({ people }) => missingKeys(people));
   // Before offboarding: the leaver's CLI session is one of the credentials /mcp must refuse.
@@ -81,6 +82,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('run token spent', { binding }, () => spentOnce(deployment));
   await report.check('runs refused', { admin, binding }, ({ admin }) => runsRefused(deployment, admin));
   await report.check('run signs in by CLI', { canaries, binding }, ({ canaries }) => cliSignsIn(deployment, canaries));
+  await report.check('keys uploaded', { admin, canaries, binding }, ({ admin, canaries }) => keysUploaded(deployment, admin, canaries));
   await report.check('run unbound', { admin, binding, credential }, ({ admin, binding, credential }) => runUnbound(deployment, admin, binding, credential));
   await report.check('exchanges limited', { binding }, () => exchangesLimited(deployment));
   await report.check('tokens unlogged', { binding }, () => tokensUnlogged(deployment));

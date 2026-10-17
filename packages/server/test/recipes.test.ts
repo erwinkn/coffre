@@ -144,16 +144,53 @@ test('a regenerate replaces the versions it was listed with, or writes nothing',
 
   // One half renamed since the page listed it: its old name is no half of the pair.
   await root.secrets.rename('market/dev/JWT_PRIVATE_KEY', 'SIGNING_KEY');
-  await assert.rejects(regenerate({ private: 2, public: 2 }), { status: 409, message: /JWT_PRIVATE_KEY has no value of its own to regenerate now/ });
+  await assert.rejects(regenerate({ private: 2, public: 2 }), { status: 409, message: /JWT_PRIVATE_KEY has no value to regenerate now: it was renamed/ });
   // Typed over, or archived, since.
   await root.secrets.set('market/dev', { JWT_PUBLIC_KEY: 'typed' });
   await assert.rejects(regenerate({ private: 2, public: 2 }, { private: 'SIGNING_KEY', public: 'JWT_PUBLIC_KEY' }), { status: 409, message: /JWT_PUBLIC_KEY changed/ });
   await root.secrets.set('market/dev', { SIGNING_KEY: null });
-  await assert.rejects(regenerate({ private: 2, public: 3 }, { private: 'SIGNING_KEY', public: 'JWT_PUBLIC_KEY' }), { status: 409, message: /SIGNING_KEY changed since it was listed: it is version 2, archived/ });
+  await assert.rejects(regenerate({ private: 2, public: 3 }, { private: 'SIGNING_KEY', public: 'JWT_PUBLIC_KEY' }), { status: 409, message: /SIGNING_KEY has no value to regenerate now/ });
 
   // Nothing of those refused was written: no JWT_PRIVATE_KEY again, and the versions are as the writes left them.
   const listed = (await root.secrets.list('market/dev')).keys.map(({ key, version, archived }) => [key, version, archived]);
   assert.deepEqual(listed, [['JWT_PUBLIC_KEY', 3, false], ['SIGNING_KEY', 2, true]]);
+});
+
+test('in a fork, an inherited key keeps its recipe, and regenerating it overrides it there, never in the parent', async () => {
+  await root.environments.create('market/prod', { name: 'Prod' });
+  await root.secrets.set('market/prod', { ...pairWrite(), TOKEN: { value: 'parent-token', generated: { recipe: 'bytes:32:hex' } } });
+  await root.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  const listed = async () => Object.fromEntries((await root.secrets.list('market/prod-eu')).keys.map((entry) => [entry.key, [entry.generated, entry.version, entry.parent?.state]]));
+  assert.deepEqual(await listed(), {
+    JWT_PRIVATE_KEY: [PAIR, 1, 'inherited'],
+    JWT_PUBLIC_KEY: [PAIR, 1, 'inherited'],
+    TOKEN: [{ recipe: 'bytes:32:hex' }, 1, 'inherited'],
+  });
+
+  // Regenerating replaces the version it inherits, written as the fork's own.
+  const write = pairWrite();
+  const written = await root.secrets.set('market/prod-eu', {
+    JWT_PRIVATE_KEY: { ...write.JWT_PRIVATE_KEY!, replaces: 1 },
+    JWT_PUBLIC_KEY: { ...write.JWT_PUBLIC_KEY!, replaces: 1 },
+  });
+  assert.deepEqual(written.keys, { JWT_PRIVATE_KEY: { version: 1 }, JWT_PUBLIC_KEY: { version: 1 } });
+  assert.deepEqual((await listed()).JWT_PUBLIC_KEY, [PAIR, 1, 'overridden']);
+  // The parent is as it was: its versions, and its own pair.
+  assert.deepEqual((await root.secrets.list('market/prod')).keys.map(({ key, version, generated }) => [key, version, generated]), [
+    ['JWT_PRIVATE_KEY', 1, PAIR],
+    ['JWT_PUBLIC_KEY', 1, PAIR],
+    ['TOKEN', 1, { recipe: 'bytes:32:hex' }],
+  ]);
+
+  // The parent rotated since the fork listed its key: the regenerate is refused.
+  await root.secrets.set('market/prod', { TOKEN: { value: 'rotated', generated: { recipe: 'bytes:32:hex' } } });
+  await assert.rejects(
+    root.secrets.set('market/prod-eu', { TOKEN: { value: 'v', generated: { recipe: 'bytes:32:hex' }, replaces: 1 } }),
+    { status: 409, message: /TOKEN changed since it was listed: it is version 2, not 1/ },
+  );
+  // One half overridden by hand in the fork: the inherited half no longer pairs with it there, nor it with anything.
+  await root.secrets.set('market/prod-eu', { JWT_PUBLIC_KEY: 'typed' });
+  assert.deepEqual([(await listed()).JWT_PRIVATE_KEY![0], (await listed()).JWT_PUBLIC_KEY![0]], [null, null]);
 });
 
 test('a recipe the database holds and no client could send makes no Regenerate', async () => {
