@@ -47,11 +47,11 @@ market/dev    DATABASE_URL=postgres://dev    STRIPE_KEY=sk_test_1
   included. The vault enforces it by binding the owner into each wrapped
   data key, so a forged database row fails to decrypt instead of granting
   access.
-- **The prototype** on this branch has the schema on both engines, the
-  read path (export, `run`, `get`) resolving chains, forks that inherit,
-  removals, resets, the archive block and the vault's `through` label. Its
-  tests pass on Postgres and SQLite. Personal configs are designed here
-  but not prototyped, apart from their column.
+- **Status.** Erwin agreed to the three recommendations below (no
+  lending, owner-only personal configs, explicit `@me`). Forks that
+  inherit shipped first, as 0.7's first PR: section 7 says what it built.
+  Personal configs are the second PR; their `owner` column comes with
+  their own migration.
 
 ## 1. The model
 
@@ -229,7 +229,7 @@ addition. A fork's removal of it does nothing, and the page shows it as
 **The parent is archived or deleted.** Archiving an environment that live
 forks inherit from is refused. The 409 names them: "market/prod is
 inherited by market/prod-eu: archive it first". This is D41's rule for
-references, applied to parents, and the prototype has it. Personal
+references, applied to parents, and it is built. Personal
 configs are the exception: they're private and derived, so archiving dev
 archives every `dev@…` with it, and restoring dev restores them. A fork
 is restored only while its parent is live. Deleting a parent for good is
@@ -448,10 +448,10 @@ SENTRY_DSN       removed   ·  prod has it                                      
 
 ```sh
 coffre fork market/prod prod-eu --inherit          # a fork that inherits
-coffre list market/prod-eu                         # a "from" column: own, prod, removed
-coffre set market/prod-eu DATABASE_URL             # an override, prompted as ever
-coffre remove market/prod-eu/SENTRY_DSN            # does without prod's key
-coffre reset market/prod-eu/DATABASE_URL           # back to prod's
+coffre list market/prod-eu                         # each key: (from prod), (overrides prod), (removed: prod has it)
+coffre set market/prod-eu/DATABASE_URL             # an override, prompted as ever
+coffre remove market/prod-eu/SENTRY_DSN            # does without prod's key; --undo inherits it again
+coffre reset market/prod-eu/DATABASE_URL           # back to prod's, its own kept; --undo serves it again
 coffre run market/dev@me -- pnpm dev               # your personal dev, or dev if you have none
 coffre set market/dev@me DATABASE_URL              # makes your personal dev on first write
 ```
@@ -473,23 +473,33 @@ default is a compatibility promise, and copying stays the default.
 ### API
 
 ```
-PUT   /api/projects/market/prod-eu            {"from": "prod", "inherit": true}     (prototyped)
-GET   /api/secrets/market/prod-eu             each key: "from": null | "prod", "removed": bool
-PATCH /api/secrets/market/prod-eu             {"DATABASE_URL": {"inherit": true}}   reset to the parent
-PATCH /api/projects/market/prod-eu/dismissals {"SENTRY_DSN": true}                  remove (exists today)
-POST  /api/reveals                            {"path": "market/dev@me"}             a personal config
+PUT   /api/projects/market/prod-eu                 {"from": "prod", "inherit": true}
+GET   /api/secrets/market/prod-eu                  "parents": ["prod"]; each key's "parent"
+PATCH /api/secrets/market/prod-eu/DATABASE_URL     {"inherit": true}      reset to the parent; false undoes it
+PATCH /api/projects/market/prod-eu/dismissals      {"SENTRY_DSN": true}   remove; null inherits it again
+POST  /api/reveals                                 {"path": "market/dev@me"}   a personal config (PR 2)
 ```
 
+Each listed key's `parent` is null outside a fork and for a key only the
+fork holds; otherwise `{ from, state, changed, reset }`: `state` is
+`inherited`, `overridden` or `removed`, `from` the environment holding
+the parent's key, `changed` that its value is newer than the override,
+and `reset` that the fork's own value was reset and is kept. A key is
+listed once: a reset override is folded into its inherited entry, not
+listed again as archived.
+
 `GET /api/projects` lists each environment's `parent`, and its owner for a
-personal config, to those who may see it.
+personal config, to those who may see it. A fork's count is of the keys
+it resolves to.
 
 ### MCP
 
 The tools take paths, so `market/prod-eu` and `market/dev@me` work as
-they are. `list_secrets` gains each key's `from`, and
+they are. `list_secrets` gains each key's `parent`, and
 `reveal_secret_values` resolves forks like `run`. `create_environment`
-can't fork today. Adding `from` and `inherit` there is a small, separate
-step.
+takes `inherits`, a slug of the same project, and makes a fork that
+inherits; its approval page names the parent. It makes no copies: a copy
+reads every value, which is no approval's to grant in passing.
 
 ### Missing keys
 
@@ -507,11 +517,14 @@ personal config.
 
 ## 6. Migrations
 
-One migration, `0004_environment_parents`, adds both columns, nullable,
-with their index, unique key and check. On Postgres it also adds the
-same-project foreign key. This is an expand-only change. The previous
-release, serving on the new schema during a deploy, ignores both columns
-and meets no fork, since only the new code makes them.
+`0004_environment_parents` adds `parent_id`, nullable, with its index
+and check. On Postgres it also adds the same-project foreign key. This is
+an expand-only change. The previous release, serving on the new schema
+during a deploy, ignores the column and meets no fork, since only the new
+code makes them. Personal configs' `owner`, with its check and its unique
+index on `(parent_id, owner)`, comes in PR 2's own migration: nothing in
+PR 1 reads or writes it, and a column added before the code that guards
+it would only be one the app's login could write unchecked.
 
 - **The foreign key is `NO ACTION`, not `RESTRICT`.** It's checked at the
   end of a statement, not at each row, so one statement that deletes a
@@ -535,72 +548,57 @@ and meets no fork, since only the new code makes them.
   `environments` covers the columns, and the absent `UPDATE` keeps them
   immutable.
 
-## 7. The prototype on this branch
+## 7. What 0.7's first PR built
 
-What's built:
+Forks that inherit, everywhere but personal configs:
 
-- `packages/db`: both schemas, `0004_environment_parents` for each engine
-  (Postgres generated, SQLite hand-written), and snapshots.
-- `packages/server`:
-  - `parentsOf` and `forksOf` (`db/queries.ts`);
-  - `readableValues` resolving the chain, with removals as dismissals and
-    the archived-parent refusal (`api/references.ts`);
-  - `reveal`'s read-on-the-parent check, and single-key reads of
-    inherited keys (`api/secrets.ts`);
-  - `PUT … {from, inherit}` (`api/forks.ts`, `api/routes.ts`), and
-    `putEnvironment` storing `parent_id`, with the parent checked again
-    under the log's head;
-  - forks as copies or references of a fork, which take what it resolves
-    to, each key where it's held, with that folder; and no copy into an
-    empty environment that already inherits;
-  - the chain read in one snapshot (`SNAPSHOT`), and the parent check
-    before any other refusal;
-  - every write in a fork ending the key's removal (`endRemovals`), and a
-    write reviving an override that was reset (`api/secrets.ts`);
-  - the archive block, the refusal to restore a fork whose parent is
-    archived, and the refusal to delete a parent (`api/projects.ts`).
-- `packages/core` and `packages/vault`: `through` on `unwrap`'s items,
-  checked and logged as `through` and `also` (`vault.ts`).
-- `packages/client`: the regenerated `api.ts`.
-- `packages/server/test/inheritance.test.ts`, twelve cases, on both
-  engines:
-  - live reads after a parent change and a new key;
-  - override, addition, removal, reset and restore;
-  - the log in both places;
-  - "a fork lends nothing", for the app and for the vault called
-    directly;
-  - forks named from another project, or the value's own environment,
-    refused as `bad_claim`;
-  - chains and the cap;
-  - the archive block, restoring, and the refusal of an archived parent;
-  - a write over a removal, then a reset;
-  - forking a fork as references and as copies;
-  - the vault refusing an archived fork;
-  - the input refusals.
+- **Schema.** `0004_environment_parents`, both engines (section 6).
+- **Reads.** `readableValues` resolves the chain in one snapshot (`run`,
+  `export`, `get`, reveals); `inheritedRows` and `resolveKeys`
+  (`packages/server/src/api/inheritance.ts`) do the same by name for the
+  list, the missing keys, the project list's counts, resets and renames.
+  The parent check comes before any other refusal, and the vault logs
+  inherited reads under the parent with `through` and `also`.
+- **Writes.** `PUT … {from, inherit}` makes a fork; a write in a fork
+  revives a reset override and ends its key's removal (`endRemovals`, in
+  five places now: the reset's undo is the fifth). Reset and its undo are
+  `PATCH /secrets/…/:key {inherit}`, under `secret.write`, logged as
+  `secret.reset` and `secret.unarchive`, and refused where the parent holds
+  no such key or a reference reads the override. A rename carries down to
+  every fork below, archived ones included (`renameBelow`), moving
+  removals with the key and refusing, named, where a fork holds the new
+  name. A reference to a key a fork only inherits is refused, naming the
+  parent's key.
+- **Guards.** No archiving a parent with live forks, no deleting one any
+  fork names, no restoring a fork under an archived parent.
+- **Missing keys** compare what environments resolve to, and leave out a
+  key only an environment's own forks hold.
+- **Surfaces.** The UI's Add environment offers "Inheriting from …"; the
+  environment page says what it inherits from, tags each key "from prod",
+  "overrides prod" (with "prod changed since") or "removed · prod has it",
+  and offers Override, Remove, Restore, Reset to prod and Use its own value
+  again, each with an Undo. The CLI has `fork --inherit`, `reset`, `remove`
+  and a fork's `list`; MCP's `create_environment` takes `inherits`; the
+  audit page reads "revealed market/prod/STRIPE_KEY in market/prod-eu".
+- **Tests.** `packages/server/test/inheritance.test.ts` on both engines,
+  the CLI's, the UI's sentences, MCP's approval, and the conformance
+  check `inheritance`.
 
-Not built yet:
+Left out, on purpose or for later:
 
-- personal configs (the owner's AAD binding, `@me`, privacy in lists);
-- `GET /secrets`' `from` column;
-- the rename cascade;
-- missing keys' resolved comparison;
-- reset as a write (`{"inherit": true}`, under `secret.write`; the
-  prototype resets by archiving, which takes `secret.archive`);
-- the UI, the CLI and MCP.
-
-One shortcut to undo: a single-key read now loads its environment's rows
-and filters by key, rather than fetching the one row by id.
+- personal configs (PR 2);
+- the page's filter chips, the switcher's indenting, "Compare with prod",
+  and preselecting "Inheriting from" in Add environment: an empty
+  environment stays the default, as the CLI's copy does;
+- a list-valued `also`, so a read of a reference a fork inherits also
+  reaches the holder's log (section 3).
 
 ## 8. Recommendation
 
 Build it as above, in two PRs, for **0.7.0**. A schema change and a new
 read rule make it a minor release.
 
-1. **Forks that inherit.** The prototype, plus everything under "not built
-   yet" except personal configs, and conformance checks: a fork reads its
-   parent live, a fork's reader without the parent is refused, and the
-   vault refuses a `through` from another project. Two to three days of
-   agent work, plus review. The UI page is the largest part.
+1. **Forks that inherit.** Built: section 7.
 2. **Personal configs.** The vault's owner binding (both KEK providers),
    `@me` in path parsing (server, client, CLI, MCP), privacy in lists,
    switcher, missing keys and audit, the settings list, offboarding and
@@ -610,6 +608,9 @@ read rule make it a minor release.
    care in review.
 
 ## Questions for Erwin
+
+Answered on 2026-10-17: Erwin took each recommendation (standing rule
+R8), reversible before 0.7.0.
 
 1. **Should a fork lend its parent's values to people who can't read the
    parent?** I recommend no. Inheriting is a view of the parent, never a
