@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { contextFor, clientFor } from './api-fixture.ts';
 import { browserFor, deps, entries, fromPage, ROOT, route, runtime, sessionFor, useMcp, DEV } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
+import type { CoffreRuntime } from '../src/runtime.ts';
 import { checkPlugins, type CoffrePlugin } from '../src/plugins.ts';
 import { vaultKv } from '../src/plugins/vault-kv.ts';
 
@@ -144,6 +145,28 @@ test('what coffre does not serve says so, and never as 404 on a path a client me
   // vault-action sends an empty namespace with every request.
   assert.equal((await vault('secret/data/market/prod', eso, { headers: { 'x-vault-namespace': '' } })).status, 200);
   assert.equal((await vault('secret/metadata/market/prod')).status, 404);
+  // `vault kv get -wrap-ttl=5m` expects a wrapping token, never the values themselves.
+  const wrapped = await vault('secret/data/market/prod', eso, { headers: { 'x-vault-wrap-ttl': '5m' } });
+  assert.equal(wrapped.status, 400);
+  assert.equal((await wrapped.text()).includes(PROD.DATABASE_URL), false);
+});
+
+test("behind Cloudflare Access, a plugin's token is Access's assertion, which the API reads from its own header", async () => {
+  const access = {
+    ...runtime,
+    auth: { mode: 'cloudflare', access: { issuer: 'https://acme.cloudflareaccess.com', jwksUrl: 'https://acme.cloudflareaccess.com/cdn-cgi/access/certs', audience: 'coffre-aud' } },
+    signin: null,
+    verifier: {
+      verify: async (token: string) => {
+        if (token !== 'assertion-for-eso') throw new Error('not an assertion');
+        return { type: 'service', id: 'eso', commonName: 'eso' };
+      },
+    },
+  } as unknown as CoffreRuntime;
+  const ask = (token: string) =>
+    coffreRoute(new Request('https://secrets.acme.example/v1/secret/data/market/prod', { headers: { 'x-vault-token': token } }), access, null).then((response) => response!);
+  assert.deepEqual((await body(await ask('assertion-for-eso'))).data.data, PROD);
+  assert.equal((await ask('forged')).status, 403);
 });
 
 test("`vault kv get` and vals learn the mount's version first, without a token", async () => {

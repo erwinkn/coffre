@@ -55,6 +55,8 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
   if (request.method !== 'GET' && request.method !== 'HEAD') return failure(405, "coffre's Vault API is read only");
   // Vault Enterprise's namespaces: an empty header is what some clients always send.
   if ((request.headers.get('x-vault-namespace') ?? '') !== '') return failure(400, 'coffre has no Vault namespaces');
+  // Response wrapping (`vault kv get -wrap-ttl=5m`): the client expects a single-use token, not the values. Refused before anything is read.
+  if ((request.headers.get('x-vault-wrap-ttl') ?? '') !== '') return failure(400, 'coffre does not wrap responses: leave out -wrap-ttl');
 
   // What `vault kv get` and vals ask first, to learn the mount's KV version. It holds no secret: Vault's UI asks it too.
   const mounts = 'sys/internal/ui/mounts/';

@@ -4,6 +4,7 @@
 // as whoever a request's credential names, through the API: the same route
 // table, checks, vault and audit log as the CLI.
 import { createClient, type CoffreClient } from '@coffre/client';
+import { ACCESS_JWT_HEADER } from '@coffre/core/identity';
 
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { fetchApi } from './fetch-api.ts';
@@ -25,10 +26,11 @@ export type CoffrePlugin = {
 export type PluginContext = {
   publicUrl: string;
   /**
-   * The API as whoever `token` names, a service token or a CLI session,
-   * which the plugin read from its request: never a cookie, which coffre
-   * alone reads. The token is checked at the first call, once for all of
-   * them; a refusal, the token's included, throws a `CoffreError`.
+   * The API as whoever `token` names, which the plugin read from its
+   * request: a service, personal or CLI token with coffre's sign-in, Access's
+   * assertion behind Cloudflare Access; never a cookie, which coffre alone
+   * reads. The token is checked at the first call, once for all of them; a
+   * refusal, the token's included, throws a `CoffreError`.
    */
   api(token: string): CoffreClient;
 };
@@ -64,13 +66,15 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
   const { pathname } = new URL(request.url);
   const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
   if (routes === undefined) return null;
+  // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
+  const carrying = (token: string) => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
   return routes.fetch(request, {
     publicUrl: runtime.publicUrl,
     api: (token) => {
       let checked: Promise<AuthenticatedIdentity | Response> | undefined;
       return createClient({
         url: runtime.publicUrl,
-        headers: () => ({ authorization: `Bearer ${token}` }),
+        headers: () => carrying(token),
         // In process, as a page's render calls it (`pageClient`): one check of the token for every call.
         transport: (inner) =>
           fetchApi(inner, runtime, {
