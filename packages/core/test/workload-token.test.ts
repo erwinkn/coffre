@@ -136,7 +136,8 @@ test('an uploaded key set keeps the public keys that sign, written one way, and 
   const short = Buffer.from(rsa.jwk.n!, 'base64url');
   short[0] = 0x01;
   await invalid({ keys: [{ ...rsa.jwk, n: short.toString('base64url') }] }, /under 2048 bits/);
-  await invalid({ keys: [{ ...ec.jwk, x: 'AQAB' }] }, /not a valid EC key/);
+  await invalid({ keys: [{ ...ec.jwk, x: 'AQAB' }] }, /32 bytes/);
+  await invalid({ keys: [{ ...ec.jwk, x: Buffer.alloc(32, 1).toString('base64url') }] }, /not a valid EC key/);
   await invalid({ keys: [rsa.jwk, { ...ec.jwk, kid: 'rs' }] }, /two keys are key rs/);
   // RSA parameters jose would take, though they verify what nobody signed: an exponent of 1 makes a signature its own message.
   for (const e of ['AQ', 'Aw', 'AQAA', 'AAEAAQ', 'AQAB=']) await invalid({ keys: [{ ...rsa.jwk, e }] }, /exponent|n and e/);
@@ -144,8 +145,15 @@ test('an uploaded key set keeps the public keys that sign, written one way, and 
   even[even.length - 1]! &= 0xfe;
   await invalid({ keys: [{ ...rsa.jwk, n: even.toString('base64url') }] }, /not a valid RSA key/);
   await invalid({ keys: [{ ...rsa.jwk, n: `AA${rsa.jwk.n}` }] }, /fewest bytes/);
-  // One set, however listed: one digest.
+  // One set, however listed: one digest, two kids of one key included.
   assert.equal((await uploadedKeys({ keys: [ec.jwk, rsa.jwk] })).digest, (await uploadedKeys({ keys: [rsa.jwk, ec.jwk] })).digest);
+  const twice = [{ ...rsa.jwk, kid: 'old' }, { ...rsa.jwk, kid: 'next' }];
+  assert.equal((await uploadedKeys({ keys: twice })).digest, (await uploadedKeys({ keys: twice.toReversed() })).digest);
+  // An EC coordinate in another spelling, its last character's unused bits set: refused, not another key.
+  const last = ec.jwk.x!.at(-1)!;
+  const respelled = `${ec.jwk.x!.slice(0, -1)}${'AEIMQUYcgkosw048'.includes(last) ? String.fromCharCode(last.charCodeAt(0) + 1) : last}`;
+  if (respelled !== ec.jwk.x) await invalid({ keys: [{ ...ec.jwk, x: respelled }] }, /32 bytes/);
+  await invalid({ keys: [{ ...ec.jwk, x: `${ec.jwk.x}AA` }] }, /32 bytes/);
 });
 
 test('a token that names no key verifies under whichever key of the set signed it, as while an issuer rotates', async () => {

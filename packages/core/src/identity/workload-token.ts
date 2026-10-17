@@ -252,9 +252,7 @@ export async function uploadedKeys(value: unknown): Promise<UploadedKeys> {
       key = { kty: 'RSA', ...kidAndUse(jwk), alg, n: jwk.n as string, e: jwk.e as string };
     } else if (jwk.kty === 'EC' && jwk.crv === 'P-256' && (jwk.alg === undefined || jwk.alg === 'ES256')) {
       alg = 'ES256';
-      if (typeof jwk.x !== 'string' || typeof jwk.y !== 'string' || !BASE64URL.test(jwk.x) || !BASE64URL.test(jwk.y)) {
-        throw new KeysInvalid(`${named} is an EC key without x and y, each base64url`);
-      }
+      if (!coordinate(jwk.x) || !coordinate(jwk.y)) throw new KeysInvalid(`${named} is an EC key without x and y, each 32 bytes in base64url`);
       key = { kty: 'EC', ...kidAndUse(jwk), alg, crv: 'P-256', x: jwk.x, y: jwk.y };
     } else {
       throw new KeysInvalid(`${named} is not an RSA key for RS256 or a P-256 key for ES256, the two coffre accepts`);
@@ -267,7 +265,8 @@ export async function uploadedKeys(value: unknown): Promise<UploadedKeys> {
     keys.push(key);
   }
   if (keys.length === 0) throw new KeysInvalid('the key set holds no key that signs');
-  const sorted = keys.map((key) => [thumbprint(key), key] as const).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  // By thumbprint, then whole: two kids may name the same key.
+  const sorted = keys.map((key) => [`${thumbprint(key)} ${JSON.stringify(key)}`, key] as const).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const jwks = JSON.stringify({ keys: sorted.map(([, key]) => key) });
   return { jwks, digest: createHash('sha256').update(jwks, 'utf8').digest('hex'), keys: keySummaries(jwks) };
 }
@@ -288,6 +287,13 @@ function thumbprint(key: JWK): string {
 }
 
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
+
+/** A P-256 coordinate as JWK writes one: 32 bytes, in base64url exactly, so that one key has one spelling. */
+function coordinate(value: unknown): value is string {
+  if (typeof value !== 'string' || !BASE64URL.test(value)) return false;
+  const bytes = Buffer.from(value, 'base64url');
+  return bytes.length === 32 && bytes.toString('base64url') === value;
+}
 
 /** An unsigned integer as JWK writes one, base64url in its fewest bytes; null for anything else. */
 function integer(value: unknown): bigint | null {

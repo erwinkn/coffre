@@ -976,3 +976,32 @@ test("a binding's uploaded keys are under its MAC: keys swapped in the database 
   assert.deepEqual([status, body.reason], [401, 'no_match']);
   assert.deepEqual((await runtime.workloads!.listBindings(await contextFor(deps, ROOT), SERVICE)).map((binding) => binding.id), [bound]);
 });
+
+test('replacing keys keeps which binding a run matches: of two that take the same token, the older still wins', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  for (const environment of ['dev', 'prod']) await root.environments.create(`market/${environment}`, { name: environment });
+  await root.access.set(MEMBER, { 'market/dev': 'viewer', 'market/prod': 'viewer' });
+  const scoped = async (label: string, path: string) => {
+    const made = await runtime.workloads!.bind(
+      await contextFor(deps, ROOT),
+      SERVICE,
+      { profile: 'custom', issuer: CLUSTER, claims: ACCOUNT, scope: { [path]: 'viewer' }, label, replaces: [], jwks: { keys: [rsa.jwk] } as never },
+      { dryRun: false },
+    );
+    assert.ok('binding' in made);
+    return made.binding.id;
+  };
+  await scoped('dev', 'market/dev');
+  await scoped('prod', 'market/prod');
+  const matched = async () => {
+    assert.equal((await trade(projected(rsa))).status, 200);
+    const id = (await appEntries('token.exchange')).at(-1)!.metadata.bindingId;
+    return (await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id as string)))[0]!.label;
+  };
+  assert.equal(await matched(), 'dev');
+  for (let rotation = 0; rotation < 4; rotation++) {
+    await replaceKeys(rotation % 2 === 0 ? [rsa, ec] : [rsa]);
+    assert.equal(await matched(), 'dev', `after rotation ${rotation + 1}`);
+  }
+});

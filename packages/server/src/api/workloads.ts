@@ -425,7 +425,7 @@ export class WorkloadService {
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
         const now = new Date();
         const bindings: BindingView[] = [];
-        for (const old of live) {
+        for (const [i, old] of live.entries()) {
           const id = randomUUID();
           const { scope, byPath } = scopes.get(old.id)!;
           const row = {
@@ -439,7 +439,8 @@ export class WorkloadService {
             claims: old.claims,
             scope: storedScope(scope),
             label: old.label,
-            createdAt: now,
+            // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
+            createdAt: new Date(now.getTime() + i),
             createdBy: ctx.caller.principal.id,
           };
           await insertBinding(tx, this.#deps.chainKey, row);
