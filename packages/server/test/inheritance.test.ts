@@ -660,3 +660,16 @@ test('a removal of a key the parent archived since stays listed, as such, until 
   await root.secrets.update('market/prod/SENTRY_DSN', { archived: false });
   assert.equal((await values(maintainer, 'market/prod-eu')).SENTRY_DSN, 'https://sentry/prod');
 });
+
+test('a reset override removed, its key archived in the parent since, is listed once, as the removal', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { SENTRY_DSN: 'https://sentry/eu' });
+  await maintainer.secrets.inherit('market/prod-eu/SENTRY_DSN', true);
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: true });
+  await root.secrets.update('market/prod/SENTRY_DSN', { archived: true });
+  const listed = (await maintainer.secrets.list('market/prod-eu')).keys.filter((key) => key.key === 'SENTRY_DSN');
+  assert.deepEqual(listed.map((key) => [key.archived, key.parent]), [[false, { from: 'prod', state: 'removed', changed: false, reset: true, held: false }]]);
+  // Restored, the removal goes, and its own value is an archived key of the fork's, as any other.
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: null });
+  assert.deepEqual((await maintainer.secrets.list('market/prod-eu')).keys.filter((key) => key.key === 'SENTRY_DSN').map((key) => [key.archived, key.parent]), [[true, null]]);
+});

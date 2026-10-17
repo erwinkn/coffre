@@ -200,8 +200,9 @@ export async function listSecrets(
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
 
   const own = new Set(rows.filter((row) => row.archivedAt === null).map((row) => row.key));
-  // An override reset to the parent's: its key is listed once, as inherited, saying its own value is kept.
-  const reset = new Set(rows.filter((row) => row.archivedAt !== null && inherited.held.has(row.key)).map((row) => row.key));
+  // An override reset to the parent's: its key is listed once, as inherited or removed, saying its own value is kept.
+  const removedSince = (key: string) => inherited.removed.has(key) && inherited.archived.has(key);
+  const reset = new Set(rows.filter((row) => row.archivedAt !== null && (inherited.held.has(row.key) || removedSince(row.key))).map((row) => row.key));
   const keys: SecretKey[] = rows.filter((row) => !reset.has(row.key)).map((row) => {
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
     if (held === undefined) return { ...view(row), parent: null };
@@ -224,10 +225,10 @@ export async function listSecrets(
   // A removal of a key the parent archived since: no longer doing anything, until the parent brings it back. Listed, to be restored.
   for (const key of inherited.removed) {
     const from = inherited.archived.get(key);
-    if (from === undefined || own.has(key) || reset.has(key)) continue;
+    if (from === undefined || own.has(key)) continue;
     keys.push({
       key, reference: null, folder: null, archived: false, version: null, updatedAt: null, updatedBy: null,
-      parent: { from: from.slug, state: 'removed', changed: false, reset: false, held: false },
+      parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
     });
   }
   keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
