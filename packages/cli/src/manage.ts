@@ -314,9 +314,17 @@ export async function removeSecret(connect: () => CoffreClient, args: string[], 
   const environment = path.slice(0, path.lastIndexOf('/'));
   const key = path.slice(path.lastIndexOf('/') + 1);
   const api = connect();
-  const { parents } = await api.secrets.list(environment);
+  const { parents, keys: listed } = await api.secrets.list(environment);
   if (parents === undefined || parents.length === 0) {
     throw new UsageError(`${environment} inherits from no environment: \`coffre archive ${path}\` takes a key out of it`);
+  }
+  // A value of its own beats a removal: the fork would go on serving it.
+  const entry = listed.find((each) => each.key === key && !each.archived);
+  if (!values.undo && entry !== undefined && entry.parent?.state === 'overridden') {
+    throw new UsageError(`${path} overrides ${entry.parent.from}'s with a value of its own: \`coffre reset ${path}\` first, then remove it`);
+  }
+  if (!values.undo && entry !== undefined && entry.parent === null) {
+    throw new UsageError(`${path} is ${environment}'s own, inherited from nowhere: \`coffre archive ${path}\` takes it out`);
   }
   const { keys } = await api.environments.dismiss(environment, { [key]: values.undo ? null : true });
   if (keys[key] === 'unchanged') return void io.out.write(`${path} was ${values.undo ? 'not removed' : 'removed'} already\n`);

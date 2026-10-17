@@ -1185,6 +1185,8 @@ function SecretRow({
   const canRead = canReveal && !removed && !parentHidden;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
+  // And where that version is held: a reset, an override or a new reference changes it under the same number.
+  const readFrom = `${inherited ? parent!.from : '.'}:${reference?.source ?? ''}`;
   const holderPath = `${project}/${environment}/${entry.key}`;
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
@@ -1195,10 +1197,10 @@ function SecretRow({
   // different version -- saved here, rolled back, or written by someone else
   // and picked up on refresh -- the old plaintext is not the value any more,
   // and must not stay on screen pretending to be.
-  const shown = revealIsCurrent(reveal, readVersion) ? reveal : null;
+  const shown = revealIsCurrent(reveal, readVersion, readFrom) ? reveal : null;
   useEffect(() => {
-    if (reveal !== null && !revealIsCurrent(reveal, readVersion)) setReveal(null);
-  }, [reveal, readVersion]);
+    if (reveal !== null && !revealIsCurrent(reveal, readVersion, readFrom)) setReveal(null);
+  }, [reveal, readVersion, readFrom]);
 
   useEffect(() => {
     if (reveal === null) return;
@@ -1208,7 +1210,7 @@ function SecretRow({
 
   const secondsLeft = useSecondsLeft(shown);
 
-  const editBase = editing && revealIsCurrent(base, readVersion) ? base : null;
+  const editBase = editing && revealIsCurrent(base, readVersion, readFrom) ? base : null;
   useEffect(() => {
     if (!editing) setBase(null);
   }, [editing]);
@@ -1220,7 +1222,7 @@ function SecretRow({
       const value = await fetchValue();
       dispatch({
         type: 'read-succeeded',
-        reveal: show ? { value, version: readVersion, at: Date.now() } : null,
+        reveal: show ? { value, version: readVersion, from: readFrom, at: Date.now() } : null,
       });
       return value;
     } catch (failure) {
@@ -1285,7 +1287,7 @@ function SecretRow({
       const value = await readValue({ show: false });
       setOpening(false);
       if (value === null) return;
-      setBase({ value, version: readVersion, at: Date.now() });
+      setBase({ value, version: readVersion, from: readFrom, at: Date.now() });
     }
     setReveal(null);
     onEdit();

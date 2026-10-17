@@ -578,3 +578,42 @@ test('a project that holds forks is archived and deleted whole, its forks with i
   await root.projects.delete('market');
   assert.equal((await root.projects.list()).projects.some((project) => project.slug === 'market'), false);
 });
+
+test('two renames at once: one wins, the other is refused, and the forks follow the winner', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu' });
+  const outcomes = await Promise.allSettled([
+    root.secrets.update('market/prod/STRIPE_KEY', { key: 'FIRST' }),
+    root.secrets.update('market/prod/STRIPE_KEY', { key: 'SECOND' }),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1);
+  const won = Object.keys(await values(root, 'market/prod')).find((key) => key === 'FIRST' || key === 'SECOND')!;
+  const eu = await values(maintainer, 'market/prod-eu');
+  assert.deepEqual([eu[won], Object.keys(eu).filter((key) => key === 'FIRST' || key === 'SECOND' || key === 'STRIPE_KEY')], ['sk_eu', [won]]);
+});
+
+test("in a fork, a write brings back a reset override, never an archived key of the fork's own", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { EU_REGION: 'eu-west-1', STRIPE_KEY: 'sk_eu' });
+  await maintainer.secrets.update('market/prod-eu/EU_REGION', { archived: true });
+  await maintainer.secrets.inherit('market/prod-eu/STRIPE_KEY', true);
+  await root.access.set(`user:${ADA}`, { market: 'developer' });
+
+  await assert.rejects(ada.secrets.set('market/prod-eu', { EU_REGION: 'eu-west-2' }), { status: 409, message: /EU_REGION is archived; unarchive it/ });
+  await assert.rejects(ada.secrets.dryRun('market/prod-eu', { EU_REGION: 'eu-west-2' }), { status: 409 });
+  assert.deepEqual((await ada.secrets.dryRun('market/prod-eu', { STRIPE_KEY: 'sk_eu_2' })).keys, { STRIPE_KEY: 'changed' });
+  await ada.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu_2' });
+  assert.equal((await values(ada, 'market/prod-eu')).STRIPE_KEY, 'sk_eu_2');
+});
+
+test("a reference refused on a key a fork inherits names the parent's key only to a reader of the fork", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/dev', { name: 'Dev' });
+  await root.access.set(`user:${ADA}`, { 'billing/dev': 'developer' });
+  await assert.rejects(ada.secrets.set('billing/dev', { STRIPE: { ref: 'market/prod-eu/STRIPE_KEY' } }), (error: { status: number; message: string }) => {
+    assert.equal(error.status, 404);
+    assert.equal(error.message, 'market/prod-eu/STRIPE_KEY is no live secret to refer to');
+    return true;
+  });
+});

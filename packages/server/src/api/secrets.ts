@@ -268,6 +268,16 @@ async function endRemovals(
   }
 }
 
+/**
+ * The keys a write in this environment may bring back from archived: in a
+ * fork, those its parents hold, whose own row is an override reset to
+ * theirs (`inheritSecret`). None elsewhere.
+ */
+async function resetKeys(db: Queryable, place: ResolvedPath): Promise<ReadonlySet<string>> {
+  if (place.environment!.parentId === null) return new Set();
+  return new Set((await inheritedRows(db, place.environment!.id))?.held.keys());
+}
+
 /** A competing write invalidated the keys prepared outside the transaction. */
 class PrepareAgain extends Error {}
 
@@ -330,15 +340,17 @@ export async function setSecrets(
     const currently = await currentReferences(ctx.db, heads.filter((row) => row.currentVersionId === null).map((row) => row.id));
     // Each key's newest reference, which the transaction checks no write replaced meanwhile.
     const newestBefore = newestReferences(await referenceRows(ctx.db, { holderSecretIds: heads.map((row) => row.id) }));
-    // In a fork, an archived key is an override reset to its parent's: writing it again overrides again.
-    const fork = place.environment!.parentId !== null;
+    // In a fork, an archived key its parent holds is an override reset to the parent's: writing it overrides
+    // again. One the parent lacks is archived as anywhere, and unarchiving it takes more than a write.
+    const resettable = await resetKeys(ctx.db, place);
+    const refuseArchived = (key: string, row: { id: string }) => new Refusal(
+      conflict(`${key} is archived; unarchive it before writing a new version`),
+      denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
+    );
     const archived = (key: string) => {
       const row = prepared.get(key);
-      if (row?.archivedAt == null || fork) return;
-      throw new Refusal(
-        conflict(`${key} is archived; unarchive it before writing a new version`),
-        denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
-      );
+      if (row?.archivedAt == null || resettable.has(key)) return;
+      throw refuseArchived(key, row);
     };
     const items = writes.map(([key, value]) => {
       archived(key);
@@ -425,10 +437,12 @@ export async function setSecrets(
       if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
 
       const keys: Record<string, SetOutcome> = {};
-      // A reference written again unchanged revives its key too.
-      for (const key of keysIn.filter((key) => patch[key] !== null)) {
-        const row = byKey.get(key);
-        if (row?.archivedAt == null) continue;
+      // A reset override written again serves again, a reference written again unchanged too; still one the parent holds.
+      const revived = keysIn.filter((key) => patch[key] !== null && byKey.get(key)?.archivedAt != null);
+      const stillResettable = revived.length === 0 ? resettable : await resetKeys(tx, place);
+      for (const key of revived) {
+        const row = byKey.get(key)!;
+        if (!stillResettable.has(key)) throw refuseArchived(key, row);
         await update(tx, secrets, { id: row.id }, { archivedAt: null });
         log.push(allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }));
       }
@@ -536,8 +550,11 @@ async function referenceTargets(
     const parts = ref.split('/');
     const found = parts.length === 3 ? await resolvePath(ctx.db, { project: parts[0]!, environment: parts[1]!, key: parts[2]! }) : null;
     if (found?.environment == null || found.secret === null || found.project.archivedAt !== null || found.environment.archivedAt !== null || found.secret.archivedAt !== null) {
-      // A key a fork only inherits is its parent's: the reference goes to where the value is held.
-      const inherited = found?.environment?.parentId == null || found.environment.archivedAt !== null ? null : await inheritedRows(ctx.db, found.environment.id);
+      // A key a fork only inherits is its parent's: the reference goes to where the value is held. Said only to
+      // a reader of the fork, who may know its project's key names; to anyone else, it is no secret at all.
+      const tells = found?.environment != null && found.environment.parentId !== null && found.environment.archivedAt === null
+        && can(ctx.caller, 'secret.read', placeOf(found.project, found.environment));
+      const inherited = tells ? await inheritedRows(ctx.db, found!.environment!.id) : null;
       const held = inherited?.removed.has(parts[2]!) === false ? inherited.held.get(parts[2]!) : undefined;
       const why = held === undefined ? `${ref} is no live secret to refer to` : `${ref} is inherited from ${parts[0]}/${held.from.slug}: refer to ${parts[0]}/${held.from.slug}/${parts[2]} instead`;
       throw new Refusal(notFound(why), denied(ctx, 'secret.reference', 'unknown_source', { ...environment, operationId, metadata: { key, source: ref } }));
@@ -598,11 +615,11 @@ export async function dryRunSecrets(
   return withRefusals(ctx, async () => {
     need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', { operationId, metadata: { dryRun: true } });
     const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
-    // In a fork, an archived key is an override reset to its parent's: writing it overrides again, a change.
-    const fork = place.environment!.parentId !== null;
+    // In a fork, an archived key its parent holds is an override reset to the parent's: writing it overrides again, a change.
+    const resettable = await resetKeys(ctx.db, place);
     // Refuse what the write would refuse before opening anything.
     for (const [key, value] of Object.entries(patch)) {
-      if (value !== null && rows.get(key)?.archivedAt != null && !fork) {
+      if (value !== null && rows.get(key)?.archivedAt != null && !resettable.has(key)) {
         throw conflict(`${key} is archived; unarchive it before writing a new version`);
       }
     }
@@ -668,6 +685,16 @@ export async function patchSecret(
   const result = await audited(ctx, async (tx, log) => {
     // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
     await checkEnvironment(tx, place, environment);
+    // A rename names the key it found: renamed meanwhile, the forks below would be searched for a name gone.
+    if (renaming) {
+      const [now] = await lock(tx, secrets, { id: secret.id });
+      if (now?.key !== secret.key) {
+        throw new Refusal(
+          conflict(`${secret.key} was renamed meanwhile${now === undefined ? '' : ` to ${now.key}`}: nothing changed`),
+          denied(ctx, 'secret.rename', 'renamed_meanwhile', { ...where, metadata: { key: secret.key, nextKey } }),
+        );
+      }
+    }
     if (archiving && archived) {
       await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
     }

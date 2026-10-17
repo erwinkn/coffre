@@ -127,10 +127,11 @@ function plural(count: number, one: string, many = `${one}s`): string {
  */
 function secrets(facts: Facts): Part[] {
   const through = (entry: AuditEntry) => text((entry.metadata.via as { path?: unknown } | undefined)?.path);
-  // The fork a value was inherited in, by path.
+  // The fork a value was inherited in, by path: in its parent's project, which holds the reference a read went through.
   const forkOf = (entry: AuditEntry) => {
     const slug = text((entry.metadata.through as { slug?: unknown } | undefined)?.slug);
-    return slug === null || entry.project === null ? null : `${entry.project}/${slug}`;
+    const project = through(entry)?.split('/')[0] ?? entry.project;
+    return slug === null || project === null ? null : `${project}/${slug}`;
   };
   if (facts.batch.length === 1) {
     const [held, fork] = [through(facts.entry), forkOf(facts.entry)];

@@ -9,6 +9,11 @@
 export type Reveal = {
   value: string;
   version: number | null;
+  /**
+   * Where the value was held, when that can change under one version
+   * number: a fork's key reset to its parent's reads another secret's v1.
+   */
+  from?: string;
   /** When the read happened, in ms since the epoch; drives the auto-hide. */
   at: number;
 };
@@ -16,6 +21,7 @@ export type Reveal = {
 export function revealIsCurrent(
   reveal: Reveal | null,
   currentVersion: number | null,
+  currentFrom?: string,
 ): reveal is Reveal {
-  return reveal !== null && reveal.version === currentVersion;
+  return reveal !== null && reveal.version === currentVersion && reveal.from === currentFrom;
 }
