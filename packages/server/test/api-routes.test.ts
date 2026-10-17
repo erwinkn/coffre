@@ -93,6 +93,19 @@ test('a place patch changes only the fields it names', async () => {
   assert.equal((await root.projects.list()).projects[0].name, 'Marketplace');
 });
 
+test('a place created without a name takes its slug as one, which older CLIs print', async () => {
+  const made = await root.projects.create('billing');
+  assert.deepEqual(made, { project: { slug: 'billing', name: 'billing', archivedAt: null }, created: true });
+  assert.equal((await root.environments.create('billing/staging')).environment.name, 'staging');
+  // A name sent, as a CLI before 0.6.2 sends one, is kept.
+  assert.equal((await root.environments.create('billing/prod', { name: 'Prod' })).environment.name, 'Prod');
+  const billing = (await root.projects.list()).projects.find((project) => project.slug === 'billing')!;
+  assert.deepEqual(billing.environments.map(({ slug, name }) => ({ slug, name })), [
+    { slug: 'prod', name: 'Prod' },
+    { slug: 'staging', name: 'staging' },
+  ]);
+});
+
 test('a patch with a field the route does not know is refused', async () => {
   const response = await raw('PATCH', '/projects/market', { name: 'M', owner: 'someone' });
   assert.equal(response.status, 400);

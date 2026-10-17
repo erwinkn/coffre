@@ -208,20 +208,17 @@ function ProjectRow({
         <td className="col-project">
           <span className="cell-project">
             <Tile name={project.slug} />
-            <span className="cell-stack">
-              {pending ? (
-                <span>{project.name}</span>
-              ) : (
-                <Link
-                  className="cell-link stretch"
-                  to="/projects/$project"
-                  params={{ project: project.slug }}
-                >
-                  {project.name}
-                </Link>
-              )}
-              <small className="mono">{project.slug}</small>
-            </span>
+            {pending ? (
+              <span>{project.slug}</span>
+            ) : (
+              <Link
+                className="cell-link stretch"
+                to="/projects/$project"
+                params={{ project: project.slug }}
+              >
+                {project.slug}
+              </Link>
+            )}
           </span>
         </td>
         <td className="col-envs" data-label="Environments">
@@ -281,7 +278,6 @@ function ProjectRow({
 
 function NewProject() {
   const [slug, setSlug] = useState('');
-  const [name, setName] = useState('');
   const [open, setOpen] = useState(false);
   const create = useChange(createProject(useCoffre()));
   const slugError = slug === '' ? null : slugProblem(slug);
@@ -308,9 +304,8 @@ function NewProject() {
           onSubmit={(event) => {
             event.preventDefault();
             // Listed at once, as saving; the list says if the server refuses.
-            create({ slug, name: name.trim() });
+            create({ slug });
             setSlug('');
-            setName('');
             close();
           }}
         >
@@ -332,16 +327,6 @@ function NewProject() {
             </span>
           </label>
 
-          <label className="field">
-            <span className="label">Display name</span>
-            <input
-              className="input"
-              placeholder="Market data platform"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
@@ -349,7 +334,7 @@ function NewProject() {
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={slug === '' || slugError !== null || name.trim() === ''}
+              disabled={slug === '' || slugError !== null}
             >
               Create project
             </button>

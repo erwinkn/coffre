@@ -139,8 +139,8 @@ export const SECTIONS = [
     title: 'Projects',
     entries: [
       { command: 'projects', usage: ['projects [--json]'], about: ['with their environments'] },
-      { command: 'projects create', usage: ['projects create <project> [--name <name>]'] },
-      { command: 'projects rename', usage: ['projects rename <project> [--name <name>] [--slug <new-project>]'] },
+      { command: 'projects create', usage: ['projects create <project>'] },
+      { command: 'projects rename', usage: ['projects rename <project> --slug <new-project>'] },
       { command: 'projects archive', usage: ['projects archive <project>'], about: ['out of reach, and back with unarchive'] },
       { command: 'projects unarchive', usage: ['projects unarchive <project>'] },
       {
@@ -156,17 +156,17 @@ export const SECTIONS = [
         about: ['every project in it moves; you must manage each of them'],
       },
       { command: 'folders remove', usage: ['folders remove <folder> [--apply]'], about: ['every project out of it, each staying where it is'] },
-      { command: 'environments create', usage: [`environments create ${P} [--name <name>]`] },
+      { command: 'environments create', usage: [`environments create ${P}`] },
       {
         command: 'fork',
-        usage: [`fork ${P} <new-environment> [--name <name>] [--reference]`],
+        usage: [`fork ${P} <new-environment> [--reference]`],
         about: [
           'a new environment beside it, each key a copy of its value,',
           'without history; --reference makes each key a reference',
           'to its parent instead',
         ],
       },
-      { command: 'environments rename', usage: [`environments rename ${P} [--name <name>] [--slug <new-environment>]`] },
+      { command: 'environments rename', usage: [`environments rename ${P} --slug <new-environment>`] },
       { command: 'environments archive', usage: [`environments archive ${P}`] },
       { command: 'environments unarchive', usage: [`environments unarchive ${P}`] },
       { command: 'environments delete', usage: [`environments delete ${P} [--apply]`], about: ['an archived one, for good, as a project'] },

@@ -76,7 +76,7 @@ export type Api = {
   };
   "PUT /projects/:project": {
     input: {
-      name: string;
+      name?: string;
     };
     output: {
       project: {
@@ -128,7 +128,7 @@ export type Api = {
   };
   "PUT /projects/:project/:environment": {
     input: {
-      name: string;
+      name?: string;
       from?: string;
       references?: boolean;
     };

@@ -32,7 +32,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PUT /projects/:project': { ui: [{ does: 'Projects › New project', in: 'pages/projects.tsx', call: 'projects.create' }] },
   'PATCH /projects/:project': {
     ui: [
-      { does: 'a project › Settings › Save (slug, name)', in: 'pages/project-settings.tsx', call: 'projects.update' },
+      { does: 'a project › Settings › Save (slug, folder)', in: 'pages/project-settings.tsx', call: 'projects.update' },
       { does: 'a project › Settings › Archive …, Restore …', in: 'pages/project-settings.tsx', call: 'projects.update' },
     ],
   },

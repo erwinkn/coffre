@@ -74,12 +74,9 @@ await pool.query(
 
 const admin = await signIn(ADMIN);
 
-await put(admin, '/api/projects/market', { name: 'Acme Market' });
-for (const [slug, name] of [
-    ['dev', 'Development'],
-    ['prod', 'Production'],
-]) {
-    await put(admin, `/api/projects/market/${slug}`, { name });
+await put(admin, '/api/projects/market', {});
+for (const slug of ['dev', 'prod']) {
+    await put(admin, `/api/projects/market/${slug}`, {});
 }
 console.log('==> created project market with environments dev, prod');
 

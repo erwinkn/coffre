@@ -77,7 +77,6 @@ const secret = z.string().min(1).max(300).describe('A secret, as project/environ
 const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
 const member = z.string().min(1).max(320).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
 const service = z.string().min(1).max(200).describe('A service account: service:ci-deploy, or ci-deploy');
-const name = z.string().trim().min(1).max(100).describe('Its display name');
 
 /** `market/prod/KEY` as its environment and key, or why not. */
 function splitSecret(path: string): { environment: string; key: string } {
@@ -525,17 +524,14 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     scope: 'write',
     idempotent: true,
     destructive: false,
-    input: z.object({ project: slug.describe('The project slug: market'), name }).strict(),
+    input: z.object({ project: slug.describe('The project slug: market') }).strict(),
     names: ({ project }) => [project],
     change: {
-      summary: ({ project, name }) => `create the project ${project} (${name})`,
+      summary: ({ project }) => `create the project ${project}`,
       check: projectMakers,
-      preview: async (_api, { project, name }) => [
-        { label: 'Project', value: project, kind: 'mono' },
-        { label: 'Name', value: name },
-      ],
-      apply: async (api, { project, name }) => {
-        const made = await api.projects.create(project, { name });
+      preview: async (_api, { project }) => [{ label: 'Project', value: project, kind: 'mono' }],
+      apply: async (api, { project }) => {
+        const made = await api.projects.create(project);
         return {
           result: { project, created: made.created },
           text: made.created ? `The project ${project} is created, with no environments yet.` : `The project ${project} existed already: nothing changed.`,
@@ -551,17 +547,14 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     scope: 'write',
     idempotent: true,
     destructive: false,
-    input: z.object({ environment, name }).strict(),
+    input: z.object({ environment }).strict(),
     names: ({ environment }) => [environment],
     change: {
-      summary: ({ environment, name }) => `create the environment ${environment} (${name})`,
+      summary: ({ environment }) => `create the environment ${environment}`,
       check: async ({ api }, { environment }) => needsOn(api, [splitEnvironment(environment).project], 'environment.manage'),
-      preview: async (_api, { environment, name }) => [
-        { label: 'Environment', value: environment, kind: 'mono' },
-        { label: 'Name', value: name },
-      ],
-      apply: async (api, { environment, name }) => {
-        const made = await api.environments.create(environment, { name });
+      preview: async (_api, { environment }) => [{ label: 'Environment', value: environment, kind: 'mono' }],
+      apply: async (api, { environment }) => {
+        const made = await api.environments.create(environment);
         return {
           result: { environment, created: made.created },
           text: made.created ? `The environment ${environment} is created, with no secrets yet.` : `The environment ${environment} existed already: nothing changed.`,

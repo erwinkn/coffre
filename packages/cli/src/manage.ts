@@ -98,7 +98,7 @@ export async function projects(connect: () => CoffreClient, args: string[], io: 
     if (folder !== null) io.out.write(`${folder}/\n`);
     for (const project of inFolder) {
       const archived = project.archivedAt === null ? '' : ' (archived)';
-      io.out.write(`${indent}${project.slug}${archived}  ${project.name}\n`);
+      io.out.write(`${indent}${project.slug}${archived}\n`);
       for (const environment of project.environments) {
         // Environments the caller may only know by name come without details.
         if (environment.details?.archivedAt) continue;
@@ -109,24 +109,34 @@ export async function projects(connect: () => CoffreClient, args: string[], io: 
   }
 }
 
+// A project or environment goes by its slug. `--name`, which gave it a label
+// before 0.6.2, is still taken, so that scripts passing it keep working, and
+// said to be ignored.
 const naming = { name: { type: 'string' } } as const;
 const renaming = { name: { type: 'string' }, slug: { type: 'string' } } as const;
+
+function nameIgnored(values: { name?: string }, what: 'project' | 'environment', io: Io): void {
+  if (values.name !== undefined) io.err.write(`coffre: --name is ignored: ${what === 'project' ? 'a' : 'an'} ${what} goes by its slug\n`);
+}
 
 export async function projectsCreate(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, naming, ['<project>']);
   const { project } = place(positionals[0]!, false);
+  nameIgnored(values, 'project', io);
   const api = connect();
-  const made = await api.projects.create(project, { name: values.name ?? project });
-  io.out.write(made.created ? `created ${made.project.slug}, "${made.project.name}"\n` : `${made.project.slug} exists already, "${made.project.name}": nothing changed\n`);
+  // The slug as its name too: an instance before 0.6.2 wants one.
+  const made = await api.projects.create(project, { name: project });
+  io.out.write(made.created ? `created ${made.project.slug}\n` : `${made.project.slug} exists already: nothing changed\n`);
 }
 
 export async function environmentsCreate(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, naming, [`<project>/<environment>`]);
   const { project, environment } = place(positionals[0]!, true);
+  nameIgnored(values, 'environment', io);
   const api = connect();
-  const made = await api.environments.create(`${project}/${environment}`, { name: values.name ?? environment! });
+  const made = await api.environments.create(`${project}/${environment}`, { name: environment! });
   const path = `${project}/${made.environment.slug}`;
-  io.out.write(made.created ? `created ${path}, "${made.environment.name}"\n` : `${path} exists already, "${made.environment.name}": nothing changed\n`);
+  io.out.write(made.created ? `created ${path}\n` : `${path} exists already: nothing changed\n`);
 }
 
 /**
@@ -140,8 +150,9 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
   const { project, environment: from } = place(positionals[0]!, true);
   const slug = positionals[1]!;
   if (slug.includes('/')) throw new UsageError(`name the new environment alone, as in staging, not "${slug}": it goes in ${project}`);
+  nameIgnored(values, 'environment', io);
   const api = connect();
-  const made = await api.environments.create(`${project}/${slug}`, { name: values.name ?? slug, from: from!, ...(values.reference ? { references: true } : {}) });
+  const made = await api.environments.create(`${project}/${slug}`, { name: slug, from: from!, ...(values.reference ? { references: true } : {}) });
   const { keys = 0, references = 0, copied = [] } = made.forked ?? {};
   const what = values.reference
     ? `${references} reference${references === 1 ? '' : 's'}${copied.length === 0 ? '' : `, and ${copied.length} copied: ${copied.join(', ')}, whose source you read only through ${from}`}`
@@ -150,28 +161,29 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
   if (values.reference && references > 0) io.out.write(`  whoever reads ${project}/${made.environment.slug} reads those values through them, as they change\n`);
 }
 
-/** The patch `--name` and `--slug` make: one of them at least. */
-function renamed(values: { name?: string; slug?: string }): { name?: string; slug?: string } {
-  if (values.name === undefined && values.slug === undefined) throw new UsageError('give it a new --name, a new --slug, or both');
-  return { ...(values.name === undefined ? {} : { name: values.name }), ...(values.slug === undefined ? {} : { slug: values.slug }) };
+/** The patch `--slug` makes: the new slug. */
+function renamed(values: { name?: string; slug?: string }, what: 'project' | 'environment', io: Io): { slug: string } {
+  nameIgnored(values, what, io);
+  if (values.slug === undefined) throw new UsageError('give it a new --slug');
+  return { slug: values.slug };
 }
 
 export async function projectsRename(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, renaming, ['<project>']);
   const { project } = place(positionals[0]!, false);
-  const patch = renamed(values);
+  const patch = renamed(values, 'project', io);
   const api = connect();
   const { project: now } = await api.projects.update(project, patch);
-  io.out.write(`${project} is now ${now.slug}, "${now.name}"\n`);
+  io.out.write(`${project} is now ${now.slug}\n`);
 }
 
 export async function environmentsRename(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, renaming, ['<project>/<environment>']);
   const { project, environment } = place(positionals[0]!, true);
-  const patch = renamed(values);
+  const patch = renamed(values, 'environment', io);
   const api = connect();
   const { environment: now } = await api.environments.update(`${project}/${environment}`, patch);
-  io.out.write(`${project}/${environment} is now ${project}/${now.slug}, "${now.name}"\n`);
+  io.out.write(`${project}/${environment} is now ${project}/${now.slug}\n`);
   // Scopes name environments by slug: a new one can bring in, or leave out, those scoped to it.
   if (now.slug !== environment) io.out.write(`  instance roles scoped to ${environment} no longer reach it; those scoped to ${now.slug} do\n`);
 }

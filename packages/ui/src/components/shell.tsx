@@ -410,7 +410,7 @@ function Breadcrumbs({
         </span>
         <span className="crumb">
           <span className="crumb-link" aria-current="page">
-            <span>{projectSlug}</span>
+            <span className="crumb-name">{projectSlug}</span>
           </span>
         </span>
       </nav>
@@ -449,6 +449,10 @@ function Breadcrumbs({
   );
 }
 
+/**
+ * The project you are in, one button that lists every project. Its own
+ * page, all its environments, is the current one in that list.
+ */
 function ProjectCrumb({
   slug,
   current,
@@ -460,44 +464,39 @@ function ProjectCrumb({
 }) {
   const navigate = useNavigate();
   return (
-    <span className="crumb">
-      <Link
-        className="crumb-link"
-        to="/projects/$project"
-        params={{ project: slug }}
+    <Menu.Root>
+      <Menu.Trigger
+        className="crumb-link crumb-switch"
+        aria-label={`${slug}, switch project`}
         aria-current={current ? 'page' : undefined}
       >
         <Tile name={slug} />
-        <span className="crumb-project-name">{slug}</span>
-      </Link>
-      <Menu.Root>
-        <Menu.Trigger className="crumb-switch" aria-label="Switch project">
-          <ChevronsUpDown size={14} />
-        </Menu.Trigger>
-        <MenuPopup align="start">
-          <Menu.Group>
-            <Menu.GroupLabel className="menu-label">Projects</Menu.GroupLabel>
-            {projects.map((project) => (
-              <Menu.Item
-                key={project.slug}
-                className="menu-item"
-                onClick={() =>
-                  navigate({ to: '/projects/$project', params: { project: project.slug } })
-                }
-              >
-                <Tile name={project.slug} />
-                {project.slug}
-                <span className="menu-hint">{project.name}</span>
-                {project.slug === slug && <Check size={14} className="menu-check" />}
-              </Menu.Item>
-            ))}
-          </Menu.Group>
-        </MenuPopup>
-      </Menu.Root>
-    </span>
+        <span className="crumb-name crumb-project-name">{slug}</span>
+        <ChevronsUpDown size={14} className="crumb-chevron" />
+      </Menu.Trigger>
+      <MenuPopup align="start">
+        <Menu.Group>
+          <Menu.GroupLabel className="menu-label">Projects</Menu.GroupLabel>
+          {projects.map((project) => (
+            <Menu.Item
+              key={project.slug}
+              className="menu-item"
+              onClick={() =>
+                navigate({ to: '/projects/$project', params: { project: project.slug } })
+              }
+            >
+              <Tile name={project.slug} />
+              {project.slug}
+              {project.slug === slug && <Check size={14} className="menu-check" />}
+            </Menu.Item>
+          ))}
+        </Menu.Group>
+      </MenuPopup>
+    </Menu.Root>
   );
 }
 
+/** The environment you are in, one button that lists its siblings you can open. */
 function EnvironmentCrumb({
   projectSlug,
   slug,
@@ -508,44 +507,49 @@ function EnvironmentCrumb({
   environments: ProjectSummary['environments'];
 }) {
   const navigate = useNavigate();
-  return (
-    <span className="crumb">
+  if (environments.length === 0) {
+    return (
       <span className="crumb-link" aria-current="page">
-        <span>{slug}</span>
+        <span className="crumb-name">{slug}</span>
       </span>
-      {environments.length > 0 && (
-        <Menu.Root>
-          <Menu.Trigger className="crumb-switch" aria-label="Switch environment">
-            <ChevronsUpDown size={14} />
-          </Menu.Trigger>
-          <MenuPopup align="start">
-            <Menu.Group>
-              <Menu.GroupLabel className="menu-label">
-                Environments in {projectSlug}
-              </Menu.GroupLabel>
-              {environments.map((environment) => (
-                <Menu.Item
-                  key={environment.slug}
-                  className="menu-item"
-                  onClick={() =>
-                    navigate({
-                      to: '/projects/$project/$environment',
-                      params: { project: projectSlug, environment: environment.slug },
-                    })
-                  }
-                >
-                  <span className="mono">{environment.slug}</span>
-                  <span className="menu-hint">
-                    {environment.details?.secretCount ?? 0} secret
-                    {environment.details?.secretCount === 1 ? '' : 's'}
-                  </span>
-                  {environment.slug === slug && <Check size={14} className="menu-check" />}
-                </Menu.Item>
-              ))}
-            </Menu.Group>
-          </MenuPopup>
-        </Menu.Root>
-      )}
-    </span>
+    );
+  }
+  return (
+    <Menu.Root>
+      <Menu.Trigger
+        className="crumb-link crumb-switch"
+        aria-label={`${slug}, switch environment`}
+        aria-current="page"
+      >
+        <span className="crumb-name">{slug}</span>
+        <ChevronsUpDown size={14} className="crumb-chevron" />
+      </Menu.Trigger>
+      <MenuPopup align="start">
+        <Menu.Group>
+          <Menu.GroupLabel className="menu-label">
+            Environments in {projectSlug}
+          </Menu.GroupLabel>
+          {environments.map((environment) => (
+            <Menu.Item
+              key={environment.slug}
+              className="menu-item"
+              onClick={() =>
+                navigate({
+                  to: '/projects/$project/$environment',
+                  params: { project: projectSlug, environment: environment.slug },
+                })
+              }
+            >
+              <span className="mono">{environment.slug}</span>
+              <span className="menu-hint">
+                {environment.details?.secretCount ?? 0} secret
+                {environment.details?.secretCount === 1 ? '' : 's'}
+              </span>
+              {environment.slug === slug && <Check size={14} className="menu-check" />}
+            </Menu.Item>
+          ))}
+        </Menu.Group>
+      </MenuPopup>
+    </Menu.Root>
   );
 }
