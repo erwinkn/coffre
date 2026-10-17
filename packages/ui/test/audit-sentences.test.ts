@@ -66,6 +66,17 @@ test('a run of twelve secrets the vault logged as one entry reads the same, and 
   assert.equal(said({ ...run, decision: 'deny', reason: 'no_grant' }), 'tried to run market/prod, 12 secrets: no grant');
 });
 
+test("a fork's run that inherits several values reads as a run of the fork, from one entry of its parent's", () => {
+  const keys = [{ key: 'SENTRY_DSN', version: 1 }, { key: 'STRIPE_KEY', version: 2 }];
+  const own = entry({ action: 'secret.read', author: 'vault', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', operationId: 'op-3', metadata: { purpose: 'run' } });
+  const inherited = entry({
+    action: 'secret.read', author: 'vault', ...prod, operationId: 'op-3', secrets: keys,
+    metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' }, secrets: keys.map(({ key, version }) => ({ subject: `market/prod/${key}`, version })) },
+  });
+  assert.equal(said(own, inherited), 'ran market/prod-eu: 3 secrets, 2 inherited');
+  assert.equal(plain(describe([perSecret(inherited)[0]!]).parts), 'ran market/prod/SENTRY_DSN in market/prod-eu');
+});
+
 test('a read whose list was emptied or mangled around coffre still reads, as its place', () => {
   const emptied = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [], metadata: { purpose: 'run', secrets: [] } });
   assert.deepEqual(perSecret(emptied), [emptied]);

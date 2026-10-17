@@ -1612,30 +1612,39 @@ export type SecretPlaceRow = {
   currentVersionAt: Date | null;
 };
 
+/**
+ * These secrets, where they are now, by id: any number of them, a thousand
+ * a query, within every engine's bound on a statement's parameters (an
+ * offboarding report asks for each secret a member's reads listed).
+ */
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
-  if (ids.length === 0) return new Map();
   const { secrets, secretVersions, environments, projects } = tablesOf(db);
-  const rows = await db
-    .select({
-      id: secrets.id,
-      key: secrets.key,
-      projectId: secrets.projectId,
-      project: projects.slug,
-      environmentId: secrets.environmentId,
-      environment: environments.slug,
-      archivedAt: secrets.archivedAt,
-      projectArchivedAt: projects.archivedAt,
-      environmentArchivedAt: environments.archivedAt,
-      currentVersionId: secrets.currentVersionId,
-      currentVersion: secrets.currentVersion,
-      currentVersionAt: secretVersions.createdAt,
-    })
-    .from(secrets)
-    .innerJoin(environments, eq(environments.id, secrets.environmentId))
-    .innerJoin(projects, eq(projects.id, secrets.projectId))
-    .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-    .where(inArray(secrets.id, [...new Set(ids)]));
-  return new Map(rows.map((row) => [row.id, row]));
+  const unique = [...new Set(ids)];
+  const found = new Map<string, SecretPlaceRow>();
+  for (let start = 0; start < unique.length; start += 1000) {
+    const rows = await db
+      .select({
+        id: secrets.id,
+        key: secrets.key,
+        projectId: secrets.projectId,
+        project: projects.slug,
+        environmentId: secrets.environmentId,
+        environment: environments.slug,
+        archivedAt: secrets.archivedAt,
+        projectArchivedAt: projects.archivedAt,
+        environmentArchivedAt: environments.archivedAt,
+        currentVersionId: secrets.currentVersionId,
+        currentVersion: secrets.currentVersion,
+        currentVersionAt: secretVersions.createdAt,
+      })
+      .from(secrets)
+      .innerJoin(environments, eq(environments.id, secrets.environmentId))
+      .innerJoin(projects, eq(projects.id, secrets.projectId))
+      .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+      .where(inArray(secrets.id, unique.slice(start, start + 1000)));
+    for (const row of rows) found.set(row.id, row);
+  }
+  return found;
 }
 
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */

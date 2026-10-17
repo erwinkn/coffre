@@ -2578,13 +2578,14 @@ function keyEntry(
   };
 }
 
-/** What every secret of one read shares, said once in its entry rather than in each of its `secrets`. */
-const READ_SHARED = ['purpose', 'intent', 'credentialId'] as const;
+/** What every secret of one read at a place shares, said once in its entry rather than in each of its `secrets`. */
+const READ_SHARED = ['purpose', 'intent', 'credentialId', 'through'] as const;
 
 /**
  * A decision's `secret.read` entries, made one per secret, as the log keeps
  * them: one per place it was decided at, the environment read and, through
- * a reference, the holder's (`also`). An entry about several secrets lists
+ * a reference, the holder's, or the fork that inherits it (`also`,
+ * `through`). An entry about several secrets lists
  * them in `secrets`, each with what its own entry would have said: its
  * `secretId`, `secretVersionId`, `subject`, `version`, and its `via`, holder
  * (`also.secretId`) and intent `item` when it has them. An entry about one
@@ -2600,10 +2601,11 @@ function readsByPlace(entries: readonly NewEntry[]): NewEntry[] {
       out.push(entry);
       continue;
     }
-    const also = (JSON.parse(entry.metadata ?? '{}') as { also?: { projectId?: string; environmentId?: string } }).also;
+    const { also, through } = JSON.parse(entry.metadata ?? '{}') as { also?: { projectId?: string; environmentId?: string }; through?: unknown };
     const place = JSON.stringify([
       entry.actor, entry.decision, entry.code ?? null, entry.projectId ?? null, entry.environmentId ?? null,
       entry.operationId ?? null, entry.requestId ?? null, String(entry.relatedSeq ?? null), also?.projectId ?? null, also?.environmentId ?? null,
+      through ?? null,
     ]);
     const group = groups.get(place);
     if (group !== undefined) {
@@ -2623,15 +2625,17 @@ function oneRead(group: NewEntry[]): NewEntry {
   if (group.length === 1) return first;
   const details = group.map((entry) => JSON.parse(entry.metadata ?? '{}') as Record<string, unknown>);
   const shared = Object.fromEntries(READ_SHARED.flatMap((field) => (details[0]![field] === undefined ? [] : [[field, details[0]![field]]])));
-  const holder = details[0]!.also as { projectId: string; environmentId: string } | undefined;
+  // The place on the other side, which the group shares: a reference's holder, or the fork reading.
+  const beside = details[0]!.also as { projectId: string | null; environmentId: string } | undefined;
   const secrets = group.map((entry, i) => {
     const own = Object.fromEntries(Object.entries(details[i]!).filter(([field]) => !(READ_SHARED as readonly string[]).includes(field) && field !== 'also'));
-    const also = details[i]!.also as { secretId: string } | undefined;
+    // A reference's holder is its own; a fork's `also` names only the fork, which the entry says once.
+    const holder = (details[i]!.also as { secretId?: string } | undefined)?.secretId;
     return {
       ...(entry.secretId == null ? {} : { secretId: entry.secretId }),
       ...(entry.secretVersionId == null ? {} : { secretVersionId: entry.secretVersionId }),
       ...own,
-      ...(also === undefined ? {} : { also: { secretId: also.secretId } }),
+      ...(holder === undefined ? {} : { also: { secretId: holder } }),
     };
   });
   return {
@@ -2640,7 +2644,7 @@ function oneRead(group: NewEntry[]): NewEntry {
     secretVersionId: null,
     metadata: JSON.stringify({
       ...shared,
-      ...(holder === undefined ? {} : { also: { projectId: holder.projectId, environmentId: holder.environmentId } }),
+      ...(beside === undefined ? {} : { also: { projectId: beside.projectId, environmentId: beside.environmentId } }),
       secrets,
     }),
   };

@@ -2,7 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
+import { deriveLogKey } from '@coffre/core/audit';
 import { defineSignin, generateToken, github, hashToken } from '@coffre/core/identity';
+import { appendEntries } from '@coffre/db/log';
 import { eq, isNull } from 'drizzle-orm';
 
 import { auditLog, credentials, identities, secrets } from './db/tables.ts';
@@ -244,6 +246,17 @@ test('the report lists the current values someone saw, until each is rotated', a
   assert.equal(report.exposed[0].project, 'market');
   assert.equal(report.exposed[0].environment, 'prod');
   assert.ok(Date.parse(report.exposed[0].at) <= Date.now());
+});
+
+test('the report reads any number of secrets a member\'s reads listed, past every engine\'s bound on a query\'s parameters', async () => {
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  const [secret] = await db.owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, 'API_KEY'));
+  // One read listing 33,000 secrets, the one still served among them: as the vault writes it, under its key.
+  const listed = [...Array.from({ length: 33_000 }, () => ({ secretId: randomUUID(), subject: 'market/prod/GONE', version: 1 })), { secretId: secret!.id, subject: 'market/prod/API_KEY', version: 1 }];
+  await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', deps.vault.signingKey), [{
+    actor: `user:${DEV}`, action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ purpose: 'run', secrets: listed }),
+  }]));
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), ['API_KEY v1 read']);
 });
 
 test('removed people stay listed, with as many values to rotate as their report', async () => {
