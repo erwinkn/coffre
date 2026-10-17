@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   BindingInvalid,
   canonicalClaims,
+  claimAt,
   checkBinding,
   checkFetchUrl,
   CLOCK_TOLERANCE_SECONDS,
@@ -11,11 +12,19 @@ import {
   GitHubAppUnavailable,
   GITLAB_ISSUER,
   issuedRefusal,
+  keySummaries,
+  KeysInvalid,
   MAX_BINDINGS,
+  MAX_TOKEN_AGE_SECONDS,
+  uploadedKeys,
+  verifyWorkloadToken,
   WorkloadTokenRefused,
   type BindingClaims,
   type DecodedToken,
   type GitHubAppRepositories,
+  type JSONWebKeySet,
+  type KeySummary,
+  type UploadedKeys,
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
@@ -88,6 +97,7 @@ export type ExchangeReason =
   | 'unknown_key'
   | 'expired'
   | 'too_old'
+  | 'too_long'
   | 'not_yet_valid'
   | 'audience'
   | 'replayed'
@@ -128,8 +138,12 @@ const RUN_CLAIMS = [
   'sub', 'jti', 'actor', 'event_name', 'ref', 'base_ref', 'head_ref', 'sha', 'repository', 'repository_id', 'run_id', 'run_attempt',
   'workflow_ref', 'job_workflow_ref', 'job_workflow_sha', 'environment',
   'project_path', 'project_id', 'namespace_id', 'pipeline_id', 'pipeline_source', 'job_id',
+  'kubernetes.io.pod.name',
 ] as const;
 const MAX_RUN_CLAIM = 256;
+
+/** A binding's `jwks_uri` when it carries its issuer's keys: the SHA-256 of those keys (`UploadedKeys`), where a fetched set's URL would be. */
+const UPLOADED = 'sha256:';
 
 /** Refusals logged, by reason and service, once a minute each. */
 const refusalsLogged = new Map<string, number>();
@@ -140,7 +154,10 @@ export type BindingView = {
   id: string;
   profile: WorkloadProfile;
   issuer: string;
+  /** Where coffre fetches its issuer's keys; for one that carries them, `sha256:<hex>` of those. */
   jwksUri: string;
+  /** The keys it carries, uploaded with it, under which coffre verifies and fetches nothing; null when they are fetched from `jwksUri`. */
+  keys: KeySummary[] | null;
   claims: BindingClaims;
   /** What the credentials it issues reach, of what its account holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
   scope: ScopeByPath | null;
@@ -150,11 +167,12 @@ export type BindingView = {
   lastUsedAt: string | null;
 };
 
-/** What saving a binding would do: the binding as checked, the keys its issuer names, and the bindings it replaces. */
+/** What saving a binding would do: the binding as checked, the keys its issuer names or it carries, and the bindings it replaces. */
 export type BindingPlan = {
   profile: WorkloadProfile;
   issuer: string;
   jwksUri: string;
+  keys: KeySummary[] | null;
   claims: BindingClaims;
   scope: ScopeByPath;
   /** `asked`: named in `replaces`. `keys_moved`: the service's bindings on the issuer, under its old keys' URL. */
@@ -170,7 +188,27 @@ export type BindingInput = {
   label: string | null;
   /** Bindings this one takes the place of, as a change to them: they are removed in the same step. */
   replaces: string[];
+  /**
+   * The issuer's public keys, a JWKS, for an issuer coffre cannot or should
+   * not fetch them from, such as a private Kubernetes cluster's: then the
+   * issuer is any string its tokens name, and coffre asks it nothing.
+   */
+  jwks?: JSONWebKeySet;
 };
+
+/**
+ * What replacing a service's keys for an issuer would do: the keys, and
+ * the bindings on the issuer that new ones, the same but for those keys,
+ * take the place of.
+ */
+export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[] };
+
+/**
+ * A workload's ID token, verified for a service: the binding of the service
+ * whose every claim it carries, and its claims as verified. Nothing spent:
+ * whoever acts on it spends it (`consumeToken`).
+ */
+export type VerifiedWorkload = { binding: BindingRow; claims: Record<string, unknown>; token: DecodedToken };
 
 /**
  * The IDs a binding names, as an owner would otherwise look them up, under
@@ -225,9 +263,10 @@ export class WorkloadService {
   async bind(ctx: Asker, serviceId: string, input: BindingInput, options: { dryRun: boolean }): Promise<BindingPlan | { binding: BindingView; replaced: string[] }> {
     const member = `token:${serviceId}`;
     const details = { principalType: 'service', principalId: serviceId, profile: input.profile, issuer: input.issuer };
+    const uploaded = input.jwks === undefined ? null : await keysOf(input.jwks);
     let policy: ReturnType<typeof checkBinding>;
     try {
-      policy = checkBinding(input, { allowLoopback: this.#deps.config.allowLoopback });
+      policy = checkBinding(input, { allowLoopback: this.#deps.config.allowLoopback, uploaded: uploaded !== null });
     } catch (error) {
       if (error instanceof BindingInvalid) throw badRequest(error.message);
       throw error;
@@ -240,9 +279,12 @@ export class WorkloadService {
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
+      // Keys uploaded with it, by their digest; else where its issuer's discovery says they are.
       let jwksUri: string;
       try {
-        jwksUri = await discoverKeys(this.#deps.transport, policy.issuer, { allowLoopback: this.#deps.config.allowLoopback });
+        jwksUri = uploaded === null
+          ? await discoverKeys(this.#deps.transport, policy.issuer, { allowLoopback: this.#deps.config.allowLoopback })
+          : `${UPLOADED}${uploaded.digest}`;
       } catch (error) {
         if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${policy.issuer}: ${error.message}`);
         throw error;
@@ -257,6 +299,12 @@ export class WorkloadService {
           if (asked.has(row.id)) return [{ ...row, why: 'asked' }];
           return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ ...row, why: 'keys_moved' }] : [];
         });
+        // Keys uploaded, on either side, are no move of the issuer's: the bindings that would go are still good.
+        if (replaces.some((row) => row.why === 'keys_moved' && (row.jwksUri.startsWith(UPLOADED) || jwksUri.startsWith(UPLOADED)))) {
+          throw conflict(
+            `${shownMember(member)}'s other bindings on ${policy.issuer} verify with other keys: replace their keys with these first, or replace those bindings with this one`,
+          );
+        }
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
         return replaces;
       };
@@ -266,7 +314,9 @@ export class WorkloadService {
       const { scope, byPath } = await issuedScope(
         this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.bind', metadata: details }, inherits ? inheritedScope(replaced) : undefined,
       );
-      const plan = (replaces: typeof replaced): BindingPlan => ({ ...policy, jwksUri, scope: byPath, replaces: replaces.map(({ id, why }) => ({ id, why })) });
+      const plan = (replaces: typeof replaced): BindingPlan => ({
+        ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, replaces: replaces.map(({ id, why }) => ({ id, why })),
+      });
       if (options.dryRun) return plan(replaced);
 
       return audited(this.#deps, async (tx, log) => {
@@ -284,6 +334,7 @@ export class WorkloadService {
           profile: planned.profile,
           issuer: planned.issuer,
           jwksUri: planned.jwksUri,
+          jwks: uploaded?.jwks ?? null,
           claims: canonicalClaims(planned.claims),
           scope: storedScope(scope),
           label: input.label?.slice(0, 120) ?? null,
@@ -305,6 +356,7 @@ export class WorkloadService {
             profile: planned.profile,
             issuer: planned.issuer,
             jwksUri: planned.jwksUri,
+            ...(uploaded === null ? {} : { keys: uploaded.keys }),
             claims: planned.claims,
             scope,
             replaces: planned.replaces.map((replaced) => replaced.id),
@@ -314,6 +366,105 @@ export class WorkloadService {
           binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath),
           replaced: planned.replaces.map((replaced) => replaced.id),
         };
+      });
+    });
+  }
+
+  /**
+   * Give a service's bindings on an issuer new keys, uploaded: when the
+   * issuer rotates its keys, or when its keys are to be uploaded rather
+   * than fetched. Bindings never change, so each is replaced by a new one,
+   * the same but for its keys, in one step, and the old one's
+   * `token.unbind` is its tombstone: the credentials it issued end with it.
+   * A set that holds the old keys and the new verifies tokens of both while
+   * the issuer moves from one to the other. With `dryRun`, write nothing and
+   * log nothing.
+   */
+  async replaceKeys(
+    ctx: Asker,
+    serviceId: string,
+    input: { issuer: string; jwks: JSONWebKeySet },
+    options: { dryRun: boolean },
+  ): Promise<KeysPlan | { bindings: BindingView[]; replaced: string[] }> {
+    const member = `token:${serviceId}`;
+    const details = { principalType: 'service', principalId: serviceId, issuer: input.issuer };
+    const uploaded = await keysOf(input.jwks);
+    const jwksUri = `${UPLOADED}${uploaded.digest}`;
+    return withRefusals(this.#deps, async () => {
+      const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
+      if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
+      const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
+      if (standing.status !== 'active') throw unknown();
+      /** Its live bindings on the issuer, each held to its profile as one that carries its keys. */
+      const replacing = (live: BindingRow[]): BindingRow[] => {
+        const on = live.filter((row) => row.issuer === input.issuer);
+        if (on.length === 0) throw notFound(`no binding of ${shownMember(member)}'s trusts ${input.issuer}`);
+        if (on.every((row) => row.jwksUri === jwksUri)) throw conflict(`${shownMember(member)}'s bindings on ${input.issuer} carry these keys already`);
+        for (const row of on) {
+          try {
+            checkBinding({ profile: row.profile, issuer: row.issuer, claims: JSON.parse(row.claims) as BindingClaims }, { uploaded: true });
+          } catch (error) {
+            if (error instanceof BindingInvalid) throw badRequest(error.message);
+            throw error;
+          }
+        }
+        return on;
+      };
+      const replaced = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
+      const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
+      for (const row of replaced) {
+        scopes.set(row.id, await issuedScope(this.#deps.db, ctx, setting, standing, undefined, { action: 'token.bind', metadata: details }, inheritedScope([row])));
+      }
+      const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id) };
+      if (options.dryRun) return plan;
+
+      return audited(this.#deps, async (tx, log) => {
+        if (!(await stillMember(tx, member, standing))) throw unknown();
+        const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
+        if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
+        const now = new Date();
+        const bindings: BindingView[] = [];
+        for (const [i, old] of live.entries()) {
+          const id = randomUUID();
+          const { scope, byPath } = scopes.get(old.id)!;
+          const row = {
+            id,
+            principal: member,
+            generation: standing.generation,
+            profile: old.profile,
+            issuer: old.issuer,
+            jwksUri,
+            jwks: uploaded.jwks,
+            claims: old.claims,
+            scope: storedScope(scope),
+            label: old.label,
+            // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
+            createdAt: new Date(now.getTime() + i),
+            createdBy: ctx.caller.principal.id,
+          };
+          await insertBinding(tx, this.#deps.chainKey, row);
+          await this.#revoke(tx, old.id, member, ctx.caller.principal.id, now);
+          log.push(allowed(ctx, 'token.unbind', {
+            metadata: { bindingId: old.id, principalType: 'service', principalId: serviceId, reason: 'keys_replaced', by: id },
+          }));
+          log.push(allowed(ctx, 'token.bind', {
+            metadata: {
+              bindingId: id,
+              principalType: 'service',
+              principalId: serviceId,
+              profile: old.profile,
+              issuer: old.issuer,
+              jwksUri,
+              keys: uploaded.keys,
+              claims: JSON.parse(old.claims) as BindingClaims,
+              scope,
+              replaces: [old.id],
+            },
+          }));
+          bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath));
+        }
+        return { bindings, replaced: plan.replaces };
       });
     });
   }
@@ -447,7 +598,7 @@ export class WorkloadService {
    * 1. the token's shape;
    * 2. the service's live bindings on its issuer, one read;
    * 3. its signature under that issuer's keys, then its audience, times and
-   *    claims against those bindings;
+   *    claims against those bindings (`verify`);
    * 4. that it is not spent yet, a read;
    * 5. the member, from the vault, outside any transaction, and a binding
    *    0.4 made sealed with what it holds (`sealCredentials`);
@@ -468,32 +619,55 @@ export class WorkloadService {
     }
   }
 
-  async #exchange(request: ExchangeRequest, meta: { requestId: string; sourceIp: string | null }): Promise<Exchanged> {
-    const { db, chainKey, transport, vault } = this.#deps;
+  /**
+   * Which binding of `member`, `token:<id>`, a workload's ID token matches,
+   * the exchange's steps 1 to 3: its shape, the service's live bindings on
+   * its issuer, then its signature under that issuer's keys, fetched or
+   * carried, its audience, times and claims. Nothing written, and the token
+   * not spent: whoever acts on it checks that, and spends it. Throws
+   * `ExchangeRefused`, saying why as a workload's owner can act on it.
+   */
+  async verify(member: string, token: string): Promise<VerifiedWorkload> {
+    const { db, chainKey, transport } = this.#deps;
     let decoded: DecodedToken;
     try {
-      decoded = decodeWorkloadToken(request.token);
+      decoded = decodeWorkloadToken(token);
     } catch (error) {
       throw refused(error);
     }
     const issuer = decoded.claims.iss;
-    const member = request.service;
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
     // The bindings first, so that a token none can take costs this one read.
     const candidates = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS);
     if (candidates.length === 0) throw unbound();
-    // A service's bindings on one issuer share its keys' URL; one made after the keys moved replaced the rest.
-    const jwksUri = candidates[candidates.length - 1]!.jwksUri;
+    // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
+    const newest = candidates[candidates.length - 1]!;
+    const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };
     let claims: Record<string, unknown>;
     try {
-      claims = await verifyWithKeys(transport, jwksUri, request.token, { issuer, audience: this.#deps.publicUrl, now: new Date() });
+      claims = newest.jwks === null
+        ? await verifyWithKeys(transport, newest.jwksUri, token, expected)
+        // Uploaded keys: nothing to fetch, and no issuer to ask whether a token still stands, so none lives past the hour.
+        : await verifyWorkloadToken(token, JSON.parse(newest.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
     } catch (error) {
       if (error instanceof IssuerUnavailable) throw new ExchangeRefused('issuer_unavailable', error.message, 503);
+      if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') {
+        throw new ExchangeRefused('unknown_key', `the token's key is not among those uploaded for ${issuer}: if it rotated its keys, replace them`);
+      }
       throw refused(error);
     }
-    const binding = matching(candidates.filter((candidate) => candidate.jwksUri === jwksUri), claims, member);
+    const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member);
+    return { binding, claims, token: decoded };
+  }
+
+  async #exchange(request: ExchangeRequest, meta: { requestId: string; sourceIp: string | null }): Promise<Exchanged> {
+    const { db, chainKey, vault } = this.#deps;
+    const member = request.service;
+    const { binding, claims, token: decoded } = await this.verify(member, request.token);
+    const issuer = decoded.claims.iss;
+    const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     const standing = await vault.access(member);
@@ -536,6 +710,16 @@ export class WorkloadService {
   }
 }
 
+/** An uploaded key set, checked (`uploadedKeys`), or a 400 saying what is wrong with it. */
+async function keysOf(jwks: JSONWebKeySet): Promise<UploadedKeys> {
+  try {
+    return await uploadedKeys(jwks);
+  } catch (error) {
+    if (error instanceof KeysInvalid) throw badRequest(error.message);
+    throw error;
+  }
+}
+
 /** GitHub not answering the app, or refusing it, as the API answers it: 503, saying which. */
 async function unavailable<T>(ask: () => Promise<T>): Promise<T> {
   try {
@@ -571,7 +755,7 @@ function matching(bindings: BindingRow[], claims: Record<string, unknown>, membe
 function runClaims(claims: Record<string, unknown>): Record<string, string | number> {
   const run: Record<string, string | number> = {};
   for (const name of RUN_CLAIMS) {
-    const value = claims[name];
+    const value = claimAt(claims, name);
     if (typeof value === 'string') run[name] = value.slice(0, MAX_RUN_CLAIM);
     else if (typeof value === 'number' && Number.isFinite(value)) run[name] = value;
   }
@@ -600,6 +784,7 @@ function view(row: BindingRow, scope: ScopeByPath | null): BindingView {
     profile: row.profile as WorkloadProfile,
     issuer: row.issuer,
     jwksUri: row.jwksUri,
+    keys: row.jwks === null ? null : keySummaries(row.jwks),
     claims: JSON.parse(row.claims) as BindingClaims,
     scope,
     label: row.label,

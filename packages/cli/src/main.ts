@@ -16,7 +16,7 @@ import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
-import { bindingFrom, describeBindings, describeEvents, describePlan, reaches, scopeFrom, serviceMember, TRUST_USAGE } from './trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
@@ -1302,6 +1302,8 @@ async function trust(args: string[]): Promise<void> {
       scope: { type: 'string', multiple: true },
       label: { type: 'string' },
       replace: { type: 'string', multiple: true },
+      'jwks-file': { type: 'string' },
+      'replace-keys': { type: 'boolean' },
       apply: { type: 'boolean', default: false },
     },
     allowPositionals: true,
@@ -1316,9 +1318,31 @@ async function trust(args: string[]): Promise<void> {
   if (positionals.length > 1) throw new UsageError(`too many arguments: ${positionals.slice(1).join(' ')}`);
   const member = serviceMember(service);
   const coffre = client();
-  const { scope: scopeFlags, label, replace, apply, ...flags } = values;
-  if (Object.keys(flags).length === 0) {
+  const { scope: scopeFlags, label, replace, apply, 'jwks-file': jwksFile, 'replace-keys': replaceKeys, ...flags } = values;
+  if (Object.keys(flags).length === 0 && jwksFile === undefined && replaceKeys === undefined) {
     process.stdout.write(describeBindings(member, (await coffre.bindings.list(member)).bindings));
+    return;
+  }
+  const jwks = (() => {
+    if (jwksFile === undefined) return undefined;
+    try {
+      return keySetFrom(readFileSync(jwksFile, 'utf8'), jwksFile);
+    } catch (error) {
+      return fail((error as NodeJS.ErrnoException).code === undefined ? (error as Error).message : `could not read ${jwksFile}: ${(error as Error).message}`);
+    }
+  })();
+  if (replaceKeys === true) {
+    const { issuer, ...others } = flags;
+    if (issuer === undefined || jwks === undefined) throw new UsageError('--replace-keys takes --issuer <iss> and --jwks-file <path>: whose bindings get which keys');
+    const extra = [...Object.keys(others), ...(scopeFlags === undefined ? [] : ['scope']), ...(label === undefined ? [] : ['label']), ...(replace === undefined ? [] : ['replace'])];
+    if (extra.length > 0) throw new UsageError(`--replace-keys changes only the keys of the bindings on --issuer, not --${extra.join(', --')}`);
+    const plan = await coffre.bindings.previewKeys(member, { issuer, jwks });
+    if (!apply) {
+      process.stdout.write(`${describeKeys(member, plan, null)}Run it again with --apply to save it.\n`);
+      return;
+    }
+    const saved = await coffre.bindings.replaceKeys(member, { issuer, jwks });
+    process.stdout.write(describeKeys(member, plan, saved));
     return;
   }
   // A repository or project the lookup cannot see comes back here, for bindingFrom to say how to give its IDs.
@@ -1333,7 +1357,7 @@ async function trust(args: string[]): Promise<void> {
       throw new UsageError((error as Error).message);
     }
   })();
-  const input = { ...binding, ...(scope === undefined ? {} : { scope }), label: label ?? null, replaces: replace ?? [] };
+  const input = { ...binding, ...(scope === undefined ? {} : { scope }), ...(jwks === undefined ? {} : { jwks }), label: label ?? null, replaces: replace ?? [] };
   const plan = await coffre.bindings.preview(member, input);
   const events = describeEvents(plan);
   if (!apply) {

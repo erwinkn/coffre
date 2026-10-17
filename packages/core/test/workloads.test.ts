@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  BindingInvalid,
   canonicalClaims,
   checkBinding,
   checkFetchUrl,
+  claimAt,
   differingClaims,
   githubEventsAt,
   githubReusable,
@@ -243,4 +245,39 @@ test('a URL coffre fetches is https on 443 at a public host name, with no creden
   assert.throws(() => at('http://10.0.0.1:8081', { allowLoopback: true }), /must use https/);
   // A key set's URL may carry a query.
   at('https://idp.acme.example/keys?v=2', { query: true });
+});
+
+test('a claim is named by its path through nested objects; a key may hold dots, and a path read two ways names nothing', () => {
+  const token = {
+    sub: 'system:serviceaccount:ci:deploy',
+    'kubernetes.io': { namespace: 'ci', serviceaccount: { name: 'deploy', uid: '4f1c' } },
+    'oidc.circleci.com/vcs-origin': 'github.com/acme/api',
+  };
+  assert.equal(claimAt(token, 'sub'), token.sub);
+  assert.equal(claimAt(token, 'kubernetes.io.serviceaccount.uid'), '4f1c');
+  assert.equal(claimAt(token, 'kubernetes.io.namespace'), 'ci');
+  assert.equal(claimAt(token, 'oidc.circleci.com/vcs-origin'), 'github.com/acme/api', 'a top-level name with dots, as before');
+  assert.equal(claimAt(token, 'kubernetes.io.pod.name'), undefined);
+  assert.equal(claimAt(token, 'kubernetes'), undefined);
+  assert.equal(claimAt({ list: ['a'] }, 'list.0'), undefined, 'arrays are not walked');
+  // Two readings, each reaching a value: which one the binding meant cannot be told, so neither matches.
+  assert.equal(claimAt({ 'a.b': 'top', a: { b: 'nested' } }, 'a.b'), undefined);
+  assert.equal(claimAt({ 'a.b': 'top', a: { c: 'nested' } }, 'a.b'), 'top');
+
+  const binding = checkBinding({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: token.sub, 'kubernetes.io.serviceaccount.uid': '4f1c' } });
+  assert.deepEqual(differingClaims('custom', binding.claims, token), []);
+  assert.deepEqual(differingClaims('custom', binding.claims, { ...token, 'kubernetes.io': { serviceaccount: { uid: 'other' } } }), ['kubernetes.io.serviceaccount.uid']);
+  // An object where a string is expected matches nothing.
+  assert.deepEqual(differingClaims('custom', { sub: token.sub, 'kubernetes.io.serviceaccount': 'deploy' }, token), ['kubernetes.io.serviceaccount']);
+});
+
+test('a binding that carries its keys names any issuer, exactly, but never one coffre fetches from', () => {
+  const custom = (issuer: string) => checkBinding({ profile: 'custom', issuer, claims: { sub: 'x' } }, { uploaded: true });
+  for (const issuer of ['https://kubernetes.default.svc.cluster.local', 'https://10.0.0.1:6443', 'kapsule:fr-par:5f2a', 'http://localhost']) {
+    assert.equal(custom(issuer).issuer, issuer);
+  }
+  assert.throws(() => checkBinding({ profile: 'custom', issuer: 'https://kubernetes.default.svc.cluster.local', claims: { sub: 'x' } }), /public host name/);
+  for (const issuer of ['', ' https://idp', 'https://idp\n', 'x'.repeat(401)]) assert.throws(() => custom(issuer), BindingInvalid);
+  assert.throws(() => checkBinding({ profile: 'github', issuer: null, claims: {} }, { uploaded: true }), /publishes its keys/);
+  assert.throws(() => checkBinding({ profile: 'gitlab', issuer: GITLAB_ISSUER, claims: {} }, { uploaded: true }), /publishes its keys/);
 });

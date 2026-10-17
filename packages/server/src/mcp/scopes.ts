@@ -43,6 +43,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'DELETE /members/:member/tokens/:id': 'manage-access',
   'GET /members/:member/bindings': 'read',
   'POST /members/:member/bindings': 'manage-access',
+  'POST /members/:member/bindings/keys': 'manage-access',
   'GET /workloads/lookup': 'read',
   'GET /workloads/repositories': 'read',
   'DELETE /members/:member/bindings/:id': 'manage-access',

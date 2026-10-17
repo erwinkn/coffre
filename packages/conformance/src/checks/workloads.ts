@@ -175,6 +175,46 @@ export async function cliSignsIn(deployment: Deployment, canaries: Canaries): Pr
   }
 }
 
+/** A pod of a private cluster, whose issuer coffre cannot reach: a viewer on dev. */
+export const POD = 'token:conformance-pod';
+const CLUSTER = 'https://kubernetes.default.svc.cluster.local';
+const POD_ACCOUNT = { sub: 'system:serviceaccount:ci:deploy', uid: '4f1c8d2a-7b3e-4c1d-9a2f-0e6b5c4d3a21' };
+
+/**
+ * A binding that carries its issuer's keys: the dev IdP's, uploaded under an
+ * issuer at a `.local` host, which no binding could fetch from. A pod's
+ * token buys a credential by its service account's UID, a nested claim; one
+ * of another UID, or that lives past the hour, does not. Its keys replaced
+ * by the ES256 key alone, an RS256 token is refused and an ES256 one taken.
+ */
+export async function keysUploaded(deployment: Deployment, admin: Person, canaries: Canaries): Promise<string> {
+  await admin.api.members.add(POD);
+  await admin.api.access.set(POD, { [DEV]: 'viewer' });
+  const { keys } = (await (await fetch(deployment.idp.workloads.jwksUrl)).json()) as { keys: Record<string, unknown>[] };
+  const claims = { sub: POD_ACCOUNT.sub, 'kubernetes.io.serviceaccount.uid': POD_ACCOUNT.uid };
+  const made = await admin.api.bindings.create(POD, { profile: 'custom', issuer: CLUSTER, claims, jwks: { keys }, label: 'conformance pod' });
+  expect(made.binding.keys?.length === 2 && /^sha256:/.test(made.binding.jwksUri), 'the binding does not show the keys uploaded with it', made.binding);
+  const now = Math.floor(Date.now() / 1000);
+  const pod = (alg: 'RS256' | 'ES256', uid = POD_ACCOUNT.uid, times: Record<string, number> = {}) =>
+    mint(deployment, { iss: CLUSTER, sub: POD_ACCOUNT.sub, 'kubernetes.io': { namespace: 'ci', serviceaccount: { name: 'deploy', uid } }, ...times }, { alg });
+
+  const issued = await exchange(deployment, await pod('RS256'), POD);
+  expect(issued.status === 200 && typeof issued.token === 'string', "the pod's token bought no credential", shown(issued));
+  const { values } = await bearer(deployment.origin, issued.token).secrets.reveal(`${DEV}/API_KEY`);
+  expect(values.API_KEY === canaries[`${DEV}/API_KEY`], 'the credential did not read the value as the service');
+  const other = await exchange(deployment, await pod('RS256', 'another-uid'), POD);
+  expect(other.status === 401 && other.reason === 'no_match', 'a token of another service account under the same name was taken', shown(other));
+  const long = await exchange(deployment, await pod('RS256', POD_ACCOUNT.uid, { iat: now, nbf: now, exp: now + 3601 }), POD);
+  expect(long.status === 401 && long.reason === 'too_long', 'a token that lives past the hour was taken', shown(long));
+
+  await admin.api.bindings.replaceKeys(POD, { issuer: CLUSTER, jwks: { keys: keys.filter((key) => key.alg === 'ES256') } });
+  const dropped = await exchange(deployment, await pod('RS256'), POD);
+  expect(dropped.status === 401 && dropped.reason === 'unknown_key', 'a token signed by a key no longer uploaded was taken', shown(dropped));
+  const kept = await exchange(deployment, await pod('ES256'), POD);
+  expect(kept.status === 200, 'a token signed by the key kept was refused', shown(kept));
+  return `${POD} trusts ${CLUSTER} by its uploaded keys: a pod's token taken by its account's UID; another UID, and a token living past the hour, refused; the RS256 key replaced away, its tokens refused and ES256's taken`;
+}
+
 /** Removing the binding ends the credentials it issued at once, and the next run gets none. */
 export async function runUnbound(deployment: Deployment, admin: Person, bindingId: string, credential: string): Promise<string> {
   const me = (token: string) => fetch(`${deployment.origin}/api/me`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.status);

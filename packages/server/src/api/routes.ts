@@ -1,5 +1,5 @@
 import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
-import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
+import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet } from '@coffre/core/identity';
 import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -125,6 +125,9 @@ const authorizationRequest = z.object({
   scope: z.string().max(512).optional(),
   resource: z.string().max(2048).optional(),
 });
+
+/** An issuer's public keys, uploaded with a binding: a JWKS, whose keys `uploadedKeys` checks one by one. */
+const keySet = z.object({ keys: z.array(z.record(z.string().max(64), z.unknown())).min(1).max(MAX_KEYS) });
 
 /** Trust bindings for CI runs: on when the deployment's sign-in says so. */
 function workloads(ctx: ApiContext) {
@@ -403,11 +406,21 @@ export const routes = {
       scope: credentialScope,
       label: z.string().trim().min(1).max(120).nullable().default(null),
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
+      // The issuer's keys, for one coffre asks nothing: then the issuer is any string its tokens name.
+      jwks: keySet.optional(),
     }).strict(),
     // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
     query: dryRunFlag,
     run: (ctx, { params, input, query }) =>
-      workloads(ctx).bind(ctx, serviceId(params.member), input, { dryRun: query.dryRun !== undefined }),
+      workloads(ctx).bind(ctx, serviceId(params.member), { ...input, jwks: input.jwks as JSONWebKeySet | undefined }, { dryRun: query.dryRun !== undefined }),
+  }),
+  // New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them.
+  ...route('POST /members/:member/bindings/keys', {
+    input: z.object({ issuer: z.string().min(1).max(400), jwks: keySet }).strict(),
+    // `?dryRun=1` checks the keys and says which bindings would be replaced, and writes nothing.
+    query: dryRunFlag,
+    run: (ctx, { params, input, query }) =>
+      workloads(ctx).replaceKeys(ctx, serviceId(params.member), { issuer: input.issuer, jwks: input.jwks as JSONWebKeySet }, { dryRun: query.dryRun !== undefined }),
   }),
   ...route('GET /workloads/lookup', {
     input: z.object({
