@@ -36,13 +36,6 @@
       "when": 1792244020959,
       "tag": "0004_environment_parents",
       "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1792249919891,
-      "tag": "0005_personal_configs",
-      "breakpoints": true
     }
   ]
 }
