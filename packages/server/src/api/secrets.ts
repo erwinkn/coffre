@@ -35,6 +35,7 @@ import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaul
 import type { AuditEntry } from '../db/audit.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
+import { resolveRead } from './personal.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
@@ -85,6 +86,12 @@ export type SecretVersion = {
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
 /** A value, or a reference to another secret by path. */
 export type SecretValue = string | { ref: string };
+
+/**
+ * For `market/dev@me`: the environment it is a personal config of, and
+ * `fallback` while you have none, the list then being dev's own.
+ */
+export type PersonalView = { of: string; fallback: boolean };
 
 /** A reset in a fork, or its undoing: the key as it is now, and the environment that holds the parent's. */
 export type InheritResult = { key: string; archived: boolean; folder: string | null; from: string };
@@ -161,7 +168,7 @@ export async function currentEnvelopes(
 export async function listSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
-): Promise<{ permissions: Permission[]; keys: SecretKey[]; parents: string[]; rotateAfterDays: number | null }> {
+): Promise<{ permissions: Permission[]; keys: SecretKey[]; parents: string[]; personal: PersonalView | null; rotateAfterDays: number | null }> {
   const environment = requireLive(place);
   const fork = place.environment!.parentId !== null;
   const read = async (db: Queryable) => {
@@ -236,6 +243,7 @@ export async function listSecrets(
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys,
     parents: inherited.parents.map((parent) => parent.slug),
+    personal: place.personal === undefined ? null : { of: place.personal.of.slug, fallback: place.personal.fallback === true },
     rotateAfterDays: ctx.rotateAfterDays,
   };
 }
@@ -263,7 +271,8 @@ async function appendVersion(
  * here, under the head: a write (`setSecrets`), a restored version
  * (`restoreVersion`), an unarchive and a rename onto the key (`patchSecret`),
  * and an override undoing a reset (`inheritSecret`). A rename in a parent
- * carries removals down itself (`renameBelow`).
+ * carries removals down itself (`renameBelow`), and ends the removal of the
+ * name a personal config's key is moved aside to.
  */
 async function endRemovals(
   ctx: ApiContext,
@@ -560,6 +569,10 @@ async function referenceTargets(
   if (refs.length === 0) return [];
   const refused = (key: string, message: string, reason: string) =>
     new Refusal(conflict(message), denied(ctx, 'secret.reference', reason, { ...environment, operationId, metadata: { key } }));
+  // A personal config's values are bound to its owner: no reference holds one there, nor reads one from there (the vault refuses both too).
+  if (place.environment!.owner !== null) {
+    throw refused(refs[0]!.key, `a personal config holds values only, no reference: copy the value of ${refs[0]!.ref} instead`, 'personal');
+  }
   const resolved = await Promise.all(refs.map(async ({ key, ref }) => {
     const parts = ref.split('/');
     const found = parts.length === 3 ? await resolvePath(ctx.db, { project: parts[0]!, environment: parts[1]!, key: parts[2]! }) : null;
@@ -573,6 +586,7 @@ async function referenceTargets(
       const why = held === undefined ? `${ref} is no live secret to refer to` : `${ref} is inherited from ${parts[0]}/${held.from.slug}: refer to ${parts[0]}/${held.from.slug}/${parts[2]} instead`;
       throw new Refusal(notFound(why), denied(ctx, 'secret.reference', 'unknown_source', { ...environment, operationId, metadata: { key, source: ref } }));
     }
+    if (found.environment.owner !== null) throw refused(key, `${ref} is in a personal config, which no reference reads`, 'personal');
     need(ctx, 'secret.read', placeOf(found.project, found.environment), 'secret.reference', { operationId, metadata: { key, source: ref } });
     return { key, secretId: found.secret.id };
   }));
@@ -772,7 +786,17 @@ async function renameBelow(
     const at = { projectId: place.project.id, environmentId: fork.id };
     const rows = await lock(tx, secrets, { environmentId: fork.id, key: [key, nextKey] });
     const taken = rows.find((row) => row.key === nextKey);
-    if (taken !== undefined) {
+    // A personal config is named to nobody but its owner: its own key of the new name moves aside, `NEXT_KEY_2`, rather than stop the rename.
+    if (taken !== undefined && fork.owner !== null) {
+      const aside = await asideKey(tx, fork.id, nextKey);
+      await update(tx, secrets, { id: taken.id }, { key: aside, updatedAt: new Date() });
+      log.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: aside, parent, aside: true } }));
+      // Live under its new name, it is no longer removed there, as any row made live (`endRemovals`). An archived one serves nothing: the removal stands.
+      if (taken.archivedAt === null && (await dismissalsIn(tx, fork.id)).some((row) => row.key === aside)) {
+        await update(tx, dismissedKeys, { environmentId: fork.id, key: aside }, { restoredAt: new Date(), restoredBy: ctx.caller.principal.id });
+        log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: aside, renamed: nextKey, parent } }));
+      }
+    } else if (taken !== undefined) {
       throw new Refusal(
         conflict(`${place.project.slug}/${fork.slug} inherits ${key} and holds a ${nextKey} of its own: rename or archive that one first`),
         denied(ctx, 'secret.rename', 'duplicate_key_below', { ...at, secretId: taken.id, metadata: { key, nextKey, parent } }),
@@ -799,6 +823,21 @@ async function renameBelow(
       await update(tx, dismissedKeys, { environmentId: fork.id, key: nextKey }, { restoredAt: now, restoredBy: by });
       log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: nextKey, renamed: key, parent } }));
     }
+  }
+}
+
+/**
+ * A name for a personal config's key moved out of a rename's way:
+ * `NEXT_KEY_2`, `_3` and on, held by nothing the config reads, its own
+ * keys or those it inherits, and within the 128 characters a key takes.
+ */
+async function asideKey(tx: Transaction, environmentId: string, key: string): Promise<string> {
+  const inherited = await inheritedRows(tx, environmentId);
+  const taken = new Set([...(await environmentSecrets(tx, environmentId)).map((row) => row.key), ...(inherited?.held.keys() ?? [])]);
+  for (let n = 2; ; n++) {
+    const suffix = `_${n}`;
+    const name = `${key.slice(0, 128 - suffix.length)}${suffix}`;
+    if (!taken.has(name)) return name;
   }
 }
 
@@ -968,7 +1007,8 @@ export async function reveal(
 ): Promise<{ operationId: string; values: Record<string, string>; version: string | null }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
-    const place = await resolvePath(ctx.db, path);
+    // `market/dev@me`: your personal config of dev, or dev while you have none.
+    const place = await resolveRead(ctx, path);
     const environment = place === null ? null : liveEnvironment(place);
     if (place === null || environment === null) {
       throw new Refusal(

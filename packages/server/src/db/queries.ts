@@ -2,7 +2,7 @@ import type { GrantPlace, InstanceRole, Scope } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
-import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
+import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
@@ -142,9 +142,19 @@ export type ResolvedPath = {
     slug: string;
     name: string;
     archivedAt: Date | null;
-    /** The environment it inherits from, a fork's. */
+    /** The environment it inherits from, a fork's, and its slug. */
     parentId: string | null;
+    parentSlug: string | null;
+    /** A personal config's owner, `user:<email>`: an environment whose values are theirs alone. */
+    owner: string | null;
   } | null;
+  /**
+   * For a path that asks for your personal config, `market/dev@me`: the
+   * environment it is a config of, whether you have one (`environment`) or
+   * not (null). Only a read falls back to it: then `environment` is it,
+   * and `fallback` says so.
+   */
+  personal?: { of: { id: string; slug: string; archivedAt: Date | null }; fallback?: true };
   secret: {
     id: string;
     key: string;
@@ -171,27 +181,51 @@ function standing(slug: AnyColumn): SQL {
 export async function resolvePath(
   db: Queryable,
   path: { project: string; environment?: string; key?: string },
-  { tombstones = false }: { tombstones?: boolean } = {},
+  { tombstones = false, owner = null }: { tombstones?: boolean; owner?: string | null } = {},
 ): Promise<ResolvedPath | null> {
   const { projects, environments, secrets } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
+  // `dev@me`: dev first, then its personal config owned by whoever asks, and the key in that.
+  const personalSlug = path.environment === undefined ? null : personalOf(path.environment);
+  const slug = personalSlug ?? path.environment;
   const [row] = await db
     .select({ project: projects, environment: environments, secret: secrets })
     .from(projects)
     .leftJoin(
       environments,
-      path.environment === undefined
+      slug === undefined
         ? none
-        : and(eq(environments.projectId, projects.id), eq(environments.slug, path.environment), alive(environments.slug)),
+        : and(eq(environments.projectId, projects.id), eq(environments.slug, slug), alive(environments.slug)),
     )
     .leftJoin(
       secrets,
-      path.key === undefined ? none : and(eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
+      path.key === undefined || personalSlug !== null ? none : and(eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
     )
     .where(and(eq(projects.slug, path.project), alive(projects.slug)))
     .limit(1);
   if (row === undefined) return null;
-  const { project, environment, secret } = row;
+  const { project } = row;
+  let { environment, secret } = row;
+  let personal: ResolvedPath['personal'];
+  if (personalSlug !== null) {
+    // A personal config is never anyone's parent: `dev@me@me` names nothing.
+    if (environment === null || environment.owner !== null) {
+      environment = null;
+    } else {
+      personal = { of: { id: environment.id, slug: environment.slug, archivedAt: environment.archivedAt } };
+      const mine = owner === null ? undefined : await personalConfig(db, environment.id, owner);
+      environment = mine ?? null;
+      secret = null;
+      if (mine !== undefined && path.key !== undefined) {
+        [secret = null] = await db.select().from(secrets).where(and(eq(secrets.environmentId, mine.id), eq(secrets.key, path.key)));
+      }
+    }
+  }
+  const parentSlug = environment?.parentId == null
+    ? null
+    : personal?.of.id === environment.parentId
+      ? personal.of.slug
+      : ((await db.select({ slug: environments.slug }).from(environments).where(eq(environments.id, environment.parentId)))[0]?.slug ?? null);
   return {
     project: { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt },
     environment:
@@ -203,7 +237,10 @@ export async function resolvePath(
             name: environment.name,
             archivedAt: environment.archivedAt,
             parentId: environment.parentId,
+            parentSlug,
+            owner: environment.owner,
           },
+    ...(personal === undefined ? {} : { personal }),
     secret:
       secret === null
         ? null
@@ -217,13 +254,41 @@ export async function resolvePath(
   };
 }
 
+/** When each environment was made, by id. */
+export async function environmentsCreatedAt(db: Queryable, ids: readonly string[]): Promise<Map<string, Date>> {
+  if (ids.length === 0) return new Map();
+  const { environments } = tablesOf(db);
+  const rows = await db.select({ id: environments.id, createdAt: environments.createdAt }).from(environments).where(inArray(environments.id, [...ids]));
+  return new Map(rows.map((row) => [row.id, row.createdAt]));
+}
+
+/** `owner`'s personal config of an environment, deleted ones apart: one at most (`environments_parent_id_owner_key`). */
+export async function personalConfig(db: Queryable, parentId: string, owner: string) {
+  const { environments } = tablesOf(db);
+  const [row] = await db
+    .select()
+    .from(environments)
+    .where(and(eq(environments.parentId, parentId), eq(environments.owner, owner), standing(environments.slug)));
+  return row;
+}
+
 export type PlaceRow = {
   id: string;
   slug: string;
   name: string;
   archivedAt: Date | null;
   /** Each with its live secret count, its own rows: a fork's inherited keys are its parent's. */
-  environments: { id: string; slug: string; name: string; archivedAt: Date | null; parentId: string | null; secretCount: number }[];
+  environments: {
+    id: string;
+    slug: string;
+    name: string;
+    archivedAt: Date | null;
+    parentId: string | null;
+    parentSlug: string | null;
+    /** A personal config's owner: listed to them and to the project's maintainers alone. */
+    owner: string | null;
+    secretCount: number;
+  }[];
 };
 
 /**
@@ -261,8 +326,14 @@ export async function places(db: Queryable, { tombstones = false }: { tombstones
       name: environment.name,
       archivedAt: environment.archivedAt,
       parentId: environment.parentId,
+      parentSlug: null,
+      owner: environment.owner,
       secretCount: Number(secretCount),
     });
+  }
+  for (const place of found) {
+    const slugOf = new Map(place.environments.map((environment) => [environment.id, environment.slug]));
+    for (const environment of place.environments) environment.parentSlug = environment.parentId === null ? null : (slugOf.get(environment.parentId) ?? null);
   }
   return found;
 }
@@ -1450,11 +1521,15 @@ export async function liveEnvironment(db: Queryable, environmentId: string): Pro
   return row !== undefined;
 }
 
-/** The environments that inherit from `environmentId` directly: the live ones, or with `archived`, those archived too. */
-export async function forksOf(db: Queryable, environmentId: string, { archived = false }: { archived?: boolean } = {}): Promise<{ id: string; slug: string }[]> {
+/**
+ * The environments that inherit from `environmentId` directly: the live
+ * ones, or with `archived`, those archived too. Each with its owner, a
+ * personal config's, which follows its parent where a shared fork stops it.
+ */
+export async function forksOf(db: Queryable, environmentId: string, { archived = false }: { archived?: boolean } = {}): Promise<{ id: string; slug: string; owner: string | null; archivedAt: Date | null }[]> {
   const { environments } = tablesOf(db);
   return db
-    .select({ id: environments.id, slug: environments.slug })
+    .select({ id: environments.id, slug: environments.slug, owner: environments.owner, archivedAt: environments.archivedAt })
     .from(environments)
     .where(and(eq(environments.parentId, environmentId), archived ? undefined : isNull(environments.archivedAt), standing(environments.slug)))
     .orderBy(asc(environments.slug));

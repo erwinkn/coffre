@@ -1,12 +1,13 @@
 import {
   allows,
   instanceRoleGrants,
+  withinCredential,
   PERMISSIONS,
   roleGrants,
   type GrantPlace,
   type InstanceRole,
   type Permission,
-  type Place,
+  type Place as CorePlace,
   type CredentialScope,
   type Role,
   type Scope,
@@ -15,7 +16,14 @@ import type { Access, Vault } from '@coffre/core/vault';
 
 import { formatMember } from './paths.ts';
 
-export type { Place };
+/**
+ * A place a permission is checked at. A personal config's names its owner
+ * and the environment it is a config of: `can` decides it on them, never
+ * on grants or roles at the personal config itself.
+ */
+export type Place = CorePlace | (Extract<CorePlace, { environmentSlug: string | null }> & {
+  personal: { owner: string; parent: { environmentId: string; environmentSlug: string | null } };
+});
 
 export type PrincipalRef = { type: 'user' | 'service'; id: string };
 
@@ -79,19 +87,36 @@ export function callerFrom(principal: PrincipalRef, access: Access, credentialSc
  *   on an environment  its environment grant, its project's grant, or their instance role, when its scope takes it in
  */
 export function can(caller: Caller, permission: Permission, place: Place): boolean {
-  return allows(caller, permission, place);
+  if (!('personal' in place)) return allows(caller, permission, place);
+  const parent = { projectId: place.projectId, ...place.personal.parent };
+  // A personal config's values: its owner's alone, while they read its parent; no grant or role reaches them,
+  // an Owner's included (docs/design/forking.md, section 3). The vault decides the same.
+  // A credential's scope caps it still: an owner's viewer token on the parent reads their config, and writes nothing.
+  if (SECRET_PERMISSIONS.includes(permission)) {
+    return caller.principal.type === 'user' && formatMember(caller.principal) === place.personal.owner
+      && allows(caller, 'secret.read', parent) && withinCredential(caller, permission, parent);
+  }
+  // Anything else, as at its parent: its log, to whoever reads the parent's.
+  return allows(caller, permission, parent);
 }
+
+const SECRET_PERMISSIONS: readonly Permission[] = ['secret.read', 'secret.write', 'secret.archive'];
 
 /** Everything the caller may do at `place`, in catalogue order. */
 export function permissionsAt(caller: Caller, place: Place): Permission[] {
   return PERMISSIONS.filter((permission) => can(caller, permission, place));
 }
 
-/** A project, or one of its environments, as a permission check names it. */
-export function placeOf(project: { id: string }, environment: { id: string; slug: string } | null): Place {
-  return environment === null
-    ? { projectId: project.id }
-    : { projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug };
+/** A project, or one of its environments, as a permission check names it: a personal config with its owner and parent. */
+export function placeOf(
+  project: { id: string },
+  environment: { id: string; slug: string; owner?: string | null; parentId?: string | null; parentSlug?: string | null } | null,
+): Place {
+  if (environment === null) return { projectId: project.id };
+  const place = { projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug };
+  if (environment.owner == null) return place;
+  // A parent unknown here matches no grant: the owner's read of it is not assumed.
+  return { ...place, personal: { owner: environment.owner, parent: { environmentId: environment.parentId ?? '', environmentSlug: environment.parentSlug ?? null } } };
 }
 
 /**

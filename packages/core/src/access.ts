@@ -396,6 +396,17 @@ export function allows(holder: Holdings, permission: Permission, place: Place): 
   return holdsAt(holder.grants, permission, place);
 }
 
+/**
+ * Whether the credential a request came in on, a scoped token or binding,
+ * leaves `permission` at `place` to its holder: always, for a session. A
+ * personal config's owner holds its every permission by reading its parent
+ * (docs/design/forking.md), and a token of theirs is still held to the
+ * role its scope names there: a viewer's token reads it, and writes nothing.
+ */
+export function withinCredential(holder: Holdings, permission: Permission, place: Place): boolean {
+  return holder.credentialScope == null || holdsAt(holder.credentialScope, permission, place);
+}
+
 /** Whether a grant among `grants` covers `place` with a role that holds `permission`. */
 function holdsAt(grants: readonly (GrantPlace & { role: Role })[], permission: Permission, place: Place): boolean {
   return grants.some((grant) => covers(grant, place) && roleGrants(grant.role, permission));

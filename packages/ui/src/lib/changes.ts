@@ -383,7 +383,7 @@ export function createEnvironment(client: CoffreClient, project: string): Change
     targets: (vars) => [saving(environmentId(project, vars.slug))],
     apply: (environments, vars) => [
       ...environments,
-      { slug: vars.slug, name: vars.slug, accessible: false, parent: vars.inherit === true ? (vars.from ?? null) : null, details: { archivedAt: null, secretCount: 0 } },
+      { slug: vars.slug, name: vars.slug, accessible: false, parent: vars.inherit === true ? (vars.from ?? null) : null, personal: false, details: { archivedAt: null, secretCount: 0 } },
     ],
     affects: () => affects.places(),
     run: async (vars) => {

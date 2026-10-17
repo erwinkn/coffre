@@ -74,6 +74,7 @@ export type Api = {
           name: string;
           accessible: boolean;
           parent: string | null;
+          personal: boolean;
           details: null | {
             archivedAt: string | null;
             secretCount: number | null;
@@ -255,6 +256,10 @@ export type Api = {
         };
       }[];
       parents: string[];
+      personal: null | {
+        of: string;
+        fallback: boolean;
+      };
       rotateAfterDays: number | null;
     };
   };
@@ -526,6 +531,11 @@ export type Api = {
         endedBy: string | null;
         endedAt: string | null;
       }[];
+      personal: {
+        project: string;
+        of: string;
+        slug: string;
+      }[];
     };
   };
   "PUT /members/:member": {
@@ -662,6 +672,11 @@ export type Api = {
           createdAt: string;
           endedBy: string | null;
           endedAt: string | null;
+        }[];
+        personal: {
+          project: string;
+          of: string;
+          slug: string;
         }[];
       };
     };
@@ -1299,6 +1314,19 @@ export type Api = {
       replaced: string[];
     };
   };
+  "GET /personal/:project": {
+    input: undefined;
+    output: {
+      configs: {
+        owner: string;
+        of: string;
+        slug: string;
+        keys: string[];
+        archived: boolean;
+        createdAt: string;
+      }[];
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
@@ -1806,6 +1834,20 @@ export type OffboardingReport = {
     endedBy: string | null;
     endedAt: string | null;
   }[];
+  personal: {
+    project: string;
+    of: string;
+    slug: string;
+  }[];
+};
+
+export type PersonalConfig = {
+  owner: string;
+  of: string;
+  slug: string;
+  keys: string[];
+  archived: boolean;
+  createdAt: string;
 };
 
 export type ListedReference = {
@@ -1834,6 +1876,7 @@ export type ProjectSummary = {
     name: string;
     accessible: boolean;
     parent: string | null;
+    personal: boolean;
     details: null | {
       archivedAt: string | null;
       secretCount: number | null;

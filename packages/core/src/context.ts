@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * The binding context for a secret's ciphertext.
  *
@@ -9,11 +11,17 @@
  * These are immutable UUIDs, never names. Binding to `project/environment/key`
  * names would mean that renaming an environment or a secret key makes every
  * existing ciphertext permanently undecryptable.
+ *
+ * A personal config's values are bound to their owner too, `owner`, which
+ * only the vault's wrap of the data key carries (docs/design/forking.md,
+ * section 4): a forged owner column fails to open, rather than granting.
  */
 export type SecretContext = {
   projectId: string;
   environmentId: string;
   secretId: string;
+  /** A personal config's owner, as `ownerKey` hashes them. */
+  owner?: string;
 };
 
 /**
@@ -31,11 +39,25 @@ function assertUuid(value: string, field: string): void {
   }
 }
 
-/** Throw unless every field is a lowercase UUID. */
+/** Throw unless every field is a lowercase UUID, and an owner a lowercase SHA-256. */
 export function checkContext(ctx: SecretContext): void {
   assertUuid(ctx.projectId, 'projectId');
   assertUuid(ctx.environmentId, 'environmentId');
   assertUuid(ctx.secretId, 'secretId');
+  if (ctx.owner !== undefined && (typeof ctx.owner !== 'string' || !OWNER_RE.test(ctx.owner))) {
+    throw new Error(`context.owner must be a lowercase SHA-256, got: ${String(ctx.owner)}`);
+  }
+}
+
+const OWNER_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * A personal config's owner as its values' context binds them: the SHA-256
+ * of the member, `user:ada@acme.example`. Hashed, so it joins the AAD as
+ * unambiguously as a UUID: an email can hold the separator.
+ */
+export function ownerKey(member: string): string {
+  return createHash('sha256').update(member, 'utf8').digest('hex');
 }
 
 /**
@@ -48,7 +70,7 @@ export function checkContext(ctx: SecretContext): void {
 export function encodeAad(ctx: SecretContext): Buffer {
   checkContext(ctx);
   return Buffer.from(
-    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}`,
+    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}`,
     'utf8',
   );
 }

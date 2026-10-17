@@ -51,6 +51,7 @@ export const keys = {
   secrets: ({ project, environment }: Place) => ['secrets', project, environment],
   references: (path: string) => ['references', path],
   missing: ({ project, environment }: Place) => ['missing', project, environment],
+  personal: (project: string) => ['personal', project],
   directory: ['directory'],
   report: (member: string) => ['report', member],
   memberAccess: (member: string) => ['member-access', member],
@@ -176,6 +177,13 @@ export const queries = {
     queryOptions({
       queryKey: keys.missing(place),
       queryFn: () => uiResult(() => client.environments.missing(`${place.project}/${place.environment}`)),
+    }),
+
+  /** A project's personal configs, for whoever manages its environments: whose, of what, and their key names. */
+  personal: (client: CoffreClient, project: string) =>
+    queryOptions({
+      queryKey: keys.personal(project),
+      queryFn: () => uiResult(() => client.environments.personal(project)),
     }),
 
   /** The live references into and out of a place, and who reads through them, for whoever manages its access. */
@@ -624,10 +632,13 @@ export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {
  * change also lands in the audit log, which is always read fresh.
  */
 export const affects = {
-  /** A project or environment made, renamed or archived: the tree, and where you hold access. */
-  places: (): QueryKey[] => [keys.projects, keys.me],
-  /** Secrets written, renamed, restored or archived: the environment and the counts. */
-  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references'], ['missing']],
+  /**
+   * A project or environment made, renamed or archived: the tree, where you
+   * hold access, and the personal configs listed of it, which go with it.
+   */
+  places: (): QueryKey[] => [keys.projects, keys.me, ['personal']],
+  /** Secrets written, renamed, restored or archived: the environment, the counts, and the personal configs' key names. */
+  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references'], ['missing'], ['personal']],
   /**
    * Someone's access in a project changed: its grants, their report, and, as
    * it may be your own, what you can see.

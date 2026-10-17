@@ -4,6 +4,21 @@ import { INSTANCE_ROLE_NAMES, type InstanceRole } from './access.ts';
 import { PROJECT_PAGES } from './pages.ts';
 
 export const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
+/**
+ * Your personal config of an environment, in a path: `market/dev@me`
+ * (docs/design/forking.md). A read falls back to `market/dev` when you have
+ * none; a write never does.
+ */
+export const PERSONAL_SUFFIX = '@me';
+
+/** `dev@me` as the environment it is a personal config of, `dev`; null for any other slug. */
+export function personalOf(environment: string): string | null {
+  return environment.endsWith(PERSONAL_SUFFIX) ? environment.slice(0, -PERSONAL_SUFFIX.length) : null;
+}
+
+/** An environment as a path names it: a slug, or `<slug>@me` for your personal config of it. */
+export const environmentPath = z.string().refine((value) => slug.safeParse(personalOf(value) ?? value).success, 'not a valid environment');
+
 /** An environment's slug: any slug but the name of one of its project's pages. */
 export const environmentSlug = slug.refine((value) => !(PROJECT_PAGES as readonly string[]).includes(value), {
   error: (issue) => `"${String(issue.input)}" is taken by a project's page, /projects/<project>/${String(issue.input)}: an environment cannot have it`,
