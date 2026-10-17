@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.2 (2026-10-17)
+
 - **Copy a secret without revealing it.** A hidden value now has a Copy button
   beside Reveal, for whoever may reveal it. It reads the value the way Reveal
   does, with the same audit entry, and puts it on the clipboard exactly as
