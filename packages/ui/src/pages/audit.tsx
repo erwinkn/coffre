@@ -314,7 +314,7 @@ function Row({
             {runLabel(entry.run)}
           </small>
         )}
-        {entry.token !== null && (
+        {entry.token != null && (
           // The personal token the person made the request with, by the label it was made with.
           <small className="actor-run" title={`Personal token ${entry.token.id}`}>
             via token “{entry.token.label}”

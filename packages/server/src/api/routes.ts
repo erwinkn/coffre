@@ -139,7 +139,8 @@ function serviceId(member: string): string {
 
 /** What a token is made with, as `POST /members/:member/tokens` takes it: a service's or a person's. */
 const tokenInput = z.object({
-  label: z.string().trim().min(1).max(120).nullable().default(null),
+  // Printed in lists, the log and terminals: no control character, which could rewrite what is shown around it.
+  label: z.string().trim().min(1).max(120).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
   // A service token's lifetime, in days.
   expiresInDays: z.number().int().min(1).max(366).optional(),
   // A personal token's, in minutes: an afternoon's script or agent, a week at most.

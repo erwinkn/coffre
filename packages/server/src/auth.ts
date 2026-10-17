@@ -1,4 +1,4 @@
-import { ACCESS_JWT_HEADER, type AuthConfig, type Principal } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@coffre/core/identity';
 import type { CredentialScope } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
@@ -64,13 +64,24 @@ export function readCookie(request: Request, name: string): string | null {
   return cookieValue(request, name);
 }
 
+/**
+ * The browser's session, from its cookie in signin mode. Never a personal
+ * token: that is a bearer token, sent in a header, and what trusts the
+ * cookie (pages, linking an account, approving a sign-in) trusts a person
+ * at their browser, which a token planted in the cookie is not.
+ */
+export function sessionCookie(request: Request, auth: AuthConfig): string | null {
+  const token = cookieValue(request, sessionCookieName(auth));
+  return token === null || tokenKind(token) === 'personal' ? null : token;
+}
+
 export function bearerToken(request: Request): string | null {
   const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
   return match === null ? null : match[1];
 }
 
 export function accessTokenForRequest(request: Request, auth: AuthConfig): string | null {
-  if (auth.mode === 'signin') return cookieValue(request, sessionCookieName(auth));
+  if (auth.mode === 'signin') return sessionCookie(request, auth);
   const token = request.headers.get(ACCESS_JWT_HEADER);
   return token === null || token.length === 0 ? null : token;
 }

@@ -1367,9 +1367,11 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
-  if (report.personalTokens.length > 0) {
-    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${report.personalTokens.length})\n`);
-    for (const token of report.personalTokens) {
+  // An instance before 0.7 lists none.
+  const personalTokens = report.personalTokens ?? [];
+  if (personalTokens.length > 0) {
+    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${personalTokens.length})\n`);
+    for (const token of personalTokens) {
       const used = token.lastUsedAt === null ? 'never used' : `last used ${token.lastUsedAt.slice(0, 10)}`;
       process.stdout.write(`  "${token.label ?? ''}" ${token.hint}, reaching ${reaches(token.scope)}, ${used}, expires ${token.expiresAt.slice(0, 16).replace('T', ' ')} UTC\n`);
     }
@@ -1442,7 +1444,8 @@ async function audit(args: string[]): Promise<void> {
   for (const entry of result.entries.reverse()) {
     const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
     // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
-    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token === null ? '' : ` via "${entry.token.label}"`}`;
+    // An instance before 0.7 sends no `token`.
+    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}`;
     process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
   }
 }

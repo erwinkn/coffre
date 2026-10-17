@@ -451,7 +451,8 @@ export class SigninService {
     profile: SignedInAccount,
   ): Promise<{ ok: true } | { ok: false; reason: SigninRefusal }> {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
-    if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
+    // An account linked through a personal token would sign in with all its person holds, for good.
+    if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) throw forbidden('only people link sign-in accounts, signed in as themselves');
     const access = await this.#standing(ctx.caller.principal);
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);
@@ -674,8 +675,8 @@ export class SigninService {
         decision: 'allow',
         requestId: meta.requestId,
         sourceIp: meta.sourceIp,
-        // A run's credential signing itself out is the run's act, too.
-        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) === null ? {} : { credentialId: row.id }) },
+        // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
+        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' ? { credentialId: row.id } : {}) },
       });
     });
   }

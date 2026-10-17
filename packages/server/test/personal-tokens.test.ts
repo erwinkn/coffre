@@ -13,7 +13,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -256,4 +256,30 @@ test('a person lists and revokes their own tokens, and whoever runs the instance
   assert.deepEqual([report.live.tokens, report.live.sessions, report.personalTokens.map((token) => token.label)], [1, 0, ['left']]);
   const { revoked } = await root.members.remove(ADA);
   assert.equal(revoked.tokens, 1);
+});
+
+test('a personal token is a bearer token alone: planted in the session cookie it is no session, and it links no sign-in account', async () => {
+  const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  const cookie = createClient({
+    url: ORIGIN,
+    headers: () => ({ cookie: `__Host-coffre_session=${issued.token}` }),
+    transport: (request) => fetchApi(request, runtime, { sourceIp: null }),
+  });
+  assert.equal(await status(cookie.me()), 401);
+  // Linking an account checks its caller itself too, as approving a sign-in and connecting an app do.
+  const asked = await contextFor(deps, 'ada@acme.example');
+  const scoped = { ...asked, caller: { ...asked.caller, credentialScope: [{ projectId: 'p', environmentId: null, role: 'viewer' as const }] } };
+  await assert.rejects(signin.linkIdentity(scoped, { provider: 'github', subject: 'mallory', emails: ['mallory@evil.example'], name: null } as never), { status: 403 });
+  await assert.rejects(signin.decideDevice(scoped, 'BCDF-GHJK', true), { status: 403 });
+});
+
+test("a personal token's label is shown wherever it goes, so it holds no control character; and its own sign-out names it", async () => {
+  for (const label of ['agent\u001b[2K', 'two\nlines', 'tab\there']) {
+    assert.equal(await status(ada.tokens.issue(ADA, { label, expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })), 400, JSON.stringify(label));
+  }
+  const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
+  const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
+  const out = entries.find((entry) => entry.action === 'sign_out')!;
+  assert.deepEqual(out.token, { id: issued.id, label: 'agent' });
 });
