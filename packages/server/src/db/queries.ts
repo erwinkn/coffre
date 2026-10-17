@@ -734,7 +734,9 @@ export async function members(
  * Every allowed read, write and import of a secret by these actors, a read
  * of several once per secret it lists, then every restore, oldest first.
  * Each row that names a secret carries it as it is now: its key, current
- * version, and whether it or its place is archived.
+ * version, and whether it or its place is archived. Several reads, so the
+ * caller runs them in one snapshot (`SNAPSHOT`): a restore committed between
+ * two would show its version without the one it restored.
  */
 export async function memberActivity(db: Queryable, actorIds: string[]) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
@@ -758,15 +760,13 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     .leftJoin(projects, eq(projects.id, secrets.projectId))
     .where(where)
     .orderBy(asc(auditLog.seq));
-  const [seen, restores] = await Promise.all([
-    entries(and(
-      allowed,
-      inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
-      inArray(auditLog.action, ['secret.read', 'secret.write']),
-    )),
-    // Few, each someone's choice: all of them, for whichever secrets were seen.
-    entries(and(allowed, eq(auditLog.action, 'secret.restore'))),
-  ]);
+  const seen = await entries(and(
+    allowed,
+    inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
+    inArray(auditLog.action, ['secret.read', 'secret.write']),
+  ));
+  // Few, each someone's choice: all of them, for whichever secrets were seen.
+  const restores = await entries(and(allowed, eq(auditLog.action, 'secret.restore')));
   const listedOf = (row: (typeof seen)[number]) => {
     const { secrets: listed } = JSON.parse(row.metadata) as { secrets?: unknown };
     return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];

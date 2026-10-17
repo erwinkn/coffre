@@ -23,6 +23,7 @@ import {
 import { isTombstone } from '@coffre/core/schemas';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities, mcpConnections } from '@coffre/db/schema';
+import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
 import {
@@ -370,7 +371,7 @@ export async function listMembers(
   // Everyone removed, so their reports stay reachable: removal ends access,
   // not the work of rotating what they saw.
   const removed = all.filter((listed) => listed.status === 'removed').map((listed) => listed.member);
-  const exposed = exposure(removed, removed.length === 0 ? [] : await memberActivity(ctx.db, removed.map((m) => m.id)));
+  const exposed = exposure(removed, removed.length === 0 ? [] : await ctx.db.transaction((tx) => memberActivity(tx, removed.map((m) => m.id)), SNAPSHOT));
   return {
     members,
     removed: removed.map((member) => ({
@@ -480,7 +481,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     .filter((credential) => credential.kind === 'service' && credential.createdBy === member.id)
     .sort((a, b) => compare(a.service, b.service) || a.createdAt.getTime() - b.createdAt.getTime());
 
-  const activity = await memberActivity(ctx.db, [member.id]);
+  const activity = await ctx.db.transaction((tx) => memberActivity(tx, [member.id]), SNAPSHOT);
   const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
   const made = (await referencesBy(ctx.db, formatMember(member))).map((reference) => reference.view);
   made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
