@@ -180,4 +180,21 @@ DeclareOps == [p \in DeclareProcs |->
 DeclareBudget == [p \in DeclareProcs |-> 2]
 DeclareGrants == {}
 
+-----------------------------------------------------------------------------
+(* Regenerating: a fork regenerates the key it inherits while, in the parent,
+   an owner renames that key or writes it, and a value is typed in the fork
+   itself. The regenerate is listed before the vault wraps and commits under
+   the head: what it replaces must be what "k1" resolves to there. *)
+
+RegeneratingMembers == {"olga"}
+RegeneratingRank == [m \in RegeneratingMembers |-> AllRanks[m]]
+RegeneratingOwners == {"olga"}
+RegeneratingProcs == {"regen", "parent", "fork"}
+RegeneratingOps == [p \in RegeneratingProcs |->
+    CASE p = "regen" -> {Op("regenerate", "olga", "olga", "env")}
+      [] p = "parent" -> {Op("renamekey", "olga", None, "env"), Op("write", "olga", "olga", "env")}
+      [] p = "fork" -> {Op("override", "olga", None, "env")}]
+RegeneratingBudget == [p \in RegeneratingProcs |-> IF p = "parent" THEN 2 ELSE 1]
+RegeneratingGrants == {[who |-> "olga", at |-> "*"]}
+
 =============================================================================

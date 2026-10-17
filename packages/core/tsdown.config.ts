@@ -12,6 +12,8 @@ export default defineConfig({
     // MCP's scopes and client rules, for the server and the consent page.
     mcp: 'src/mcp.ts',
     pages: 'src/pages.ts',
+    // How a generated value is made, for the pages, the CLI and the server's checks.
+    recipe: 'src/recipe.ts',
     schemas: 'src/schemas.ts',
     vault: 'src/vault.ts',
     // Trust bindings' rules alone, for the pages and the CLI: none of sign-in's own code.

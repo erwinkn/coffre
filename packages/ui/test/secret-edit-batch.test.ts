@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   applySecretEditBatch,
   companionsOf,
+  generationsOf,
   hasSecretEditConflict,
   type SecretChange,
   type SecretDraft,
@@ -240,6 +241,41 @@ test("a row's companion is written in the same patch as the row", async () => {
   assert.deepEqual(writes, [
     { A: 'a-private', JWT_PRIVATE_KEY: 'private', JWT_PUBLIC_KEY: 'public', A_PUBLIC: 'a-public' },
   ]);
+});
+
+test('a generated value is written with its recipe, and a key pair names both keys as they are saved', async () => {
+  const writes: unknown[] = [];
+  const changes = {
+    // Renamed in the same save: the pair names the private key's new name.
+    A: { ...change('SIGNING_PRIVATE_KEY', 'private'), recipe: 'ecdsa:p-256', companion: { key: ' SIGNING_PUBLIC_KEY ', value: 'public' } },
+    B: change('B', 'typed'),
+  };
+  const drafts: SecretDraft[] = [{ id: 1, key: 'TOKEN ', value: 'made', recipe: 'bytes:32:hex' }];
+  const result = await applySecretEditBatch({
+    active,
+    drafts,
+    changes,
+    operations: {
+      rename: async () => {},
+      write: async (patch) => {
+        writes.push(patch);
+      },
+    },
+  });
+  assert.equal(result.error, null);
+  const pair = { recipe: 'ecdsa:p-256', pair: { private: 'SIGNING_PRIVATE_KEY', public: 'SIGNING_PUBLIC_KEY' } };
+  assert.deepEqual(writes, [{
+    SIGNING_PRIVATE_KEY: { value: 'private', generated: pair },
+    SIGNING_PUBLIC_KEY: { value: 'public', generated: pair },
+    B: 'typed',
+    TOKEN: { value: 'made', generated: { recipe: 'bytes:32:hex' } },
+  }]);
+  // And what the list shows until it is read back.
+  assert.deepEqual(generationsOf(active, drafts, changes), new Map([
+    ['TOKEN', { recipe: 'bytes:32:hex' }],
+    ['SIGNING_PRIVATE_KEY', pair],
+    ['SIGNING_PUBLIC_KEY', pair],
+  ]));
 });
 
 test('a companion stays with its row when the patch after a rename fails', async () => {

@@ -188,6 +188,31 @@
   `GET /api/audit?path=market/prod/DATABASE_URL`, list who read or changed
   it, reads of several that listed it included. The route took only a project
   or an environment, though the MCP tool `read_audit_log` offered a secret.
+- **Generate a secret's value from the CLI, and regenerate it in one step.**
+  `coffre set market/prod/SESSION_SECRET --generate bytes:32:hex` makes the
+  value in the CLI and writes it; nobody sees it, the terminal included. A
+  recipe is what the page's Generate dialog offers: `bytes:<1-256>`, as
+  base62 unless `:hex`, `:base64` or `:base64url` follows; `aes:256` or
+  `aes:128`; and key pairs, `ecdsa:` or `ecdh:` with `p-256`, `p-384` or
+  `p-521`, whose public key is written beside the private key in the same
+  write (`JWT_PRIVATE_KEY` gives `JWT_PUBLIC_KEY`, or `--public-key`).
+- **A generated value keeps its recipe.** The write sends it with the value,
+  and the server keeps it with the version, so `coffre regenerate
+  market/prod/SESSION_SECRET`, or Regenerate in the row's menu, rotates the
+  secret: a new value, made the same way, where you are, never shown. A key
+  pair's either key regenerates both, and only if neither changed since it
+  was listed (409 otherwise). In a fork, regenerating a key it inherits
+  overrides it there; the parent keeps its value. A value typed or pasted over a generated
+  one clears its recipe; a rollback brings it back with the value. The row
+  marks a generated key; its version history, `coffre history` and `coffre
+  list` name each recipe; and `coffre list` says `coffre regenerate` for a generated value due
+  for rotation.
+- **One recipe, in `@coffre/core/recipe`.** The page's generator, the CLI and
+  the server's checks share it: the server makes no value, and refuses a
+  recipe it cannot read, or a key pair not written whole (400).
+- **Schema.** `0008_recipes` adds `recipe`, `pair_id` and `pair_half` to
+  `secret_versions`, nullable, and extends the versions' erase-only trigger
+  to them. 0.6 serves on it unchanged; its writes store no recipe.
 
 ## 0.6.2 (2026-10-17)
 

@@ -1,5 +1,6 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
+import type { Generation } from '@coffre/core/recipe';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
@@ -7,7 +8,7 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, forkKey, moveSecret, restoreSecret, saveSecrets, UnsavedEdits, type ForkAction, type SaveSecretsVars } from '../lib/changes';
+import { archiveSecret, forkKey, moveSecret, regenerateSecret, restoreSecret, saveSecrets, UnsavedEdits, type ForkAction, type SaveSecretsVars } from '../lib/changes';
 import { changeKey, type ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
@@ -52,6 +53,8 @@ import {
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
+import { RecipeMark, RegenerateSecret } from '../components/regenerate';
+import { liveGeneration, regeneratedKeys, regenerateWaits } from '../lib/recipes';
 import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
@@ -180,6 +183,7 @@ function EnvironmentLedger({
   const restore = useChange(restoreSecret(coffre, { project, environment }));
   const archive = useChange(archiveSecret(coffre, { project, environment }));
   const move = useChange(moveSecret(coffre, { project, environment }));
+  const regenerate = useChange(regenerateSecret(coffre, { project, environment }, principal?.id ?? null));
   // A fork's keys, against its parent's: each action shows at once, with its opposite as Undo.
   const forkChanges = {
     remove: useChange(forkKey(coffre, { project, environment }, 'remove')),
@@ -251,6 +255,13 @@ function EnvironmentLedger({
   const archived = keys.filter((entry) => entry.archived);
   const existing = new Set(keys.map((entry) => entry.key));
   const versionOf = (key: string) => keys.find((entry) => entry.key === key.trim())?.version ?? null;
+  /** The listed version id of each key, those with one: what a regenerate replaces. */
+  const versionIdOf = (name: string) => active.find((entry) => entry.key === name)?.versionId ?? null;
+  const versionsOf = (names: readonly string[]) =>
+    Object.fromEntries(names.flatMap((name) => {
+      const version = versionIdOf(name);
+      return version === null ? [] : [[name, version] as const];
+    }));
 
   const changedEntries = active.filter(
     (entry) => secretChangeFor(changes, entry.key) !== undefined,
@@ -613,6 +624,23 @@ function EnvironmentLedger({
                       project={project}
                       environment={environment}
                       entry={entry}
+                      generated={liveGeneration(entry, active)}
+                      // Being edited, written by a new row or its companion, or with a save on its way:
+                      // a key pair's Regenerate waits for both halves.
+                      busy={(key) =>
+                        status(key).state === 'pending' ||
+                        editing.has(key) ||
+                        secretChangeFor(changes, key) !== undefined ||
+                        drafts.some((draft) => draft.key.trim() === key || draft.companion?.key.trim() === key) ||
+                        // Written here and not yet read back: no version to say it replaces.
+                        versionIdOf(key) === null
+                      }
+                      onRegenerate={(generated) =>
+                        regenerate(
+                          { key: entry.key, generated, versions: versionsOf(regeneratedKeys(entry.key, generated)) },
+                          { onSuccess: () => toast.success(`Regenerated ${regeneratedKeys(entry.key, generated).join(' and ')}`) },
+                        )
+                      }
                       rotateAfterDays={rotateAfterDays}
                       change={change ?? { key: entry.key, value: null, archived: false }}
                       editing={
@@ -1129,6 +1157,9 @@ function SecretRow({
   project,
   environment,
   entry,
+  generated,
+  busy,
+  onRegenerate,
   rotateAfterDays,
   change,
   editing,
@@ -1156,6 +1187,12 @@ function SecretRow({
   project: string;
   environment: string;
   entry: SecretKey;
+  /** Its recipe, as the page may regenerate it by: a key pair's while both halves are listed alike (`liveGeneration`). */
+  generated: Generation | null;
+  /** Whether a key in this environment is being edited, or has a save on its way. */
+  busy: (key: string) => boolean;
+  /** Regenerate it by its recipe, a tracked save of every key it writes. */
+  onRegenerate: (generated: Generation) => void;
   rotateAfterDays: number | null;
   change: SecretChange;
   editing: boolean;
@@ -1195,6 +1232,7 @@ function SecretRow({
   const [moving, setMoving] = useState(false);
   const [referring, setReferring] = useState(false);
   const [breaking, setBreaking] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
   const [lentOpen, setLentOpen] = useState(false);
   // Archiving a key others read through references waits until they are broken (D41).
   const [archiveBlocked, setArchiveBlocked] = useState(false);
@@ -1373,6 +1411,7 @@ function SecretRow({
           ) : (
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
+              {generated !== null && <RecipeMark generated={generated} />}
               {leaving && <span className="tag tag-red">Will be archived</span>}
               {parent !== null && <Standing project={project} secretKey={entry.key} parent={parent} />}
               {lent.length > 0 && (
@@ -1403,9 +1442,9 @@ function SecretRow({
                     placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
                     disabled={disabled}
                     autoFocus={!focusName}
-                    // A value typed over a generated private key no longer matches its public key.
+                    // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
                     onChange={(value) =>
-                      onPatch({ value: value === (editBase?.value ?? '') ? null : value, companion: undefined })
+                      onPatch({ value: value === (editBase?.value ?? '') ? null : value, companion: undefined, recipe: undefined })
                     }
                     onEscape={onUndo}
                     generate={{
@@ -1413,7 +1452,7 @@ function SecretRow({
                       name: change.key,
                       renamable: false,
                       companion: change.companion,
-                      onUse: ({ value, companion }) => onPatch({ value, companion }),
+                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe }),
                     }}
                   />
                   <CompanionNote companion={change.companion} versionOf={versionOf} />
@@ -1596,6 +1635,16 @@ function SecretRow({
                       Rename
                     </Menu.Item>
                   )}
+                  {canWrite && !editing && !leaving && generated !== null && (
+                    <Menu.Item
+                      className="menu-item"
+                      disabled={regenerateWaits(entry.key, generated, busy)}
+                      onClick={() => setRegenerating(true)}
+                    >
+                      <Generate size={14} />
+                      Regenerate…
+                    </Menu.Item>
+                  )}
                   {canWrite && !editing && !leaving && own && (
                     <Menu.Item className="menu-item" onClick={() => setMoving(true)}>
                       <Folder size={14} />
@@ -1651,6 +1700,20 @@ function SecretRow({
               onSuccess: () => toast.success(`${entry.key} reads ${source}`),
             })
           }
+        />
+      )}
+
+      {canWrite && generated !== null && (
+        <RegenerateSecret
+          open={regenerating}
+          onOpenChange={setRegenerating}
+          place={`${project}/${environment}`}
+          entry={entry}
+          generated={generated}
+          onConfirm={() => {
+            setReveal(null);
+            onRegenerate(generated);
+          }}
         />
       )}
 
@@ -2001,14 +2064,14 @@ function DraftRow({
                 value={draft.value}
                 placeholder="Value"
                 disabled={disabled}
-                // A value typed over a generated private key no longer matches its public key.
-                onChange={(value) => onChange({ value, companion: undefined })}
+                // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
+                onChange={(value) => onChange({ value, companion: undefined, recipe: undefined })}
                 onEscape={onRemove}
                 generate={{
                   name: draft.key,
                   renamable: true,
                   companion: draft.companion,
-                  onUse: ({ value, name, companion }) => onChange({ key: name, value, companion }),
+                  onUse: ({ value, name, companion, recipe }) => onChange({ key: name, value, companion, recipe }),
                 }}
               />
               <CompanionNote companion={draft.companion} versionOf={versionOf} />
@@ -2250,7 +2313,14 @@ function VersionHistory({
                   <td className="nowrap">
                     <Timestamp iso={version.createdAt} />
                   </td>
-                  <td>{version.createdBy}</td>
+                  <td>
+                    {version.createdBy}
+                    {version.recipe !== null && (
+                      <span className="cell-muted">
+                        {' '}· generated, <span className="mono">{version.recipe}</span>
+                      </span>
+                    )}
+                  </td>
                   <td className="cell-mono cell-muted nowrap">{version.kek}</td>
                   <td className="col-actions">
                     {canWrite && !version.current && (

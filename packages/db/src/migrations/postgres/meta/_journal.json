@@ -57,6 +57,13 @@
       "when": 1792253794481,
       "tag": "0007_personal_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792255559691,
+      "tag": "0008_recipes",
+      "breakpoints": true
     }
   ]
 }
