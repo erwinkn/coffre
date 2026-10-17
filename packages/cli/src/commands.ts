@@ -300,7 +300,7 @@ export const SECTIONS = [
   },
   {
     title: 'Audit',
-    entries: [{ command: 'audit', usage: ['audit [--limit N] [--actor <id>] [--denied] [--detail] [--json]'] }],
+    entries: [{ command: 'audit', usage: ['audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail] [--json]'], about: ['a project, environment or KEY: market/prod/DATABASE_URL lists', 'who read or changed it, reads of several that listed it included'] }],
   },
   {
     title: 'Verify',

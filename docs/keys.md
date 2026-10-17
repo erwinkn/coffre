@@ -202,7 +202,9 @@ coffre's credentials, or the key is disabled, the call fails (the API answers
 500, and the server log names the KMS error) and each key is logged with what
 happened to it: `kms_unavailable`, `kms_uncertain` when a request may have
 reached KMS, `cancelled` when it never left, or `withheld` for a key KMS did
-open but the call could not release. So the log accounts for every key KMS
+open but the call could not release. The keys of a read at one place that
+came out alike share one entry, each its item of the intent. So the log
+accounts for every key KMS
 was asked about, and full verification fails on an intent whose outcomes
 never came. A wrapped key that KMS will not decrypt for this secret is
 refused as `bad_claim`, as with a local key.

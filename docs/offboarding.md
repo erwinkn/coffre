@@ -78,8 +78,9 @@ drop out of sight once they can no longer sign in.
 
 ### How "saw" is decided
 
-From the audit log: every allowed `secret.read` (the vault's) or
-`secret.write` in their name, which records the exact version, following each
+From the audit log: every allowed `secret.read` (the vault's), each secret
+of a read of several, or `secret.write` in their name, which records the
+exact version, following each
 `secret.restore` back to the version it copied. That covers the web UI's
 Reveal, `coffre get`, `run` and `export`, and imports (which compare with the
 current value, a read).

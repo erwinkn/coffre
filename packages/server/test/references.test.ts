@@ -373,6 +373,24 @@ test("the source's side sees who reads through its references, and the reads are
   assert.deepEqual([await inLog('market'), await inLog('market/prod'), await inLog('billing'), await inLog('billing/prod')], [1, 1, 1, 1]);
 });
 
+test('a read through references is one entry for each place its values came from, and a look for any of its keys finds it', async () => {
+  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL'), STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
+  const { operationId } = await bo.secrets.reveal('billing/prod');
+  const read = (await root.audit.list({ limit: 50 })).entries.filter((entry) => entry.operationId === operationId);
+  // billing's own PORT; market's two, read through billing's references, in one entry.
+  assert.deepEqual(read.map((entry) => [entry.project, entry.environment, entry.key, entry.secrets]).sort(), [
+    ['billing', 'prod', 'PORT', null],
+    ['market', 'prod', null, [{ key: 'DATABASE_URL', version: 1 }, { key: 'STRIPE_KEY', version: 1 }]],
+  ]);
+  const bulk = read.find((entry) => entry.secrets !== null)!;
+  const finds = async (path: string) => (await root.audit.list({ path, limit: 50 })).entries.some((entry) => entry.seq === bulk.seq);
+  // Who read STRIPE_KEY: asked of the source's key or the holder's, either place, never another key.
+  assert.deepEqual(
+    await Promise.all(['market/prod/STRIPE_KEY', 'billing/prod/STRIPE_KEY', 'market/prod/DATABASE_URL', 'market/prod', 'billing/prod', 'billing/prod/PORT'].map(finds)),
+    [true, true, true, true, true, false],
+  );
+});
+
 test("an offboarding report lists the references someone made, by their seals' actor; removing them ends none (D46)", async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL'), STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
   await max.references.break('billing/prod/STRIPE_KEY');

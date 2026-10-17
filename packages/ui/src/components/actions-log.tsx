@@ -21,8 +21,9 @@ export function ActionsLog({ member }: { member: string }) {
     initialPageParam: undefined as number | undefined,
     queryFn: ({ pageParam }) =>
       uiResult(() => client.audit.list({ actor: member, limit: PAGE_SIZE, before: pageParam })),
+    // A page lists fewer entries where they name many secrets: `more` says whether older ones follow.
     getNextPageParam: (page) =>
-      page.ok && page.entries.length === PAGE_SIZE ? page.entries.at(-1)!.seq : undefined,
+      page.ok && page.more && page.entries.length > 0 ? page.entries.at(-1)!.seq : undefined,
   });
 
   if (log.isPending) {

@@ -430,7 +430,8 @@ class VaultService implements Vault {
           tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
         const result = await decide(d);
-        const entries = [...reports, ...d.log];
+        // A read is logged once per place, whichever way it ends (`readsByPlace`).
+        const entries = [...reports, ...readsByPlace(d.log)];
         let at = d.at;
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
@@ -453,7 +454,7 @@ class VaultService implements Vault {
       return { ok: true, ...result };
     } catch (error) {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
-      const entries = [...reports, ...error.entries];
+      const entries = [...reports, ...readsByPlace(error.entries)];
       if (entries.length > 0) {
         await this.#db.transaction(async (tx) => {
           await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
@@ -2278,6 +2279,7 @@ class VaultService implements Vault {
     let keys: readonly string[] = [];
     for (let after = -1n; ; ) {
       const batch = await store.vaultEntriesAfter(tx, after, VERIFY_BATCH);
+      if (batch.length === 0) return { ok: true };
       for (const entry of batch) {
         const result = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: logKeys });
         if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
@@ -2286,7 +2288,6 @@ class VaultService implements Vault {
       if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
       keys = moved.keys;
       for (const entry of batch) findings.add(entry);
-      if (batch.length < VERIFY_BATCH) return { ok: true };
       after = batch[batch.length - 1]!.seq;
     }
   }
@@ -2617,6 +2618,78 @@ function keyEntry(
       version: secret.version,
       ...detail,
       ...traced(correlation),
+    }),
+  };
+}
+
+/** What every secret of one read at a place shares, said once in its entry rather than in each of its `secrets`. */
+const READ_SHARED = ['purpose', 'intent', 'credentialId', 'through'] as const;
+
+/**
+ * A decision's `secret.read` entries, made one per secret, as the log keeps
+ * them: one per place it was decided at, the environment read and, through
+ * a reference, the holder's, or the fork that inherits it (`also`,
+ * `through`). An entry about several secrets lists
+ * them in `secrets`, each with what its own entry would have said: its
+ * `secretId`, `secretVersionId`, `subject`, `version`, and its `via`, holder
+ * (`also.secretId`) and intent `item` when it has them. An entry about one
+ * secret is as it always was. A `coffre run` of a hundred keys is one entry,
+ * not a hundred; what it decided, and for which keys, is the same. Other
+ * entries pass through, in order.
+ */
+function readsByPlace(entries: readonly NewEntry[]): NewEntry[] {
+  const groups = new Map<string, NewEntry[]>();
+  const out: (NewEntry | NewEntry[])[] = [];
+  for (const entry of entries) {
+    if (entry.action !== 'secret.read') {
+      out.push(entry);
+      continue;
+    }
+    const { also, through } = JSON.parse(entry.metadata ?? '{}') as { also?: { projectId?: string; environmentId?: string }; through?: unknown };
+    const place = JSON.stringify([
+      entry.actor, entry.decision, entry.code ?? null, entry.projectId ?? null, entry.environmentId ?? null,
+      entry.operationId ?? null, entry.requestId ?? null, String(entry.relatedSeq ?? null), also?.projectId ?? null, also?.environmentId ?? null,
+      through ?? null,
+    ]);
+    const group = groups.get(place);
+    if (group !== undefined) {
+      group.push(entry);
+      continue;
+    }
+    const fresh = [entry];
+    groups.set(place, fresh);
+    out.push(fresh);
+  }
+  return out.map((item) => (Array.isArray(item) ? oneRead(item) : item));
+}
+
+/** Entries of one read at one place as one entry: `readsByPlace`. */
+function oneRead(group: NewEntry[]): NewEntry {
+  const [first] = group as [NewEntry];
+  if (group.length === 1) return first;
+  const details = group.map((entry) => JSON.parse(entry.metadata ?? '{}') as Record<string, unknown>);
+  const shared = Object.fromEntries(READ_SHARED.flatMap((field) => (details[0]![field] === undefined ? [] : [[field, details[0]![field]]])));
+  // The place on the other side, which the group shares: a reference's holder, or the fork reading.
+  const beside = details[0]!.also as { projectId: string | null; environmentId: string } | undefined;
+  const secrets = group.map((entry, i) => {
+    const own = Object.fromEntries(Object.entries(details[i]!).filter(([field]) => !(READ_SHARED as readonly string[]).includes(field) && field !== 'also'));
+    // A reference's holder is its own; a fork's `also` names only the fork, which the entry says once.
+    const holder = (details[i]!.also as { secretId?: string } | undefined)?.secretId;
+    return {
+      ...(entry.secretId == null ? {} : { secretId: entry.secretId }),
+      ...(entry.secretVersionId == null ? {} : { secretVersionId: entry.secretVersionId }),
+      ...own,
+      ...(holder === undefined ? {} : { also: { secretId: holder } }),
+    };
+  });
+  return {
+    ...first,
+    secretId: null,
+    secretVersionId: null,
+    metadata: JSON.stringify({
+      ...shared,
+      ...(beside === undefined ? {} : { also: { projectId: beside.projectId, environmentId: beside.environmentId } }),
+      secrets,
     }),
   };
 }

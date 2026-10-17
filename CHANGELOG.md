@@ -137,6 +137,25 @@
 - **Migration** `0006_uploaded_keys` adds `jwks` to `service_bindings`, a
   nullable column the app inserts and never updates. 0.6 keeps serving on
   it.
+- **A read of many secrets is one audit entry.** `coffre run`, `coffre export`,
+  reading an environment in the UI or through MCP, a fork and a reference's
+  read used to write one `secret.read` per key: a machine polling an
+  environment of a hundred keys every 15 minutes wrote a hundred entries a
+  poll. The vault now writes one per place read, listing each secret and the
+  version it released (`secrets`), committed before any value leaves as
+  before; values read through references into another environment get an
+  entry for that environment. The Audit page says "ran market/prod: 37
+  secrets" and opens to each, and `coffre audit` adds "(37 secrets)". The
+  bulk limit still counts keys, and the offboarding report still lists each
+  value a member read. Entries written before stay as they are and verify as
+  they did. No migration. A page of `GET /api/audit`, and each batch of a
+  verification, holds at most 8 MiB of what its entries list, so a page of
+  large reads can come back short of its `limit`: the response's new `more`
+  says whether to page back with `before`.
+- **Ask the log about one key.** `coffre audit market/prod/DATABASE_URL`, and
+  `GET /api/audit?path=market/prod/DATABASE_URL`, list who read or changed
+  it, reads of several that listed it included. The route took only a project
+  or an environment, though the MCP tool `read_audit_log` offered a secret.
 
 ## 0.6.2 (2026-10-17)
 

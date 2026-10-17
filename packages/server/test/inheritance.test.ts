@@ -1,7 +1,7 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { CoffreClient } from '@coffre/client';
+import type { AuditEntryView, CoffreClient } from '@coffre/client';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
@@ -120,16 +120,19 @@ test("an inherited value is the parent's read: logged there, and in the fork thr
   const [prod, eu] = [await environmentId('prod'), await environmentId('prod-eu')];
   const reads = await entries('vault', 'secret.read');
   const also = (environmentId: string) => ({ projectId: reads[0].projectId, environmentId });
-  assert.deepEqual(reads.map((read) => [read.decision, read.environmentId, read.metadata.subject, read.metadata.through, read.metadata.also]), [
-    ['allow', eu, 'market/prod-eu/DATABASE_URL', undefined, undefined],
-    ['allow', prod, 'market/prod/SENTRY_DSN', { environmentId: eu, slug: 'prod-eu' }, also(eu)],
-    ['allow', prod, 'market/prod/STRIPE_KEY', { environmentId: eu, slug: 'prod-eu' }, also(eu)],
+  // The fork's own key; then prod's two, read in the fork, in one entry of prod's that lists them.
+  const listed = (read: (typeof reads)[number]) =>
+    (read.metadata.secrets as { subject: string }[] | undefined)?.map((secret) => secret.subject) ?? [read.metadata.subject];
+  assert.deepEqual(reads.map((read) => [read.decision, read.environmentId, listed(read), read.metadata.through, read.metadata.also]), [
+    ['allow', eu, ['market/prod-eu/DATABASE_URL'], undefined, undefined],
+    ['allow', prod, ['market/prod/SENTRY_DSN', 'market/prod/STRIPE_KEY'], { environmentId: eu, slug: 'prod-eu' }, also(eu)],
   ]);
-  // So the fork's log lists all three reads, and the parent's the two of its own keys.
+  // So the fork's log lists both entries, all three reads, and the parent's the one of its own keys.
+  const reading = (log: AuditEntryView[]) => log.filter((entry) => entry.action === 'secret.read' && entry.author === 'vault');
   const { entries: forkLog } = await root.audit.list({ path: 'market/prod-eu' });
-  assert.equal(forkLog.filter((entry) => entry.action === 'secret.read' && entry.author === 'vault').length, 3);
+  assert.deepEqual(reading(forkLog).map((entry) => entry.secrets?.map((secret) => secret.key) ?? [entry.key]).flat().sort(), ['DATABASE_URL', 'SENTRY_DSN', 'STRIPE_KEY']);
   const { entries: parentLog } = await root.audit.list({ path: 'market/prod' });
-  assert.equal(parentLog.filter((entry) => entry.action === 'secret.read' && entry.author === 'vault').length, 2);
+  assert.deepEqual(reading(parentLog).map((entry) => entry.secrets?.map((secret) => secret.key)), [['SENTRY_DSN', 'STRIPE_KEY']]);
 });
 
 test('a fork lends nothing: reading what it inherits takes read on the parent, by your own grants', async () => {
