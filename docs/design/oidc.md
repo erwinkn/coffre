@@ -405,8 +405,13 @@ in [ci.md](../ci.md#issuers-coffre-cannot-reach), and Kubernetes' in
   and gitlab.com's issuers are refused: they rotate their keys, so coffre
   always fetches theirs.
 - **The keys are checked at upload** (`uploadedKeys` in core): RSA of 2048
-  bits or more for RS256, P-256 for ES256, at most 32. Each key keeps `kty`,
-  `kid`, `use`, `alg` and its public parameters, in a fixed order. Keys for
+  bits or more for RS256, P-256 for ES256, at most 32. An RSA key's modulus
+  must be odd and its exponent odd and at least 65537, each in its fewest
+  bytes: jose takes an exponent of 1, under which a signature is its own
+  message and anyone can forge one. Each key keeps `kty`, `kid`, `use`,
+  `alg` and its public parameters, in a fixed order, and the keys are sorted
+  by thumbprint, so one set has one digest however it is listed. A token
+  that names no `kid` verifies under whichever key of the set signed it. Keys for
   encryption are left out, as from a fetched set. A private or symmetric key
   refuses the whole set.
 - **Where they live.** A nullable `service_bindings.jwks` holds them, as that

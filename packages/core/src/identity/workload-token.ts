@@ -106,18 +106,20 @@ export async function verifyWorkloadToken(
   keys: JSONWebKeySet,
   expected: { issuer: string; audience: string; now: Date; maxLifetime?: number },
 ): Promise<JWTPayload & DecodedToken['claims']> {
+  const options = {
+    algorithms: [...WORKLOAD_ALGORITHMS],
+    issuer: expected.issuer,
+    // For exp and nbf; iat's bounds are issuedRefusal's, since jose would stretch the hour by the tolerance too.
+    clockTolerance: CLOCK_TOLERANCE_SECONDS,
+    requiredClaims: ['iss', 'sub', 'exp', 'iat'],
+    currentDate: expected.now,
+  };
   let payload: JWTPayload;
   try {
-    ({ payload } = await jwtVerify(token, createLocalJWKSet(keys), {
-      algorithms: [...WORKLOAD_ALGORITHMS],
-      issuer: expected.issuer,
-      // For exp and nbf; iat's bounds are issuedRefusal's, since jose would stretch the hour by the tolerance too.
-      clockTolerance: CLOCK_TOLERANCE_SECONDS,
-      requiredClaims: ['iss', 'sub', 'exp', 'iat'],
-      currentDate: expected.now,
-    }));
+    ({ payload } = await jwtVerify(token, createLocalJWKSet(keys), options));
   } catch (error) {
-    throw refusalOf(error);
+    if (!(error instanceof errors.JWKSMultipleMatchingKeys)) throw refusalOf(error);
+    payload = await anyKey(token, error, options);
   }
   const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000);
   if (issued !== null) throw issued;
@@ -143,6 +145,22 @@ export function issuedRefusal(iat: number, now: number): WorkloadTokenRefused | 
   }
   if (iat - now > CLOCK_TOLERANCE_SECONDS) return new WorkloadTokenRefused('too_old', 'the token says it was issued in the future');
   return null;
+}
+
+/**
+ * A token that names no key, or one several keys share, verified by
+ * whichever of them signed it: a set may hold several, as while its issuer
+ * rotates. At most `MAX_KEYS` tries, each a signature check alone.
+ */
+async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2]): Promise<JWTPayload> {
+  for await (const key of matching) {
+    try {
+      return (await jwtVerify(token, key, options)).payload;
+    } catch (error) {
+      if (!(error instanceof errors.JWSSignatureVerificationFailed)) throw refusalOf(error);
+    }
+  }
+  throw new WorkloadTokenRefused('signature', "the token's signature does not verify");
 }
 
 function refusalOf(error: unknown): WorkloadTokenRefused {
@@ -196,9 +214,13 @@ const PRIVATE_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k'];
  * An issuer's public keys, as uploaded for a binding: a JWKS, `{ "keys": [
  * … ] }`, of RSA keys of 2048 bits or more, for RS256, and P-256 keys, for
  * ES256, each kept with only the members that verify (`kty`, `kid`, `use`,
- * `alg` and the key), in the order given. Keys for encryption are left out,
- * as from a fetched set; a private or a symmetric key refuses the whole set,
- * since coffre keeps no secret of an issuer's. Throws `KeysInvalid`.
+ * `alg` and the key), in the order of their thumbprints, so that one set
+ * however listed has one digest. An RSA key's parameters are checked
+ * before jose sees them, since it takes some that verify anything: an
+ * exponent of 1 makes every signature its message. Keys for encryption are
+ * left out, as from a fetched set; a private or a symmetric key refuses the
+ * whole set, since coffre keeps no secret of an issuer's. Throws
+ * `KeysInvalid`.
  */
 export async function uploadedKeys(value: unknown): Promise<UploadedKeys> {
   const listed = (value as { keys?: unknown } | null)?.keys;
@@ -220,14 +242,19 @@ export async function uploadedKeys(value: unknown): Promise<UploadedKeys> {
     let key: JWK;
     if (jwk.kty === 'RSA' && (jwk.alg === undefined || jwk.alg === 'RS256')) {
       alg = 'RS256';
-      if (typeof jwk.n !== 'string' || typeof jwk.e !== 'string') throw new KeysInvalid(`${named} is an RSA key without n and e`);
-      // The modulus's bits, counted from its highest set bit, as jose counts them when it verifies.
-      const modulus = Buffer.from(jwk.n, 'base64url').toString('hex');
-      if (modulus === '' || BigInt(`0x${modulus}`).toString(2).length < 2048) throw new KeysInvalid(`${named} is an RSA key under 2048 bits`);
-      key = { kty: 'RSA', ...kidAndUse(jwk), alg, n: jwk.n, e: jwk.e };
+      const [n, e] = [integer(jwk.n), integer(jwk.e)];
+      if (n === null || e === null) throw new KeysInvalid(`${named} is an RSA key without n and e, each a base64url integer in its fewest bytes`);
+      // The modulus's bits counted from its highest set bit, as jose counts them when it verifies.
+      if (n.toString(2).length < 2048) throw new KeysInvalid(`${named} is an RSA key under 2048 bits`);
+      if (n % 2n === 0n) throw new KeysInvalid(`${named} is not a valid RSA key`);
+      // As NIST SP 800-56B has it: odd, above 2^16, below 2^256.
+      if (e % 2n === 0n || e <= 65536n || e >= 2n ** 256n) throw new KeysInvalid(`${named}'s exponent is not one an RSA key signs with: odd, from 65537`);
+      key = { kty: 'RSA', ...kidAndUse(jwk), alg, n: jwk.n as string, e: jwk.e as string };
     } else if (jwk.kty === 'EC' && jwk.crv === 'P-256' && (jwk.alg === undefined || jwk.alg === 'ES256')) {
       alg = 'ES256';
-      if (typeof jwk.x !== 'string' || typeof jwk.y !== 'string') throw new KeysInvalid(`${named} is an EC key without x and y`);
+      if (typeof jwk.x !== 'string' || typeof jwk.y !== 'string' || !BASE64URL.test(jwk.x) || !BASE64URL.test(jwk.y)) {
+        throw new KeysInvalid(`${named} is an EC key without x and y, each base64url`);
+      }
       key = { kty: 'EC', ...kidAndUse(jwk), alg, crv: 'P-256', x: jwk.x, y: jwk.y };
     } else {
       throw new KeysInvalid(`${named} is not an RSA key for RS256 or a P-256 key for ES256, the two coffre accepts`);
@@ -240,21 +267,34 @@ export async function uploadedKeys(value: unknown): Promise<UploadedKeys> {
     keys.push(key);
   }
   if (keys.length === 0) throw new KeysInvalid('the key set holds no key that signs');
-  const jwks = JSON.stringify({ keys });
+  const sorted = keys.map((key) => [thumbprint(key), key] as const).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const jwks = JSON.stringify({ keys: sorted.map(([, key]) => key) });
   return { jwks, digest: createHash('sha256').update(jwks, 'utf8').digest('hex'), keys: keySummaries(jwks) };
 }
 
 /** The keys of a set `uploadedKeys` kept, as an owner sees them. */
 export function keySummaries(jwks: string): KeySummary[] {
-  return (JSON.parse(jwks) as JSONWebKeySet).keys.map((key) => {
-    // RFC 7638: the required members alone, in lexicographic order.
-    const required = key.kty === 'RSA' ? { e: key.e, kty: key.kty, n: key.n } : { crv: key.crv, kty: key.kty, x: key.x, y: key.y };
-    return {
-      kid: key.kid ?? null,
-      alg: key.kty === 'RSA' ? 'RS256' : 'ES256',
-      thumbprint: createHash('sha256').update(JSON.stringify(required), 'utf8').digest('base64url'),
-    };
-  });
+  return (JSON.parse(jwks) as JSONWebKeySet).keys.map((key) => ({
+    kid: key.kid ?? null,
+    alg: key.kty === 'RSA' ? 'RS256' : 'ES256',
+    thumbprint: thumbprint(key),
+  }));
+}
+
+/** A key's RFC 7638 thumbprint: the SHA-256 of its required members alone, in lexicographic order. */
+function thumbprint(key: JWK): string {
+  const required = key.kty === 'RSA' ? { e: key.e, kty: key.kty, n: key.n } : { crv: key.crv, kty: key.kty, x: key.x, y: key.y };
+  return createHash('sha256').update(JSON.stringify(required), 'utf8').digest('base64url');
+}
+
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+
+/** An unsigned integer as JWK writes one, base64url in its fewest bytes; null for anything else. */
+function integer(value: unknown): bigint | null {
+  if (typeof value !== 'string' || !BASE64URL.test(value)) return null;
+  const bytes = Buffer.from(value, 'base64url');
+  if (bytes.length === 0 || bytes[0] === 0 || bytes.toString('base64url') !== value) return null;
+  return BigInt(`0x${bytes.toString('hex')}`);
 }
 
 function kidAndUse(jwk: Record<string, unknown>): Pick<JWK, 'kid' | 'use'> {

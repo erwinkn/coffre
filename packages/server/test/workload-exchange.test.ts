@@ -939,7 +939,7 @@ test("replacing an issuer's keys replaces each binding on it, the same but for t
   const plan = await replaceKeys([rsa, ec], true);
   assert.ok(!('bindings' in plan));
   assert.deepEqual(plan.replaces, [first.binding.id, other.binding.id]);
-  assert.deepEqual(plan.keys.map(({ kid }) => kid), ['rs-1', 'es-1']);
+  assert.deepEqual(plan.keys.map(({ kid }) => kid).sort(), ['es-1', 'rs-1']);
   assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null).length, 3, 'a dry run writes nothing');
 
   const done = await replaceKeys([rsa, ec]);

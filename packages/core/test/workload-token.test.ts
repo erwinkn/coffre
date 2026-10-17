@@ -112,15 +112,16 @@ test('an uploaded key set keeps the public keys that sign, written one way, and 
   const rsa = await signer('RS256', 'rs');
   const ec = await signer('ES256', 'es');
   const set = await uploadedKeys({ keys: [{ ...rsa.jwk, x5c: ['MIIB'] }, ec.jwk, { ...ec.jwk, kid: 'enc', use: 'enc' }] });
-  assert.deepEqual(set.keys.map(({ kid, alg }) => [kid, alg]), [['rs', 'RS256'], ['es', 'ES256']]);
+  assert.deepEqual(set.keys.map(({ kid, alg }) => [kid, alg]).sort(), [['es', 'ES256'], ['rs', 'RS256']]);
+  assert.deepEqual(set.keys.map(({ thumbprint }) => thumbprint), set.keys.map(({ thumbprint }) => thumbprint).sort(), 'kept in the order of their thumbprints');
   assert.match(set.digest, /^[0-9a-f]{64}$/);
   assert.deepEqual(keySummaries(set.jwks), set.keys);
-  assert.equal(JSON.parse(set.jwks).keys[0].x5c, undefined);
+  assert.ok((JSON.parse(set.jwks) as { keys: Record<string, unknown>[] }).keys.every((key) => key.x5c === undefined));
   const reordered = await uploadedKeys({ keys: [Object.fromEntries(Object.entries(rsa.jwk).reverse()), ec.jwk] });
   assert.equal(reordered.digest, set.digest);
   // The thumbprint is RFC 7638's: the same as jose's.
   const { calculateJwkThumbprint } = await import('jose');
-  assert.equal(set.keys[0]!.thumbprint, await calculateJwkThumbprint(rsa.jwk));
+  assert.equal(set.keys.find(({ kid }) => kid === 'rs')!.thumbprint, await calculateJwkThumbprint(rsa.jwk));
   // What it keeps verifies.
   await verify(await rsa.sign({}), JSON.parse(set.jwks).keys);
 
@@ -137,4 +138,23 @@ test('an uploaded key set keeps the public keys that sign, written one way, and 
   await invalid({ keys: [{ ...rsa.jwk, n: short.toString('base64url') }] }, /under 2048 bits/);
   await invalid({ keys: [{ ...ec.jwk, x: 'AQAB' }] }, /not a valid EC key/);
   await invalid({ keys: [rsa.jwk, { ...ec.jwk, kid: 'rs' }] }, /two keys are key rs/);
+  // RSA parameters jose would take, though they verify what nobody signed: an exponent of 1 makes a signature its own message.
+  for (const e of ['AQ', 'Aw', 'AQAA', 'AAEAAQ', 'AQAB=']) await invalid({ keys: [{ ...rsa.jwk, e }] }, /exponent|n and e/);
+  const even = Buffer.from(rsa.jwk.n!, 'base64url');
+  even[even.length - 1]! &= 0xfe;
+  await invalid({ keys: [{ ...rsa.jwk, n: even.toString('base64url') }] }, /not a valid RSA key/);
+  await invalid({ keys: [{ ...rsa.jwk, n: `AA${rsa.jwk.n}` }] }, /fewest bytes/);
+  // One set, however listed: one digest.
+  assert.equal((await uploadedKeys({ keys: [ec.jwk, rsa.jwk] })).digest, (await uploadedKeys({ keys: [rsa.jwk, ec.jwk] })).digest);
+});
+
+test('a token that names no key verifies under whichever key of the set signed it, as while an issuer rotates', async () => {
+  const [old, next] = [await signer('RS256', 'old'), await signer('RS256', 'next')];
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const token = await next.sign({}, { kid: undefined });
+  const keys = [unnamed(old.jwk), unnamed(next.jwk)];
+  assert.equal((await verify(token, keys)).sub, 'repo:acme/api:ref:refs/heads/main');
+  await refused(verify(await (await signer('RS256', 'other')).sign({}, { kid: undefined }), keys), 'signature');
+  // Its claims are still checked, under the key that signed it.
+  await refused(verify(await next.sign({ aud: 'https://elsewhere.example' }, { kid: undefined }), keys), 'audience');
 });
