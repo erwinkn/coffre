@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { environmentSecrets, fileSecrets, resolvePath, secretFolderOf, type ResolvedPath } from '../db/queries.ts';
+import { environmentSecrets, fileSecrets, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
@@ -76,12 +76,8 @@ export async function forkEnvironment(
     await setSecrets(ctx, target, { ...patch });
 
     // Each key keeps its folder.
-    const sourceRows = await environmentSecrets(ctx.db, source.environment.id);
-    const folders = await secretFolderOf(ctx.db, source.environment.id);
-    const filed = sourceRows.flatMap((row) => {
-      const folder = folders.get(row.id);
-      return folder === undefined || !(row.key in patch) ? [] : [{ key: row.key, folder }];
-    });
+    const filed = (await environmentSecrets(ctx.db, source.environment.id)).flatMap(({ key, folder }) =>
+      folder === null || !(key in patch) ? [] : [{ key, folder }]);
     if (filed.length > 0) {
       const ids = new Map((await environmentSecrets(ctx.db, target.environment.id)).map((secret) => [secret.key, secret.id]));
       await audited(ctx, async (tx) => {

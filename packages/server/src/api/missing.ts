@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { dismissedKeys } from '@coffre/db/schema';
 
-import { dismissalsIn, environmentSecrets, liveKeysIn, places, secretFolderOf, update, upsert, type ResolvedPath } from '../db/queries.ts';
+import { dismissalsIn, environmentSecrets, liveKeysIn, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
 import { allowed, audited, type ApiContext } from './context.ts';
 import { ApiError, notFound } from './errors.ts';
 import { checkEnvironment } from './secrets.ts';
@@ -42,8 +42,6 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
     liveKeysIn(ctx.db, others.map((environment) => environment.id)),
     dismissalsIn(ctx.db, here.environmentId),
   ]);
-  const folders = new Map<string, string>();
-  for (const environment of others) for (const [id, folder] of await secretFolderOf(ctx.db, environment.id)) folders.set(id, folder);
   const slugOf = new Map(others.map((environment) => [environment.id, environment.slug]));
   const has = new Set(present.map((secret) => secret.key));
   const found = new Map<string, { in: string[]; folders: Set<string | null> }>();
@@ -51,7 +49,7 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
     if (has.has(secret.key)) continue;
     const entry = found.get(secret.key) ?? { in: [], folders: new Set() };
     entry.in.push(slugOf.get(secret.environmentId)!);
-    entry.folders.add(folders.get(secret.id) ?? null);
+    entry.folders.add(secret.folder);
     found.set(secret.key, entry);
   }
   const keys = [...found.entries()]

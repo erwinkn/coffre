@@ -51,6 +51,8 @@ export type Change<TData, TItem, TVars, TResult> = {
    * removed ones as they are until confirmed. A rename touches both names.
    */
   targets: (vars: TVars) => Target[];
+  /** How saves are worded, when not as saves: dismissing. */
+  saving?: Words;
   /** How removals are worded, when not as removals: archiving, revoking. */
   removing?: Words;
   /** The items as they will be once the saves land; removals are left for the server. */
@@ -83,7 +85,7 @@ export function changeOptions<TData, TItem, TVars, TResult>(
     mutationFn: change.run,
     onMutate: async (vars) => {
       const targets = change.targets(vars);
-      const words = { saving: WORDS.saving, removing: change.removing ?? WORDS.removing };
+      const words = { saving: change.saving ?? WORDS.saving, removing: change.removing ?? WORDS.removing };
       announce(`${change.label(vars)}: ${words[mainKind(targets)].pending}`);
       // A read already on its way would land over the change.
       await queryClient.cancelQueries({ queryKey: list.queryKey });

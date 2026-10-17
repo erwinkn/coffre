@@ -25,6 +25,7 @@ import { stringsOf } from './lib/search';
 import {
   hasAppsTab,
   loadDirectory,
+  loadEnvironment,
   loadMember,
   loadPrincipal,
   loadProject,
@@ -156,19 +157,9 @@ export const environment = {
   validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
     filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
   }),
-  loader: async ({ context, params }: Loader<{ project: string; environment: string }>) => {
+  loader: ({ context, params }: Loader<{ project: string; environment: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const secrets = await queryClient.fetchQuery(queries.secrets(coffre, params));
-    // Then, for whoever reads it, the references that read its secrets from
-    // elsewhere and the keys it lacks, rendered with them. Asked only then,
-    // so a refused visit is one refusal in the log, not three.
-    if (secrets.ok) {
-      await Promise.all([
-        queryClient.fetchQuery(queries.references(coffre, `${params.project}/${params.environment}`)),
-        queryClient.fetchQuery(queries.missing(coffre, params)),
-      ]);
-    }
-    return secrets;
+    return loadEnvironment(queryClient, coffre, params);
   },
 };
 

@@ -58,12 +58,12 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [{ does: "an environment: the keys its siblings have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
   },
   'PATCH /projects/:project/:environment/dismissals': {
-    ui: [{ does: 'an environment › Missing keys › Dismiss, Dismiss all, Restore', in: 'components/missing.tsx', call: 'environments.dismiss' }],
+    ui: [{ does: 'an environment › Missing keys › Dismiss, Dismiss all, and Undo after either', in: 'components/missing.tsx', call: 'environments.dismiss' }],
   },
   'GET /secrets/:project/:environment': { ui: [{ does: 'an environment: its secrets', in: 'pages/environment.tsx', call: 'secrets.list' }] },
   'PATCH /secrets/:project/:environment': {
     ui: [
-      { does: 'an environment › New secret, Edit, then Save', in: 'pages/environment.tsx', call: 'secrets.set' },
+      { does: 'an environment › Add secret, Edit, then Save', in: 'pages/environment.tsx', call: 'secrets.set' },
       { does: 'an environment › Import .env, after its plan', in: 'pages/environment.tsx', call: 'secrets.set' },
     ],
   },

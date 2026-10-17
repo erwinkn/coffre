@@ -52,7 +52,7 @@
   --violet: light-dark(oklch(0.5 0.19 296), oklch(0.76 0.12 300));
   --violet-wash: light-dark(oklch(0.955 0.022 300), oklch(0.28 0.06 300));
 
-  /* The floating save bar and toasts: dark in both schemes. */
+  /* Toasts: dark in both schemes. */
   --float: light-dark(oklch(0.235 0 0), oklch(0.3 0 0));
   --on-float: light-dark(oklch(0.985 0 0), oklch(0.97 0 0));
   --on-float-2: light-dark(oklch(0.8 0 0), oklch(0.8 0 0));
@@ -2752,30 +2752,30 @@ tr.row-failure > td:first-child {
   margin-left: auto;
 }
 
-/* Pending changes: a dark bar floating at the foot of the page. */
-.savebar {
-  position: fixed;
-  z-index: 40;
-  left: 50%;
-  bottom: 1.25rem;
-  width: min(46rem, calc(100vw - 2rem));
-  transform: translateX(-50%);
-  border-radius: var(--radius-xl);
-  background: var(--float);
-  color: var(--on-float);
-  box-shadow: var(--shadow-lg);
-  animation: rise 240ms var(--ease-out);
-}
-
-.savebar-inner {
+/* Pending changes: a bar at the foot of the table they are made in, as blue
+   as the rows it saves. It sticks to the bottom of the window while the
+   table runs past it, and its shadow says it floats over rows then. */
+.pending-bar {
+  position: sticky;
+  z-index: 5;
+  bottom: 0;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
-  padding: 0.5rem 0.5rem 0.5rem 1rem;
+  padding: 0.5rem 0.75rem 0.5rem 1rem;
+  border-top: 1px solid color-mix(in oklab, var(--accent) 35%, var(--border));
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: var(--accent-wash);
+  box-shadow: 0 -6px 12px -10px oklch(0 0 0 / 0.25);
 }
 
-.savebar-count {
+/* The bar draws the line under the last row. */
+.card > .dt-wrap:has(+ .pending-bar) .dt tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.pending-count {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
@@ -2783,71 +2783,61 @@ tr.row-failure > td:first-child {
   white-space: nowrap;
 }
 
-.savebar-count .dot {
-  color: color-mix(in oklab, var(--accent) 70%, var(--on-float));
+.pending-count .dot {
+  color: var(--accent);
 }
 
-.savebar-summary {
+.pending-summary {
   flex: 1 1 12rem;
   min-width: 0;
   overflow: hidden;
-  color: var(--on-float-2);
+  color: var(--ink-2);
   font-size: 0.8125rem;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.savebar-summary .mono {
-  color: var(--on-float);
+.pending-summary .mono {
+  color: var(--ink);
 }
 
-.savebar-error {
+.pending-error {
   flex-basis: 100%;
   display: flex;
   gap: 0.5rem;
-  padding: 0 0.5rem 0.25rem 0;
-  color: var(--on-float);
+  padding-bottom: 0.25rem;
+  color: var(--red);
   font-size: 0.8125rem;
 }
 
-.savebar-error svg {
+.pending-error svg {
   flex: none;
   margin-top: 0.15rem;
 }
 
-.savebar-actions {
+.pending-actions {
   display: flex;
   align-items: center;
   gap: 0.375rem;
+  margin-left: auto;
 }
 
-.savebar .btn {
-  border-color: color-mix(in oklab, var(--on-float) 22%, transparent);
-  background: transparent;
-  color: var(--on-float);
-  box-shadow: none;
+/* A primary button with a chevron joined to its right, which opens a menu of
+   other things it could do. */
+.split-button {
+  display: inline-flex;
 }
 
-.savebar .btn:hover:not(:disabled) {
-  border-color: color-mix(in oklab, var(--on-float) 40%, transparent);
-  background: color-mix(in oklab, var(--on-float) 10%, transparent);
+.split-button > .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
-.savebar .btn-primary {
-  border-color: var(--on-float);
-  background: var(--on-float);
-  color: var(--float);
-}
-
-.savebar .btn-primary:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--on-float) 88%, var(--float));
-}
-
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translate(-50%, 12px);
-  }
+.split-button > .btn:last-child {
+  width: 1.875rem;
+  border-left-color: color-mix(in oklab, var(--panel) 30%, var(--ink));
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
 
 /* ========================================================================== */
@@ -5004,12 +4994,8 @@ a.menu-item:hover {
     flex-basis: 100%;
   }
 
-  .savebar-summary {
+  .pending-summary {
     display: none;
-  }
-
-  .savebar-actions {
-    margin-left: auto;
   }
 
   .signin-form {

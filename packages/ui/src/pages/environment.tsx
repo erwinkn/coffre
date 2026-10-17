@@ -1,14 +1,14 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
-import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, moveSecret, restoreSecret, saveSecrets, UnsavedEdits } from '../lib/changes';
-import type { ItemStatus } from '../lib/optimistic';
+import { archiveSecret, moveSecret, restoreSecret, saveSecrets, UnsavedEdits, type SaveSecretsVars } from '../lib/changes';
+import { changeKey, type ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
@@ -34,7 +34,7 @@ import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { noReads, revealToggleDisabled, rowReads } from '../lib/row-reads';
 import { sortKeys, type Sort } from '../lib/secret-order';
 import { inDialog } from '../lib/shortcuts';
-import { secretKeyProblem } from '../lib/validation';
+import { folderProblem, secretKeyProblem } from '../lib/validation';
 import {
   breakAfterUnderscores,
   ConfirmButton,
@@ -55,6 +55,7 @@ import { GenerateValue, type GeneratedUse } from '../components/generate-value';
 import { MaskedInput, MaskedTextarea } from '../components/masked';
 import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
+import { MultiCombobox } from '../components/multi-combobox';
 import { ArchiveBlocked, archiveBlockers, LentReferences, MakeReference, ReferenceValue } from '../components/references';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import {
@@ -161,6 +162,7 @@ function EnvironmentLedger({
   rotateAfterDays: number | null;
 }) {
   const coffre = useCoffre();
+  const queryClient = useQueryClient();
   const { principal } = useShell();
   const save = useChange(saveSecrets(coffre, { project, environment }, principal?.id ?? null));
   const restore = useChange(restoreSecret(coffre, { project, environment }));
@@ -188,6 +190,7 @@ function EnvironmentLedger({
   const [sort, setSort] = useState<Sort>({ by: 'key', descending: false });
   // A column's first click sorts it ascending: names A to Z, the oldest values first.
   const sortBy = (by: Sort['by']) => setSort((current) => ({ by, descending: current.by === by && !current.descending }));
+  const [addingFolder, setAddingFolder] = useState(false);
   const nextDraftId = useRef(0);
 
   const canWrite = permissions.includes('secret.write');
@@ -197,6 +200,10 @@ function EnvironmentLedger({
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
   const folders = foldersOf(active);
+  // What can be filed now: not a secret whose save is on its way, which may
+  // not exist yet, nor one with an edit pending, as its menu offers no move
+  // while it is edited.
+  const settled = active.filter((entry) => status(entry.key).state !== 'pending' && secretChangeFor(changes, entry.key) === undefined);
   // Renaming or removing a folder: everything in it at once, the keys staying where they are.
   const refile = useAction();
   const place = `${project}/${environment}`;
@@ -294,6 +301,7 @@ function EnvironmentLedger({
     save(batch, {
       // What did not go comes back as it was, beside the other pending rows.
       onError: (error) => {
+        forgetRefusal(batch);
         const left = error instanceof UnsavedEdits ? error.outcome : batch;
         setDrafts((rows) => [...rows, ...left.drafts]);
         setChanges((current) => ({ ...current, ...left.changes }));
@@ -324,11 +332,16 @@ function EnvironmentLedger({
     setChanges({});
     setEditing(new Set());
     setSaveError(null);
-    // A refused save, given up: its rows stop saying so.
-    for (const entry of keys) {
-      const state = status(entry.key);
-      if (state.state === 'failed') dismiss(state.mutationId);
-    }
+  }
+
+  /**
+   * A refused save leaves its rows no failure of their own: its edits come
+   * back on them, and the bar under the table says why. Every other refused
+   * change, a move for one, says why beneath its row.
+   */
+  function forgetRefusal(batch: SaveSecretsVars) {
+    const saves = queryClient.getMutationCache().findAll({ mutationKey: changeKey(queryKeys.secrets({ project, environment })) });
+    for (const each of saves) if (each.state.variables === batch) dismiss(each.mutationId);
   }
 
   /**
@@ -336,7 +349,7 @@ function EnvironmentLedger({
    * rest as one patch that lands whole or not at all. The edits show in the
    * list at once, each row marked as saving; whatever did not land comes
    * back as pending, so pressing save again retries exactly that, and the
-   * save bar says why.
+   * bar under the table says why.
    */
   function saveChanges() {
     if (!ready) return;
@@ -347,6 +360,7 @@ function EnvironmentLedger({
     setSaveError(null);
     save(batch, {
       onError: (error) => {
+        forgetRefusal(batch);
         const left = error instanceof UnsavedEdits ? error.outcome : batch;
         setDrafts(left.drafts);
         setChanges(left.changes);
@@ -419,7 +433,7 @@ function EnvironmentLedger({
         : null;
 
   // Filtering narrows what is listed, never what is saved: a pending edit on
-  // a row the filter hides still counts, and still shows in the save bar.
+  // a row the filter hides still counts, and still shows in the bar under the table.
   const needle = query.trim().toLowerCase();
   const listed = sortKeys(
     needle === '' ? active : active.filter((entry) => entry.key.toLowerCase().includes(needle)),
@@ -537,6 +551,7 @@ function EnvironmentLedger({
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
+                      onDismiss={dismiss}
                       columns={columns}
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
@@ -591,15 +606,33 @@ function EnvironmentLedger({
             </table>
           </div>
         )}
+        {pendingCount > 0 && (
+          <PendingBar
+            pending={pending}
+            ready={ready}
+            error={saveError ?? problem}
+            onDiscard={discardAll}
+            onSave={saveChanges}
+          />
+        )}
       </section>
 
       {canWrite && (
         <div className="table-actions">
-          <button className="btn btn-primary" onClick={() => addDraft()}>
-            <Plus size={14} />
-            New secret
-          </button>
+          <AddButton onAddSecret={() => addDraft()} onAddFolder={() => setAddingFolder(true)} canAddFolder={settled.length > 0} />
           {canReveal && <ImportEnv project={project} environment={environment} />}
+          <AddFolder
+            open={addingFolder}
+            onOpenChange={setAddingFolder}
+            keys={settled.map((entry) => entry.key)}
+            folders={folders}
+            onAdd={(folder, keys) => {
+              // As things stand on submit: a secret whose save started since the dialog opened is left out, not raced.
+              for (const entry of settled) {
+                if (keys.includes(entry.key) && entry.folder !== folder) move({ key: entry.key, folder });
+              }
+            }}
+          />
         </div>
       )}
 
@@ -659,46 +692,187 @@ function EnvironmentLedger({
         </Card>
       )}
 
-      {pendingCount > 0 && (
-        <div className="savebar" role="region" aria-label="Unsaved changes">
-          <div className="savebar-inner">
-            <span className="savebar-count">
-              <span className="dot" aria-hidden />
-              {pendingCount} unsaved change{pendingCount === 1 ? '' : 's'}
-            </span>
-            <span className="savebar-summary">
-              {pending.slice(0, 3).map((item, index) => (
-                <span key={`${item.key}:${index}`}>
-                  {index > 0 && ' · '}
-                  <span className="mono">{item.key}</span> {item.what}
-                </span>
-              ))}
-              {pending.length > 3 && ` · and ${pending.length - 3} more`}
-            </span>
-            <div className="savebar-actions">
-              <button className="btn btn-sm" onClick={discardAll}>
-                Discard
-              </button>
-              <button
-                className="btn btn-sm btn-primary"
-                onClick={saveChanges}
-                disabled={!ready}
-                title="Save (⌘ Enter or Ctrl Enter)"
-                aria-keyshortcuts="Meta+Enter Control+Enter"
-              >
-                Save {pendingCount === 1 ? 'change' : `${pendingCount} changes`}
-              </button>
-            </div>
-            {(saveError ?? problem) !== null && (
-              <p className="savebar-error" role="alert">
-                <AlertCircle size={14} />
-                <span>{saveError ?? problem}</span>
-              </p>
-            )}
-          </div>
-        </div>
-      )}
     </>
+  );
+}
+
+/**
+ * The pending edits, at the foot of the table they are made in: what they
+ * are, Discard and Save. It sticks to the bottom of the window while the
+ * table runs past it, so Save stays in reach of any row.
+ */
+function PendingBar({
+  pending,
+  ready,
+  error,
+  onDiscard,
+  onSave,
+}: {
+  pending: Pending[];
+  ready: boolean;
+  /** Why the last save failed, or why this one cannot go yet. */
+  error: string | null;
+  onDiscard: () => void;
+  onSave: () => void;
+}) {
+  const count = pending.length;
+  return (
+    <div className="pending-bar" role="region" aria-label="Unsaved changes">
+      <span className="pending-count">
+        <span className="dot" aria-hidden />
+        {count} unsaved change{count === 1 ? '' : 's'}
+      </span>
+      <span className="pending-summary">
+        {pending.slice(0, 3).map((item, index) => (
+          <span key={`${item.key}:${index}`}>
+            {index > 0 && ' · '}
+            <span className="mono">{item.key}</span> {item.what}
+          </span>
+        ))}
+        {count > 3 && ` · and ${count - 3} more`}
+      </span>
+      <div className="pending-actions">
+        <button className="btn btn-sm" onClick={onDiscard}>
+          Discard
+        </button>
+        <button
+          className="btn btn-sm btn-primary"
+          onClick={onSave}
+          disabled={!ready}
+          title="Save (⌘ Enter or Ctrl Enter)"
+          aria-keyshortcuts="Meta+Enter Control+Enter"
+        >
+          Save {count === 1 ? 'change' : `${count} changes`}
+        </button>
+      </div>
+      {error !== null && (
+        <p className="pending-error" role="alert">
+          <AlertCircle size={14} />
+          <span>{error}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Add secret, and beside it a menu of the other things to add: a folder.
+ * One button in look, two to the keyboard and to a screen reader, the
+ * second a menu button.
+ */
+function AddButton({
+  onAddSecret,
+  onAddFolder,
+  canAddFolder,
+}: {
+  onAddSecret: () => void;
+  onAddFolder: () => void;
+  /** Whether there is a secret to file in a new folder. */
+  canAddFolder: boolean;
+}) {
+  return (
+    <div className="split-button">
+      <button className="btn btn-primary" onClick={onAddSecret}>
+        <Plus size={14} />
+        Add secret
+      </button>
+      <Menu.Root>
+        <Menu.Trigger className="btn btn-primary btn-icon" aria-label="More to add">
+          <ChevronDown size={14} />
+        </Menu.Trigger>
+        <MenuPopup align="start">
+          <Menu.Item className="menu-item" onClick={onAddFolder} disabled={!canAddFolder}>
+            <Folder size={14} />
+            Add folder…
+            {!canAddFolder && <span className="menu-hint">after a secret</span>}
+          </Menu.Item>
+        </MenuPopup>
+      </Menu.Root>
+    </div>
+  );
+}
+
+/**
+ * A new folder, and the secrets filed in it. A folder is a name on what it
+ * holds (docs/design/environments.md), so it is made with its first
+ * secrets: one with nothing in it would not be there to see.
+ */
+function AddFolder({
+  open,
+  onOpenChange,
+  keys,
+  folders,
+  onAdd,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** The secrets that can be filed, by name. */
+  keys: readonly string[];
+  /** The folders in use, which a name already in use joins. */
+  folders: readonly string[];
+  onAdd: (folder: string, keys: string[]) => void;
+}) {
+  const [name, setName] = useState('');
+  const [chosen, setChosen] = useState<string[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    setName('');
+    setChosen([]);
+  }, [open]);
+  const problem = folderProblem(name);
+  const joins = folders.includes(name);
+  const ready = name !== '' && problem === null && chosen.length > 0;
+
+  return (
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Add a folder"
+      description="Folders only arrange the list: names, values and access stay as they are."
+    >
+      <form
+        className="form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!ready) return;
+          onAdd(name, chosen);
+          onOpenChange(false);
+        }}
+      >
+        <label className="field">
+          <span className="label">Name</span>
+          <input
+            className="input"
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+            value={name}
+            aria-invalid={problem !== null}
+            onChange={(event) => setName(event.target.value)}
+          />
+          <span className={`hint${problem !== null ? ' edit-note-error' : ''}`}>
+            {problem ?? (joins ? `${name} is in use: the secrets join it.` : 'One level: no slash.')}
+          </span>
+        </label>
+        <MultiCombobox
+          label="Secrets in it"
+          options={keys}
+          value={chosen}
+          onChange={setChosen}
+          placeholder="Pick one or more…"
+          hint="A folder holds at least one secret."
+          mono
+        />
+        <div className="dialog-actions">
+          <button className="btn" type="button" onClick={() => onOpenChange(false)}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" type="submit" disabled={!ready}>
+            Add folder
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -887,6 +1061,7 @@ function SecretRow({
   environments,
   status,
   disabled,
+  onDismiss,
   columns,
   onEdit,
   onPatch,
@@ -916,6 +1091,8 @@ function SecretRow({
   /** A save of this row on its way, or refused. */
   status: ItemStatus;
   disabled: boolean;
+  /** Forget a refused change once its row has said so. */
+  onDismiss: (mutationId: number) => void;
   columns: number;
   onEdit: () => void;
   onPatch: (patch: Partial<SecretChange>) => void;
@@ -1411,6 +1588,12 @@ function SecretRow({
           </td>
         </tr>
       ) : null}
+
+      <RowFailure
+        status={status}
+        columns={columns}
+        onDismiss={() => status.state === 'failed' && onDismiss(status.mutationId)}
+      />
     </>
   );
 }
@@ -1538,7 +1721,7 @@ function DraftRow({
           <input
             className="input input-mono"
             // Only the row that just mounted takes focus, which is the one the
-            // New secret button created.
+            // Add secret button created.
             autoFocus
             aria-label="Name of the new secret"
             aria-invalid={keyProblem !== null}

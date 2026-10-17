@@ -1,4 +1,4 @@
-import type { CoffreClient, ConnectedApp, IdentityRow, OffboardingReport, SecretKey, SessionRow } from '@coffre/client';
+import type { CoffreClient, ConnectedApp, IdentityRow, MissingKey, OffboardingReport, SecretKey, SessionRow } from '@coffre/client';
 import { EVERYWHERE, unscoped, type InstanceRole, type Role, type Scope } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
@@ -34,6 +34,7 @@ function listOf<TItem, TData extends { ok: boolean } | null>(
 const ARCHIVING: Words = { pending: 'Archiving…', done: 'archived', failed: 'Not archived.' };
 const REVOKING: Words = { pending: 'Revoking…', done: 'revoked', failed: 'Not revoked.' };
 const DISCONNECTING: Words = { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' };
+const MOVING: Words = { pending: 'Moving…', done: 'moved', failed: 'Not moved.' };
 
 const saving = (id: string): Target => ({ id, kind: 'saving' });
 const removing = (id: string): Target => ({ id, kind: 'removing' });
@@ -559,6 +560,7 @@ export function moveSecret(
 ): Change<Secrets, SecretKey, { key: string; folder: string | null }, unknown> {
   return {
     list: secretsList(place),
+    saving: MOVING,
     label: (vars) => vars.key,
     targets: (vars) => [saving(vars.key)],
     apply: (entries, vars) => entries.map((entry) => (entry.key === vars.key ? { ...entry, folder: vars.folder } : entry)),
@@ -596,5 +598,55 @@ export function archiveSecret(
       entries.map((entry) => (archived.has(entry.key) ? { ...entry, archived: true } : entry)),
     affects: () => affects.secrets(place),
     run: (vars) => client.secrets.update(`${place.project}/${place.environment}/${vars.key}`, { archived: true }),
+  };
+}
+
+// --- missing keys ----------------------------------------------------------------
+
+type Missing = ({ ok: true; missing: MissingKey[] } | Failure);
+
+export function missingList(place: { project: string; environment: string }) {
+  return listOf<MissingKey, Missing>(keys.missing(place), 'missing', (entry) => entry.key);
+}
+
+const DISMISSING: Words = { pending: 'Dismissing…', done: 'dismissed', failed: 'Not dismissed.' };
+const RESTORING: Words = { pending: 'Restoring…', done: 'restored', failed: 'Not restored.' };
+
+/**
+ * Dismiss missing keys for the whole team. It shows at once: a dismissal
+ * hides nothing anyone may read, so it need not wait for the server, and a
+ * refusal puts the keys back.
+ */
+export function dismissMissing(client: CoffreClient, place: { project: string; environment: string }) {
+  return missingChange(client, place, true);
+}
+
+/** Bring dismissed keys back, as Undo after a dismissal does: listed again at once. */
+export function restoreMissing(client: CoffreClient, place: { project: string; environment: string }) {
+  return missingChange(client, place, false);
+}
+
+function missingChange(
+  client: CoffreClient,
+  place: { project: string; environment: string },
+  dismissed: boolean,
+): Change<Missing, MissingKey, MissingKey[], unknown> {
+  return {
+    list: missingList(place),
+    saving: dismissed ? DISMISSING : RESTORING,
+    label: (entries) => (entries.length === 1 ? entries[0]!.key : `${entries.length} missing keys`),
+    targets: (entries) => entries.map((entry) => saving(entry.key)),
+    apply: (entries, named) => {
+      const names = new Set(named.map((entry) => entry.key));
+      const others = entries.filter((entry) => !names.has(entry.key));
+      // Listed by name, as the server lists them.
+      return dismissed ? others : [...others, ...named].sort((a, b) => (a.key < b.key ? -1 : 1));
+    },
+    affects: () => [],
+    run: (entries) =>
+      client.environments.dismiss(
+        `${place.project}/${place.environment}`,
+        Object.fromEntries(entries.map((entry) => [entry.key, dismissed ? true : null])),
+      ),
   };
 }

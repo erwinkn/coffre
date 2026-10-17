@@ -7,8 +7,10 @@ How coffre's pages place and word things. The styles they name are in
 
 - **On a table or a list: below it.** Outside its border, at the bottom left,
   in a `.table-actions` row right after the card or grid: Add user, New
-  project, Add environment, New secret beside Import .env, Edit access, Issue
-  token. A row it adds appears last, next to the button.
+  project, Add environment, Add secret beside Import .env, Edit access, Issue
+  token. A row it adds appears last, next to the button. A second way to
+  add, such as a folder, goes in the menu of a chevron joined to the
+  primary button's right (`.split-button`), not in a button of its own.
 - **On one card: in that card.** A form's Save sits under its fields,
   bottom-left; a form that is the page's only business needs no card.
 - **On a cell's content: in that cell,** at its right: a secret's Copy,
@@ -17,6 +19,9 @@ How coffre's pages place and word things. The styles they name are in
 - **On one row: in that row,** in its last column: one "⋯" menu for the
   rest (history, rename, archive), the column as narrow as its button.
 - **Unsaved changes show on their row** until they are saved or dropped.
+  Saving or dropping them all is in a bar at the foot of their table, part
+  of its card, which sticks to the bottom of the window while the table
+  runs past it.
 - **On the whole page: in the page header.** Few belong there: a principal's
   menu, Sign out, the audit log's seal.
 
