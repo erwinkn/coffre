@@ -322,7 +322,8 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
       )}
 
       {found !== null && <PrincipalReportCards report={found} />}
-      {found !== null && !removed && found.personalTokens.length > 0 && (
+      {/* A report from an instance before 0.7, mid-deploy or rolled back, lists none. */}
+      {found !== null && !removed && (found.personalTokens ?? []).length > 0 && (
         <MemberPersonalTokens member={memberRef(principalType, principalId)} tokens={found.personalTokens} />
       )}
     </>
