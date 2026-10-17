@@ -7,9 +7,10 @@ add/remove/overwrite a few."
 
 Coffre already forks, but a fork is a one-off. `coffre fork market/prod
 staging` copies prod's values into staging, and `--reference` makes each
-key a reference to prod's (docs/design/environments.md). Neither follows
-prod afterwards. A key added to prod never reaches staging, and nothing
-records that staging came from prod. This note adds the missing piece: an
+key a reference to prod's (docs/design/environments.md). A copy never
+follows prod. References follow each key's value, but a key added to prod
+later never reaches staging, and nothing records that staging came from
+prod. This note adds the missing piece: an
 environment that keeps reading its parent, live, except for the keys it
 sets or removes. A personal config is the same thing, owned by one person.
 
@@ -151,9 +152,10 @@ Coffre keeps the parts that matter and differs in four ways:
 
 ### Options I rejected
 
-- **A fork made of references.** `coffre fork --reference` exists. It
-  doesn't pick up keys added to the parent later, it writes one sealed
-  vault entry per key, and it can't remove a key. It's the right tool for
+- **A fork made of references.** `coffre fork --reference` exists. Its
+  keys follow prod's values, but it doesn't pick up keys added to prod
+  later, it writes one sealed vault entry per key, and nothing says where
+  it came from. It's the right tool for
   lending specific keys to people who can't read the source, which is a
   different job.
 - **Inheritance that lends, sealed by the vault.** The vault would seal
@@ -231,8 +233,12 @@ reader of a key can't tell where it comes from without a diagram.
   inherits is refused: "market/prod-eu/STRIPE_KEY is inherited from
   market/prod; reference that instead". A reference to an override is
   fine, as for any key.
-- *Personal configs.* A personal config may hold references (its owner
-  reads the source). No reference may point into one.
+- *Personal configs* hold values only: no references out, none in. A
+  read through a reference unwraps its source's data key, which isn't
+  bound to any owner (section 4). So a reference held in Ada's personal
+  config would be guarded only by the `owner` column, which a forged row
+  or a 0.6 vault ignores. Ada who wants `billing/dev/X` locally copies
+  it.
 - *Forking a fork as references* resolves each key to where its value
   really lives, prod's key for an inherited one, as one hop already
   requires.
@@ -262,13 +268,13 @@ since key names are not secret within a project (docs/design/environments.md,
 "Missing keys"). That they come from prod and prod's folder, too. Version and age
 only if they read prod. Never values without read on prod.
 
-**Scoped roles and slugs.** An overlay is an environment with its own
-slug, `prod-eu`, and scopes treat it like any other. A Developer scoped
-`only: [prod]` reads prod-eu's inherited keys, since they're prod's, but
-not its own overrides. One scoped `except: [prod]` reads prod-eu's own
-keys but not what it inherits, so their `run` of prod-eu refuses. That's
-right: a scope that excludes prod excludes prod's values wherever they
-show up. Name forks so scopes read well: `prod-eu`, not `eu`. A personal
+**Scoped roles and slugs.** Reading a fork takes read on the fork, and
+on each parent it inherits a value from. An overlay is an environment with
+its own slug, `prod-eu`, and scopes treat it like any other. A Developer
+scoped `only: [prod]` doesn't read prod-eu at all; they read prod. One
+scoped `except: [prod]` reads prod-eu's own keys one at a time, but not
+what it inherits, so their `run` of prod-eu refuses. That's right: a scope
+that excludes prod excludes prod's values wherever they show up. Name forks so scopes read well: `prod-eu`, not `eu`. A personal
 config's slug never matters, because nobody's grant decides it (below).
 
 **Personal configs: the owner alone.** Ada's `market/dev@ada` is hers.
@@ -304,7 +310,8 @@ the fork's log too:
 
 The audit page words it "cy read market/prod/STRIPE_KEY in
 market/prod-eu". `through` is the app's word, checked by the vault to be
-a live environment of the same project, other than the value's own. It
+a live environment of the same project, other than the value's own. It's
+checked once, not again under the log's head as grants are, because it
 decides nothing: the worst a lying app does is file a read in the wrong
 fork's log, and only one it could already read. One gap remains. A read
 of a reference that the fork inherits has three places (the source, the
@@ -361,7 +368,9 @@ owners, fails closed: it unwraps without the owner and gets an
 authentication failure, so an old release can't leak personal values to
 project readers. That's the real reason to bind the owner
 cryptographically and not with a sealed log entry, the way references
-work.
+work. It also explains why personal configs hold no references: a value
+read through one is wrapped under its source's ids alone, so the binding
+can't reach it.
 
 ## 5. Surfaces
 
@@ -509,12 +518,17 @@ What's built:
   - `reveal`'s read-on-the-parent check, and single-key reads of
     inherited keys (`api/secrets.ts`);
   - `PUT … {from, inherit}` (`api/forks.ts`, `api/routes.ts`), and
-    `putEnvironment` storing `parent_id`;
-  - the archive block (`api/projects.ts`).
+    `putEnvironment` storing `parent_id`, with the parent checked again
+    under the log's head;
+  - forks as copies or references of a fork, which take what it resolves
+    to, each key where it's held, with that folder;
+  - a write in a fork restoring the key's removal (`api/secrets.ts`);
+  - the archive block, and the refusal to restore a fork whose parent is
+    archived (`api/projects.ts`).
 - `packages/core` and `packages/vault`: `through` on `unwrap`'s items,
   checked and logged as `through` and `also` (`vault.ts`).
 - `packages/client`: the regenerated `api.ts`.
-- `packages/server/test/inheritance.test.ts`, eight cases, on both
+- `packages/server/test/inheritance.test.ts`, twelve cases, on both
   engines:
   - live reads after a parent change and a new key;
   - override, addition, removal, reset and restore;
@@ -524,7 +538,10 @@ What's built:
   - forks named from another project, or the value's own environment,
     refused as `bad_claim`;
   - chains and the cap;
-  - the archive block and the refusal of an archived parent;
+  - the archive block, restoring, and the refusal of an archived parent;
+  - a write over a removal, then a reset;
+  - forking a fork as references and as copies;
+  - the vault refusing an archived fork;
   - the input refusals.
 
 Not built yet:
@@ -533,7 +550,8 @@ Not built yet:
 - `GET /secrets`' `from` column;
 - the rename cascade;
 - missing keys' resolved comparison;
-- reset as a write;
+- reset as a write (`{"inherit": true}`, under `secret.write`; the
+  prototype resets by archiving, which takes `secret.archive`);
 - the UI, the CLI and MCP.
 
 One shortcut to undo: a single-key read now loads its environment's rows

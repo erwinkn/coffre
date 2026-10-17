@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
-import { notFound } from './errors.ts';
+import { badRequest, notFound } from './errors.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { managedAccount } from './services.ts';
@@ -174,6 +174,9 @@ export const routes = {
     run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; forked: Forked | null }> => {
       // Not a slug a project's page has (`@coffre/core/pages`).
       environmentSlug.parse(params.environment);
+      if (input.from === undefined && (input.inherit === true || input.references === true)) {
+        throw badRequest('a fork names the environment it forks: `from`');
+      }
       return input.from === undefined
         ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
         : forkEnvironment(ctx, place, params.environment, {

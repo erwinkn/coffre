@@ -811,12 +811,13 @@ class VaultService implements Vault {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
     }
     // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own.
+    // Checked once, not again under the log's head: it decides nothing, so a fork archived meanwhile only names a read.
     if (items.some((item, i) => {
       const through = throughs[i];
       if (through === null) return false;
       const fork = forks.get(through);
       const decidedAt = sealed[i]?.holder ?? item.secret;
-      return fork === undefined || fork.deleted || fork.projectId !== decidedAt.projectId || through === decidedAt.environmentId;
+      return fork === undefined || fork.deleted || fork.archived || fork.projectId !== decidedAt.projectId || through === decidedAt.environmentId;
     })) {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
     }

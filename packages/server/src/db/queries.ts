@@ -1386,6 +1386,23 @@ export async function parentsOf(db: Queryable, environmentId: string): Promise<P
   return parents;
 }
 
+/** Whether an environment, and its project, are neither archived nor deleted. */
+export async function liveEnvironment(db: Queryable, environmentId: string): Promise<boolean> {
+  const { environments, projects } = tablesOf(db);
+  const [row] = await db
+    .select({ id: environments.id })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(and(
+      eq(environments.id, environmentId),
+      isNull(environments.archivedAt),
+      isNull(projects.archivedAt),
+      standing(environments.slug),
+      standing(projects.slug),
+    ));
+  return row !== undefined;
+}
+
 /** The live environments that inherit from `environmentId` directly, by slug. */
 export async function forksOf(db: Queryable, environmentId: string): Promise<string[]> {
   const { environments } = tablesOf(db);

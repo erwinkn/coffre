@@ -6,9 +6,10 @@ import { isTombstone } from '@coffre/core/schemas';
 import type { HolderRef, SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
-import { secretReferences, secrets, secretVersions } from '@coffre/db/schema';
+import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
 import {
+  dismissalsIn,
   environmentSecrets,
   insert,
   insertIfAbsent,
@@ -369,6 +370,14 @@ export async function setSecrets(
         keys[key] = { reference: sourcePath(source) };
       }
       for (const { key, source } of refs.map((ref) => ({ key: ref.key, source: ref.ref }))) keys[key] ??= { reference: source };
+      // In a fork, a key given a value or a reference of its own is no longer removed: reset later, it inherits again.
+      if (place.environment!.parentId !== null) {
+        const removed = new Set((await dismissalsIn(tx, environment.environmentId)).map((row) => row.key));
+        for (const key of [...items, ...references].map((item) => item.key).filter((key) => removed.has(key))) {
+          await update(tx, dismissedKeys, { environmentId: environment.environmentId, key }, { restoredAt: now, restoredBy: ctx.caller.principal.id });
+          log.push(allowed(ctx, 'missing.restore', { ...environment, operationId, metadata: { key } }));
+        }
+      }
       const archiving = archives.map((key) => byKey.get(key)).filter((secret) => secret !== undefined && secret.archivedAt === null);
       if (archiving.length > 0) {
         await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: archiving.map((secret) => secret!.id) }, 'secret.archive', { ...environment, operationId });

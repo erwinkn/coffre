@@ -12,6 +12,8 @@ import {
   eraseVersions,
   forksOf,
   insert,
+  liveEnvironment,
+  parentsOf,
   places,
   projectsInFolder,
   resolvePath,
@@ -356,6 +358,13 @@ export async function putEnvironment(
         }),
       );
     }
+    // The parent too: archived or deleted since the fork checked it, it is no parent.
+    if (parentId !== null && !(await liveEnvironment(tx, parentId))) {
+      throw new Refusal(
+        conflict(`${project.slug}/${from} was archived or deleted meanwhile: it is no parent`),
+        denied(ctx, 'environment.create', 'parent_archived', { projectId: project.id, metadata: { environmentSlug: slug, from } }),
+      );
+    }
     const id = randomUUID();
     try {
       await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
@@ -423,6 +432,16 @@ export async function patchEnvironment(
   return audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
     if (archivedAt != null) await refuseIfRead(ctx, tx, `${project.slug}/${environment.slug}`, scope, 'environment.archive', scope);
+    // A fork is restored only while every environment it inherits from is live.
+    if (archivedAt === null && environment.parentId !== null) {
+      const gone = (await parentsOf(tx, environment.id)).find((parent) => parent.archivedAt !== null || parent.deleted);
+      if (gone !== undefined) {
+        throw new Refusal(
+          conflict(`${project.slug}/${environment.slug} inherits from ${project.slug}/${gone.slug}, which is ${gone.deleted ? 'deleted' : 'archived'}: restore that first`),
+          denied(ctx, 'environment.restore', 'parent_archived', { ...scope, metadata: { parent: gone.slug } }),
+        );
+      }
+    }
     // A live fork reads its parent's keys: archiving the parent would leave it half empty (docs/design/forking.md).
     const forks = archivedAt == null ? [] : await forksOf(tx, environment.id);
     if (forks.length > 0) {

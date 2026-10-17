@@ -212,3 +212,62 @@ test('inheriting and referencing are not one fork, and a fork that inherits is a
   await root.environments.create('market/empty', { name: 'Empty' });
   await assert.rejects(maintainer.environments.create('market/empty', { from: 'prod', inherit: true }), { status: 409 });
 });
+
+test('a value written over a removal ends it: reset afterwards, the key inherits again', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: true });
+  await maintainer.secrets.set('market/prod-eu', { SENTRY_DSN: 'https://sentry/eu' });
+  assert.deepEqual((await maintainer.environments.missing('market/prod-eu')).dismissed, []);
+  await maintainer.secrets.update('market/prod-eu/SENTRY_DSN', { archived: true });
+  assert.equal((await values(maintainer, 'market/prod-eu')).SENTRY_DSN, 'https://sentry/prod');
+});
+
+test("a fork is restored only while its parent is live, and names what it forks", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.environments.update('market/prod-eu', { archived: true });
+  await root.environments.update('market/prod', { archived: true });
+  await assert.rejects(root.environments.update('market/prod-eu', { archived: false }), { status: 409, message: /inherits from market\/prod, which is archived/ });
+  await root.environments.update('market/prod', { archived: false });
+  await root.environments.update('market/prod-eu', { archived: false });
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_live_1');
+
+  await assert.rejects(maintainer.environments.create('market/x', { inherit: true }), { status: 400 });
+});
+
+test('the vault takes no archived fork', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await root.environments.update('market/prod-eu', { archived: true });
+  const [version] = await db.owner.select({ id: secretVersions.id }).from(secretVersions).limit(1);
+  const claimed = await deps.vault.unwrap({ principal: `user:${MAINTAINER}`, purpose: 'run', items: [{ secretVersionId: version.id, through: await environmentId('prod-eu') }] });
+  assert.deepEqual(claimed.ok ? null : claimed.refusal.code, 'bad_claim');
+});
+
+test("forking a fork as references or copies takes what it resolves to: each key where it is held, with that folder", async () => {
+  await root.secrets.update('market/prod/DATABASE_URL', { folder: 'database' });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { EU_REGION: 'eu-west-1' });
+  // An override reset to prod's: its archived row is no source.
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu' });
+  await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+
+  const referenced = await maintainer.environments.create('market/eu-refs', { from: 'prod-eu', references: true });
+  assert.deepEqual(referenced.forked, { from: 'prod-eu', keys: 4, references: 4, copied: [], inherits: false });
+  const { keys } = await maintainer.secrets.list('market/eu-refs');
+  assert.deepEqual(keys.map((key) => [key.key, key.reference?.source, key.folder]), [
+    ['DATABASE_URL', 'market/prod/DATABASE_URL', 'database'],
+    ['EU_REGION', 'market/prod-eu/EU_REGION', null],
+    ['SENTRY_DSN', 'market/prod/SENTRY_DSN', null],
+    ['STRIPE_KEY', 'market/prod/STRIPE_KEY', null],
+  ]);
+  // References follow prod's rotations, as inheriting does.
+  await root.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_2' });
+  assert.equal((await values(maintainer, 'market/eu-refs')).STRIPE_KEY, 'sk_live_2');
+
+  await maintainer.environments.create('market/eu-copy', { from: 'prod-eu' });
+  assert.deepEqual((await maintainer.secrets.list('market/eu-copy')).keys.map((key) => [key.key, key.folder]), [
+    ['DATABASE_URL', 'database'],
+    ['EU_REGION', null],
+    ['SENTRY_DSN', null],
+    ['STRIPE_KEY', null],
+  ]);
+});

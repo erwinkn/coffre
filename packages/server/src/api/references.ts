@@ -256,6 +256,8 @@ export function unreadable({ view, holder, source, row, state }: Resolved): stri
  */
 export type Readable = {
   key: string;
+  /** The folder it is listed in, where it is held. */
+  folder: string | null;
   secretVersionId: string;
   secret: SecretRef;
   envelope: Envelope;
@@ -321,6 +323,7 @@ async function valuesIn(
     if (row.current !== null) {
       items.push({
         key: row.key,
+        folder: row.folder,
         secretVersionId: row.current.id,
         secret: {
           projectId: environment.projectId,
@@ -343,6 +346,7 @@ async function valuesIn(
     }
     items.push({
       key: row.key,
+      folder: row.folder,
       secretVersionId: source.currentVersionId!,
       // Opened as the source it is: its value is bound to the source's ids.
       secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source) },

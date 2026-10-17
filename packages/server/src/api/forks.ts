@@ -6,7 +6,7 @@ import { asking, audited, need, withRefusals, type ApiContext } from './context.
 import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
 import { openValues } from './keys.ts';
 import { putEnvironment, type PlaceView } from './projects.ts';
-import { currentReferences, placeOfRow, readableValues } from './references.ts';
+import { readableValues, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -60,7 +60,7 @@ export async function forkEnvironment(
     // What the fork reads, checked before anything is made: a reference that cannot be read stops it.
     const readable = await readableValues(ctx.db, source, sourcePlace);
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.join('; '));
-    const plan = input.references ? await referencesFor(ctx, readable.items.map((item) => item.key), source) : new Map<string, string>();
+    const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
     const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
     const copies = readable.items.filter((item) => !plan.has(item.key));
@@ -77,9 +77,8 @@ export async function forkEnvironment(
     if (target?.environment == null) throw notFound(`${project.slug}/${slug} went away while it was being forked`);
     await setSecrets(ctx, target, { ...patch });
 
-    // Each key keeps its folder.
-    const filed = (await environmentSecrets(ctx.db, source.environment.id)).flatMap(({ key, folder }) =>
-      folder === null || !(key in patch) ? [] : [{ key, folder }]);
+    // Each key keeps its folder, where it is held: an inherited key, its parent's.
+    const filed = readable.items.flatMap(({ key, folder }) => (folder === null || !(key in patch) ? [] : [{ key, folder }]));
     if (filed.length > 0) {
       const ids = new Map((await environmentSecrets(ctx.db, target.environment.id)).map((secret) => [secret.key, secret.id]));
       await audited(ctx, async (tx) => {
@@ -116,24 +115,17 @@ async function inheritFrom(
 }
 
 /**
- * The source each key of a fork as references points at, by path: the
- * parent's key, or that key's own source when it is a reference, one hop.
- * Only where the forker reads that source by their own grants: reading it
- * through the parent is no read on it for making a reference. The rest are
- * copied.
+ * The source each key of a fork as references points at, by path: where
+ * its value is held, the parent's key, a key the parent inherits, or a
+ * reference's source, one hop. Only where the forker reads that source by
+ * their own grants: reading it through the parent is no read on it for
+ * making a reference. The rest are copied.
  */
-async function referencesFor(ctx: ApiContext, keys: readonly string[], parent: ResolvedPath): Promise<Map<string, string>> {
-  const rows = (await environmentSecrets(ctx.db, parent.environment!.id)).filter((row) => keys.includes(row.key));
-  const held = await currentReferences(ctx.db, rows.filter((row) => row.current === null).map((row) => row.id));
+function referencesFor(ctx: ApiContext, items: readonly Readable[]): Map<string, string> {
   const plan = new Map<string, string>();
-  for (const row of rows) {
-    const reference = held.get(row.id);
-    if (reference === undefined) {
-      plan.set(row.key, `${parent.project.slug}/${parent.environment!.slug}/${row.key}`);
-      continue;
-    }
-    const source = reference.source!;
-    if (can(ctx.caller, 'secret.read', placeOfRow(source))) plan.set(row.key, reference.view.source);
+  for (const { key, secret } of items) {
+    const at = { projectId: secret.projectId, environmentId: secret.environmentId, environmentSlug: secret.path.split('/')[1]! };
+    if (can(ctx.caller, 'secret.read', at)) plan.set(key, secret.path);
   }
   return plan;
 }
