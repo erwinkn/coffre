@@ -8,11 +8,13 @@ import { environments, projects } from '@coffre/db/schema';
 
 import {
   deletionScope,
+  dismissalsAcross,
   distinctSecretCounts,
   eraseVersions,
   forksOf,
   insert,
   liveEnvironment,
+  liveKeysIn,
   parentsOf,
   places,
   projectsInFolder,
@@ -20,6 +22,7 @@ import {
   tombstoneSlug,
   update,
   type Doomed,
+  type PlaceRow,
   type ResolvedPath,
   fileProject,
   projectFolderOf,
@@ -31,6 +34,7 @@ import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.
 import { scopeView } from './members.ts';
 import { serviceSettingFor, setsUp } from './services.ts';
 import { formatMember } from './paths.ts';
+import { resolveKeys } from './inheritance.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
 export type Me = {
@@ -74,7 +78,12 @@ export type ProjectEnvironmentSummary = {
   name: string;
   /** True when the caller may open the environment's secret metadata page. */
   accessible: boolean;
-  /** Omitted for environments that the caller may only know by name. */
+  /** The environment it inherits from, by slug: a fork's (docs/design/forking.md). Null for none. */
+  parent: string | null;
+  /**
+   * Omitted for environments that the caller may only know by name. A
+   * fork's count is of the keys it resolves to: its own, and those it inherits.
+   */
   details: { archivedAt: string | null; secretCount: number | null } | null;
 };
 
@@ -140,7 +149,10 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   // The projects whose secrets the caller may count, and where they may.
   const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
   const [known, folders] = await Promise.all([places(ctx.db), projectFolderOf(ctx.db)]);
+  const counts = await forkCounts(ctx.db, known);
   for (const project of known) {
+    const slugOf = new Map(project.environments.map((environment) => [environment.id, environment.slug]));
+    const parent = (environment: { parentId: string | null }) => (environment.parentId === null ? null : (slugOf.get(environment.parentId) ?? null));
     if (!seesProject(caller, project)) continue;
     const scope = { projectId: project.id };
     if (project.archivedAt !== null && !runsInstance(caller) && !can(caller, 'project.manage', scope)) {
@@ -159,15 +171,16 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
         // Every role that writes or archives also reads, so read is the test.
         const secretAccess = can(caller, 'secret.read', placeOf(project, environment));
         if (!manages && !secretAccess) {
-          return { slug: environment.slug, name: environment.name, accessible: false, details: null };
+          return { slug: environment.slug, name: environment.name, accessible: false, parent: parent(environment), details: null };
         }
         return {
           slug: environment.slug,
           name: environment.name,
           accessible: secretAccess,
+          parent: parent(environment),
           details: {
             archivedAt: iso(environment.archivedAt),
-            secretCount: secretAccess ? environment.secretCount : null,
+            secretCount: secretAccess ? (counts.get(environment.id) ?? environment.secretCount) : null,
           },
         };
       }),
@@ -188,9 +201,23 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   }
 
   // One query counts every project, rather than one list per environment.
-  const counts = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
-  for (const { summary, projectId } of counted) summary.secretCount = counts.get(projectId) ?? 0;
+  const distinct = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
+  for (const { summary, projectId } of counted) summary.secretCount = distinct.get(projectId) ?? 0;
   return { projects: summaries };
+}
+
+/**
+ * How many keys each fork resolves to, its own and those it inherits, for
+ * the projects that have one: two queries for all of them, none without.
+ */
+async function forkCounts(db: Queryable, known: readonly PlaceRow[]): Promise<Map<string, number>> {
+  const forked = known.filter((project) => project.environments.some((environment) => environment.parentId !== null));
+  const ids = forked.flatMap((project) => project.environments.map((environment) => environment.id));
+  if (ids.length === 0) return new Map();
+  const [live, dismissed] = await Promise.all([liveKeysIn(db, ids), dismissalsAcross(db, ids)]);
+  const counts = new Map<string, number>();
+  for (const [id, keys] of resolveKeys(forked.flatMap((project) => project.environments), live, dismissed)) counts.set(id, keys.size);
+  return counts;
 }
 
 export type PlaceView = {
@@ -444,7 +471,7 @@ export async function patchEnvironment(
       }
     }
     // A live fork reads its parent's keys: archiving the parent would leave it half empty (docs/design/forking.md).
-    const forks = archivedAt == null ? [] : await forksOf(tx, environment.id);
+    const forks = archivedAt == null ? [] : (await forksOf(tx, environment.id)).map((fork) => fork.slug);
     if (forks.length > 0) {
       throw new Refusal(
         conflict(`${project.slug}/${environment.slug} is inherited by ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: archive ${forks.length === 1 ? 'it' : 'them'} first`),
@@ -544,7 +571,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
     requireInstance(ctx, action, fields, `delete ${what === 'project' ? 'a project' : 'an environment'} for good`);
     if (!archived(place)) throw notArchived();
     // A fork, archived or not, keeps its parent: deleted, it would leave the fork naming a tombstone forever.
-    const forked = async (db: Queryable) => (environment === null ? [] : forksOf(db, environment.id, { archived: true }));
+    const forked = async (db: Queryable) => (environment === null ? [] : (await forksOf(db, environment.id, { archived: true })).map((fork) => fork.slug));
     const parentOf = (forks: string[]) => new Refusal(
       conflict(`${path} is the parent of ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: delete ${forks.length === 1 ? 'it' : 'them'} first`),
       denied(ctx, action, 'inherited', { ...fields, metadata: { path, forks } }),

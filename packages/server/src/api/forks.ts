@@ -101,8 +101,8 @@ export async function forkEnvironment(
 /**
  * A fork that inherits: a new environment whose keys are its parent's,
  * read live, until it sets or removes its own (docs/design/forking.md).
- * Nothing is copied or read now. Its parent is set once, here: a personal
- * config is no parent, and a chain stops at `MAX_PARENTS`.
+ * Nothing is copied or read now. Its parent is set once, here, and a chain
+ * stops at `MAX_PARENTS`.
  */
 async function inheritFrom(
   ctx: ApiContext,
@@ -113,7 +113,6 @@ async function inheritFrom(
 ): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
   const from = parent.environment!.slug;
   if (place.environment !== null) throw conflict(`${place.project.slug}/${slug} already exists: a fork that inherits is a new environment`);
-  if (parent.environment!.owner !== null) throw conflict(`${place.project.slug}/${from} is a personal config: fork the environment it inherits from`);
   const above = await parentsOf(ctx.db, parent.environment!.id);
   if (above === null || above.length >= MAX_PARENTS) {
     throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);

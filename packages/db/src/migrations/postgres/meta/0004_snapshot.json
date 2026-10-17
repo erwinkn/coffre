@@ -1,5 +1,5 @@
 {
-  "id": "ffb9d436-2f22-4f53-a704-57bffb6ed1e2",
+  "id": "bb1f5bf0-5e72-4375-8fac-8fbda2a9cf92",
   "prevId": "59e5ba04-f7a0-4e7d-a349-9e47da2bf28e",
   "version": "7",
   "dialect": "postgresql",
@@ -1137,37 +1137,9 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
-        },
-        "owner": {
-          "name": "owner",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
-        "environments_parent_id_owner_key": {
-          "name": "environments_parent_id_owner_key",
-          "columns": [
-            {
-              "expression": "parent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "owner",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "strpos(\"environments\".\"slug\", '~') = 0",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "environments_parent_idx": {
           "name": "environments_parent_idx",
           "columns": [
@@ -1242,10 +1214,6 @@
         "environments_parent_check": {
           "name": "environments_parent_check",
           "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
-        },
-        "environments_owner_check": {
-          "name": "environments_owner_check",
-          "value": "\"environments\".\"owner\" IS NULL OR (\"environments\".\"parent_id\" IS NOT NULL AND \"environments\".\"owner\" LIKE 'user:_%')"
         }
       },
       "isRLSEnabled": false

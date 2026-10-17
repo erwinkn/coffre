@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e5b2812f-ab9d-4fad-8ca6-4fefa8cd62e2",
+  "id": "6c8539b6-8306-405b-848a-18716ed0faf1",
   "prevId": "e88f495b-b45b-45f9-a361-e1b224e6ecfe",
   "tables": {
     "audit_chain_head": {
@@ -947,25 +947,9 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "owner": {
-          "name": "owner",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {
-        "environments_parent_id_owner_key": {
-          "name": "environments_parent_id_owner_key",
-          "columns": [
-            "parent_id",
-            "owner"
-          ],
-          "isUnique": true,
-          "where": "instr(\"environments\".\"slug\", '~') = 0"
-        },
         "environments_parent_idx": {
           "name": "environments_parent_idx",
           "columns": [
@@ -1030,10 +1014,6 @@
         "environments_parent_check": {
           "name": "environments_parent_check",
           "value": "\"environments\".\"parent_id\" IS NULL OR \"environments\".\"parent_id\" <> \"environments\".\"id\""
-        },
-        "environments_owner_check": {
-          "name": "environments_owner_check",
-          "value": "\"environments\".\"owner\" IS NULL OR (\"environments\".\"parent_id\" IS NOT NULL AND \"environments\".\"owner\" LIKE 'user:_%')"
         }
       }
     },

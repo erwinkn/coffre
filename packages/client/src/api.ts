@@ -65,6 +65,7 @@ export type Api = {
           slug: string;
           name: string;
           accessible: boolean;
+          parent: string | null;
           details: null | {
             archivedAt: string | null;
             secretCount: number | null;
@@ -237,7 +238,13 @@ export type Api = {
         version: number | null;
         updatedAt: string | null;
         updatedBy: string | null;
+        parent: null | {
+          from: string;
+          state: "inherited" | "overridden" | "removed";
+          changed: boolean;
+        };
       }[];
+      parents: string[];
       rotateAfterDays: number | null;
     };
   };
@@ -270,6 +277,7 @@ export type Api = {
       key?: string;
       archived?: boolean;
       folder?: string | null;
+      inherit?: boolean;
     };
     output: {
       key: string;
@@ -1652,6 +1660,7 @@ export type ProjectSummary = {
     slug: string;
     name: string;
     accessible: boolean;
+    parent: string | null;
     details: null | {
       archivedAt: string | null;
       secretCount: number | null;
@@ -1697,6 +1706,11 @@ export type SecretKey = {
   version: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
+  parent: null | {
+    from: string;
+    state: "inherited" | "overridden" | "removed";
+    changed: boolean;
+  };
 };
 
 export type SecretVersion = {

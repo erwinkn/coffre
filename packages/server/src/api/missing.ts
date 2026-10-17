@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { dismissedKeys } from '@coffre/db/schema';
 
-import { dismissalsIn, environmentSecrets, liveKeysIn, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
+import { dismissalsAcross, dismissalsIn, environmentSecrets, liveKeysIn, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
 import { allowed, audited, type ApiContext } from './context.ts';
 import { ApiError, notFound } from './errors.ts';
+import { resolveKeys } from './inheritance.ts';
 import { checkEnvironment } from './secrets.ts';
 
 /**
@@ -32,25 +33,36 @@ function live(place: ResolvedPath): { projectId: string; environmentId: string }
  * environments of its project, the dismissed apart: a reader of dev learns
  * that prod has `STRIPE_KEY`, never its value, and nothing of another project.
  * A key archived here is not missing: archiving it was a decision.
+ *
+ * Forks compare what they resolve to (docs/design/forking.md): a key a
+ * fork inherits is no more missing there than in its parent, and one it
+ * removed is a dismissal already. An environment is never missing a key
+ * that only its own forks hold: `EU_REGION` in prod-eu does not flag prod.
  */
 export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise<{ missing: MissingKey[]; dismissed: DismissedKey[] }> {
   const here = live(place);
   const project = (await places(ctx.db)).find((each) => each.id === here.projectId)!;
-  const others = project.environments.filter((environment) => environment.id !== here.environmentId && environment.archivedAt === null);
-  const [present, elsewhere, dismissals] = await Promise.all([
+  const below = forksBelow(project.environments, here.environmentId);
+  const others = project.environments.filter((environment) =>
+    environment.id !== here.environmentId && environment.archivedAt === null && !below.has(environment.id));
+  const ids = project.environments.map((environment) => environment.id);
+  const [present, liveKeys, removed, dismissals] = await Promise.all([
     environmentSecrets(ctx.db, here.environmentId),
-    liveKeysIn(ctx.db, others.map((environment) => environment.id)),
+    liveKeysIn(ctx.db, ids),
+    dismissalsAcross(ctx.db, ids),
     dismissalsIn(ctx.db, here.environmentId),
   ]);
-  const slugOf = new Map(others.map((environment) => [environment.id, environment.slug]));
-  const has = new Set(present.map((secret) => secret.key));
+  const resolved = resolveKeys(project.environments, liveKeys, removed);
+  const has = new Set([...present.map((secret) => secret.key), ...resolved.get(here.environmentId)!.keys()]);
   const found = new Map<string, { in: string[]; folders: Set<string | null> }>();
-  for (const secret of elsewhere) {
-    if (has.has(secret.key)) continue;
-    const entry = found.get(secret.key) ?? { in: [], folders: new Set() };
-    entry.in.push(slugOf.get(secret.environmentId)!);
-    entry.folders.add(secret.folder);
-    found.set(secret.key, entry);
+  for (const other of others) {
+    for (const [key, held] of resolved.get(other.id)!) {
+      if (has.has(key)) continue;
+      const entry = found.get(key) ?? { in: [], folders: new Set() };
+      entry.in.push(other.slug);
+      entry.folders.add(held.folder);
+      found.set(key, entry);
+    }
   }
   const keys = [...found.entries()]
     .map(([key, entry]): MissingKey => ({ key, in: entry.in.sort(), folder: entry.folders.size === 1 ? [...entry.folders][0]! : null }))
@@ -64,6 +76,21 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
       return row === undefined ? [] : [{ ...entry, dismissedBy: row.dismissedBy, dismissedAt: row.dismissedAt.toISOString() }];
     }),
   };
+}
+
+/** The environments below one, forks of its forks too, from each environment's parent. */
+function forksBelow(environments: readonly { id: string; parentId: string | null }[], environmentId: string): Set<string> {
+  const below = new Set<string>();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const environment of environments) {
+      if (environment.parentId === null || below.has(environment.id)) continue;
+      if (environment.parentId !== environmentId && !below.has(environment.parentId)) continue;
+      below.add(environment.id);
+      grew = true;
+    }
+  }
+  return below;
 }
 
 /** What a dismissal patch did to each key it named. */

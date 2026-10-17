@@ -327,22 +327,13 @@ test('a reset override is overridden again by a write, and a restored version en
   assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_live_1');
 });
 
-test('a parent is deleted only once no fork names it, and a deleted personal config frees its place', async () => {
+test('a parent is deleted only once no fork names it', async () => {
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   await root.environments.update('market/prod-eu', { archived: true });
   await root.environments.update('market/prod', { archived: true });
   await assert.rejects(root.environments.delete('market/prod'), { status: 409, message: /market\/prod is the parent of market\/prod-eu: delete it first/ });
   await root.environments.delete('market/prod-eu');
   await root.environments.delete('market/prod');
-
-  // Personal configs are not made by the API yet: the index, in the database.
-  await root.environments.create('market/dev', { name: 'Dev' });
-  const [dev] = [await environmentId('dev')];
-  const [market] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
-  const personal = (slug: string) => ({ id: crypto.randomUUID(), projectId: market.id, slug, name: slug, parentId: dev, owner: `user:${ADA}` });
-  await db.owner.insert(environments).values(personal('dev-p-1~deleted-2026-10-17'));
-  await db.owner.insert(environments).values(personal('dev-p-2'));
-  await assert.rejects(db.owner.insert(environments).values(personal('dev-p-3')));
 });
 
 test("forking a fork tells its forker no more of an unreadable parent than a read does", async () => {
@@ -431,4 +422,149 @@ test('a fork is filed under only for a read whose reference holds: a forged pair
   assert.deepEqual(refusals.map((entry) => [entry.decision, entry.metadata.through]), [['deny', { environmentId: eu, refused: true }]]);
   const { entries: forkLog } = await root.audit.list({ path: 'market/prod-eu' });
   assert.equal(forkLog.filter((entry) => entry.action === 'secret.read').length, 0);
+});
+
+test("a fork's list says what it inherits, overrides and removes, and its parents; versions only to the parent's readers", async () => {
+  await root.secrets.update('market/prod/DATABASE_URL', { folder: 'database' });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { DATABASE_URL: 'postgres://eu', EU_REGION: 'eu-west-1' });
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: true });
+  const listed = await maintainer.secrets.list('market/prod-eu');
+  assert.deepEqual(listed.parents, ['prod']);
+  assert.deepEqual(listed.keys.map((key) => [key.key, key.folder, key.parent, key.version]), [
+    ['DATABASE_URL', null, { from: 'prod', state: 'overridden', changed: false }, 1],
+    ['EU_REGION', null, null, 1],
+    ['SENTRY_DSN', null, { from: 'prod', state: 'removed', changed: false }, null],
+    ['STRIPE_KEY', null, { from: 'prod', state: 'inherited', changed: false }, 1],
+  ]);
+  // An inherited key is listed in its parent's folder; prod moved its own DATABASE_URL, which the override does not follow.
+  await root.secrets.update('market/prod/STRIPE_KEY', { folder: 'billing' });
+  assert.equal((await maintainer.secrets.list('market/prod-eu')).keys.find((key) => key.key === 'STRIPE_KEY')?.folder, 'billing');
+
+  // prod writes DATABASE_URL after the override: the override is flagged.
+  await root.secrets.set('market/prod', { DATABASE_URL: 'postgres://prod-2' });
+  const after = await maintainer.secrets.list('market/prod-eu');
+  assert.deepEqual(after.keys.find((key) => key.key === 'DATABASE_URL')?.parent, { from: 'prod', state: 'overridden', changed: true });
+
+  // A reader of the fork alone sees the names and their standing, never when the parent's were written.
+  await root.access.set(`user:${ADA}`, { 'market/prod-eu': 'viewer' });
+  const hers = await ada.secrets.list('market/prod-eu');
+  assert.deepEqual(hers.keys.map((key) => [key.key, key.parent?.state ?? null, key.version, key.updatedAt === null, key.parent?.changed ?? null]), [
+    ['DATABASE_URL', 'overridden', 1, false, false],
+    ['EU_REGION', null, 1, false, null],
+    ['SENTRY_DSN', 'removed', null, true, false],
+    ['STRIPE_KEY', 'inherited', null, true, false],
+  ]);
+  // Outside forks, nothing changes: no parent, no parents.
+  const prod = await root.secrets.list('market/prod');
+  assert.deepEqual([prod.parents, prod.keys.every((key) => key.parent === null)], [[], true]);
+});
+
+test('a reset is a write: a developer resets an override to the parent, and undoes it; nowhere is it an archive by another name', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { DATABASE_URL: 'postgres://eu', EU_REGION: 'eu-west-1' });
+  await root.access.set(`user:${ADA}`, { market: 'developer' });
+  await assert.rejects(ada.secrets.update('market/prod-eu/DATABASE_URL', { archived: true }), { status: 403 });
+
+  assert.deepEqual(await ada.secrets.update('market/prod-eu/DATABASE_URL', { inherit: true }), { key: 'DATABASE_URL', archived: true, folder: null, from: 'prod' });
+  assert.equal((await values(ada, 'market/prod-eu')).DATABASE_URL, 'postgres://prod');
+  assert.deepEqual((await entries('app', 'secret.reset')).map((entry) => entry.metadata), [{ key: 'DATABASE_URL', from: 'prod' }]);
+  // Again: nothing to do.
+  await ada.secrets.update('market/prod-eu/DATABASE_URL', { inherit: true });
+  assert.equal((await entries('app', 'secret.reset')).length, 1);
+
+  // Undone, its override serves again, with the value it had.
+  await ada.environments.dismiss('market/prod-eu', { DATABASE_URL: true });
+  await ada.secrets.update('market/prod-eu/DATABASE_URL', { inherit: false });
+  assert.equal((await values(ada, 'market/prod-eu')).DATABASE_URL, 'postgres://eu');
+  assert.deepEqual((await ada.environments.missing('market/prod-eu')).dismissed, []);
+
+  // A key the parent lacks is no override, and an environment with no parent resets nothing.
+  await assert.rejects(ada.secrets.update('market/prod-eu/EU_REGION', { inherit: true }), { status: 409, message: /holds EU_REGION: archive it instead/ });
+  await assert.rejects(ada.secrets.update('market/prod/DATABASE_URL', { inherit: true }), { status: 409, message: /inherits from no environment/ });
+  await assert.rejects(ada.secrets.update('market/prod-eu/DATABASE_URL', { inherit: true, folder: 'x' }), { status: 400 });
+});
+
+test('a reset override that others read through a reference waits until they are broken, as archiving does', async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { DATABASE_URL: 'postgres://eu' });
+  await root.environments.create('market/dev', { name: 'Dev' });
+  await root.secrets.set('market/dev', { EU_DB: { ref: 'market/prod-eu/DATABASE_URL' } });
+  await assert.rejects(maintainer.secrets.update('market/prod-eu/DATABASE_URL', { inherit: true }), { status: 409, message: /1 reference reads/ });
+  // A key a fork only inherits is its parent's to refer to.
+  await assert.rejects(root.secrets.set('market/dev', { STRIPE: { ref: 'market/prod-eu/STRIPE_KEY' } }), {
+    status: 404,
+    message: /market\/prod-eu\/STRIPE_KEY is inherited from market\/prod: refer to market\/prod\/STRIPE_KEY instead/,
+  });
+});
+
+test("a rename carries down to the forks' overrides and removals, forks of forks included, and stops at a fork holding the new name", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.environments.create('market/prod-eu-canary', { from: 'prod-eu', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { STRIPE_KEY: 'sk_eu' });
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: true });
+  await maintainer.secrets.set('market/prod-eu-canary', { STRIPE_KEY: 'sk_canary' });
+
+  await root.secrets.update('market/prod/STRIPE_KEY', { key: 'STRIPE_SECRET_KEY' });
+  await root.secrets.update('market/prod/SENTRY_DSN', { key: 'SENTRY_URL' });
+  assert.deepEqual(await values(maintainer, 'market/prod-eu'), { DATABASE_URL: 'postgres://prod', STRIPE_SECRET_KEY: 'sk_eu' });
+  assert.deepEqual(await values(maintainer, 'market/prod-eu-canary'), { DATABASE_URL: 'postgres://prod', STRIPE_SECRET_KEY: 'sk_canary' });
+  const [eu, canary] = [await environmentId('prod-eu'), await environmentId('prod-eu-canary')];
+  assert.deepEqual((await entries('app', 'secret.rename')).map((entry) => [entry.environmentId, entry.metadata]), [
+    [await environmentId('prod'), { key: 'STRIPE_KEY', nextKey: 'STRIPE_SECRET_KEY' }],
+    [eu, { key: 'STRIPE_KEY', nextKey: 'STRIPE_SECRET_KEY', parent: 'prod' }],
+    [canary, { key: 'STRIPE_KEY', nextKey: 'STRIPE_SECRET_KEY', parent: 'prod' }],
+    [await environmentId('prod'), { key: 'SENTRY_DSN', nextKey: 'SENTRY_URL' }],
+  ]);
+  assert.deepEqual((await maintainer.environments.missing('market/prod-eu')).dismissed.map((key) => key.key), ['SENTRY_URL']);
+
+  // A fork that holds the new name already stops the rename, named, and nothing moves.
+  await maintainer.secrets.set('market/prod-eu-canary', { DB: 'canary-db' });
+  await assert.rejects(root.secrets.update('market/prod/DATABASE_URL', { key: 'DB' }), {
+    status: 409,
+    message: /market\/prod-eu-canary inherits DATABASE_URL and holds a DB of its own/,
+  });
+  assert.equal((await values(root, 'market/prod')).DATABASE_URL, 'postgres://prod');
+});
+
+test("a rename's new name is no removal a fork made of another key: it inherits what it inherited", async () => {
+  await root.secrets.set('market/prod', { OLD: 'old' });
+  await root.environments.create('market/dev', { name: 'Dev' });
+  await root.secrets.set('market/dev', { NEW: 'dev' });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  // prod-eu dismissed dev's NEW from its missing keys, before prod had one.
+  await maintainer.environments.dismiss('market/prod-eu', { NEW: true });
+  await root.secrets.update('market/prod/OLD', { key: 'NEW' });
+  assert.equal((await values(maintainer, 'market/prod-eu')).NEW, 'old');
+});
+
+test('missing keys compare what forks resolve to, and a parent misses nothing only its forks hold', async () => {
+  await root.environments.create('market/dev', { name: 'Dev' });
+  await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://dev', DEV_ONLY: 'x' });
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { EU_REGION: 'eu-west-1' });
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: true });
+
+  const eu = await maintainer.environments.missing('market/prod-eu');
+  assert.deepEqual(eu.missing.map((key) => [key.key, key.in]), [['DEV_ONLY', ['dev']]]);
+  assert.deepEqual(eu.dismissed.map((key) => [key.key, key.in]), [['SENTRY_DSN', ['prod']]]);
+  // prod is not missing EU_REGION, which only its fork holds; dev is, and sees prod-eu hold what it inherits.
+  assert.deepEqual((await root.environments.missing('market/prod')).missing.map((key) => key.key), ['DEV_ONLY']);
+  assert.deepEqual((await root.environments.missing('market/dev')).missing.map((key) => [key.key, key.in]), [
+    ['EU_REGION', ['prod-eu']],
+    ['SENTRY_DSN', ['prod']],
+    ['STRIPE_KEY', ['prod', 'prod-eu']],
+  ]);
+});
+
+test("projects list each environment's parent, and count what a fork resolves to", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  await maintainer.secrets.set('market/prod-eu', { EU_REGION: 'eu-west-1' });
+  await maintainer.environments.dismiss('market/prod-eu', { SENTRY_DSN: true });
+  const { projects: listed } = await maintainer.projects.list();
+  const market = listed.find((project) => project.slug === 'market')!;
+  assert.deepEqual(market.environments.map((environment) => [environment.slug, environment.parent, environment.details?.secretCount]), [
+    ['prod', null, 3],
+    ['prod-eu', 'prod', 3],
+  ]);
 });
