@@ -34,7 +34,9 @@ import {
   loadShell,
   projectOf,
   queries,
+  tabOpens,
   type AuditSearch,
+  type Freshness,
 } from './lib/queries';
 import type { Permission } from './shared/models';
 import { loginSearch } from './lib/signin-errors';
@@ -215,8 +217,8 @@ export const userAccess = {};
 export const userActivity = {
   loader: async ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const shell = await loadShell(queryClient, coffre, 'cached');
-    if (!shell.capabilities.canReadAudit) throw redirect({ to: '/users/$user', params });
+    const reads = async (freshness: Freshness) => (await loadShell(queryClient, coffre, freshness)).capabilities.canReadAudit;
+    if (!(await tabOpens(reads))) throw redirect({ to: '/users/$user', params });
   },
 };
 
@@ -229,11 +231,14 @@ export const userActivity = {
 export const userApps = {
   loader: async ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const [shell, report] = await Promise.all([
-      loadShell(queryClient, coffre, 'cached'),
-      loadMember(queryClient, coffre, memberRef('user', params.user), 'cached'),
-    ]);
-    if (!hasAppsTab(shell, report)) throw redirect({ to: '/users/$user', params });
+    const has = async (freshness: Freshness) => {
+      const [shell, report] = await Promise.all([
+        loadShell(queryClient, coffre, freshness),
+        loadMember(queryClient, coffre, memberRef('user', params.user), freshness),
+      ]);
+      return hasAppsTab(shell, report);
+    };
+    if (!(await tabOpens(has))) throw redirect({ to: '/users/$user', params });
   },
 };
 
@@ -266,8 +271,8 @@ export const serviceAccount = {
 export const serviceAccountSignIn = {
   loader: async ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const ways = await loadSignIn(queryClient, coffre, memberRef('service', params.account), 'cached');
-    if (ways === null) throw redirect({ to: '/service-accounts/$account/access', params });
+    const shows = async (freshness: Freshness) => (await loadSignIn(queryClient, coffre, memberRef('service', params.account), freshness)) !== null;
+    if (!(await tabOpens(shows))) throw redirect({ to: '/service-accounts/$account/access', params });
   },
 };
 
@@ -278,8 +283,8 @@ export const serviceAccountAccess = {};
 export const serviceAccountActivity = {
   loader: async ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    const shell = await loadShell(queryClient, coffre, 'cached');
-    if (!shell.capabilities.canReadAudit) throw redirect({ to: '/service-accounts/$account', params });
+    const reads = async (freshness: Freshness) => (await loadShell(queryClient, coffre, freshness)).capabilities.canReadAudit;
+    if (!(await tabOpens(reads))) throw redirect({ to: '/service-accounts/$account', params });
   },
 };
 

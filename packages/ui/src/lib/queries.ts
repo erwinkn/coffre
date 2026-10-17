@@ -407,6 +407,15 @@ function read<T, TKey extends QueryKey>(queryClient: QueryClient, options: Fetch
 }
 
 /**
+ * Whether a tab may open: from the cache, and where the cache says no, from
+ * the network, which a no needs before the tab sends anyone away. A stale
+ * no could be an account since added back, or a role since given.
+ */
+export async function tabOpens(opens: (freshness: Freshness) => Promise<boolean>): Promise<boolean> {
+  return (await opens('cached')) || opens('fresh');
+}
+
+/**
  * The shell, as every loader reads it: from the cache while fresh, so a
  * child route never asks again for what the root has.
  */
