@@ -60,7 +60,10 @@ test("ESO's store check and reads: lookup-self, then an environment, with every 
   const { data, renewable, lease_duration } = await body(read);
   assert.deepEqual(data.data, PROD);
   assert.deepEqual([renewable, lease_duration], [false, 0]);
-  assert.equal((data.metadata as { version: number }).version, 0);
+  const metadata = data.metadata as { version: number; custom_metadata: { coffre_version: string } };
+  assert.equal(metadata.version, 0);
+  // The environment's own version, as `GET /api/projects/market/prod/version` answers it, without a read.
+  assert.equal(metadata.custom_metadata.coffre_version, (await clientFor(deps, ROOT).environments.version('market/prod')).version);
 
   const reads = (await entries('secret.read')).filter((entry) => entry.decision === 'allow');
   assert.deepEqual(reads.map((entry) => entry.actor).sort(), ['token:eso', 'token:eso']);

@@ -220,7 +220,7 @@ process.
 | Candidate | Shape | Needs |
 |---|---|---|
 | Vault KV read adapter | Plugin | `routes` + `api` (built) |
-| Kubernetes login for the adapter | Part of that plugin | `exchange`. The key handling stays core: uploaded key sets for trust bindings, a separate 0.7 worker |
+| Kubernetes login for the adapter | Part of that plugin | `exchange`. The key handling stays core: trust bindings with uploaded key sets (#241) |
 | Change notifications (webhooks) | Plugin | `events` + `scheduled` + `api` as its own service account (sketch below) |
 | Rotation, short-lived credentials (GitHub App tokens, R2) | Plugin | `scheduled` + `api` as its own service account. The third-party credential it rotates with is a coffre secret that account reads (R7) |
 | Uploaded JWKS for Kubernetes service accounts | **Core**, not a plugin | It decides who a workload is |
@@ -286,10 +286,12 @@ plugins: [
 | Any other path | 404 |
 
 The mount is `secret` by default, as in Vault (`vaultKv({ mount: 'kv' })`
-changes it). The metadata in a data response has `version: 0`, because an
-environment has no version of its own. Each value's history stays in
-coffre. A value-free environment version is coming (W124, T94): once it
-lands, `version` and `created_time` should come from it.
+changes it). The metadata in a data response has `version: 0`: Vault's
+version is a number, and coffre's environment version (T94, #240) is a hash
+of what a read opens. That hash goes in `custom_metadata.coffre_version`,
+Vault's map of strings, which `vault kv get` prints. A whole environment's
+reveal answers it, so it costs nothing. A single key's read has none. Each
+value's history stays in coffre.
 
 A fork that inherits (#238) reads through the adapter as it does through
 `coffre export`. The adapter calls the API's reveal, so inherited keys
@@ -322,8 +324,9 @@ is the same volume `coffre export` in a 15-minute cron would cause. One
 entry per bulk read is coming (W123, T95), which cuts that to 40 entries an
 hour. The adapter needs no change for it, since it is the API's reveal.
 Don't optimize it here. And if a poll ever needs to know whether anything
-changed without reading values, the value-free environment version (T94)
-is the tool, not change detection of the adapter's own.
+changed without reading values, coffre's environment version (T94,
+`GET /api/projects/<p>/<e>/version`) is the tool, not change detection of
+the adapter's own.
 
 **Which tools this buys.** Requests were taken from each tool's source
 (ESO v2.13.0, `hashicorp/vault/api` v1.22.0, Vault v2.2.0, Terraform
@@ -352,22 +355,26 @@ account token>" }`. It reads `auth.client_token`, and on cleanup calls
 lookup-self and then `PUT /v1/auth/token/revoke-self`.
 
 1. The plugin calls `coffre.exchange({ service: 'token:eso', token: jwt })`.
-   This is today's workload exchange: the trust bindings, their limits and
-   their audit. The Vault role names the service account.
-2. Bindings check the token's issuer. Today they discover its keys from the
+   This is the workload exchange behind `POST /api/auth/oidc`:
+   `WorkloadService.verify` (the bindings, the signature, the claims), then
+   spending the token so it cannot be replayed, then a 5-minute credential,
+   all with the exchange's limits and audit. The Vault role names the
+   service account. A plugin never calls `verify` alone: spending and
+   issuing are what make it safe, and they stay in core.
+2. Bindings check the token's issuer. They discover its keys from the
    issuer's URL, which works for EKS and GKE, whose issuers are public. For
-   a private cluster, the binding holds an uploaded key set, which another
-   0.7 worker is building in core. The adapter does no key handling of its
-   own.
+   a private cluster, the binding holds an uploaded key set (#241, in main),
+   whose issuer may be any string, such as `https://kubernetes.default.svc`.
+   The adapter does no key handling of its own.
 3. The answer is `auth: { client_token: <5-minute coffre token>,
    lease_duration: 300, renewable: false }`. ESO logs in again when the
    token runs out.
 4. `revoke-self` is the API's `POST /api/auth/logout`. With it, a token
    ESO is done with ends early.
 
-The interface that needs from the trust-binding work is the existing
-exchange, unchanged: `{ service, token } → { token, expiresAt }`, with an
-uploaded key set as one more way a binding trusts an issuer.
+The interface it needs from core is the existing exchange, unchanged:
+`{ service, token } → { token, expiresAt }`. Since #241, an uploaded key set
+is one more way a binding trusts an issuer, so nothing else is missing.
 
 ## 6. Decisions for Erwin
 
@@ -382,10 +389,10 @@ uploaded key set as one more way a binding trusts an issuer.
    the path. A personal config (R8) would be `market/prod@me`, passed
    through to the API as it is. *Recommendation: keep it.* A Vault user
    expects "a path is a map of keys", and an environment is exactly that.
-3. **Versions.** `version: 0` and `?version=N` refused, against a real
-   per-environment version, which coffre does not have. *Recommendation:
-   keep it.* ESO never reads the version, and refusing beats serving a
-   version that means something else.
+3. **Versions.** `version: 0`, coffre's hash in `custom_metadata`, and
+   `?version=N` refused, against inventing a counter for Vault's numeric
+   version. *Recommendation: keep it.* ESO never reads the version, and
+   refusing beats serving a version that means something else.
 4. **The token's expiry in lookup-self.** Today it reports `ttl: 0`, no
    expiry, as Vault does for tokens that never expire. That means ESO
    cannot warn before a 30-day token runs out. The fix is small: add the
@@ -418,7 +425,7 @@ uploaded key set as one more way a binding trusts an issuer.
 | PR | What | Effort |
 |---|---|---|
 | 1 | The plugin mechanism and the read-only Vault adapter, from this prototype. Adds a user doc (`docs/vault.md`: ESO, CLI, Terraform, vals setup), the ESO `webhook` alternative in the same doc, and `expiresAt` in `/api/me` (decision 4) | 1 to 2 days |
-| 2 | `exchange`, Kubernetes and JWT login, and `revoke-self`, once uploaded key sets land | 1 day |
+| 2 | `exchange`, Kubernetes and JWT login, and `revoke-self`, on uploaded key sets (#241, in main) | 1 day |
 | 3 | `events` and `scheduled`, and the `notify` plugin | 3 days |
 | 4 | LIST, if wanted (decision 6) | Half a day |
 | 5 | Rotation plugins on `scheduled`, from W108 and W109's prototypes | Per provider |

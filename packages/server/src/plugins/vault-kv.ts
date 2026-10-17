@@ -78,8 +78,8 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
       // A path that names no environment is a mistake in the client's configuration: 400, which ESO does not read as the secret gone.
       const depth = place.split('/').length;
       if (depth < 2 || depth > 3) return failure(400, `name ${data}<project>/<environment>, or ${data}<project>/<environment>/<KEY> for one value`);
-      const { values } = await api.secrets.reveal(place);
-      return success({ data: values, metadata: METADATA });
+      const { values, version } = await api.secrets.reveal(place);
+      return success({ data: values, metadata: metadata(version) });
     }
     return failure(404);
   } catch (error) {
@@ -89,11 +89,20 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
 }
 
 /**
- * A KV v2 read's metadata. An environment has no version of its own, and
- * a value's history stays in coffre: 0 says there is none here, as
- * `?version=` is refused.
+ * A KV v2 read's metadata. Vault's `version` is a number, which no version
+ * of coffre's is: 0 says there is none here, as `?version=` is refused. An
+ * environment's own version, a hash of what the read opened, is in
+ * `custom_metadata`, Vault's map of strings, where `vault kv get` shows it.
  */
-const METADATA = { created_time: '1970-01-01T00:00:00Z', custom_metadata: null, deletion_time: '', destroyed: false, version: 0 };
+function metadata(version: string | null) {
+  return {
+    created_time: '1970-01-01T00:00:00Z',
+    custom_metadata: version === null ? null : { coffre_version: version },
+    deletion_time: '',
+    destroyed: false,
+    version: 0,
+  };
+}
 
 /** The mount as `sys/internal/ui/mounts/<path>` describes it: `options.version`, a string, is what clients read. */
 function mountInfo(mount: string) {

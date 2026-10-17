@@ -67,7 +67,7 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
   const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
   if (routes === undefined) return null;
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
-  const carrying = (token: string) => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
+  const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
   return routes.fetch(request, {
     publicUrl: runtime.publicUrl,
     api: (token) => {
