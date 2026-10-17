@@ -63,11 +63,13 @@ export type SecretKey = {
    * (docs/design/forking.md): `inherited`, no row here, the parent's value
    * read live; `overridden`, a value or reference of its own over the
    * parent's; `removed`, the parent's key this fork does without. `from`
-   * is the environment that holds it, the parent or one above, and
-   * `changed` says its value is newer than the override. Null for a key
-   * only this environment holds, and outside forks.
+   * is the environment that holds it, the parent or one above; `changed`
+   * says its value is newer than the override; `reset`, that the fork's
+   * own value was reset to it and is kept, archived, for `inherit: false`
+   * to serve again. Each key is listed once. Null for a key only this
+   * environment holds, and outside forks.
    */
-  parent: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean } | null;
+  parent: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean; reset: boolean } | null;
 };
 
 export type SecretVersion = {
@@ -194,13 +196,15 @@ export async function listSecrets(
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
 
   const own = new Set(rows.filter((row) => row.archivedAt === null).map((row) => row.key));
-  const keys: SecretKey[] = rows.map((row) => {
+  // An override reset to the parent's: its key is listed once, as inherited, saying its own value is kept.
+  const reset = new Set(rows.filter((row) => row.archivedAt !== null && inherited.held.has(row.key)).map((row) => row.key));
+  const keys: SecretKey[] = rows.filter((row) => !reset.has(row.key)).map((row) => {
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
     if (held === undefined) return { ...view(row), parent: null };
     // Flagged while the parent's value is newer than the override, to whoever may know when it was written.
     const [mine, theirs] = [writtenAt(row), writtenAt(held.row)];
     const changed = reads(held.from) && mine !== null && theirs !== null && theirs > mine;
-    return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed } };
+    return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false } };
   });
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;
@@ -210,10 +214,10 @@ export async function listSecrets(
       ...view(held.row),
       ...(shown ? {} : { reference: null, version: null, updatedAt: null, updatedBy: null }),
       archived: false,
-      parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false },
+      parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key) },
     });
   }
-  keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : Number(a.archived) - Number(b.archived)));
+  keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   return {
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys,

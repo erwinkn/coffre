@@ -43,7 +43,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'PUT /projects/:project/:environment': {
-    ui: [{ does: 'a project › Environments › Add environment', in: 'pages/project-environments.tsx', call: 'environments.create' }],
+    ui: [{ does: 'a project › Environments › Add environment, empty, inheriting, a copy or references', in: 'pages/project-environments.tsx', call: 'environments.create' }],
   },
   'PATCH /projects/:project/:environment': {
     ui: [{ does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project-environments.tsx', call: 'environments.update' }],
@@ -58,7 +58,10 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [{ does: "an environment: the keys its siblings have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
   },
   'PATCH /projects/:project/:environment/dismissals': {
-    ui: [{ does: 'an environment › Missing keys › Dismiss, Dismiss all, and Undo after either', in: 'components/missing.tsx', call: 'environments.dismiss' }],
+    ui: [
+      { does: 'an environment › Missing keys › Dismiss, Dismiss all, and Undo after either', in: 'components/missing.tsx', call: 'environments.dismiss' },
+      { does: "a fork › an inherited key › ⋯ › Remove; a removed one › Restore; Undo after either", in: 'lib/changes.ts', call: 'environments.dismiss' },
+    ],
   },
   'GET /secrets/:project/:environment': { ui: [{ does: 'an environment: its secrets', in: 'pages/environment.tsx', call: 'secrets.list' }] },
   'PATCH /secrets/:project/:environment': {
@@ -71,6 +74,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [
       { does: "a secret › Edit: its name, then Save", in: 'pages/environment.tsx', call: 'secrets.rename' },
       { does: 'a secret › ⋯ › Archive; an archived one › ⋯ › Restore', in: 'pages/environment.tsx', call: 'secrets.update' },
+      { does: "a fork › an override › ⋯ › Reset to its parent; a reset one › ⋯ › Use its own value again; Undo after either", in: 'lib/changes.ts', call: 'secrets.inherit' },
     ],
   },
   'GET /secrets/:project/:environment/:key/versions': {

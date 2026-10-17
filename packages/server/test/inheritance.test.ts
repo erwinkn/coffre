@@ -432,10 +432,10 @@ test("a fork's list says what it inherits, overrides and removes, and its parent
   const listed = await maintainer.secrets.list('market/prod-eu');
   assert.deepEqual(listed.parents, ['prod']);
   assert.deepEqual(listed.keys.map((key) => [key.key, key.folder, key.parent, key.version]), [
-    ['DATABASE_URL', null, { from: 'prod', state: 'overridden', changed: false }, 1],
+    ['DATABASE_URL', null, { from: 'prod', state: 'overridden', changed: false, reset: false }, 1],
     ['EU_REGION', null, null, 1],
-    ['SENTRY_DSN', null, { from: 'prod', state: 'removed', changed: false }, null],
-    ['STRIPE_KEY', null, { from: 'prod', state: 'inherited', changed: false }, 1],
+    ['SENTRY_DSN', null, { from: 'prod', state: 'removed', changed: false, reset: false }, null],
+    ['STRIPE_KEY', null, { from: 'prod', state: 'inherited', changed: false, reset: false }, 1],
   ]);
   // An inherited key is listed in its parent's folder; prod moved its own DATABASE_URL, which the override does not follow.
   await root.secrets.update('market/prod/STRIPE_KEY', { folder: 'billing' });
@@ -444,7 +444,7 @@ test("a fork's list says what it inherits, overrides and removes, and its parent
   // prod writes DATABASE_URL after the override: the override is flagged.
   await root.secrets.set('market/prod', { DATABASE_URL: 'postgres://prod-2' });
   const after = await maintainer.secrets.list('market/prod-eu');
-  assert.deepEqual(after.keys.find((key) => key.key === 'DATABASE_URL')?.parent, { from: 'prod', state: 'overridden', changed: true });
+  assert.deepEqual(after.keys.find((key) => key.key === 'DATABASE_URL')?.parent, { from: 'prod', state: 'overridden', changed: true, reset: false });
 
   // A reader of the fork alone sees the names and their standing, never when the parent's were written.
   await root.access.set(`user:${ADA}`, { 'market/prod-eu': 'viewer' });
@@ -469,6 +469,9 @@ test('a reset is a write: a developer resets an override to the parent, and undo
   assert.deepEqual(await ada.secrets.update('market/prod-eu/DATABASE_URL', { inherit: true }), { key: 'DATABASE_URL', archived: true, folder: null, from: 'prod' });
   assert.equal((await values(ada, 'market/prod-eu')).DATABASE_URL, 'postgres://prod');
   assert.deepEqual((await entries('app', 'secret.reset')).map((entry) => entry.metadata), [{ key: 'DATABASE_URL', from: 'prod' }]);
+  // Listed once, as inherited, its own value kept.
+  const listed = (await ada.secrets.list('market/prod-eu')).keys.filter((key) => key.key === 'DATABASE_URL');
+  assert.deepEqual(listed.map((key) => [key.archived, key.parent]), [[false, { from: 'prod', state: 'inherited', changed: false, reset: true }]]);
   // Again: nothing to do.
   await ada.secrets.update('market/prod-eu/DATABASE_URL', { inherit: true });
   assert.equal((await entries('app', 'secret.reset')).length, 1);

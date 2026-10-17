@@ -35,7 +35,7 @@ type Listed = {
   reference?: { state: string; source?: string; version?: number | null; createdBy?: string };
   updatedAt?: string | null;
   updatedBy?: string | null;
-  parent?: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean } | null;
+  parent?: { from: string; state: 'inherited' | 'overridden' | 'removed'; changed: boolean; reset: boolean } | null;
 };
 type Environment = {
   values: Record<string, string>;
@@ -205,10 +205,10 @@ test("list of a fork says where each key stands to its parent's: inherited, over
       values: {},
       rotateAfterDays: null,
       listed: [
-        { key: 'DATABASE_URL', version: 1, updatedAt: today, updatedBy: 'cy@acme.example', parent: { from: 'prod', state: 'overridden', changed: true } },
+        { key: 'DATABASE_URL', version: 1, updatedAt: today, updatedBy: 'cy@acme.example', parent: { from: 'prod', state: 'overridden', changed: true, reset: false } },
         { key: 'EU_REGION', version: 1, updatedAt: today, updatedBy: 'cy@acme.example' },
-        { key: 'SENTRY_DSN', version: null, parent: { from: 'prod', state: 'removed', changed: false } },
-        { key: 'STRIPE_KEY', version: 2, updatedAt: today, updatedBy: 'ada@acme.example', parent: { from: 'prod', state: 'inherited', changed: false } },
+        { key: 'SENTRY_DSN', version: null, parent: { from: 'prod', state: 'removed', changed: false, reset: false } },
+        { key: 'STRIPE_KEY', version: 2, updatedAt: today, updatedBy: 'ada@acme.example', parent: { from: 'prod', state: 'inherited', changed: false, reset: true } },
       ],
     },
   });
@@ -218,7 +218,7 @@ test("list of a fork says where each key stands to its parent's: inherited, over
     'DATABASE_URL\tv1\tcy@acme.example\ttoday  (overrides prod; prod changed since)',
     'EU_REGION\tv1\tcy@acme.example\ttoday',
     'SENTRY_DSN\tv-\t-\t-  (removed: prod has it)',
-    'STRIPE_KEY\tv2\tada@acme.example\ttoday  (from prod)',
+    'STRIPE_KEY\tv2\tada@acme.example\ttoday  (from prod; its own reset, and kept)',
     '',
   ].join('\n'));
 });

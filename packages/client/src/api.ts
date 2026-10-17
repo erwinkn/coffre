@@ -242,6 +242,7 @@ export type Api = {
           from: string;
           state: "inherited" | "overridden" | "removed";
           changed: boolean;
+          reset: boolean;
         };
       }[];
       parents: string[];
@@ -1717,6 +1718,7 @@ export type SecretKey = {
     from: string;
     state: "inherited" | "overridden" | "removed";
     changed: boolean;
+    reset: boolean;
   };
 };
 
