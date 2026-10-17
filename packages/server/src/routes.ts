@@ -38,3 +38,5 @@ export const readyz = route;
 export const mcp = route;
 /** `/.well-known/$`: the OAuth metadata MCP clients read first: the protected resource's and the authorization server's. */
 export const wellKnown = route;
+/** A plugin's paths, at its prefix: `/v1/$` for `vaultKv` (docs/design/plugins.md). */
+export const plugin = route;

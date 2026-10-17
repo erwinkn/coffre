@@ -66,7 +66,7 @@ export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: nu
     if (auth.mode !== 'signin') throw new Error('unreachable');
     const service = new SigninService({ ...deps, signin: auth.signin });
     const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport, ...options });
-    runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, rotateAfterDays: 365 };
+    runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, rotateAfterDays: 365, plugins: [] };
   });
   after(async () => {
     await resetDatabase(db.owner);

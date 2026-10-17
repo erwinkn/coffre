@@ -1,6 +1,8 @@
 import { publicOrigin, type Auth, type AuthConfig } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 
+import { checkPlugins, type CoffrePlugin } from './plugins.ts';
+
 /**
  * What every deployment writes, on either runtime. The runtime adds where
  * the database is: `postgres(env.HYPERDRIVE)` on Workers, a URL on Node.
@@ -24,6 +26,12 @@ export type CoffreConfig = {
    * change; a reference's value is its source's.
    */
   rotateAfterDays?: number | null;
+  /**
+   * What the deployment adds to coffre, each answering paths of its own as
+   * whoever a request's credential names: `[vaultKv({ mount: 'secret' })]`
+   * (docs/design/plugins.md). None if left out.
+   */
+  plugins?: readonly CoffrePlugin[];
 };
 
 export type ResolvedConfig = {
@@ -31,6 +39,7 @@ export type ResolvedConfig = {
   auth: AuthConfig;
   auditChainKey: Buffer;
   rotateAfterDays: number | null;
+  plugins: readonly CoffrePlugin[];
 };
 
 /** A year: what a value may go unchanged before it is flagged, unless the deployment says. */
@@ -53,5 +62,6 @@ export function resolveConfig(config: CoffreConfig): ResolvedConfig {
     auth: config.auth.resolve(publicUrl),
     auditChainKey,
     rotateAfterDays,
+    plugins: checkPlugins(config.plugins ?? []),
   };
 }

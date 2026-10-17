@@ -171,6 +171,7 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
     waitUntil,
     schema: { migrated: true },
     rotateAfterDays: 365,
+    plugins: [],
   };
   const asOwner = (path: string, init: RequestInit = {}) => fetchApi(
     new Request(`https://coffre.test${path}`, { ...init, headers: { 'content-type': 'application/json', cookie: `__Host-coffre_session=${ROOT}`, 'sec-fetch-site': 'same-origin' } }),
@@ -213,6 +214,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     waitUntil,
     schema: { migrated: true },
     rotateAfterDays: 365,
+    plugins: [],
   };
   const reveal = () =>
     fetchApi(

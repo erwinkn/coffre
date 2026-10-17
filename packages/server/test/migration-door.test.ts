@@ -39,6 +39,7 @@ function freshRuntime(): CoffreRuntime {
     waitUntil,
     schema: { migrated: false },
     rotateAfterDays: 365,
+    plugins: [],
   };
 }
 

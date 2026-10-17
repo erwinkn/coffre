@@ -29,6 +29,8 @@ export type CoffreRuntime = {
   waitUntil: (promise: Promise<unknown>) => void;
   /** Days a value may go unchanged before it is flagged for rotation, or null for no flag. */
   rotateAfterDays: number | null;
+  /** What the deployment added, in its configuration's order (`plugins.ts`). */
+  plugins: ResolvedConfig['plugins'];
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
 };
@@ -94,6 +96,7 @@ export function createRuntime(
     waitUntil,
     schema,
     rotateAfterDays: config.rotateAfterDays,
+    plugins: config.plugins,
   };
 }
 
