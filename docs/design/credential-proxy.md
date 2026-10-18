@@ -206,7 +206,8 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    and `paths` narrow it further.
 2. **Who.** The handle, from `x-coffre-handle` if present, else from
    where the rule puts the key: the header, the query parameter, or
-   Basic's user or password. No handle gets a 401.
+   Basic's user or password. A shaped stand-in's slot must be that shape
+   exactly (section 5). No handle gets a 401.
 3. **What.** The credential's keys, from the cache for the handle,
    environment and credential, or opened now: `use(handle, …)`, the API's
    read in process, purpose `use`. That is one vault entry naming the keys,
@@ -454,6 +455,46 @@ isolates, the map would live in a Durable Object.
   `rolcreaterole` after login, before the app's first query.
 - *Minted short-lived logins* (W108), which replace the shared password.
 
+**Shaped stand-ins.** Some clients check their key before they send it.
+DFNS's SDK decodes its token's middle part on every request, to read the
+organization from the `https://custom/app_metadata` claim, so an opaque
+handle throws before anything is sent. A credential whose header or query
+rule carries one key may say what shape its stand-in takes:
+
+```ts
+dfns: {
+  upstream: 'https://api.dfns.io',
+  inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'),
+  standIn: jwt({ claims: ['https://custom/app_metadata'] }),
+  baseUrl: 'DFNS_API_URL',
+},
+stripe: { upstream: 'https://api.stripe.com', inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), standIn: prefix('sk_test_') },
+```
+
+- `jwt({ claims })` gives the app `header.payload.<handle>`. The header is
+  `{"alg":"none","typ":"JWT"}`. The payload holds the named claims,
+  copied from the real token, and `exp`, the handle's end. The plan opens
+  the real token for them, as a use of the credential, logged (`standIn:
+  { claims }`), and copies nothing else: DFNS's `sub` and `iss` stay in
+  coffre. A key that holds no JWT fails the plan with a 409 that names it.
+- `prefix('sk_test_')` gives `sk_test_coffre_use_…`.
+
+The proxy reads the slot as the rule's template with the stand-in in its
+place, exactly: `Bearer <anything>.<anything>.<handle>` for DFNS. It reads
+the handle from the last part, ignores the rest, and the rule's header or
+parameter replaces the whole with the real value. The bare handle, or the
+stand-in framed otherwise, is a 401; `x-coffre-handle` still works. An
+opaque stand-in is found wherever the rule frames it, as before. The leak
+check and redaction are unchanged: the handle anywhere else is refused,
+and the real token quoted back is redacted. A shaped stand-in is refused
+at configuration for Basic (two keys), `sigv4()` (a key pair), and a
+template with more than one key or the same key twice.
+
+Tested with DFNS's own SDK (`@dfns/sdk`, a dev dependency): it reads its
+organization from the stand-in, and a fake DFNS reads the token it gets
+with the SDK's own `extractTokenScope` and requires the real one
+(`packages/server/test/credential-proxy-stand-ins.test.ts`).
+
 **Redis.** The same tunnel, intercepting the first `AUTH <password>` or
 `HELLO 3 AUTH <user> <password>` and replacing the handle with the real
 password. Then it pipes bytes. TLS upstream as for Postgres.
@@ -636,3 +677,4 @@ is reversible.
 | 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), checked on a deployed Worker; the privileged-role warning |
 | 4 | Redis through the tunnel |
 | 5 | `sign`/`presign`/`verify` helpers, SDK credential files |
+| 0.9 C | Shaped stand-ins, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
