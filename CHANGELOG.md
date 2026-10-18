@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.2 (2026-10-18)
+
 - **`@coffre/client` runs on Node 20 and 22.** Its `engines` said Node 24,
   which only the workspace's sources need; the published client is plain
   JavaScript built for Node 20, with no dependency, so it now declares
