@@ -6,6 +6,8 @@ import {
   companionsOf,
   generationsOf,
   hasSecretEditConflict,
+  levelsOf,
+  madeSensitive,
   valueEdit,
   type SecretChange,
   type SecretDraft,
@@ -412,4 +414,73 @@ test('a level changed alone is a mark, looser waits for a value typed into an em
   assert.deepEqual(valueEdit({ start: '', level: null }, { value: null, sensitivity: 'secret' }), { value: null, sensitivity: undefined });
   // A sensitive one, never read: anything typed is a new value, and it stays sensitive.
   assert.deepEqual(valueEdit({ start: '', level: 'sensitive' }, { value: 'sk_3', sensitivity: 'sensitive' }), { value: 'sk_3', sensitivity: 'sensitive' });
+});
+
+test("a generated pair's public key is written at its own level, not its private key's", async () => {
+  const pair = { recipe: 'ecdsa:p-256', pair: { private: 'PRIVATE_KEY', public: 'PUBLIC_KEY' } };
+  const listed = [
+    { key: 'PRIVATE_KEY', sensitivity: 'sensitive' as const },
+    { key: 'PUBLIC_KEY', sensitivity: 'secret' as const },
+    { key: 'SIGNING_PRIVATE', sensitivity: 'secret' as const },
+    { key: 'SIGNING_PUBLIC', sensitivity: 'sensitive' as const },
+  ];
+  const changes: Record<string, SecretChange> = {
+    // A sensitive private key regenerated: its public key stays a secret.
+    PRIVATE_KEY: { ...change('PRIVATE_KEY', 'private'), recipe: 'ecdsa:p-256', sensitivity: 'sensitive', companion: { key: 'PUBLIC_KEY', value: 'public' } },
+    // A public key someone made sensitive stays so.
+    SIGNING_PRIVATE: { ...change('SIGNING_PRIVATE', 'private-2'), recipe: 'ecdsa:p-256', companion: { key: 'SIGNING_PUBLIC', value: 'public-2' } },
+  };
+  // A new pair's public key is a secret, its private key sensitive.
+  const drafts: SecretDraft[] = [{ id: 1, key: 'NEW_PRIVATE', value: 'private-3', recipe: 'ecdsa:p-256', sensitivity: 'sensitive', companion: { key: 'NEW_PUBLIC', value: 'public-3' } }];
+  const patches: unknown[] = [];
+  await applySecretEditBatch({
+    active: listed,
+    drafts,
+    changes,
+    operations: {
+      rename: async () => assert.fail('nothing is renamed'),
+      write: async (patch) => {
+        patches.push(patch);
+      },
+    },
+  });
+  const signing = { recipe: 'ecdsa:p-256', pair: { private: 'SIGNING_PRIVATE', public: 'SIGNING_PUBLIC' } };
+  const made = { recipe: 'ecdsa:p-256', pair: { private: 'NEW_PRIVATE', public: 'NEW_PUBLIC' } };
+  assert.deepEqual(patches, [{
+    PRIVATE_KEY: { value: 'private', generated: pair, sensitivity: 'sensitive' },
+    PUBLIC_KEY: { value: 'public', generated: pair, sensitivity: 'secret' },
+    SIGNING_PRIVATE: { value: 'private-2', generated: signing, sensitivity: 'secret' },
+    SIGNING_PUBLIC: { value: 'public-2', generated: signing, sensitivity: 'sensitive' },
+    NEW_PRIVATE: { value: 'private-3', generated: made, sensitivity: 'sensitive' },
+    NEW_PUBLIC: { value: 'public-3', generated: made, sensitivity: 'secret' },
+  }]);
+  // What the list shows until it is read back, and what the save asks to confirm: only the new private key.
+  assert.equal(levelsOf(listed, drafts, changes).get('PUBLIC_KEY')?.sensitivity, 'secret');
+  assert.equal(levelsOf(listed, drafts, changes).get('NEW_PUBLIC')?.sensitivity, 'secret');
+  assert.deepEqual(madeSensitive(listed, drafts, changes), ['NEW_PRIVATE']);
+});
+
+test('a save asks to confirm every key it makes sensitive, a public key made so included', () => {
+  const listed = [
+    { key: 'PRIVATE_KEY', sensitivity: 'secret' as const },
+    { key: 'PUBLIC_KEY', sensitivity: 'secret' as const },
+    { key: 'TOKEN', sensitivity: 'secret' as const },
+    { key: 'OLD', sensitivity: 'sensitive' as const },
+  ];
+  const changes: Record<string, SecretChange> = {
+    PRIVATE_KEY: {
+      ...change('PRIVATE_KEY', 'private'),
+      recipe: 'ecdsa:p-256',
+      sensitivity: 'sensitive',
+      companion: { key: 'PUBLIC_KEY', value: 'public', sensitivity: 'sensitive' },
+    },
+    // A mark, named by the key's name after its rename.
+    TOKEN: { key: 'API_TOKEN', value: null, archived: false, sensitivity: 'sensitive' },
+    // Already sensitive: nothing to confirm.
+    OLD: { ...change('OLD', 'next'), sensitivity: 'sensitive' },
+  };
+  assert.deepEqual(madeSensitive(listed, [], changes), ['PRIVATE_KEY', 'PUBLIC_KEY', 'API_TOKEN']);
+  // Its public key at its own level: a secret, nothing more to confirm than the private key.
+  const { sensitivity: _, ...secretPublic } = changes.PRIVATE_KEY!.companion!;
+  assert.deepEqual(madeSensitive(listed, [], { PRIVATE_KEY: { ...changes.PRIVATE_KEY!, companion: secretPublic } }), ['PRIVATE_KEY']);
 });

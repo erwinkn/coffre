@@ -27,6 +27,7 @@ import { LEVELS, markable, SENSITIVITIES, stricter, waitsForValue } from '../lib
 import {
   companionsOf,
   hasSecretEditConflict,
+  madeSensitive,
   secretChangeFor,
   valueEdit,
   type Companion,
@@ -215,12 +216,9 @@ function EnvironmentLedger({
   const [saveError, setSaveError] = useState<string | null>(null);
   // A save that makes keys sensitive, waiting for its confirmation: nobody sees them again, which the row's menu asks too.
   const [hiding, setHiding] = useState<{ keys: string[]; go: () => void } | null>(null);
+  // Every key the save writes counts, a key pair's public key included.
   function confirmingSensitive(drafts: readonly SecretDraft[], changes: Record<string, SecretChange>, go: () => void) {
-    const levels = new Map(active.map((entry) => [entry.key, entry.sensitivity]));
-    const keys = [
-      ...drafts.filter((draft) => draft.sensitivity === 'sensitive' && levels.get(draft.key.trim()) !== 'sensitive').map((draft) => draft.key.trim()),
-      ...Object.entries(changes).filter(([key, change]) => change.sensitivity === 'sensitive' && levels.get(key) !== 'sensitive').map(([key]) => key),
-    ];
+    const keys = madeSensitive(active, drafts, changes);
     if (keys.length === 0) go();
     else setHiding({ keys, go });
   }

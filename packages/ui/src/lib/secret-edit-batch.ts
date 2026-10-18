@@ -5,9 +5,11 @@ import { stricter } from './sensitivity.ts';
 /**
  * A second secret a row writes with its own value, in the same patch: a
  * generated key pair's public key, beside its private key. It is part of
- * the row's edit, so saving, undoing or retrying the row takes both.
+ * the row's edit, so saving, undoing or retrying the row takes both. It is
+ * written at its own level, not its row's (`companionLevel`): `sensitivity`
+ * where the user chose one.
  */
-export type Companion = { key: string; value: string };
+export type Companion = { key: string; value: string; sensitivity?: 'secret' | 'sensitive' };
 
 export type SecretDraft = {
   id: number;
@@ -59,7 +61,8 @@ export function valueEdit(
   return { value, sensitivity: value === null && next.sensitivity === level ? undefined : next.sensitivity };
 }
 
-type ActiveSecret = { key: string };
+/** A listed key, and who sees its value now (null for none of its own). */
+type ActiveSecret = { key: string; sensitivity?: Sensitivity | null };
 
 /**
  * A merge patch: a value sets a key with who sees it, adding it if it is
@@ -93,20 +96,91 @@ function levelOf(edit: ValueEdit): 'secret' | 'sensitive' | 'plain' {
 }
 
 /**
+ * Who sees each listed key's value now, by its name after the save: a
+ * renamed key keeps its level under its new name; an archived one is gone.
+ */
+function levelsNow(
+  active: readonly ActiveSecret[],
+  changes: Readonly<Record<string, SecretChange>>,
+): Map<string, Sensitivity | null> {
+  const out = new Map<string, Sensitivity | null>();
+  for (const entry of active) {
+    const change = secretChangeFor(changes, entry.key);
+    if (change?.archived) continue;
+    out.set(change?.key.trim() ?? entry.key, entry.sensitivity ?? null);
+  }
+  return out;
+}
+
+/**
+ * Who sees the public key a pair writes: who the user chose, else who sees
+ * the key it writes over now, or a secret, as a generated value is never
+ * plain. A public key need not be hidden, so a sensitive private key does
+ * not make it sensitive.
+ *
+ *   PRIVATE_KEY sensitive, PUBLIC_KEY secret  -> PUBLIC_KEY written secret
+ *   PRIVATE_KEY secret, PUBLIC_KEY sensitive  -> PUBLIC_KEY written sensitive
+ *   PUBLIC_KEY new                            -> secret
+ */
+function companionLevel(companion: Companion, now: ReadonlyMap<string, Sensitivity | null>): 'secret' | 'sensitive' {
+  return companion.sensitivity ?? (now.get(companion.key.trim()) === 'sensitive' ? 'sensitive' : 'secret');
+}
+
+/**
  * What a row writes under each key: its value, and its companion's beside
  * it, each saying who sees it, as every write does: over a sensitive key,
  * one that said nothing would stay sensitive.
  */
-function rowPatch(key: string, value: string, edit: ValueEdit): SecretPatch {
+function rowPatch(key: string, value: string, edit: ValueEdit, now: ReadonlyMap<string, Sensitivity | null>): SecretPatch {
   const generated = generationOf(key, edit);
-  const sensitivity = levelOf(edit);
-  const entry = (each: string) => (generated === undefined || sensitivity === 'plain'
+  const entry = (each: string, sensitivity: Sensitivity) => (generated === undefined || sensitivity === 'plain'
     ? { value: each, sensitivity }
     : { value: each, generated, sensitivity });
   const patch: SecretPatch = Object.create(null);
-  patch[key] = entry(value);
-  if (edit.companion !== undefined) patch[edit.companion.key.trim()] = entry(edit.companion.value);
+  patch[key] = entry(value, levelOf(edit));
+  if (edit.companion !== undefined) patch[edit.companion.key.trim()] = entry(edit.companion.value, companionLevel(edit.companion, now));
   return patch;
+}
+
+/**
+ * The one merge patch a save writes, by each key's name after its renames:
+ * every value with its companion, every mark and every archive. An edit
+ * whose key went from the list writes nothing.
+ */
+function patchOf(
+  active: readonly ActiveSecret[],
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+): SecretPatch {
+  const now = levelsNow(active, changes);
+  // A key named `__proto__` is a key like any other.
+  const patch: SecretPatch = Object.create(null);
+  for (const entry of active) {
+    const change = secretChangeFor(changes, entry.key);
+    if (change === undefined) continue;
+    const key = change.key.trim();
+    if (change.archived) patch[entry.key] = null;
+    else if (change.value !== null) Object.assign(patch, rowPatch(key, change.value, change, now));
+    else if (change.sensitivity !== undefined) patch[key] = { sensitivity: change.sensitivity };
+  }
+  for (const draft of drafts) Object.assign(patch, rowPatch(draft.key.trim(), draft.value, draft, now));
+  return patch;
+}
+
+/**
+ * The keys a save makes sensitive, by their names after it: each it writes
+ * sensitive, a companion included, that was not sensitive before. Nobody
+ * sees them again, so the save asks first.
+ */
+export function madeSensitive(
+  active: readonly ActiveSecret[],
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+): string[] {
+  const now = levelsNow(active, changes);
+  return Object.entries(patchOf(active, drafts, changes))
+    .filter(([key, write]) => write !== null && write.sensitivity === 'sensitive' && now.get(key) !== 'sensitive')
+    .map(([key]) => key);
 }
 
 /**
@@ -143,15 +217,8 @@ export function levelsOf(
   changes: Readonly<Record<string, SecretChange>>,
 ): Map<string, { sensitivity: Sensitivity; value: string | null }> {
   const out = new Map<string, { sensitivity: Sensitivity; value: string | null }>();
-  const add = (key: string, value: string, edit: ValueEdit) => {
-    const sensitivity = levelOf(edit);
-    out.set(key, { sensitivity, value: sensitivity === 'plain' ? value : null });
-    if (edit.companion !== undefined) out.set(edit.companion.key.trim(), { sensitivity, value: sensitivity === 'plain' ? edit.companion.value : null });
-  };
-  for (const draft of drafts) add(draft.key.trim(), draft.value, draft);
-  for (const entry of active) {
-    const change = secretChangeFor(changes, entry.key);
-    if (change !== undefined && !change.archived && change.value !== null) add(change.key.trim(), change.value, change);
+  for (const [key, write] of Object.entries(patchOf(active, drafts, changes))) {
+    if (write !== null && 'value' in write) out.set(key, { sensitivity: write.sensitivity, value: write.sensitivity === 'plain' ? write.value : null });
   }
   return out;
 }
@@ -260,25 +327,16 @@ export async function applySecretEditBatch({
   }
 
   let applied = 0;
-  // A key named `__proto__` is a key like any other.
-  const patch: SecretPatch = Object.create(null);
+  const patch = patchOf(active, drafts, changes);
   try {
     for (const { sourceKey, change } of plan) {
-      if (change.archived) {
-        patch[sourceKey] = null;
-        continue;
-      }
       const key = change.key.trim();
-      if (key !== sourceKey) {
-        await operations.rename(sourceKey, key);
-        delete remainingChanges[sourceKey];
-        applied += 1;
-        if (change.value !== null || change.sensitivity !== undefined) remainingChanges[key] = { ...change, key };
-      }
-      if (change.value !== null) Object.assign(patch, rowPatch(key, change.value, change));
-      else if (change.sensitivity !== undefined) patch[key] = { sensitivity: change.sensitivity };
+      if (change.archived || key === sourceKey) continue;
+      await operations.rename(sourceKey, key);
+      delete remainingChanges[sourceKey];
+      applied += 1;
+      if (change.value !== null || change.sensitivity !== undefined) remainingChanges[key] = { ...change, key };
     }
-    for (const draft of drafts) Object.assign(patch, rowPatch(draft.key.trim(), draft.value, draft));
 
     const written = Object.keys(patch).length;
     if (written > 0) await operations.write({ ...patch });
