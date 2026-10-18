@@ -2612,8 +2612,9 @@ function personalRefusal(
   const gone = own.deleted || (environments.get(own.parentId)?.deleted ?? true);
   const refused = refuses(reader, 'secret.use', parent, gone) === null ? null : refuses(reader, 'secret.read', parent, gone);
   if (refused !== null) return refused;
-  // The credential's scope caps the owner still: their viewer token on the parent reads, and wraps no key.
-  return withinCredential(reader.live, permission, parent) ? null : 'no_grant';
+  // The credential's scope caps the owner still: their viewer token on the parent reads, and wraps no key. Reading their
+  // own values takes use there: a Contributor's handle reads what its owner wrote, and nothing of the parent's.
+  return withinCredential(reader.live, permission === 'secret.read' ? 'secret.use' : permission, parent) ? null : 'no_grant';
 }
 
 function refuses(reader: Standing, permission: Permission, where: Place, deleted: boolean): RefusalCode | null {

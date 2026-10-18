@@ -232,6 +232,8 @@ function EnvironmentLedger({
   const canWrite = permissions.includes('secret.write');
   const canArchive = permissions.includes('secret.archive');
   const canReveal = canRevealSecrets(permissions);
+  // What a Contributor does without reading: lists the keys, their history, and keeps a personal config.
+  const canList = canReveal || permissions.includes('secret.use');
 
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
@@ -535,7 +537,7 @@ function EnvironmentLedger({
         title={environment}
         actions={personal ? (
           <DeletePersonal project={project} environment={environment} of={parents[0]!} />
-        ) : principal?.type === 'user' && canReveal && (
+        ) : principal?.type === 'user' && canList && (
           <Link className="btn btn-sm" to="/projects/$project/$environment" params={{ project, environment: `${environment}@me` }}>
             <Key size={14} />
             My own {environment}
@@ -677,6 +679,7 @@ function EnvironmentLedger({
                       canWrite={canWrite}
                       canArchive={canArchive}
                       canReveal={canReveal}
+                      canList={canList}
                       folders={folders}
                       onMove={(folder) => move({ key: entry.key, folder })}
                       lent={lentBy.get(entry.key) ?? []}
@@ -1215,6 +1218,7 @@ function SecretRow({
   canWrite,
   canArchive,
   canReveal,
+  canList,
   folders,
   onMove,
   lent,
@@ -1249,6 +1253,8 @@ function SecretRow({
   canWrite: boolean;
   canArchive: boolean;
   canReveal: boolean;
+  /** Whether the caller lists the environment: reads it, or uses it as a Contributor does. */
+  canList: boolean;
   /** The folders in use in this environment, offered when moving it. */
   folders: readonly string[];
   onMove: (folder: string | null) => void;
@@ -1712,7 +1718,7 @@ function SecretRow({
           {status.state === 'pending' ? (
             <RowPending status={status} />
           ) : (
-            !removed && (canReveal || (canWrite && !editing && !leaving) || (canArchive && !leaving && own && !overridden)) && (
+            !removed && (canList || (canWrite && !editing && !leaving) || (canArchive && !leaving && own && !overridden)) && (
               <Menu.Root>
                 <Menu.Trigger
                   className="act act-icon act-quiet"
@@ -1722,7 +1728,7 @@ function SecretRow({
                   <MoreHorizontal size={16} />
                 </Menu.Trigger>
                 <MenuPopup align="end">
-                  <SecretReadOnly canReveal={canReveal && own}>
+                  <SecretReadOnly canReveal={canList && own}>
                     <Menu.Item className="menu-item" onClick={() => setHistoryOpen((open) => !open)}>
                       <History size={14} />
                       {historyOpen ? 'Hide history' : 'Version history'}
@@ -1927,7 +1933,7 @@ function SecretRow({
         />
       )}
 
-      {historyOpen && canReveal && (
+      {historyOpen && canList && (
         <tr className="detail-row">
           <td colSpan={columns}>
             <VersionHistory

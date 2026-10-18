@@ -21,7 +21,7 @@ import {
   type SecretPlaceRow,
   type VersionRecipe,
 } from '../db/queries.ts';
-import { can } from './caller.ts';
+import { can, lists } from './caller.ts';
 import { asking, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatMember, type Path } from './paths.ts';
@@ -441,7 +441,7 @@ export async function listReferences(
     (path.environment === undefined || end.environmentId === place.environment!.id) && (path.key === undefined || end.secretId === place.secret!.id);
   const { caller } = ctx;
   const sees = (row: ReferenceRow) => [row.holder, row.source].some((end) =>
-    can(caller, 'secret.read', end) || can(caller, 'grant.manage', { projectId: end.projectId }));
+    lists(caller, end) || can(caller, 'grant.manage', { projectId: end.projectId }));
   const resolved = await resolveReferences(ctx.db, rows.filter((row) =>
     current.get(row.holder.secretId)?.id === row.id && (at(row.holder) || at(row.source)) && sees(row)));
   const manages = (row: ReferenceRow) => [row.holder, row.source].some((end) => can(caller, 'grant.manage', { projectId: end.projectId }));

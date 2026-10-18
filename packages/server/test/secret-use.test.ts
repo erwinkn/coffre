@@ -137,3 +137,27 @@ test('a personal token of a Contributor names contributor, and reaches no read',
   assert.deepEqual((await agent.secrets.list('market/dev')).keys.map((entry) => entry.key), ['API_KEY', 'REGION', 'WEBHOOK']);
   assert.equal((await refusal(agent.secrets.reveal('market/dev/API_KEY'))).status, 403);
 });
+
+test("a Contributor's handle reads their own values in dev@me, and nothing of dev's", async () => {
+  const contributor = clientFor(deps, CONTRIBUTOR);
+  await contributor.secrets.set('market/dev@me', { WEBHOOK: 'whsec_mine_0123456789' });
+  const handle = await bearer(await sessionFor(CONTRIBUTOR)).handles.create({ label: 'coffre run market/dev@me', paths: ['market/dev@me'] });
+  const response = await route('/use/market/dev@me', { headers: { authorization: `Bearer ${handle.token}` } });
+  assert.equal(response.status, 200, await response.clone().text());
+  const plan = (await response.json()) as { env: Record<string, string>; left: string[] };
+  assert.deepEqual(plan.env, { API_KEY: handle.token, REGION: 'eu-west-3', WEBHOOK: 'whsec_mine_0123456789' });
+  assert.deepEqual(plan.left, []);
+});
+
+test("a Contributor of a fork and its parent is told the parent's plain values and versions, and lists the references it reads", async () => {
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  await root.environments.create('market/base');
+  await root.secrets.set('market/base', { SHARED: 'shared_0123456789' });
+  await root.secrets.set('market/dev', { ALIAS: { ref: 'market/base/SHARED' } });
+  await root.access.set(`user:${CONTRIBUTOR}`, { 'market/dev': 'contributor', 'market/dev-eu': 'contributor' });
+  const contributor = clientFor(deps, CONTRIBUTOR);
+  const region = (await contributor.secrets.list('market/dev-eu')).keys.find((entry) => entry.key === 'REGION')!;
+  assert.deepEqual([region.value, region.version], ['eu-west-3', 1]);
+  const references = await contributor.references.list('market/dev');
+  assert.deepEqual(references.references.map((reference) => reference.holder), ['market/dev/ALIAS']);
+});

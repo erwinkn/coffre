@@ -143,7 +143,8 @@ async function tokenScope(api: CoffreClient, canary: Canary): Promise<string> {
   const reads = me.environments.filter((env) => env.permissions.includes('secret.read')).map((env) => `${env.project}/${env.environment}`);
   expect(reads.length === 1 && reads[0] === own, `the token reads ${reads.join(', ')}, not only ${own}`);
   const more = [...new Set(me.environments.flatMap((env) => env.permissions))].filter(
-    (permission) => permission !== 'secret.read' && permission !== 'audit.read',
+    // Every role that reads uses too (secret.use): a Viewer's token holds both.
+    (permission) => permission !== 'secret.read' && permission !== 'secret.use' && permission !== 'audit.read',
   );
   expect(more.length === 0, `the token holds more than reading: ${more.join(', ')}`);
 

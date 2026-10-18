@@ -34,7 +34,7 @@ import {
   fileSecrets,
   secretFolderOf,
 } from '../db/queries.ts';
-import { can, permissionsAt, placeOf } from './caller.ts';
+import { can, lists, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -314,8 +314,9 @@ export async function listSecrets(
     value: row.current?.plaintext ?? null,
     sensitivity: levelOfRow(row),
   });
+  // Told of a parent's key, its version, age and plain value, as a lister of the parent is: a reader, or a Contributor who uses it.
   const reads = (from: { id: string; slug: string }) =>
-    can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
+    lists(ctx.caller, { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
 
   // An override reset to the parent's: its key is listed once, as inherited or removed, saying its own value is kept.
   const removedSince = (key: string) => inherited.removed.has(key) && inherited.cut.has(key);
@@ -1537,17 +1538,18 @@ export async function reveal(
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
     // else, its key is a key like any other.
-    const told = (item: Readable) => item.parent === undefined
-      || can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: item.parent.environmentId, environmentSlug: item.parent.slug });
+    const parentOf = (item: Readable) => ({ projectId: environment.projectId, environmentId: item.parent!.environmentId, environmentSlug: item.parent!.slug });
+    const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
     // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
     const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
+    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
     const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
       key: item.key,
       inherited: item.parent !== undefined,
       from: item.parent?.slug ?? null,
       plain: plain(item) && told(item),
       sensitive: item.secret.sensitive === true,
-      reads: item.parent === undefined ? readsHere : told(item),
+      reads: readsAt(item),
       versionId: told(item) ? item.secretVersionId : null,
       recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
     }))) : use.keys;
