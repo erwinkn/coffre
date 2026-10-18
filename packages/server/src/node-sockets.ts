@@ -52,15 +52,15 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
   }
   if (socket.destroyed) return;
   if (answer instanceof Response) {
-    // The plugin's refusal as it said it, its headers included (`coffre-proxy`, `www-authenticate`), framed for this one answer.
-    const body = await refusalBody(answer);
-    if (socket.destroyed) return;
+    // The plugin's refusal: its status and headers (`coffre-proxy`, `www-authenticate`), framed for this one answer, and no
+    // body, which no WebSocket client reads and a plugin's stream could hold the socket with.
+    void answer.body?.cancel().catch(() => undefined);
     const headers = [...answer.headers].filter(([name]) => !FRAMING.has(name)).map(([name, value]) => `${name}: ${value}\r\n`).join('');
     // Then gone, once said or a second on: a peer that keeps its side open keeps nothing of the server's.
     const gone = setTimeout(() => socket.destroy(), 1000);
     gone.unref();
     socket.once('close', () => clearTimeout(gone));
-    socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Refused'}\r\n${headers}content-length: ${body.length}\r\nconnection: close\r\n\r\n${body.toString('latin1')}`, 'latin1', () => socket.destroy());
+    socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Refused'}\r\n${headers}content-length: 0\r\nconnection: close\r\n\r\n`, 'latin1', () => socket.destroy());
     return;
   }
   const session = answer;
@@ -70,27 +70,6 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
     socket.off('error', ignore);
     void session(fromWebSocket(ws), connect).catch(() => undefined).finally(() => ws.terminate());
   });
-}
-
-/** A refusal's body, at most 64 KiB and a second: a plugin's stream that stalls or runs on is cut there. */
-async function refusalBody(answer: Response): Promise<Buffer> {
-  if (answer.body === null) return Buffer.alloc(0);
-  const reader = answer.body.getReader();
-  const parts: Buffer[] = [];
-  let size = 0;
-  const late = setTimeout(() => void reader.cancel().catch(() => undefined), 1000);
-  try {
-    for (let part = await reader.read(); !part.done && size < 65_536; part = await reader.read()) {
-      parts.push(Buffer.from(part.value));
-      size += part.value.length;
-    }
-  } catch {
-    // Cut short: what came is the body.
-  } finally {
-    clearTimeout(late);
-    void reader.cancel().catch(() => undefined);
-  }
-  return Buffer.concat(parts).subarray(0, 65_536);
 }
 
 /** A WebSocket's binary messages as a byte stream, each way, paused while the stream's reader is behind; nothing delivered once it ends. */

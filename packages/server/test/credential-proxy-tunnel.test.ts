@@ -511,7 +511,7 @@ test("a session ended while its app floods it, and nothing reads, ends cleanly: 
   ws.terminate();
 });
 
-test('a refusal whose body never ends is cut, and the socket goes', postgresOnly, async () => {
+test('a refusal whose body never ends is said without it, and the socket goes', postgresOnly, async () => {
   runtime.plugins = checkPlugins([{ name: 'slow', routes: { prefix: '/slow', fetch: async () => new Response(null, { status: 404 }), socket: async () => new Response(new ReadableStream({ start: (controller) => controller.enqueue(new TextEncoder().encode('partial')) }), { status: 403 }) } }]);
   const answered = await new Promise<string>((resolve) => {
     const socket = tcp({ host: '127.0.0.1', port: Number(new URL(coffreAt).port) });
@@ -521,7 +521,8 @@ test('a refusal whose body never ends is cut, and the socket goes', postgresOnly
     socket.on('close', () => resolve(text));
   });
   assert.match(answered, /^HTTP\/1\.1 403/);
-  assert.match(answered, /partial$/);
+  assert.match(answered, /content-length: 0\r\n/);
+  assert.equal(answered.includes('partial'), false);
 });
 
 /** Revoke the suite's handle, as its person would. */
