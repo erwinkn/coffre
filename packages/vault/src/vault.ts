@@ -1076,8 +1076,12 @@ class VaultService implements Vault {
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
       }
-      // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks.
-      if (action === 'secret.read' && principal.startsWith('user:') && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true })) {
+      // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks. And
+      // a fork copies one, for anyone, a service account too, only where its app says it keeps it sensitive: an app of
+      // 0.9, mid-deploy, would write the copy as a secret its people read.
+      const copying = action === 'secret.read' && call.input.purpose === 'copy';
+      const handedBack = action === 'secret.read' && principal.startsWith('user:') && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true });
+      if (handedBack || (copying && call.input.keepsSensitive !== true)) {
         secrets.forEach((secret, i) => {
           if (codes[i] === null && secret.sensitive === true) codes[i] = 'sensitive';
         });

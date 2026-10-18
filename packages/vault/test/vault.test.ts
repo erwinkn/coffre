@@ -187,6 +187,10 @@ test("a sensitive value is never handed back to a person, an Owner included: use
   const unknown = await w.vault.unwrap({ principal: ADA, purpose: 'peek' as 'reveal', items });
   assert.equal(!unknown.ok && unknown.refusal.code, 'sensitive');
   assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items }), { ok: true, keys: [key] });
+  // A service account's fork, through an app of 0.9 that would write the copy as a secret, copies nothing sensitive either.
+  const serviceCopy = await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', items });
+  assert.equal(!serviceCopy.ok && serviceCopy.refusal.code, 'sensitive');
+  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
   // A batch is all or nothing: a secret beside it is refused with it, its own entry saying why.
   const plain = await w.secret(w.dev);
   const both = [...items, ...(await versionItems([{ secret: plain, wrapped: await wrapped(w, plain) }]))];
