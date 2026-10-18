@@ -280,7 +280,24 @@ test('a handle stands in for its environment and reaches nothing but the proxy; 
   const schumann = new SchumannApiClient({ baseUrl: `${ORIGIN}/use/market/dev/schumann`, apiKey: made.token });
   runtime.plugins = checkPlugins([credentialProxy(proxyOptions({ cacheSeconds: 0 }))]);
   await schumann.get('/companies');
+  // A request whose body is still coming when the handle is revoked sends nothing: the handle is checked as it goes out.
+  let finish!: () => void;
+  const slow = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"a":'));
+      finish = () => {
+        controller.enqueue(new TextEncoder().encode('1}'));
+        controller.close();
+      };
+    },
+  });
+  const pending = route('/use/market/dev/schumann/companies', { method: 'POST', headers: { 'x-api-key': made.token, 'content-type': 'application/json' }, body: slow, duplex: 'half' } as RequestInit);
+  await new Promise((resolve) => setTimeout(resolve, 20));
   await bearer(session).tokens.revoke(`user:${DEV}`, made.id);
+  const before = received.length;
+  finish();
+  assert.equal((await pending).status, 401);
+  assert.equal(received.length, before, 'nothing reached Schumann');
   await assert.rejects(schumann.get('/companies'), /Schumann answered 401/);
 });
 

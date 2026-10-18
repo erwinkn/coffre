@@ -244,6 +244,9 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
 
   const handle = handleIn(request, credential, target);
   if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${credential.name} takes its key, or as x-coffre-handle`);
+  // The body first, however long it takes to come: the handle is checked, and the values opened, as the request goes out.
+  const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await boundedBody(request);
+  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB`);
   const values = await valuesFor(coffre, proxy, handle, path, credential, target.host);
 
   const headers = new Headers();
@@ -254,8 +257,6 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
   if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
   if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
-  const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await boundedBody(request);
-  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB`);
   // The handle goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
   const leaked = [...headers].find(([, value]) => carries(value)) ?? (carries(safeDecode(target.href)) ? ['URL'] : undefined)
     ?? (body !== undefined && HANDLE.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);

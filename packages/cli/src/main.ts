@@ -1032,7 +1032,7 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
 }
 
 /** What a person's app gets through the credential proxy (`standIns`): its environment, and what the proxy left out. */
-type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[] };
+type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string };
 
 /**
  * Stand-ins for the environments named, where the instance has the
@@ -1058,14 +1058,16 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
   }
   const shared = clash(plans.map(([path, plan]) => [path, [...Object.keys(plan.env), ...plan.left]]));
   if (shared !== null) fail(`${shared}: a key comes from one environment only`);
-  const credentials = Object.assign({}, ...plans.map(([, plan]) => plan.credentials)) as Record<string, string>;
-  const env = Object.assign({}, ...plans.map(([, plan]) => plan.env)) as Record<string, string>;
+  // Merged as entries: a variable may be named __proto__, which assigning into an object would drop.
+  const credentials = Object.fromEntries(plans.flatMap(([, plan]) => Object.entries(plan.credentials)));
+  const env: Record<string, string> = Object.fromEntries(plans.flatMap(([, plan]) => Object.entries(plan.env)));
   return {
     // What `credential(name)` (`@coffre/client/credential`) reads: each credential's URL on the proxy, and the handle.
     env: { ...env, COFFRE_CREDENTIALS: JSON.stringify(credentials), COFFRE_HANDLE: handle.token },
     left: plans.flatMap(([, plan]) => plan.left).sort(),
     credentials: Object.keys(credentials).sort(),
     exposed: Object.keys(env).filter((key) => env[key] !== handle.token && !Object.values(credentials).includes(env[key]!)).sort(),
+    expiresAt: handle.expiresAt,
   };
 }
 
@@ -1082,7 +1084,7 @@ async function proxied(to: Target): Promise<boolean> {
 /** What `run` and `export` say of a person's stand-ins, on stderr: what the app holds, and what it does without. */
 function sayStandIns(stood: StandIns, paths: readonly string[], to: Target): void {
   const lines = [
-    `coffre: stand-ins for ${listOf(paths)}: ${stood.credentials.length === 0 ? 'no credential the proxy covers' : `${stood.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts 12 hours (\`coffre tokens\` lists it)`,
+    `coffre: stand-ins for ${listOf(paths)}: ${stood.credentials.length === 0 ? 'no credential the proxy covers' : `${stood.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(stood.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
     ...(stood.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${stood.exposed.join(', ')}`]),
     ...(stood.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${stood.left.join(', ')}`]),
   ];
