@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Stand-ins: people's apps use secrets without holding them.** A vault
+  option, `people: 'stand-ins'`, makes every read a person asks for, on
+  any credential of theirs (a session, a personal token, MCP), refused if
+  it would hand values back. Service accounts read values as before, so CI
+  and production are unchanged. A person's `coffre run` gets stand-ins
+  instead, through an optional plugin, the credential proxy
+  (`credentialProxy({ credentials, expose })` from
+  `@coffre/server/plugins/credential-proxy`, and `routes/use.$.ts`):
+  - Each credential is a bundle of an environment's keys, one upstream,
+    and a rule for where its keys go: `header('x-api-key', '{KEY}')`,
+    `query(…)` or `basic(…)`.
+  - `coffre run` makes one handle (`coffre_use_…`) for the run, which the
+    app holds where each key was. Its base URL points at the proxy, which
+    puts the real key in the request and sends it to the credential's
+    upstream, and only there.
+  - An unchanged client works with no change. `credential('schumann').fetch(path)`
+    (`@coffre/client/credential`) serves new code.
+  - A handle reaches only the proxy, lasts 12 hours, and is revoked as a
+    token is. Its keys are opened once per credential a minute, each
+    opening logged as a read to `use`.
+  - `expose` names the few values an exact environment's apps hold as
+    they are, best an environment of local-only fakes.
+  - The design, its decisions and what comes next (S3, the Postgres
+    tunnel) are in docs/design/credential-proxy.md. Migration
+    `0009_handles` widens a check, and nothing else.
+
 ## 0.7.0 (2026-10-17)
 
 - **Read coffre from tools that speak Vault.** An optional plugin, added in

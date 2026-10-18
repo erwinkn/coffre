@@ -174,12 +174,9 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // One read of what the environment holds, opening only what it exposes: logged as one use, of those values.
   const held = await coffre.use(handle, { path, keys: [], purpose: 'expose', logged: { plan: true } });
-  const exposedHere = proxy.expose.get(held.environment.personal ? '' : held.environment.path);
-  const exposed = held.keys.filter((key) => exposedHere === 'all' || (exposedHere?.includes(key) ?? false));
-  const opened = exposed.length === 0 ? {} : (await coffre.use(handle, { path, keys: exposed, purpose: 'expose', logged: { exposed: true } })).values;
   const env: Record<string, string> = Object.create(null);
   const credentials: Record<string, string> = {};
-  const covered = new Set(exposed);
+  const covered = new Set<string>();
   for (const credential of proxy.credentials.values()) {
     if (!credential.keys.every((key) => held.keys.includes(key))) continue;
     const at = `${coffre.publicUrl}/use/${path}/${credential.name}`;
@@ -193,7 +190,16 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       covered.add(credential.baseUrl);
     }
   }
-  for (const key of exposed) if (opened[key] !== undefined) env[key] = opened[key];
+  // What the exact environment exposes, never through a parent; and a personal config's own values, which only its owner
+  // writes and reads, so they hand back nothing they did not write. Neither for a key a credential covers: that is a stand-in.
+  const exposedHere = held.environment.personal ? held.own : proxy.expose.get(held.environment.path);
+  const exposed = held.keys.filter((key) => !covered.has(key) && (exposedHere === 'all' || (exposedHere?.includes(key) ?? false)));
+  const opened = exposed.length === 0 ? {} : (await coffre.use(handle, { path, keys: exposed, purpose: 'expose', logged: { exposed: true } })).values;
+  for (const key of exposed) {
+    if (opened[key] === undefined) continue;
+    env[key] = opened[key];
+    covered.add(key);
+  }
   return answer({
     environment: held.environment.path,
     env: { ...env },

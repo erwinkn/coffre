@@ -142,6 +142,8 @@ test('where people get stand-ins, a person opens no value on any credential of t
   assert.deepEqual(await refusal(bearer(pat.token).secrets.reveal('market/dev')), { status: 403, reason: 'stand_ins' });
   // The Owner too: no person's credential is an exception.
   assert.deepEqual(await refusal(bearer(await sessionFor(ROOT)).secrets.reveal('market/dev')), { status: 403, reason: 'stand_ins' });
+  // Nor a dry run, whose `changed` or `unchanged` says whether a guess was right.
+  assert.deepEqual(await refusal(bearer(session).secrets.dryRun('market/dev', { SCHUMANN_API_KEY: 'guess' })), { status: 403, reason: 'stand_ins' });
   const mcp = await connect(DEV, 'read reveal');
   const revealed = await callRaw(mcp, 'reveal_secret_values', { path: 'market/dev' });
   assert.equal(JSON.stringify(revealed.body).includes(KEY), false);
@@ -303,11 +305,12 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   const mine = await plan('market/dev@me');
   assert.equal(mine.environment, 'market/dev@me');
   assert.equal(mine.env.WEBHOOK_SECRET, undefined, 'nor does a personal config of it');
-  assert.ok(mine.left.includes('LOCAL_ONLY'));
+  assert.ok(mine.left.includes('WEBHOOK_SECRET'));
+  assert.equal(mine.env.LOCAL_ONLY, 'x', "but its own values, which only its owner wrote, are its owner's app's");
 
   // Each exposure is logged as the vault's read to expose, and the proxy's entry of it.
-  const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.metadata.purpose === 'expose');
-  assert.equal(exposed.length, 1);
+  const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
+  assert.equal(exposed.length, 2);
 });
 
 test('the configuration is checked: HTTPS upstreams, no private address, rules that name keys, expose by exact path', () => {

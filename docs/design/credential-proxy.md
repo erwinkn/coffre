@@ -45,14 +45,16 @@ key never reaches the machine.
 
 | Who | What a read opens | How |
 |---|---|---|
-| A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection | **Stand-ins.** Values are opened only for coffre to use for them | The vault refuses `reveal` and `run` reads to any `user:` principal (`stand_ins`), and allows `use` and `expose` |
+| A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection | **Stand-ins.** Values are opened only for coffre to use for them | The vault refuses `reveal`, `run` and `compare` reads to any `user:` principal (`stand_ins`), and allows `use`, `expose` and a fork's `copy` |
 | A service account: a service token, a CI run's or a cluster's ID token | **Values**, as before | Unchanged: CI and production read their environment once, at full speed |
 
 The rule is in the vault, the one place every read goes through, not in
 the CLI or the API's routes. `coffre get`, the UI's reveal, `POST
-/api/reveals`, the Vault KV plugin and MCP's `reveal_secret_values` all
-reach the vault's `unwrap`, so all are refused the same way, and each
-refusal is in the vault's log. A deployment turns it on in its vault's
+/api/reveals`, the Vault KV plugin and MCP's `reveal_secret_values` and
+`show_secret_value` all reach the vault's `unwrap`, so all are refused the
+same way, and each refusal is in the vault's log. So is an import's dry
+run (`compare`): its `changed` or `unchanged` tells whoever sent a guess
+whether it was right. A fork's `copy` hands nothing back, and stays. A deployment turns it on in its vault's
 configuration (`people: 'stand-ins'`). Left out, it is `values`, as in
 0.7 (decision 1).
 
@@ -108,7 +110,7 @@ applies to the exact environment a read resolves to, never to its parents:
 |---|---|
 | `market/dev` | Real value |
 | `market/dev-eu`, a fork of dev that inherits the key | Not exposed: list `market/dev-eu` itself |
-| `market/dev@me`, with a personal config | Not exposed: a personal config is never listed |
+| `market/dev@me`, with a personal config | Not exposed: a personal config is never listed. Its *own* values, which only its owner writes, are its owner's app's, so `DATABASE_URL=postgres://localhost/ada` there reaches Ada's app |
 | `market/dev@me`, with none | Real value: the read is of `market/dev` |
 
 **The recommended use of `expose` is a local environment of fakes.** A
@@ -410,7 +412,10 @@ is reversible.
    sign-in, minted by an Access-authenticated person, with `/use/*`
    bypassed in Access.
 8. **`expose` is configuration, by exact environment, never inherited.**
-   A fork or a personal config is listed by its own path, or not exposed.
+   A fork is listed by its own path, or not exposed. A personal config is
+   never listed; its own values, written by its owner alone (R8), reach
+   its owner's app, and its inherited ones do not. Otherwise a personal
+   config, made for local overrides, would serve no app.
 9. **No DNS pinning yet.** Literal private addresses are refused. A name
    that resolves to one is the operator's DNS.
 10. **Redaction of values 8 characters or longer**, in headers and text

@@ -1192,7 +1192,7 @@ export async function reveal(
    * left out, not refused: the proxy says which it needs.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[]; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
+): Promise<{ operationId: string; values: Record<string, string>; version: string | null; environment: { path: string; personal: boolean }; keys: string[]; own: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1256,14 +1256,14 @@ export async function reveal(
     if (use !== undefined) {
       // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
       log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
-      return { operationId, values: { ...values }, version: null, environment: named, keys: read.items.map((item) => item.key) };
+      return { operationId, values: { ...values }, version: null, environment: named, keys: read.items.map((item) => item.key), own: read.items.flatMap((item) => (item.parent === undefined ? [item.key] : [])) };
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
+    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key), own: rows.flatMap((row) => (row.parent === undefined ? [row.key] : [])) };
   });
 }
 

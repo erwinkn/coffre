@@ -239,12 +239,16 @@ export type KeyChecks = { current: { kekProvider: string; kekId: string }; check
  * fork reads to `copy`. The credential proxy reads to `use`, a value it
  * injects into a request and never hands back, or to `expose`, one the
  * deployment lets people's apps hold. Where people get stand-ins
- * (`people: 'stand-ins'`), a person opens nothing to `reveal` or `run`.
+ * (`people: 'stand-ins'`), a person opens nothing to `reveal`, `run` or
+ * `compare` (`HANDED_BACK`).
  */
 export type Purpose = 'reveal' | 'run' | 'compare' | 'copy' | 'use' | 'expose';
 
-/** What a person never opens where people get stand-ins: values handed back to them. */
-export const HANDED_BACK: readonly Purpose[] = ['reveal', 'run'];
+/**
+ * What a person never opens where people get stand-ins: values handed back
+ * to them, and a dry run's `compare`, which tells them whether a guess was right.
+ */
+export const HANDED_BACK: readonly Purpose[] = ['reveal', 'run', 'compare'];
 
 /** Ties the vault's entries to the app's request and audit rows. */
 type Correlation = {
