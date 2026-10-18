@@ -18,11 +18,15 @@ import { clientFor, contextFor } from './api-fixture.ts';
 import { callRaw, connect, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
+import { setSecurityHeaders } from '../src/security-headers.ts';
 import { basic, credentialProxy, header, query, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
 import { vaultKv } from '../src/plugins/vault-kv.ts';
 
 const KEY = 'sk_schumann_real_0123456789abcdef';
 const WEBHOOK = 'whsec_local_only_0123456789';
+/** A user name the password begins with. */
+const P_USER = 'acct_one';
+const P_PASS = 'acct_one_unknownabcdefgh0123456789';
 /** A key a JSON echo escapes. */
 const QUOTED = 'q"uo\\te/d<&>0123';
 
@@ -44,6 +48,23 @@ before(async () => {
       if (request.url!.includes('/echo')) {
         response.writeHead(200, { 'content-type': 'application/json', 'x-echo': String(request.headers['x-api-key']), 'set-cookie': 'upstream=1' });
         response.end(JSON.stringify({ youSent: request.headers['x-api-key'], authorization: request.headers.authorization, url: request.url }));
+        return;
+      }
+      if (request.url!.includes('/echo-escaped')) {
+        // As PHP's json_encode writes it: every slash escaped.
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ authorization: request.headers.authorization }).replaceAll('/', '\\/'));
+        return;
+      }
+      if (request.url!.includes('/split')) {
+        // The password, which begins with the user name, split after that much, the second part a moment later.
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.write(`user ${P_USER} password acct_one`);
+        setTimeout(() => response.end(`${P_PASS.slice('acct_one'.length)} end`), 30);
+        return;
+      }
+      if (request.url!.includes('/geocode/redirect')) {
+        // A trailing-slash redirect that keeps the query, key and all.
+        response.writeHead(301, { location: `${upstreamUrl}/maps/geocode/?${request.url!.split('?')[1]}` }).end();
         return;
       }
       if (request.url!.includes('/redirect-key')) {
@@ -86,6 +107,7 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       maps: { upstream: `${upstreamUrl}/maps`, inject: query('key', '{MAPS_KEY}'), methods: ['GET'] },
       twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
       quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
+      prefixed: { upstream: `${upstreamUrl}/prefixed`, inject: basic('{P_USER}', '{P_PASS}') },
     },
     expose: { 'market/dev': ['WEBHOOK_SECRET'] },
     insecureUpstreams: true,
@@ -107,9 +129,11 @@ useMcp(
       SCHUMANN_BASE_URL: 'https://api.schumann.example/v1',
       MAPS_KEY: 'maps+real/key=0123456789',
       TWILIO_SID: 'AC0123456789',
-      TWILIO_TOKEN: 'twilio_real_token_0123456789',
+      TWILIO_TOKEN: 'twilio_real_token_0??0123456789',
       WEBHOOK_SECRET: WEBHOOK,
       QUOTED_KEY: QUOTED,
+      P_USER,
+      P_PASS,
       DATABASE_URL: 'postgres://dev-db/market',
     });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
@@ -305,7 +329,13 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
   assert.ok(sent <= 20 * 1024 * 1024, `read ${sent} bytes`);
 
   // Redaction keeps text whole: a pair split across chunks, multi-byte letters.
-  assert.equal(await (await call('/emoji')).text(), '😀xxxxxx héllo wörld 😀');
+  const emoji = await call('/emoji');
+  assert.equal(await emoji.text(), '😀xxxxxx héllo wörld 😀');
+  // On coffre's origin, an upstream's document runs nothing: sandboxed, an origin of its own, which coffre's headers keep.
+  assert.equal(emoji.headers.get('content-security-policy'), "sandbox; default-src 'none'; frame-ancestors 'none'");
+  const page = setSecurityHeaders(new Response('<script>fetch("/api/me")</script>', { headers: emoji.headers }), { nonce: 'n', publicUrl: ORIGIN });
+  assert.match(page.headers.get('content-security-policy')!, /^sandbox; default-src 'none'/);
+  assert.match(setSecurityHeaders(new Response('x', { headers: { 'content-security-policy': 'sandbox allow-scripts allow-same-origin' } }), { nonce: 'n', publicUrl: ORIGIN }).headers.get('content-security-policy')!, /^default-src 'self'/, 'a sandbox that allows anything back is replaced');
 
   // A dot segment, encoded or not, is resolved before coffre sees it, out of the credential's path altogether; an encoded slash is refused.
   for (const path of ['/../admin', '/%2e%2e/admin', '/.%2E/admin']) assert.equal((await call(path)).headers.get('coffre-proxy'), 'refused', path);
@@ -332,13 +362,31 @@ test('query and Basic credentials, with their methods and paths', async () => {
   const twilio = await route('/use/market/dev/twilio/Accounts/AC1/Messages.json', { method: 'POST', headers: { authorization: basicAuth, 'content-type': 'application/x-www-form-urlencoded' }, body: 'To=%2B33600000000&Body=hi' });
   assert.equal(twilio.status, 200);
   const sent = received.at(-1)!;
-  assert.equal(sent.headers.authorization, `Basic ${btoa('AC0123456789:twilio_real_token_0123456789')}`);
+  assert.equal(sent.headers.authorization, `Basic ${btoa('AC0123456789:twilio_real_token_0??0123456789')}`);
   assert.equal(sent.body, 'To=%2B33600000000&Body=hi');
   assert.equal((await route('/use/market/dev/twilio/Other', { headers: { authorization: basicAuth } })).status, 403);
 
+  // Basic's base64 echoed as PHP writes JSON, slashes escaped, is no way back to the token either.
+  const precondition = btoa('AC0123456789:twilio_real_token_0??0123456789');
+  assert.ok(precondition.includes('/'), 'a base64 with a slash in it');
+  const escaped = (await (await route('/use/market/dev/twilio/Accounts/echo-escaped', { headers: { authorization: basicAuth } })).json()) as { authorization: string };
+  assert.equal(escaped.authorization, 'Basic [redacted by coffre]');
+
+  // A password that begins with the user name, split right after it: neither shows, nor any of the rest.
+  const prefixed = await (await route('/use/market/dev/prefixed/split', { headers: { authorization: `Basic ${btoa(`${handle}:${handle}`)}` } })).text();
+  assert.equal(prefixed, 'user [redacted by coffre] password [redacted by coffre] end');
+
+  // A redirect under the upstream that keeps the key's parameter keeps the handle there, for an unchanged client to follow.
+  const moved = await route(`/use/market/dev/maps/geocode/redirect?address=paris&key=${handle}`);
+  assert.equal(moved.status, 301);
+  const to = new URL(moved.headers.get('location')!);
+  assert.equal(to.origin + to.pathname, `${ORIGIN}/use/market/dev/maps/geocode/`);
+  assert.equal(to.searchParams.get('key'), handle);
+  assert.equal(to.searchParams.get('address'), 'paris');
+
   // An upstream echoing what it got gives back neither form of the keys: Basic's base64, the query's encoding.
   const echoedBasic = await (await route('/use/market/dev/twilio/Accounts/echo', { headers: { authorization: basicAuth } })).text();
-  assert.equal(echoedBasic.includes(btoa('AC0123456789:twilio_real_token_0123456789')), false, echoedBasic);
+  assert.equal(echoedBasic.includes(btoa('AC0123456789:twilio_real_token_0??0123456789')), false, echoedBasic);
   assert.equal(echoedBasic.includes('twilio_real_token'), false);
   const echoedQuery = await (await route(`/use/market/dev/maps/echo?key=${handle}`)).text();
   assert.equal(echoedQuery.includes(encodeURIComponent('maps+real/key=0123456789')) || echoedQuery.includes('maps%2Breal%2Fkey%3D0123456789') || echoedQuery.includes('maps+real'), false, echoedQuery);

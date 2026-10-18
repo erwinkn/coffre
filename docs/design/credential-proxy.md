@@ -214,19 +214,27 @@ up. `left` lists what the app does without, and `coffre run` prints it.
 5. **Back.** The upstream's answer, without `set-cookie` (it would land on
    coffre's origin), and always `cache-control: no-store`, its own cache
    headers dropped: a cache on the way would serve the next caller, with
-   another handle or none, without coffre's checks. A redirect stays on the
-   proxy. A `Location` under
-   the upstream becomes the proxy's own URL for it. A redirect anywhere
-   else is a 502, naming no destination, so the app never follows it with
-   the handle. Every value the request carried, 8 characters or longer, is
-   replaced by `[redacted by coffre]` in each form an honest upstream may
-   echo it in: as it is, URL-encoded both ways, as a JSON string (Go's
-   escaping and escaped slashes included), and Basic's base64. This guards
-   against an echo, an error message quoting the request, not against a
-   hostile upstream, which holds the key anyway. That covers its headers and a text body
-   (JSON, XML, text, event streams), streamed, holding back as much as the
-   longest value so that one split across chunks is caught, and never half
-   a surrogate pair. A binary body passes as it is.
+   another handle or none, without coffre's checks. Every answer is
+   sandboxed (`content-security-policy: sandbox; default-src 'none'`,
+   which coffre's security headers keep): an upstream's HTML on coffre's
+   origin runs no script and holds no cookie of coffre's, so a file an
+   agent uploads cannot act as an Owner who opens its link. A redirect
+   stays on the proxy. A `Location` under the upstream becomes the proxy's
+   own URL for it, with the handle back in a query rule's parameter. A
+   redirect anywhere else is a 502, naming no destination, so the app
+   never follows it with the handle.
+6. **Redacted.** Every string the request carried, each value and
+   Basic's assembled base64, 8 characters or longer, is replaced by
+   `[redacted by coffre]` in each form an honest upstream may echo it in:
+   as it is, URL-encoded both ways, and as a JSON string as JavaScript, Go
+   (`\u003c`) and PHP (`\/`) write one. That covers headers and a text
+   body (JSON, XML, text, event streams), streamed. Matches are leftmost,
+   then longest, and a part is let through only once no longer value
+   could still match across the next chunk, so a password that begins
+   with the user name is caught whole. No surrogate pair is cut. A binary
+   body passes as it is. This guards against an echo, an error message
+   quoting the request, not against a hostile upstream, which holds the
+   key anyway.
 
 coffre's own refusals carry `coffre-proxy: refused`, so the app can tell
 them from the upstream's.

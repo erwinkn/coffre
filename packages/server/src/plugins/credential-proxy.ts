@@ -264,21 +264,34 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (location !== null) {
     const to = new URL(location, target);
     const inside = to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
-    if (inside) at = `${proxied}${to.pathname.slice(under.length)}${to.search}`;
-    else if (upstream.status >= 300 && upstream.status < 400) {
+    if (inside) {
+      // The proxy's URL for it, the key's parameter back to the handle, as the app sent it, for the app to follow.
+      const back = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);
+      if (inject.kind === 'query' && back.searchParams.has(inject.name)) back.searchParams.set(inject.name, handle);
+      at = back.href;
+    } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
       return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
     } else at = location;
   }
-  // What the request carried, in each form an honest upstream may echo it in: as it is, URL-encoded both ways, a JSON
-  // string's (and Go's, which escapes <, > and &, and the form that escapes /), and Basic's base64.
-  const forms = Object.values(values).flatMap((value) => {
-    const json = JSON.stringify(value).slice(1, -1);
-    return [value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2), json, json.replaceAll('/', '\\/'), json.replace(/[<>&]/g, (char) => `\\u00${char.charCodeAt(0).toString(16)}`)];
-  });
-  if (inject.kind === 'basic') forms.push(headers.get('authorization')!.slice('Basic '.length));
-  return redacted(upstream, forms, at);
+  // What the request carried: each value, and what the rule made of them, Basic's base64, in each form an honest
+  // upstream may echo it in (`echoed`).
+  const sent = [...Object.values(values), ...(inject.kind === 'basic' ? [headers.get('authorization')!.slice('Basic '.length)] : [])];
+  return redacted(upstream, sent.flatMap(echoed), at);
+}
+
+/**
+ * The forms a string takes when an upstream echoes it: as it is,
+ * URL-encoded both ways, and as a JSON string, as JavaScript writes one, as
+ * Go's does (escaping <, > and &) and as PHP's does (escaping /). An echo,
+ * an error quoting the request, not a hostile upstream, which holds the
+ * key anyway.
+ */
+function echoed(value: string): string[] {
+  const json = JSON.stringify(value).slice(1, -1);
+  const go = json.replace(/[<>&]/g, (char) => `\\u00${char.charCodeAt(0).toString(16)}`);
+  return [value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2), json, go, json.replaceAll('/', '\\/'), go.replaceAll('/', '\\/')];
 }
 
 /** Whether a header's value carries a handle: as it is, or inside Basic authentication's base64. */
@@ -375,39 +388,63 @@ function render(template: string, values: Record<string, string>): string {
 /**
  * The upstream's answer, with each value the request carried replaced
  * wherever it shows: in headers, and in a text body, streamed, holding back
- * as much as the longest value so that one split across chunks is caught
- * too. A binary body passes as it is. Cookies stay with the upstream: one
+ * what a longer value could still complete, so that one split across
+ * chunks, or one that begins another, is caught too. A binary body passes as it is. Cookies stay with the upstream: one
  * set on coffre's origin could stand in for coffre's own. `location`, a
  * redirect's, is already the proxy's own URL for it.
  */
 function redacted(upstream: Response, values: string[], location: string | null): Response {
   const secrets = [...new Set(values)].filter((value) => value.length >= MIN_REDACTED).sort((a, b) => b.length - a.length);
-  const scrub = (text: string) => secrets.reduce((out, secret) => out.split(secret).join(REDACTED), text);
+  // Leftmost, then longest: a value that begins another is replaced only once the longer one cannot match there.
+  const pattern = secrets.length === 0 ? null : new RegExp(secrets.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  const longest = secrets[0]?.length ?? 0;
+  /**
+   * `text` with each value replaced, up to where the next part could still
+   * change what matches: a match must start where the longest value, from
+   * there, would lie whole in `text`, unless `final`. What follows is
+   * returned unread, for the next part to complete.
+   */
+  const scrub = (text: string, final: boolean): { done: string; rest: string } => {
+    if (pattern === null) return { done: text, rest: '' };
+    const settled = final ? text.length : Math.max(0, text.length - longest + 1);
+    let done = '';
+    let from = 0;
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(text); match !== null && match.index < settled; match = pattern.exec(text)) {
+      done += text.slice(from, match.index) + REDACTED;
+      from = match.index + match[0].length;
+    }
+    // Nothing more matches before `settled`: up to it is done, never cutting a surrogate pair.
+    let cut = Math.max(from, settled);
+    if (!final && cut > from && cut < text.length && /[\uD800-\uDBFF]/.test(text[cut - 1]!)) cut -= 1;
+    return { done: done + text.slice(from, cut), rest: text.slice(cut) };
+  };
+  const whole = (text: string) => scrub(text, true).done;
   const headers = new Headers();
-  for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, scrub(value));
-  if (location !== null) headers.set('location', scrub(location));
+  for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, whole(value));
+  if (location !== null) headers.set('location', whole(location));
   // Never kept by a cache on the way: the next caller, with another handle or none, would get it without coffre's checks.
   for (const name of ['expires', 'pragma', 'age', 'surrogate-control', 'cdn-cache-control', 'cloudflare-cdn-cache-control']) headers.delete(name);
   headers.set('cache-control', 'no-store');
+  // The upstream's document, on coffre's origin, runs nothing and reaches nothing: a sandbox is an origin of its own,
+  // with no cookie of coffre's, and `setSecurityHeaders` keeps a policy that only narrows.
+  headers.set('content-security-policy', "sandbox; default-src 'none'; frame-ancestors 'none'");
+  headers.set('x-content-type-options', 'nosniff');
   const type = upstream.headers.get('content-type') ?? '';
   const text = /^text\/|json|xml|javascript|x-www-form-urlencoded|event-stream/i.test(type);
-  if (upstream.body === null || !text || secrets.length === 0) return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
-  const hold = secrets[0]!.length - 1;
+  if (upstream.body === null || !text || pattern === null) return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
   let carry = '';
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const body = upstream.body.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, out) {
-        const all = scrub(carry + decoder.decode(chunk, { stream: true }));
-        // Hold back what could be the start of a value the next chunk ends, and never half of a surrogate pair.
-        let cut = Math.max(0, all.length - hold);
-        if (cut > 0 && /[\uD800-\uDBFF]/.test(all[cut - 1]!)) cut -= 1;
-        carry = all.slice(cut);
-        if (cut > 0) out.enqueue(encoder.encode(all.slice(0, cut)));
+        const { done, rest } = scrub(carry + decoder.decode(chunk, { stream: true }), false);
+        carry = rest;
+        if (done.length > 0) out.enqueue(encoder.encode(done));
       },
       flush(out) {
-        const last = scrub(carry + decoder.decode());
+        const last = whole(carry + decoder.decode());
         if (last.length > 0) out.enqueue(encoder.encode(last));
       },
     }),
