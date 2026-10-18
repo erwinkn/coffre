@@ -25,6 +25,12 @@ export type ProxiedCredential = {
    * browser or anyone to use until then.
    */
   presign(path: string, options?: { method?: 'GET' | 'HEAD'; expiresIn?: number; query?: Record<string, string> }): Promise<{ url: string; expiresAt: string }>;
+  /**
+   * A signature of `message` (a string signs as its UTF-8) by a signer's
+   * private key, which stays in coffre: what Node's `crypto.sign(undefined,
+   * message, key)` gives, base64url. Each is one use in coffre's log.
+   */
+  sign(message: Uint8Array | string): Promise<string>;
 };
 
 type Env = Record<string, string | undefined>;
@@ -46,6 +52,15 @@ export function credential(
   if (typeof url !== 'string' || handle === undefined) {
     throw new Error(`no credential ${name} here: \`coffre run\` gives the app the credentials its environment holds, which the deployment's proxy names`);
   }
+  /** What the handle asks coffre to make with the environment's values, at the environment's own URL on the proxy, which the credential's is under. */
+  const compute = async (asked: unknown) => {
+    const answer = await fetcher(url.slice(0, url.lastIndexOf('/')), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' },
+      body: JSON.stringify(asked),
+    });
+    return { answer, body: (await answer.json()) as { url?: string; expiresAt?: string; signature?: string; message?: string } };
+  };
   return {
     url,
     fetch: (path, init = {}) => {
@@ -54,15 +69,17 @@ export function credential(
       return fetcher(`${url}${path.startsWith('/') ? '' : '/'}${path}`, { ...init, headers });
     },
     presign: async (path, options = {}) => {
-      // The environment's own URL on the proxy, which the credential's is under.
-      const answer = await fetcher(url.slice(0, url.lastIndexOf('/')), {
-        method: 'POST',
-        headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ presign: { credential: name, path, ...options } }),
-      });
-      const body = (await answer.json()) as { url?: string; expiresAt?: string; message?: string };
+      const { answer, body } = await compute({ presign: { credential: name, path, ...options } });
       if (!answer.ok || body.url === undefined) throw new Error(`coffre presigned nothing: ${body.message ?? answer.status}`);
       return { url: body.url, expiresAt: body.expiresAt! };
+    },
+    sign: async (message) => {
+      const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      const { answer, body } = await compute({ sign: { credential: name, message: btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') } });
+      if (!answer.ok || body.signature === undefined) throw new Error(`coffre signed nothing: ${body.message ?? answer.status}`);
+      return body.signature;
     },
   };
 }

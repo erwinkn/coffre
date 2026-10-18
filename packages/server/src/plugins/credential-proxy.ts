@@ -6,12 +6,13 @@
  * the proxy swaps in the real value at the edge, for the credential's own
  * upstream only. In the deployment's configuration:
  *
- *   import { credentialProxy, header, sigv4 } from '@coffre/server/plugins/credential-proxy';
+ *   import { credentialProxy, header, privateKey, sigv4 } from '@coffre/server/plugins/credential-proxy';
  *   plugins: [credentialProxy({
  *     credentials: {
  *       schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
  *       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
  *     },
+ *     signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY') },
  *     expose: { 'market/local': 'all' },
  *   })],
  *
@@ -21,6 +22,7 @@
  *   GET /use/market/dev                     what the app's environment holds: stand-ins and exposed values
  *   ANY /use/schumann/<path>                the request, sent to https://api.schumann.example/v1/<path> with market/dev's key
  *   ANY /use/market/dev/schumann/<path>     the same, naming the environment
+ *   POST /use/market/dev                    a presigned URL, or a signature by a signer's key, made with the values and never them
  *
  * The first is the stable URL, the same for every environment, which the
  * app's own config names: its environment is the one the handle was made
@@ -41,6 +43,7 @@ import { recipeProblem } from '@coffre/core/recipe';
 
 import type { CoffrePlugin, PickKeys, PluginContext, SocketSession } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
+import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
 
 /** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
@@ -152,11 +155,26 @@ export function postgres(key: string, options: { hosts?: readonly string[] } = {
   return { kind: 'postgres', key, ...options };
 }
 
+/** A private key coffre signs with for the app, which never holds it: the key that holds it, a PKCS#8 PEM. */
+export type Signer = { kind: 'private-key'; key: string };
+
+/**
+ * A private key the app signs with through coffre, `credential(name).sign(message)`:
+ * `privateKey('DFNS_PRIVATE_KEY')`. The environment's value is a PKCS#8
+ * PEM, Ed25519, P-256 or RSA; the app holds the handle where it was, and
+ * each signature is one use in the log.
+ */
+export function privateKey(key: string): Signer {
+  return { kind: 'private-key', key };
+}
+
 export type CredentialProxyOptions = {
   /** By name, as the proxy's URLs say it: lowercase letters, digits and dashes. */
   credentials: Record<string, Credential>;
   /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL') }`. */
   tunnels?: Record<string, Tunnel>;
+  /** Private keys, by name as credentials are, that coffre signs with for the app: `{ 'dfns-key': privateKey('DFNS_PRIVATE_KEY') }`. */
+  signers?: Record<string, Signer>;
   /** How often an open tunnel checks its handle still stands, ending when it does not: 60 seconds unless set. */
   recheckSeconds?: number;
   /**
@@ -226,6 +244,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const expose = checkListed('expose', options.expose ?? {});
   const generate = checkListed('generate', options.generate ?? {});
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
+  const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels)]));
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
@@ -240,7 +259,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
+          return await serve(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -248,7 +267,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
+          return await open(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -269,6 +288,7 @@ type Proxy = {
   /** The open tunnel sessions, by handle, environment and tunnel, each group checked as one (`watch`). */
   groups: Map<string, Group>;
   tunnels: Map<string, Tunnel>;
+  signers: Map<string, Signer>;
   insecure: boolean;
   recheckMs: number;
   expose: Map<string, 'all' | readonly string[]>;
@@ -317,12 +337,13 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     }
   }
   if (raw.length === 2) {
-    if (request.method === 'POST') return presign(request, coffre, proxy, `${place[0]}/${place[1]}`);
-    if (request.method !== 'GET') return failure(405, 'GET for the plan, POST to presign');
+    if (request.method === 'POST') return compute(request, coffre, proxy, `${place[0]}/${place[1]}`);
+    if (request.method !== 'GET') return failure(405, 'GET for the plan, POST to presign or sign');
     return plan(request, coffre, proxy, `${place[0]}/${place[1]}`);
   }
   if (raw.length < 3) return failure(404, 'name /use/<credential>/<path>, or /use/<project>/<environment>/<credential>/<path>');
   const credential = proxy.credentials.get(place[2]!);
+  if (credential === undefined && proxy.signers.has(place[2]!)) return failure(404, `${place[2]} is a signer, which reaches no upstream: credential(${JSON.stringify(place[2])}).sign(message)`);
   if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search);
 }
@@ -371,7 +392,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       resolved = rows;
       const using = covering(rows.map((row) => row.key));
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
-      const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key)]);
+      const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key), ...[...proxy.signers.values()].map((signer) => signer.key)]);
       const listed = proxy.expose.get(environment.personal ? environment.path.replace(/@me$/, '') : environment.path);
       const exposed = (row: { key: string; inherited: boolean }) => (environment.personal && !row.inherited) || listed === 'all' || (listed?.includes(row.key) ?? false);
       // The environment's own value: held there, or, read through a personal config of it, held by the environment it configures.
@@ -379,13 +400,14 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const own = (row: { inherited: boolean; from: string | null }) => (environment.personal ? row.from === configured : !row.inherited);
       // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's own.
       const identified = (row: { key: string; inherited: boolean; from: string | null }) => identifiers.has(row.key) && own(row);
-      // What the proxy fills in itself, a tunnel's URL, never the value the environment holds; and a
+      // What the proxy fills in itself, a tunnel's URL or a signer's handle, never the value the environment holds; and a
       // credential's plain keys and identifiers where giving them would leave the handle nowhere the proxy finds it:
       // S3's access key id, which the SDK sends as `Credential=`, or every key of a header's. Those stay stand-ins,
       // as secrets do.
       const asTheyAre = new Set(rows.filter((row) => row.plain || identified(row)).map((row) => row.key));
       const filled = new Set([
         ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
+        ...[...proxy.signers.values()].map((signer) => signer.key),
         ...using.filter((credential) => !carriesHandle(credential.inject, asTheyAre)).flatMap((credential) => credential.keys),
       ]);
       return rows
@@ -411,6 +433,13 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const [key, value] of Object.entries(held.values)) {
     env[key] = value;
     covered.add(key);
+  }
+  // A signer's key the handle, and the signer where `credential(name)` finds it: the key never leaves coffre.
+  for (const [name, signer] of proxy.signers) {
+    if (!held.keys.includes(signer.key)) continue;
+    credentials[name] = `${coffre.publicUrl}/use/${path}/${name}`;
+    env[signer.key] = handle;
+    covered.add(signer.key);
   }
   // A database's URL is `coffre run`'s to make, its listener's, with the handle as the password: never the real one.
   const tunnels: Record<string, { key: string; url: string }> = {};
@@ -594,6 +623,53 @@ function watch(
 }
 
 /**
+ * What a handle asks coffre to make with an environment's values, which it
+ * never hands back: `POST /use/<project>/<env>`, the handle as a bearer
+ * token, with `{ presign: {…} }` for a presigned URL, or `{ sign: {…} }`
+ * for a signature.
+ */
+async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  const raw = await boundedText(request, 65_536);
+  let asked: { presign?: Record<string, unknown>; sign?: Record<string, unknown> } | null;
+  try {
+    asked = JSON.parse(raw ?? '') as typeof asked;
+  } catch {
+    asked = null;
+  }
+  if (asked?.presign !== undefined) return presign(coffre, proxy, path, handle, asked.presign ?? {});
+  if (asked?.sign !== undefined) return sign(coffre, proxy, path, handle, asked.sign ?? {});
+  return failure(400, 'send { presign: { credential, path, method, expiresIn } } or { sign: { credential, message } } as JSON, 64 KiB at most');
+}
+
+/**
+ * A signature by a signer's private key, for the app that holds the
+ * handle: `{ sign: { credential, message } }`, the message base64url. coffre
+ * opens the key, signs as Node's `crypto.sign(undefined, message, key)`
+ * does (`signWith`), and answers `{ signature }`, base64url. The key never
+ * leaves coffre. Each signature is one use in the log, naming the message
+ * by its SHA-256, never served from the cache.
+ */
+async function sign(coffre: PluginContext, proxy: Proxy, path: string, handle: string, asked: { credential?: unknown; message?: unknown }): Promise<Response> {
+  const name = typeof asked.credential === 'string' ? asked.credential : '';
+  const signer = proxy.signers.get(name);
+  if (signer === undefined) return failure(404, 'sign names a signer of this instance\'s: its deployment\'s credentialProxy names them, signers: { … }');
+  if (typeof asked.message !== 'string' || !/^[A-Za-z0-9_-]*$/.test(asked.message) || asked.message.length % 4 === 1) return failure(400, 'sign a message given as base64url');
+  const message = Uint8Array.from(atob(asked.message.replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0));
+  const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
+  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: [signer.key], purpose: 'use', logged: { credential: name, sign: { sha256 } } });
+  const pem = used.values[signer.key];
+  if (pem === undefined) return failure(409, `${used.environment.path} holds no ${signer.key}, which ${name} signs with`);
+  try {
+    return answer({ signature: base64url(await signWith(pem, message)) });
+  } catch (error) {
+    // What is wrong with the key is said, never the key: neither the platform's error nor its message goes anywhere.
+    return failure(409, `${used.environment.path}'s ${signer.key} ${error instanceof SigningKeyError ? error.message : 'signs nothing'}`);
+  }
+}
+
+/**
  * A presigned URL, for an AWS-signed credential: `POST /use/<project>/<env>`
  * with `{ presign: { credential, path, method?, query?, expiresIn? } }`, the
  * handle as a bearer token. coffre signs a GET (or HEAD) of `path` under
@@ -604,16 +680,7 @@ function watch(
  * the log, naming the path and how long it lasts, never served from the
  * cache.
  */
-async function presign(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
-  const handle = bearer(request);
-  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  const raw = await boundedText(request, 8192);
-  let asked: { credential?: unknown; path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown };
-  try {
-    asked = (JSON.parse(raw ?? '') as { presign?: typeof asked }).presign ?? {};
-  } catch {
-    return failure(400, 'send { presign: { credential, path, method, expiresIn } } as JSON');
-  }
+async function presign(coffre: PluginContext, proxy: Proxy, path: string, handle: string, asked: { credential?: unknown; path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown }): Promise<Response> {
   const credential = typeof asked.credential === 'string' ? proxy.credentials.get(asked.credential) : undefined;
   if (credential === undefined || credential.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
   const inject = credential.inject;
@@ -1137,6 +1204,17 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
   const hosts = tunnel.hosts?.map((host) => new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname.replace(/^\[|\]$/g, ''));
   if (!insecure && hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams reaches`);
   return { ...tunnel, ...(hosts === undefined ? {} : { hosts }) };
+}
+
+function checkSigner(name: string, signer: Signer, credentials: Map<string, Resolved>, tunnels: Map<string, Tunnel>): Signer {
+  if (!NAME.test(name)) throw new Error(`credentialProxy: a signer's name is lowercase letters, digits and dashes; got ${JSON.stringify(name)}`);
+  if (credentials.has(name) || tunnels.has(name)) throw new Error(`credentialProxy: ${name} names a ${credentials.has(name) ? 'credential' : 'tunnel'} and a signer`);
+  if (signer.kind !== 'private-key') throw new Error(`credentialProxy: signer ${name} is privateKey(…), the only kind there is`);
+  if (!KEY.test(signer.key)) throw new Error(`credentialProxy: signer ${name} names the key that holds its private key, DFNS_PRIVATE_KEY`);
+  // The app holds one value for a key, and a signer's is the handle as it is.
+  const shaped = [...credentials.values()].find((credential) => credential.standIn !== undefined && credential.keys.includes(signer.key));
+  if (shaped !== undefined) throw new Error(`credentialProxy: ${shaped.name} and ${name} read ${signer.key} with different stand-ins, and the app holds one value for it`);
+  return signer;
 }
 
 function checkListed(option: 'expose' | 'generate', listed: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {
