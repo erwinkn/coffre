@@ -75,6 +75,13 @@ before(async () => {
         response.writeHead(302, { location: Buffer.from(`/accented/moved/${Buffer.from(key, 'latin1').toString('latin1')}`, 'utf8').toString('latin1') }).end();
         return;
       }
+      if (request.url!.includes('/sse')) {
+        // A heartbeat, then a pause before anything else: it must reach the client while the stream is still open.
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.write(': heartbeat\n\n');
+        setTimeout(() => response.end(`data: ${key}\n\n`), 300);
+        return;
+      }
       if (request.url!.includes('/reason')) {
         response.writeHead(401, `Invalid API key ${key}`, { 'content-type': 'text/plain' }).end('no');
         return;
@@ -154,6 +161,7 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
       prefixed: { upstream: `${upstreamUrl}/prefixed`, inject: basic('{P_USER}', '{P_PASS}') },
       accented: { upstream: `${upstreamUrl}/accented`, inject: header('x-api-key', '{ACCENT_KEY}') },
+      broken: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{BROKEN_KEY}') },
       token: { upstream: `${upstreamUrl}/token`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
       ubasic: { upstream: `${upstreamUrl}/ubasic`, inject: basic('{TWILIO_SID}', '{U_PASS}') },
     },
@@ -181,6 +189,7 @@ useMcp(
       WEBHOOK_SECRET: WEBHOOK,
       QUOTED_KEY: QUOTED,
       PADDED_KEY: `${KEY}\n`,
+      BROKEN_KEY: 'sk_broken_0123\n456789',
       P_USER,
       P_PASS,
       ACCENT_KEY,
@@ -461,6 +470,28 @@ test('query and Basic credentials, with their methods and paths', async () => {
   const relocated = await route('/use/market/dev/accented/utf8-location', { headers: { 'x-api-key': handle } });
   assert.equal(relocated.status, 302);
   assert.equal(decodeURIComponent(relocated.headers.get('location')!).includes('0123456789'), false, relocated.headers.get('location')!);
+  // An event stream's heartbeat comes through at once, and its end still redacted.
+  const stream = (await route('/use/market/dev/schumann/sse', { headers: { 'x-api-key': handle } })).body!.getReader();
+  const started = Date.now();
+  const first = new TextDecoder().decode((await stream.read()).value);
+  assert.equal(first, ': heartbeat\n\n');
+  assert.ok(Date.now() - started < 250, 'before the upstream says more');
+  let restOfStream = '';
+  for (let part = await stream.read(); !part.done; part = await stream.read()) restOfStream += new TextDecoder().decode(part.value);
+  assert.equal(restOfStream, 'data: [redacted by coffre]\n\n');
+
+  // A value no header can carry is refused, and quoted nowhere: not in the answer, not in a log.
+  const logged: unknown[] = [];
+  const error = console.error;
+  console.error = (...args: unknown[]) => void logged.push(...args);
+  let broken: Response;
+  try {
+    broken = await route('/use/market/dev/broken/companies', { headers: { 'x-api-key': handle } });
+  } finally {
+    console.error = error;
+  }
+  assert.equal(broken.status, 409);
+  assert.equal(JSON.stringify([await broken.text(), logged.map(String)]).includes('456789'), false);
   const reason = await route('/use/market/dev/schumann/reason', { headers: { 'x-api-key': handle } });
   assert.equal(reason.statusText.includes(KEY), false, reason.statusText);
   // A body in another charset passes byte for byte.

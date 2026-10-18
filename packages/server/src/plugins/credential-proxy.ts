@@ -254,9 +254,14 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     if (!DROPPED.has(name) && !name.startsWith('cf-') && !name.startsWith('x-forwarded-')) headers.set(name, value);
   }
   const inject = credential.inject;
-  if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
-  if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
-  if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
+  try {
+    if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
+    if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
+    if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
+  } catch {
+    // The platform's error quotes the value it refused: neither it nor its message goes anywhere, a log included.
+    return failure(409, `${credential.name}'s value is no valid ${inject.kind === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
+  }
   // The handle goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
   const leaked = [...headers].find(([, value]) => carries(value)) ?? (carries(safeDecode(target.href)) ? ['URL'] : undefined)
     ?? (body !== undefined && HANDLE.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);
@@ -458,7 +463,11 @@ function redactor(values: string[]): Redactor {
       from = match.index + match[0].length;
     }
     const cut = Math.max(from, settled);
-    return { done: done + text.slice(from, cut), rest: text.slice(cut) };
+    if (final) return { done: done + text.slice(from), rest: '' };
+    // Of the rest, hold back only from where a value could still begin: a partial match, or a whole one a longer could extend.
+    let hold = cut;
+    while (hold < text.length && !secrets.some((secret) => secret.startsWith(text.slice(hold)) || text.startsWith(secret, hold))) hold += 1;
+    return { done: done + text.slice(from, hold), rest: text.slice(hold) };
   };
   // A header's value and the reason phrase are already bytes, one character each, as fetch gives them.
   return { scrub, whole: (text) => scrub(text, true).done, any: pattern !== null };
