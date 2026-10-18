@@ -192,6 +192,11 @@ type Resolved = Credential & { name: string; base: URL; keys: string[]; shape?: 
 /** The credential proxy, as a plugin of the deployment's (`plugins: [credentialProxy({…})]`). */
 export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const credentials = new Map(Object.entries(options.credentials).map(([name, credential]) => [name, resolve(name, credential, options.insecureUpstreams === true)]));
+  // The app holds one value for a key: every credential that reads it gives it the same stand-in.
+  for (const one of credentials.values()) {
+    const other = [...credentials.values()].find((two) => two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.standIn) !== JSON.stringify(one.standIn));
+    if (other !== undefined) throw new Error(`credentialProxy: ${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different stand-ins, and the app holds one value for it`);
+  }
   const expose = checkExpose(options.expose ?? {});
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
@@ -598,8 +603,12 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const inject = credential.inject;
   const handle = handleIn(request, credential, target);
   if (handle === null) return failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`);
-  // A query rule's parameter as the app sent it, its stand-in's shape and all: what a redirect under the upstream gives back.
+  // A query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
+  // under the upstream gives back. Otherwise the stand-in's shape around the handle, which the proxy reads as the app's own
+  // (`e30` is `{}`: the proxy reads no claim).
   const given = inject.kind === 'query' ? target.searchParams.get(inject.name) : null;
+  const back = inject.kind !== 'query' ? null : given !== null && handleOf(credential, given) === handle ? given
+    : credential.standIn === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.standIn.kind === 'prefix' ? `${credential.standIn.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
   // An AWS-signed upload that says its payload's hash and length streams through, never held whole: an S3 object may be
   // gigabytes, and its signature needs no byte of it. Anything else is read whole first, however long it takes to come,
   // so the handle is checked, and the values opened, as the request goes out.
@@ -669,10 +678,10 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const to = new URL(location, target);
     const inside = to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
-      // The proxy's URL for it, and a query rule's parameter, kept or not, what the app sent there, for it to follow and be let in.
-      const back = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);
-      if (inject.kind === 'query') back.searchParams.set(inject.name, given ?? handle);
-      at = back.href;
+      // The proxy's URL for it, and a query rule's parameter, kept or not, the app's stand-in, for it to follow and be let in.
+      const moved = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);
+      if (inject.kind === 'query' && back !== null) moved.searchParams.set(inject.name, back);
+      at = moved.href;
     } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
@@ -817,8 +826,11 @@ function handleIn(request: Request, credential: Resolved, target: URL): string |
       slot = null;
     }
   }
-  if (slot === null) return null;
-  // A shaped stand-in's slot is that shape exactly, the handle in its place; the handle alone is found wherever the rule frames it.
+  return slot === null ? null : handleOf(credential, slot);
+}
+
+/** The handle in what the app put where the credential takes its key: a shaped stand-in's slot is that shape exactly; the handle alone is found wherever the rule frames it. */
+function handleOf(credential: Resolved, slot: string): string | null {
   return credential.shape === undefined ? (HANDLE.exec(slot)?.[0] ?? null) : (credential.shape.exec(slot)?.[1] ?? null);
 }
 

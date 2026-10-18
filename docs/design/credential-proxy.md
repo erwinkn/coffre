@@ -229,7 +229,8 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    origin runs no script and holds no cookie of coffre's, so a file an
    agent uploads cannot act as an Owner who opens its link. A redirect
    stays on the proxy. A `Location` under the upstream becomes the proxy's
-   own URL for it, with the handle back in a query rule's parameter. A
+   own URL for it, with the app's stand-in back in a query rule's
+   parameter (what it sent there, if that stands in for its handle). A
    redirect anywhere else is a 502, naming no destination, so the app
    never follows it with the handle.
 6. **Redacted.** Every string the request carried, each value and
@@ -488,7 +489,9 @@ opaque stand-in is found wherever the rule frames it, as before. The leak
 check and redaction are unchanged: the handle anywhere else is refused,
 and the real token quoted back is redacted. A shaped stand-in is refused
 at configuration for Basic (two keys), `sigv4()` (a key pair), and a
-template with more than one key or the same key twice.
+template with more than one key or the same key twice. Two credentials
+that read one key must give it the same stand-in, since the app holds
+one value for it.
 
 Tested with DFNS's own SDK (`@dfns/sdk`, a dev dependency): it reads its
 organization from the stand-in, and a fake DFNS reads the token it gets

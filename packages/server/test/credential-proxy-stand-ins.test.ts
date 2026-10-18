@@ -36,7 +36,7 @@ before(async () => {
   // The fake DFNS: the token read as the SDK reads it, the real one required, and an error that quotes it when asked to.
   dfns = createServer((request, response) => {
     const authorization = request.headers.authorization ?? '';
-    const token = authorization.replace(/^Bearer /, '');
+    const token = authorization.replace(/^Bearer /, '') || (new URL(request.url!, dfnsUrl).searchParams.get('token') ?? '');
     let scope: unknown;
     try {
       scope = extractTokenScope({ authToken: token });
@@ -46,6 +46,8 @@ before(async () => {
     received.push({ url: request.url!, authorization, scope });
     const send = (status: number, body: unknown) => response.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
     if (token !== TOKEN && authorization !== `Bearer ${STRIPE}`) return send(401, { error: { message: 'Unauthorized' } });
+    // A redirect that drops the query, for a query rule's stand-in to be given back.
+    if (request.url!.startsWith('/q/moved')) return response.writeHead(302, { location: `${dfnsUrl}/q/wallets` }).end();
     if (request.url!.startsWith('/echo')) return send(401, { error: { message: `token ${token} is not allowed here` } });
     send(200, { items: [{ id: 'wa-1', network: 'EthereumSepolia' }] });
   });
@@ -77,6 +79,8 @@ function proxyOptions(): CredentialProxyOptions {
       dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: [APP_METADATA] }), baseUrl: 'DFNS_API_URL' },
       stripe: { upstream: `${dfnsUrl}/stripe`, inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), standIn: prefix('sk_test_') },
       broken: { upstream: dfnsUrl, inject: query('token', '{NOT_A_JWT}'), standIn: jwt() },
+      // The same token in a query parameter: the same stand-in, which the app holds once.
+      q: { upstream: `${dfnsUrl}/q`, inject: query('token', '{DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: [APP_METADATA] }) },
     },
     insecureUpstreams: true,
   };
@@ -166,6 +170,19 @@ test("a shaped stand-in's slot is that shape exactly; the handle goes nowhere el
   assert.match(text, /token \[redacted by coffre\] is not allowed/);
   assert.ok(received.every((request) => !request.authorization.includes(handle)), 'the handle never reaches DFNS');
 
+  // A redirect under a query rule's upstream gives back the app's stand-in, or, where the app sent none that stands in for
+  // this handle, one of the same shape: the app follows it with no header of coffre's and is let in.
+  const follow = async (path: string, headers: Record<string, string> = {}) => {
+    const moved = await route(`/use/market/dev/q${path}`, { headers });
+    assert.equal(moved.status, 302, await moved.clone().text());
+    const to = new URL(moved.headers.get('location')!);
+    assert.equal((await route(`${to.pathname}${to.search}`)).status, 200, to.href);
+    return to.searchParams.get('token')!;
+  };
+  assert.equal(await follow(`/moved?token=${env.DFNS_AUTH_TOKEN}`), env.DFNS_AUTH_TOKEN);
+  assert.match(await follow('/moved?token=unused', { 'x-coffre-handle': handle }), new RegExp(`^[\\w-]+\\.e30\\.${handle}$`));
+  assert.match(await follow('/moved', { 'x-coffre-handle': handle }), new RegExp(`\\.${handle}$`));
+
   // A prefix: the same, `sk_test_` before the handle.
   assert.equal((await route('/use/market/dev/stripe/v1/charges', { headers: { authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } })).status, 200);
   assert.equal(received.at(-1)!.authorization, `Bearer ${STRIPE}`);
@@ -192,5 +209,10 @@ test('a shaped stand-in is for a header or query rule that carries one key: anyt
   assert.throws(make({ upstream, inject: header('x', '{K}'), standIn: prefix('has space') }), /prefix\(\) is up to 64/);
   assert.throws(make({ upstream, inject: header('x', '{K}'), standIn: jwt({ claims: ['exp'] }) }), /exp is the handle's end/);
   assert.throws(make({ upstream, inject: header('x', '{K}'), standIn: { kind: 'other' } as never }), /jwt\(…\) or prefix\(…\)/);
+  // The app holds one value for a key: two credentials that read it give it one stand-in.
+  const two = (standIn?: ReturnType<typeof jwt>) => () => credentialProxy({ credentials: { a: { upstream, inject: header('authorization', 'Bearer {K}'), standIn: jwt({ claims: ['org'] }) }, b: { upstream, inject: query('k', '{K}'), ...(standIn === undefined ? {} : { standIn }) } } });
+  assert.throws(two(), /a and b read K with different stand-ins/);
+  assert.throws(two(jwt({ claims: ['other'] })), /different stand-ins/);
+  assert.doesNotThrow(two(jwt({ claims: ['org'] })));
   assert.doesNotThrow(make({ upstream, inject: query('token', 'v1:{K}'), standIn: jwt({ claims: ['org'] }) }));
 });
