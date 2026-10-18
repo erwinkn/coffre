@@ -166,7 +166,7 @@ TWILIO_TOKEN	v1	admin@acme.example	today
   write: the client reads the value (an audited `secret.read`), then writes
   it plain with the version it `replaces`, refused if someone wrote since.
   Under stand-ins a person has no reveal, so a person never publishes a
-  value they cannot read: they type it again, plain (decision 12). A
+  value they cannot read: they type it again, plain (decision 17). A
   service account may.
 - **Never in a personal config.** Its values are its owner's alone (R8):
   a plain write there is refused. A plain value of the environment it
@@ -834,23 +834,6 @@ is reversible.
 11. **Bodies read whole, up to 16 MiB**, so the upstream gets a
     `Content-Length`. Uploads larger than that go through S3's own path
     (PR 2) or a presigned URL.
-12. **Making a stored secret plain is a reveal, then a write (0.9).**
-    Erwin's brief had it need `secret.read` on the key, and audited. Under
-    stand-ins, though, `secret.read` is a person's right to *use* a value,
-    never to see it (decision 2), and a plain value is shown to everyone
-    who lists the environment: a person, or their agent with a personal
-    token, could publish any key they may use. So the flip is the client's
-    reveal, which the vault refuses a person under stand-ins (R13), and a
-    plain write of what it showed. Without stand-ins, that is exactly
-    `secret.read` and an audited read and write. A person types a value
-    they know again, plain. *Alternative:* a flip the server does, allowed
-    to people, if publishing what one may use is wanted.
-13. **Plain is said by each write, and stored beside the ciphertext.** A
-    write that does not say `plain` is a secret, so nothing becomes or
-    stays plain without someone saying so then. The clear copy is what
-    lets a listing show it and a read skip the vault. The ciphertext keeps
-    the paths that open through the vault (references, KEK rotation)
-    unchanged.
 
 Taken in 0.9 (W127), each for Erwin to review, each reversible:
 
@@ -874,6 +857,23 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
     environment's URL from it.
 16. **`baseUrl` is removed, not deprecated**: refused at startup and by
     its type, with the URL to configure instead.
+17. **Making a stored secret plain is a reveal, then a write (0.9).**
+    Erwin's brief had it need `secret.read` on the key, and audited. Under
+    stand-ins, though, `secret.read` is a person's right to *use* a value,
+    never to see it (decision 2), and a plain value is shown to everyone
+    who lists the environment: a person, or their agent with a personal
+    token, could publish any key they may use. So the flip is the client's
+    reveal, which the vault refuses a person under stand-ins (R13), and a
+    plain write of what it showed. Without stand-ins, that is exactly
+    `secret.read` and an audited read and write. A person types a value
+    they know again, plain. *Alternative:* a flip the server does, allowed
+    to people, if publishing what one may use is wanted.
+18. **Plain is said by each write, and stored beside the ciphertext.** A
+    write that does not say `plain` is a secret, so nothing becomes or
+    stays plain without someone saying so then. The clear copy is what
+    lets a listing show it and a read skip the vault. The ciphertext keeps
+    the paths that open through the vault (references, KEK rotation)
+    unchanged.
 
 ## 9. Plan
 
