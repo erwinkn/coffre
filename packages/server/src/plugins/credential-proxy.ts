@@ -465,6 +465,8 @@ async function presign(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
   }
+  // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
+  if (HANDLE.test(safeDecode(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
   // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
   const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
   if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
@@ -648,24 +650,32 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byt
 
 /**
  * A streamed upload, as it passes: a handle anywhere in it, a chunk
- * boundary included, or a byte past the length it declared, and it stops,
- * so the upstream gets a broken request and stores nothing. On Workers,
+ * boundary included, or a length other than the one it declared, and it
+ * stops, so the upstream gets a broken request and stores nothing. What a
+ * handle could still begin, and the last bytes, wait until that is known. On Workers,
  * its declared length goes with it (`FixedLengthStream`); Node's fetch
  * sends the header as given.
  */
 function scanned(body: ReadableStream<Uint8Array>, length: number): ReadableStream<Uint8Array> {
-  let tail = '';
+  // The last bytes seen, held back: what a handle could still be the start of, and the end, sent only once it is the length declared.
+  let held = new Uint8Array(0);
   let seen = 0;
   const checked = body.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, out) {
         seen += chunk.length;
         if (seen > length) throw new Error('the upload ran past the length it declared');
-        const text = tail + binary(chunk);
-        if (HANDLE.test(text)) throw new Error('the handle is in the upload');
-        // As much as a handle's length less one: the start of one the next chunk would finish.
-        tail = text.slice(-(HANDLE_LENGTH - 1));
-        out.enqueue(chunk);
+        const window = new Uint8Array(held.length + chunk.length);
+        window.set(held);
+        window.set(chunk, held.length);
+        if (HANDLE.test(binary(window))) throw new Error('the handle is in the upload');
+        const keep = Math.min(window.length, HANDLE_LENGTH - 1);
+        if (window.length > keep) out.enqueue(window.slice(0, window.length - keep));
+        held = window.slice(window.length - keep);
+      },
+      flush(out) {
+        if (seen !== length) throw new Error('the upload ended short of the length it declared');
+        if (held.length > 0) out.enqueue(held);
       },
     }),
   );

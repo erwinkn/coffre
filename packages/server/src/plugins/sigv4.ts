@@ -100,7 +100,8 @@ export async function signV4(
  * A presigned URL (query-string authentication): the request's own
  * signature in its query, for whoever holds the URL until it expires, the
  * key itself never handed over. Only `host` signed, and the payload
- * `UNSIGNED-PAYLOAD`, as S3's presigned URLs are.
+ * `UNSIGNED-PAYLOAD` for S3, as its presigned URLs are, the empty body's
+ * hash for any other service.
  */
 export async function presignV4(
   method: string,
@@ -121,7 +122,9 @@ export async function presignV4(
   signed.searchParams.set('X-Amz-Expires', String(expiresInSeconds));
   if (keys.sessionToken !== undefined) signed.searchParams.set('X-Amz-Security-Token', keys.sessionToken);
   signed.searchParams.set('X-Amz-SignedHeaders', 'host');
-  const canonical = [method, canonicalPath(signed.pathname, scope.service), canonicalQuery(signed.searchParams), `host:${signed.host}`, '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  // S3's presigned URLs leave the payload unsigned; every other service's sign the empty body a GET has.
+  const payload = scope.service === 's3' ? 'UNSIGNED-PAYLOAD' : hex(await crypto.subtle.digest('SHA-256', new Uint8Array(0)));
+  const canonical = [method, canonicalPath(signed.pathname, scope.service), canonicalQuery(signed.searchParams), `host:${signed.host}`, '', 'host', payload].join('\n');
   const toSign = ['AWS4-HMAC-SHA256', stamp, credentialScope, hex(await crypto.subtle.digest('SHA-256', encoder.encode(canonical)))].join('\n');
   let key = await hmac(encoder.encode(`AWS4${keys.secretAccessKey}`), day);
   for (const part of [scope.region, scope.service, 'aws4_request']) key = await hmac(key, part);

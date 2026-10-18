@@ -311,8 +311,9 @@ the upstream checks against the body. Refused before anything is sent:
 literal SHA-256 or `UNSIGNED-PAYLOAD`) and its `Content-Length` streams
 through, never held whole, up to S3's own 5 GiB for one request. Its
 signature needs no byte of it. It is checked as it passes: a handle
-anywhere in it, a chunk boundary included, or a byte past its declared
-length, and it stops, so the upstream stores nothing. Other bodies are
+anywhere in it, a chunk boundary included, or a length other than the one
+it declared, and it stops, so the upstream stores nothing. What a handle
+could still begin, and its last bytes, are held back until that is known. Other bodies are
 read whole, up to 16 MiB. Equisafe's PutObject past 16 MiB failed on that
 limit (a 413), not on Workers' own request limit, which Cloudflare sets
 by plan (100 MB on Free and Pro, 200 MB on Business, 500 MB on
@@ -329,7 +330,10 @@ query, expiresIn } }`. coffre signs a GET (or HEAD) of that path under the
 credential's upstream with the real key pair, for at most an hour and never
 past the handle, and answers `{ url, expiresAt }`. The URL is the
 upstream's own (MinIO's, S3's), for a browser to use until it expires. It
-holds the access key's id and a signature, never the secret or the handle.
+holds the access key's id and a signature, never the secret or the handle:
+a path or query that carries the handle is refused. S3's URLs leave the
+payload unsigned, as its own presigner does; any other service's sign the
+empty body a GET has.
 Each URL is one use in the log, naming the path and its lifetime, never
 served from the cache. Uploads are not presigned: they go through the proxy.
 The SDK's own `getSignedUrl` signs with the handle, so it needs replacing

@@ -75,7 +75,12 @@ async function verified(request: IncomingMessage, body: Buffer): Promise<boolean
 before(async () => {
   s3 = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(chunk as Buffer);
+    try {
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+    } catch {
+      // An upload the proxy stopped mid-way: S3 stores nothing of it.
+      return;
+    }
     const body = Buffer.concat(chunks);
     const ok = await verified(request, body);
     seen.push({ method: request.method!, url: request.url!, verified: ok, authorization: request.headers.authorization ?? '', hash: String(request.headers['x-amz-content-sha256']) });
@@ -254,6 +259,12 @@ test("coffre's presigned URLs are the AWS SDK's own, byte for byte", async () =>
     assert.equal(ours.searchParams.get('X-Amz-Signature'), theirs.query!['X-Amz-Signature'], path);
     assert.equal(ours.searchParams.get('X-Amz-Credential'), theirs.query!['X-Amz-Credential']);
   }
+  // Another service signs the empty body a GET has, as the SDK's own presigner does with no payload hash said.
+  const api = new URL('https://abc.execute-api.eu-west-3.amazonaws.com/prod/a%20b');
+  const ours = await presignV4('GET', api, { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET }, { region: REGION, service: 'execute-api' }, 300, date);
+  const signer = new SignatureV4({ credentials: { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET }, region: REGION, service: 'execute-api', sha256: Sha256, uriEscapePath: true, applyChecksum: false });
+  const theirs = await signer.presign({ method: 'GET', protocol: 'https:', hostname: api.hostname, path: api.pathname, query: {}, headers: { host: api.host } }, { signingDate: date, expiresIn: 300 });
+  assert.equal(ours.searchParams.get('X-Amz-Signature'), theirs.query!['X-Amz-Signature'], 'execute-api');
 });
 
 test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the real key\'s id, for as long as asked, logged as a use', async () => {
@@ -280,7 +291,41 @@ test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the
   assert.equal((await ask({ credential: 's3', path: '/uploads/x?X-Amz-Expires=99' })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'X-Amz-Expires': '99' } })).status, 400);
   assert.equal((await ask({ credential: 'nope', path: '/uploads/x' })).status, 404);
+  // No URL to share carries the handle, in its path or its query.
+  assert.equal((await ask({ credential: 's3', path: `/uploads/${handle}` })).status, 400);
+  assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'response-content-disposition': `attachment; filename=${handle}` } })).status, 400);
   assert.equal((await route('/use/market/dev', { method: 'POST', body: JSON.stringify({ presign: { credential: 's3', path: '/x' } }) })).status, 401);
+});
+
+test('a streamed upload sends nothing of a handle split across chunks, and nothing past or short of its declared length', async () => {
+  const { handle } = await appClient();
+  const upload = (parts: Uint8Array[], declared: number, gap = 0) => {
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const part of parts) {
+          controller.enqueue(part);
+          if (gap > 0) await new Promise((resolve) => setTimeout(resolve, gap));
+        }
+        controller.close();
+      },
+    });
+    return route('/use/market/dev/s3/uploads/streamed', {
+      method: 'PUT',
+      headers: { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD', 'content-length': String(declared) },
+      body,
+      duplex: 'half',
+    } as RequestInit);
+  };
+  const bytes = new TextEncoder().encode(`data:${handle}:end`);
+  const cut = 5 + handle.length - 1;
+  assert.notEqual((await upload([bytes.slice(0, cut), bytes.slice(cut)], bytes.length, 20)).status, 200);
+  assert.equal(objects.has('uploads/streamed'), false, 'nothing stored');
+  const four = new TextEncoder().encode('abcd');
+  assert.notEqual((await upload([four, new TextEncoder().encode('e')], 4, 20)).status, 200, 'a byte past the length declared');
+  assert.notEqual((await upload([four], 5)).status, 200, 'short of it');
+  assert.equal(objects.has('uploads/streamed'), false);
+  assert.equal((await upload([four], 4)).status, 200, 'exactly as declared');
+  assert.equal(objects.get('uploads/streamed'), 'abcd');
 });
 
 test('an upload past what the proxy holds streams through: 20 MiB, signed again, the handle nowhere in it', async () => {
