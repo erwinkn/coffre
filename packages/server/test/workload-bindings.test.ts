@@ -130,7 +130,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
       issuer: GITHUB,
       jwksUri: KEYS,
       claims: plan.claims,
-      scope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }],
+      scope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
       replaces: [],
     },
   });

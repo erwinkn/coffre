@@ -267,3 +267,49 @@ test('GET /roles lists every role in both columns, as it ships or as an Owner ed
   await root.roles.reset('auditor', { instance: true });
   assert.equal((await ada.roles.list()).instanceRoles.find((role) => role.id === 'auditor')!.edited, false);
 });
+
+test("a person gives a service account a role on a whole project only if they hold it in the project's protected environments too", async () => {
+  // Before anything is protected, a Developer of market sets up a Viewer of all of it.
+  await ada.members.add('token:ci-before', { access: { market: 'viewer' } });
+  await maya.environments.protect('market/prod');
+  // Now the service would read prod, which Ada only uses: refused, by the app and by the vault.
+  assert.equal(await status(ada.members.add('token:ci-after', { access: { market: 'viewer' } })), 403);
+  assert.equal(await status(ada.members.add('token:ci-dev', { access: { 'market/dev': 'viewer' } })), 200, "dev's alone, which she reads");
+});
+
+test("whoever reads the whole log reads it as the instance's Auditor role is now, and a project's log leaves out a protected environment its role leaves out", async () => {
+  await root.members.add('user:audrey@acme.example', { role: 'auditor' });
+  const audrey = clientFor(deps, 'audrey@acme.example');
+  assert.equal(await status(audrey.audit.list({ limit: 5 })), 200);
+  await root.roles.set('auditor', { name: 'Auditor', description: 'None.', permissions: [], protected: [] }, { instance: true });
+  assert.equal(await status(audrey.audit.list({ limit: 5 })), 403, 'the Auditor role reads nothing now');
+  // A project Auditor that reads no protected environment's log.
+  await root.roles.set('auditor', { name: 'Auditor', description: 'The log, but a protected environment\'s.', permissions: ['audit.read'], protected: [] });
+  await root.members.add('user:paul@acme.example');
+  await root.access.set('user:paul@acme.example', { market: 'auditor' });
+  await maya.environments.protect('market/prod');
+  await root.secrets.set('market/prod', { PROD_ONLY: 'p' });
+  await root.secrets.set('market/dev', { DEV_ONLY: 'd' });
+  const paul = clientFor(deps, 'paul@acme.example');
+  const seen = (await paul.audit.list({ limit: 200 })).entries;
+  assert.ok(seen.some((entry) => entry.environment === 'dev'));
+  assert.ok(!seen.some((entry) => entry.environment === 'prod'), 'none of prod');
+});
+
+test("a built-in role is put back as it ships only where that is coherent: not a project-wide permission over grants on environments", async () => {
+  await root.roles.set('maintainer', { name: 'Maintainer', description: 'Uses.', permissions: ['secret.use'], protected: ['secret.use'] });
+  await root.access.set(VIC, { 'market/prod': 'maintainer' });
+  assert.equal(await status(root.roles.reset('maintainer')), 409);
+});
+
+test("a credential of a role as it ships keeps its name alone, as a release before 0.10 reads a scope; an edited role's, what it holds", async () => {
+  const { credentials } = await import('./db/tables.ts');
+  const shipped = await vic.tokens.issue(VIC, { label: 'shipped', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  await root.roles.set('viewer', { name: 'Viewer', description: 'Uses.', permissions: ['secret.use'], protected: ['secret.use'] });
+  await root.access.set(VIC, { market: 'viewer' });
+  const edited = await vic.tokens.issue(VIC, { label: 'edited', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  const scopeOf = async (id: string) => JSON.parse((await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope!) as unknown[];
+  const [kept] = (await scopeOf(shipped.id)) as Record<string, unknown>[];
+  assert.deepEqual(Object.keys(kept!).sort(), ['environmentId', 'projectId', 'role']);
+  assert.deepEqual(((await scopeOf(edited.id)) as { permissions?: unknown }[])[0]!.permissions, { normal: ['secret.use'], protected: ['secret.use'] });
+});

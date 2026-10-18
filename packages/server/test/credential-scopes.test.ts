@@ -262,8 +262,8 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow')));
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   // With what viewer held when it was issued, both columns: a role widened later widens no credential.
-  const viewer = { normal: [...ROLES.viewer.permissions], protected: [...ROLES.viewer.protected] };
-  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: viewer }]);
+  // A role as it ships, by its name alone: what it holds is what it ships with.
+  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer' }]);
 });
 
 test("a scope changed or cleared around the app fails the row's MAC, and the token is refused", async () => {

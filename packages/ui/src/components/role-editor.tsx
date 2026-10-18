@@ -55,10 +55,10 @@ export function RolesSettings() {
 }
 
 function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; editable: boolean }) {
-  // The role open in the editor, by id; `new` for one being made.
-  const [open, setOpen] = useState<string | null>(null);
+  // The role open in the editor, by id, or one being made: never a role's id, which `new` may be.
+  const [open, setOpen] = useState<{ role: string } | { making: true } | null>(null);
   const project = kind === 'role';
-  const opened = open === 'new' ? null : roles.find((role) => role.id === open);
+  const opened = open === null || 'making' in open ? null : roles.find((role) => role.id === open.role);
   return (
     <Card
       labelledBy={project ? 'roles' : 'instance-roles'}
@@ -73,7 +73,7 @@ function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; ed
       }
       actions={
         project && editable && (
-          <button className="btn" type="button" onClick={() => setOpen('new')}>
+          <button className="btn" type="button" onClick={() => setOpen({ making: true })}>
             <Plus size={14} />
             New role
           </button>
@@ -109,7 +109,7 @@ function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; ed
                 className="btn btn-sm"
                 type="button"
                 aria-label={`${editable && !role.fixed ? 'Edit' : 'View'} ${role.name}`}
-                onClick={() => setOpen(role.id)}
+                onClick={() => setOpen({ role: role.id })}
               >
                 {editable && !role.fixed && <Pencil size={14} />}
                 {editable && !role.fixed ? 'Edit…' : 'View'}
@@ -121,7 +121,7 @@ function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; ed
       {open !== null && opened !== undefined && (
         <RoleEditor
           // Each opening starts from the role as it is.
-          key={open}
+          key={'making' in open ? '' : `role:${open.role}`}
           kind={kind}
           role={opened}
           roles={roles}

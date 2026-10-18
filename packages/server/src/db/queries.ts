@@ -1903,8 +1903,12 @@ export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
 }
 
 export type AuditFilter = {
-  /** Entries in any of these projects or environments, for a caller who reads only those. */
-  within?: { projectIds: string[]; environmentIds: string[] };
+  /**
+   * Entries in any of these projects or environments, for a caller who reads
+   * only those; in a project, none about the environments of it they do not
+   * read (`except`), a protected one whose log their role leaves out.
+   */
+  within?: { projectIds: string[]; environmentIds: string[]; except?: string[] };
   projectId?: string;
   environmentId?: string;
   secretId?: string;
@@ -1966,6 +1970,9 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     within === undefined
       ? undefined
       : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
+    within?.except === undefined || within.except.length === 0
+      ? undefined
+      : or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)),
     filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
     filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
     filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),

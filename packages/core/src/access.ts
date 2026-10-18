@@ -198,10 +198,12 @@ export type Policy = {
   roles: Readonly<Record<Role, RoleDefinition>>;
   instanceRoles: Readonly<Record<InstanceRole, RoleDefinition>>;
   protected: readonly string[];
+  /** The protected environments by their project's id: what a grant on a whole project reaches of them. */
+  protectedIn: Readonly<Record<string, readonly string[]>>;
 };
 
 /** The policy before any Owner edits it: every role as it ships, and no environment protected. */
-export const DEFAULT_POLICY: Policy = { roles: ROLES, instanceRoles: INSTANCE_ROLES, protected: [] };
+export const DEFAULT_POLICY: Policy = { roles: ROLES, instanceRoles: INSTANCE_ROLES, protected: [], protectedIn: {} };
 
 /** The roles an Owner may not edit: Owner, which holds everything, and the instance's Member, which holds nothing. */
 export const FIXED_ROLES = { roles: ['owner'] as readonly string[], instanceRoles: ['owner', 'member'] as readonly InstanceRole[] };
@@ -421,7 +423,17 @@ export type ScopeGrant = GrantPlace & { role: Role; permissions?: { normal: read
 /** A grant of a scope with what its role holds now in `policy`, kept: what a credential issued now carries. */
 export function issuedGrant(grant: GrantPlace & { role: Role }, policy: Policy): ScopeGrant {
   const definition = definitionOf(policy, grant.role);
-  return { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role, permissions: { normal: [...(definition?.permissions ?? [])], protected: [...(definition?.protected ?? [])] } };
+  const place = { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role };
+  // A role as it ships is kept as its name alone, which reads as it ships, and as a release before 0.10 reads a scope:
+  // only an edited or a made role, which none of those knew, needs what it holds kept beside it.
+  if (definition !== undefined && isBuiltinRole(grant.role) && sameDefinition(definition, ROLES[grant.role])) return place;
+  return { ...place, permissions: { normal: [...(definition?.permissions ?? [])], protected: [...(definition?.protected ?? [])] } };
+}
+
+/** Whether two definitions hold the same, both columns. */
+function sameDefinition(a: RoleDefinition, b: RoleDefinition): boolean {
+  const columns = (definition: RoleDefinition) => JSON.stringify([normalDefinition(definition).permissions, normalDefinition(definition).protected]);
+  return columns(a) === columns(b);
 }
 
 /** What a scope's grant holds: as issued, or, kept by a release before 0.10, its role as it ships. */
@@ -618,9 +630,17 @@ export type ServiceSetting = Scope;
  */
 export function givesService(holder: Holdings, setting: ServiceSetting | null, role: Role, place: Place): boolean {
   if (mayManageAccess(holder, place)) return true;
-  const definition = definitionOf(holder.policy ?? DEFAULT_POLICY, role);
-  return definition !== undefined && setting !== null && holder.credentialScope == null && inScope(setting, place)
-    && definition.permissions.every((permission) => allows(holder, permission, place));
+  const policy = holder.policy ?? DEFAULT_POLICY;
+  const definition = definitionOf(policy, role);
+  if (definition === undefined || setting === null || holder.credentialScope != null || !inScope(setting, place)) return false;
+  if (!definition.permissions.every((permission) => allows(holder, permission, place))) return false;
+  // A grant on a whole project reaches its protected environments too, where the service holds the role's normal column:
+  // the person giving it holds that there as well, or gives none.
+  if (place.environmentId != null) return true;
+  return (policy.protectedIn[place.projectId] ?? []).every((environmentId) => {
+    const there: Place = { projectId: place.projectId, environmentId, environmentSlug: null };
+    return definition.permissions.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission)).every((permission) => allows(holder, permission, there));
+  });
 }
 
 /** Whether `holder` gives a service account anything anywhere among `places`: whether they set any up. */
@@ -685,7 +705,7 @@ export function issuesCredential(
  * Anyone else reads the places they hold `audit.read` in.
  */
 export function readsWholeLog(holder: Holdings): boolean {
-  return holder.credentialScope == null && instanceRoleGrants(holder.role, 'audit.read') && unscoped(holder.scope);
+  return holder.credentialScope == null && instanceRoleGrants(holder.role, 'audit.read', holder.policy ?? DEFAULT_POLICY) && unscoped(holder.scope);
 }
 
 /**

@@ -28,7 +28,7 @@ import { peopleHoldings, places, roleHolders, type ResolvedPath } from '../db/qu
 import type { Caller } from './caller.ts';
 import { placeOf } from './caller.ts';
 import { denied, Refusal, withRefusals, type ApiContext } from './context.ts';
-import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 
 // The role editor and protected environments (docs/design/roles.md): the
@@ -168,7 +168,7 @@ export async function changeRole(
       credentialId: ctx.provenance,
       credentialScope: ctx.caller.credentialScope,
     });
-    if (!result.ok) throw vaultRefused(result.refusal);
+    if (!result.ok) throw policyRefused(result.refusal);
     // The role as it is now; null for one deleted.
     if (!Object.hasOwn(table(result.policy, kind), id)) return { role: null };
     const held = await roleHolders(ctx.db);
@@ -320,6 +320,11 @@ export async function protectIds(ctx: ApiContext, projectId: string, environment
     credentialId: ctx.provenance,
     credentialScope: ctx.caller.credentialScope,
   });
-  if (!result.ok) throw vaultRefused(result.refusal);
+  if (!result.ok) throw policyRefused(result.refusal);
   return environmentIds.filter((id) => protects(result.policy, id));
+}
+
+/** The vault's refusal of a policy change: one the rules refuse as things are, a role granted where it no longer fits, is a conflict. */
+function policyRefused(refusal: { code: string; message: string }): ApiError {
+  return refusal.code === 'invalid' ? new ApiError('conflict', refusal.message, refusal.code) : vaultRefused(refusal);
 }

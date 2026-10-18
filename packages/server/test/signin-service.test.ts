@@ -791,7 +791,7 @@ test('owners issue service tokens that verify as the service', async () => {
     credentialId: issued.id,
     credentialGeneration: 0,
     exchanged: false,
-    credentialScope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }],
+    credentialScope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
     personalToken: null,
     handlePlaces: null,
     expiresAt: issued.expiresAt,
@@ -820,7 +820,7 @@ test('owners issue service tokens that verify as the service', async () => {
     label: 'deploys',
     targetCredentialId: issued.id,
     expiresAt: issued.expiresAt,
-    scope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }],
+    scope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
   });
 
   // A service's tokens do not show up as anyone's sessions.

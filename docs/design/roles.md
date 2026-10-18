@@ -37,7 +37,13 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   protected environments is in the vault's newest `policy.change` entry,
   under its MAC, with the roles (section 3). An environment's row says
   nothing of it, so a row written around coffre protects or unprotects
-  nothing. Each change is its own entry, naming what changed.
+  nothing. Each change is its own entry, naming what changed. Every read
+  is decided again under the log's head, which each change takes, so one
+  in flight when prod is protected is refused as prod is when it commits.
+- **When the vault cannot read its own policy**, only entries forged in
+  its name within reach, no role holds anything, a service account's
+  neither, but Owner, which holds everything and so writes the policy
+  again: a narrowing hidden by forged rows is never undone by them.
 
 ## 3. Roles, in two columns
 
@@ -65,6 +71,11 @@ The instance's roles have the same two columns (Developer as above).
   as R16 has services get values.
 - **What a person gets is the narrowest of three**: their role there, the
   key's sensitivity, and their credential's scope.
+- **A service account holds no more than its giver.** A person gives a
+  service account a role on a whole project only if they hold it in that
+  project's protected environments too, where the service would hold its
+  normal column: a Developer of a protected prod gives no Viewer of all of
+  `market`, which would read prod.
 - **The defaults** make protecting mean something at once. No environment
   is protected until someone says so, so 0.10 changes nobody's access.
 
@@ -103,7 +114,10 @@ request   prod use, write: the token did not grow
 ```
 
 Narrowing a role narrows every token at once, through its holder. A scope
-issued before 0.10 holds the role as its default was, never as edited.
+issued before 0.10 holds the role as its default was, never as edited. A
+role as it ships is kept by its name alone, which reads the same, so a
+scope written while an older release still serves reads there too: only
+an edited or a made role, which no older release knows, keeps its columns.
 
 ## 6. Decisions
 

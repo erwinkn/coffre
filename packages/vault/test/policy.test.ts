@@ -160,12 +160,51 @@ test("a policy entry forged in the vault's name is passed over; with none of its
   await w.grant(ADA, null, 'developer');
   const prod = await w.stored(w.prod);
   const dev = await w.stored(w.dev);
-  // Forged alone, it closes: Ada, a person, holds the protected column everywhere.
+  await w.grant(CI, w.dev, 'viewer');
+  // Forged alone, it closes: no role holds anything, a service account's neither, but Owner, who writes it again.
   await forge({ policy: { roles: {}, instanceRoles: {}, protected: [] } });
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, false);
+  assert.equal((await w.vault.unwrap({ principal: CI, purpose: 'run', items: dev })).ok, false);
+  assert.equal((await w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items: dev })).ok, true);
   // The vault's own, after it, decides; a forged one after that, unprotecting prod, is passed over.
   assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
   await forge({ policy: { roles: {}, instanceRoles: {}, protected: [] } });
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: CI, purpose: 'run', items: dev })).ok, true);
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod })).ok, false);
+});
+
+test('a read in flight when an environment is protected is decided as the policy is when it commits', { skip: process.env.COFFRE_TEST_ENGINE === 'sqlite' && 'SQLite runs one writer at a time' }, async () => {
+  const inner = LocalKekProvider.generate('test-kek-1');
+  let hold: Promise<void> | null = null;
+  const kek = {
+    provider: inner.provider, keyId: inner.keyId, keyVersion: inner.keyVersion,
+    wrap: (dek: Buffer, ctx: Parameters<typeof inner.wrap>[1], operation?: Parameters<typeof inner.wrap>[2]) => inner.wrap(dek, ctx, operation),
+    unwrap: async (wrapped: Parameters<typeof inner.unwrap>[0], ctx: Parameters<typeof inner.unwrap>[1], operation?: Parameters<typeof inner.unwrap>[2]) => {
+      if (hold !== null) await hold;
+      return inner.unwrap(wrapped, ctx, operation);
+    },
+  };
+  const config = { ...configure(), keks: new KekRegistry(kek) };
+  const vault = await openLocalVault(db.vault, config);
+  assert.equal((await vault.access(ROOT)).role, 'owner');
+  const where = await places(db.owner);
+  assert.ok((await vault.admit({ actor: ROOT, principal: ADA })).ok);
+  assert.ok((await vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: where.project, environmentId: null, role: 'developer', expiresAt: null }] })).ok);
+  const secret = await where.secret(where.prod);
+  const wrap = await vault.wrap({ principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] });
+  assert.ok(wrap.ok);
+  const items = await storedVersions(db.owner, [{ secret, wrapped: wrap.wrapped[0]! }]);
+  let release!: () => void;
+  hold = new Promise<void>((resolve) => (release = resolve));
+  const reading = vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // Another connection protects prod while the read waits on its key.
+  const twin = await openLocalVault(await db.connect(), config);
+  const protecting = protect(twin, ROOT, where.project, [where.prod]);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release();
+  const [read, protectedNow] = await Promise.all([reading, protecting]);
+  assert.ok(protectedNow.ok);
+  assert.equal(!read.ok && read.refusal.code, 'no_grant', 'refused as the policy is when it commits');
 });
