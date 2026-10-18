@@ -294,7 +294,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
       // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
       for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
       const given = request.headers.get('x-amz-content-sha256');
-      const payload = given ?? (body === undefined ? 'UNSIGNED-PAYLOAD' : hex(await crypto.subtle.digest('SHA-256', body)));
+      // The client's own hash, or the body's, an empty one's included, as SigV4 has it when no header says otherwise.
+      const payload = given ?? hex(await crypto.subtle.digest('SHA-256', body ?? new Uint8Array(0)));
       await signV4(request.method, target, headers, payload, {
         accessKeyId: render(inject.accessKeyId, values),
         secretAccessKey: render(inject.secretAccessKey, values),

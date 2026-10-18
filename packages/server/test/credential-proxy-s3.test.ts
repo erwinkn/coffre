@@ -30,7 +30,7 @@ let s3Url: string;
 let coffre: Server;
 let coffreUrl: string;
 const objects = new Map<string, string>();
-const seen: { method: string; url: string; verified: boolean; authorization: string }[] = [];
+const seen: { method: string; url: string; verified: boolean; authorization: string; hash: string }[] = [];
 
 /** SHA-256 and its HMAC, as the SDK's signer takes a hash. */
 /** What the signer hands a hash: a string, or bytes in any view. */
@@ -78,7 +78,7 @@ before(async () => {
     for await (const chunk of request) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks);
     const ok = await verified(request, body);
-    seen.push({ method: request.method!, url: request.url!, verified: ok, authorization: request.headers.authorization ?? '' });
+    seen.push({ method: request.method!, url: request.url!, verified: ok, authorization: request.headers.authorization ?? '', hash: String(request.headers['x-amz-content-sha256']) });
     if (!ok) return response.writeHead(403, { 'content-type': 'application/xml' }).end('<Error><Code>SignatureDoesNotMatch</Code></Error>');
     const url = new URL(request.url!, s3Url);
     const [, bucket, ...segments] = url.pathname.split('/');
@@ -173,7 +173,12 @@ test('put, get and list through the proxy: the SDK signs with the handle, S3 see
   const listed = await client.send(new ListObjectsV2Command({ Bucket: 'uploads', Prefix: 'kyc/' }));
   assert.deepEqual(listed.Contents?.map((object) => object.Key), ['kyc/a b+c.txt']);
 
-  assert.equal(seen.length, 3);
+  // A client that sends no payload hash, as a bare fetch to an AWS API would: signed with the empty body's SHA-256.
+  const bare = await route('/use/market/dev/s3/uploads/?list-type=2', { headers: { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00` } });
+  assert.equal(bare.status, 200);
+  assert.equal(seen.at(-1)!.hash, createHash('sha256').update('').digest('hex'));
+
+  assert.equal(seen.length, 4);
   assert.ok(seen.every((request) => request.verified), JSON.stringify(seen));
   assert.ok(seen.every((request) => !request.authorization.includes(handle)), 'the handle never reaches S3');
   // One opening of the pair for the minute.
