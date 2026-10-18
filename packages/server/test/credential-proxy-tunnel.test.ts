@@ -256,6 +256,8 @@ test("SASLprep maps as Postgres does, and falls back to the password as it is", 
   assert.equal(saslprep(String.fromCharCode(0x2168)), 'IX', 'NFKC');
   const control = `pass${String.fromCharCode(7)}word`;
   assert.equal(saslprep(control), control, 'a prohibited character: the password as it is');
+  assert.equal(saslprep(`a${String.fromCharCode(0x200b)}b`), 'a b', 'a zero-width space is a space, as Postgres maps it');
+  assert.equal(saslprep(soft), soft, 'nothing left: the password as it is');
 });
 
 test('a database that ends SCRAM without its signature is no database the URL names: refused', postgresOnly, async () => {
@@ -290,6 +292,61 @@ test('a database that ends SCRAM without its signature is no database the URL na
   } finally {
     fake.close();
   }
+});
+
+test("a person whose grant ends loses their open sessions at the next check", postgresOnly, async () => {
+  const client = appClient();
+  client.on('error', () => undefined);
+  await client.connect();
+  assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
+  await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: null });
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await assert.rejects(client.query('SELECT 1'));
+});
+
+test('a connection the app drops while the database has not answered leaves no socket open to it', postgresOnly, async () => {
+  // A database that takes the connection and says nothing: the tunnel waits on its answer to SSLRequest.
+  const opened: Socket[] = [];
+  const silent = createTcp((socket) => {
+    opened.push(socket);
+    // What the tunnel sends it is read, and never answered: a socket left unread would not say when it closes.
+    socket.resume();
+  });
+  silent.listen(0, '127.0.0.1');
+  await once(silent, 'listening');
+  try {
+    await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@127.0.0.1:${(silent.address() as AddressInfo).port}/d` });
+    const raw = tcp({ host: '127.0.0.1', port: listenerPort });
+    await once(raw, 'connect');
+    const startup = Buffer.concat([Buffer.from([0, 3, 0, 0]), cstring('user'), cstring('app'), Buffer.from([0])]);
+    const length = Buffer.alloc(4);
+    length.writeInt32BE(startup.length + 4);
+    raw.write(Buffer.concat([length, startup]));
+    await once(raw, 'data');
+    raw.write(message('p', cstring(handle)));
+    for (let waited = 0; opened.length === 0 && waited < 2000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(opened.length, 1, 'the tunnel reached the database');
+    const closed = once(opened[0]!, 'close');
+    raw.destroy();
+    await closed;
+  } finally {
+    for (const socket of opened) socket.destroy();
+    silent.close();
+  }
+});
+
+test('a startup asks for encryption once each, and no more', postgresOnly, async () => {
+  const raw = tcp({ host: '127.0.0.1', port: listenerPort });
+  await once(raw, 'connect');
+  const ssl = Buffer.alloc(8);
+  ssl.writeInt32BE(8, 0);
+  ssl.writeInt32BE(80877103, 4);
+  raw.write(Buffer.concat(Array.from({ length: 1000 }, () => ssl)));
+  let answered = '';
+  raw.on('data', (chunk: Buffer) => (answered += chunk.toString('latin1')));
+  await once(raw, 'close');
+  assert.ok(answered.startsWith('NN'), answered.slice(0, 4));
+  assert.ok(!answered.startsWith('NNN'));
 });
 
 /** Revoke the suite's handle, as its person would. */

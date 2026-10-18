@@ -167,13 +167,14 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
   const cache = new Map<string, { values: Record<string, string>; until: number }>();
+  const standing = new Map<string, { stands: boolean; at: number }>();
   return {
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+          return await serve(request, coffre, { credentials, standing, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -181,7 +182,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+          return await open(request, coffre, { credentials, standing, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -193,6 +194,8 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 
 type Proxy = {
   credentials: Map<string, Resolved>;
+  /** Each tunnel's last word on whether its sessions go on, by handle, environment and tunnel: settled answers only. */
+  standing: Map<string, { stands: boolean; at: number }>;
   tunnels: Map<string, Tunnel>;
   insecure: boolean;
   recheckMs: number;
@@ -318,6 +321,8 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
   await coffre.handle(handle);
   const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null);
+  // Just checked and read: the sessions' next check is a recheck's minute away.
+  proxy.standing.set(`${handle}\u0000${path}\u0000${place[2]!}`, { stands: true, at: Date.now() });
   let db: Database;
   try {
     db = database(values[tunnel.key]!);
@@ -335,8 +340,31 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
       database: db,
       recheckMs: proxy.recheckMs,
       connect,
-      stands: () => coffre.handle(handle).then(() => true, () => false),
+      stands: async (now) => (!now || (await coffre.handle(handle).then(() => true, () => false))) && stands(coffre, proxy, handle, path, { name: place[2]!, key: tunnel.key }),
     });
+}
+
+/**
+ * Whether a tunnel's sessions may go on: their handle stands, and its
+ * person still reads the database's URL, as the vault decides, by opening
+ * it again. Once per `recheckSeconds` for each handle, environment and
+ * tunnel, however many sessions ask, and logged as a use, as a
+ * credential's opening is: a grant that ends ends the sessions with it.
+ * Just before a login, the handle itself is checked afresh too, which
+ * opens and logs nothing.
+ */
+async function stands(coffre: PluginContext, proxy: Proxy, handle: string, path: string, tunnel: { name: string; key: string }): Promise<boolean> {
+  const key = `${handle}\u0000${path}\u0000${tunnel.name}`;
+  const kept = proxy.standing.get(key);
+  if (kept !== undefined && Date.now() - kept.at < proxy.recheckMs) return kept.stands;
+  const now = await coffre.use(handle, { path, keys: [tunnel.key], purpose: 'use', logged: { credential: tunnel.name, tunnel: true, recheck: true } }).then(
+    (used) => Object.hasOwn(used.values, tunnel.key),
+    () => false,
+  );
+  // A handful of handles in a dev loop: past a thousand answers, those too old to serve go.
+  if (proxy.standing.size >= 1000) for (const [old, answer] of proxy.standing) if (Date.now() - answer.at >= proxy.recheckMs) proxy.standing.delete(old);
+  proxy.standing.set(key, { stands: now, at: Date.now() });
+  return now;
 }
 
 /** One request through a credential: the handle checked, its values opened (or remembered), the request sent on with them. */

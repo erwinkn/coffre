@@ -34,25 +34,37 @@ export function database(url: string): Database {
   };
 }
 
-/** Reads exact lengths from a stream, keeping what came beyond them. */
+/** Reads exact lengths from a stream, keeping what came beyond them: the chunks as they came, each copied out once. */
 class Reader {
   #reader: ReadableStreamDefaultReader<Uint8Array>;
-  #held: Uint8Array = new Uint8Array(0);
+  #chunks: Uint8Array[] = [];
+  /** How far into the first chunk was taken. */
+  #offset = 0;
+  #size = 0;
   constructor(stream: ReadableStream<Uint8Array>) {
     this.#reader = stream.getReader();
   }
   async take(length: number): Promise<Uint8Array> {
-    const parts: Uint8Array[] = [this.#held];
-    let have = this.#held.length;
-    while (have < length) {
+    while (this.#size < length) {
       const { done, value } = await this.#reader.read();
       if (done) throw new Error('the connection closed');
-      parts.push(value);
-      have += value.length;
+      this.#chunks.push(value);
+      this.#size += value.length;
     }
-    this.#held = parts.length === 1 ? this.#held : concat(...parts);
-    const out = this.#held.slice(0, length);
-    this.#held = this.#held.slice(length);
+    const out = new Uint8Array(length);
+    let at = 0;
+    while (at < length) {
+      const chunk = this.#chunks[0]!;
+      const part = Math.min(length - at, chunk.length - this.#offset);
+      out.set(chunk.subarray(this.#offset, this.#offset + part), at);
+      at += part;
+      this.#offset += part;
+      if (this.#offset === chunk.length) {
+        this.#chunks.shift();
+        this.#offset = 0;
+      }
+    }
+    this.#size -= length;
     return out;
   }
   /** One backend or frontend message: its type byte and its body, `max` bytes at most, refused before it is read. */
@@ -64,15 +76,15 @@ class Reader {
   }
   /** How many bytes it read beyond what was taken. */
   get held(): number {
-    return this.#held.length;
+    return this.#size;
   }
   /** What is left: what was read beyond the last message, then the rest of the stream. */
   rest(): ReadableStream<Uint8Array> {
-    const held = this.#held;
+    const held = this.#chunks.map((chunk, i) => (i === 0 ? chunk.subarray(this.#offset) : chunk));
     const reader = this.#reader;
     return new ReadableStream({
       start(controller) {
-        if (held.length > 0) controller.enqueue(held);
+        for (const chunk of held) if (chunk.length > 0) controller.enqueue(chunk);
       },
       async pull(controller) {
         const { done, value } = await reader.read();
@@ -149,8 +161,12 @@ export type TunnelSession = {
   handle: string;
   /** The real database. */
   database: Database;
-  /** Whether the handle still stands: asked before the login and every `recheckMs`, the session ended when it does not. */
-  stands(): Promise<boolean>;
+  /**
+   * Whether the session may go on: asked every `recheckMs`, and `now`,
+   * the handle itself checked afresh, just before the login. The session
+   * ends when it may not.
+   */
+  stands(now?: boolean): Promise<boolean>;
   recheckMs: number;
   connect: Connect;
 };
@@ -182,6 +198,11 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   let upstream: Socket | Pipe | null = null;
   let key: string | null = null;
   let ended = false;
+  /** The outbound socket, owned from the moment TCP is made, through TLS: closed at once if the session ended meanwhile. */
+  const own = (pipe: Pipe) => {
+    upstream = pipe;
+    if (ended) pipe.close();
+  };
   const end = () => {
     ended = true;
     clearInterval(timer);
@@ -206,18 +227,21 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   try {
     // The startup: SSL and GSS refused (the hop to the listener is local), a cancel forwarded, or the real StartupMessage.
     let startup: Map<string, string> | null = null;
+    // SSL, then GSS, as a driver asks: no more than one of each before the real startup.
+    let negotiations = 0;
     while (startup === null) {
       const length = view(await step(from.take(4))).getInt32(0);
       if (length < 8 || length > MAX_STARTUP) throw new Error('not a Postgres startup');
       const body = await step(from.take(length - 4));
       const code = view(body).getInt32(0);
       if (code === SSL_REQUEST || code === GSS_REQUEST) {
+        if (++negotiations > 2) throw new Error('a startup asks for encryption once each');
         await to.write(encoder.encode('N'));
         continue;
       }
       if (code === CANCEL_REQUEST) {
         if (body.length !== 12) throw new Error('not a cancel request');
-        await cancel(session, `${view(body).getInt32(4)}:${view(body).getInt32(8)}`);
+        await step(cancel(session, `${view(body).getInt32(4)}:${view(body).getInt32(8)}`, own));
         return;
       }
       if (code !== PROTOCOL_3) {
@@ -234,15 +258,14 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
       return;
     }
     // Asked again now, whatever the last check said: a connection held at the prompt logs in only while its handle stands.
-    if (!(await step(session.stands()))) {
+    if (!(await step(session.stands(true)))) {
       await to.write(errorResponse('28P01', 'coffre: the handle ended: run the app with `coffre run` again'));
       return;
     }
 
     // The real database, logged in to with the real password.
     const db = session.database;
-    const socket = await step(open(session, db));
-    upstream = socket;
+    const socket = await step(open(session, db, own));
     const up = new Writer(socket.writable);
     const down = new Reader(socket.readable);
     // The app's own parameters (application_name, client_encoding, …), but who and where are the real database's.
@@ -287,9 +310,15 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   }
 }
 
-/** A connection to the database: TLS first, unless the URL says `sslmode=disable`, the server's one byte read alone. */
-async function open(session: TunnelSession, db: Database): Promise<Socket | Pipe> {
+/**
+ * A connection to the database: TLS first, unless the URL says
+ * `sslmode=disable`, the server's one byte read alone. `own` is told of
+ * each socket as it is made, TCP's then TLS's, so that whoever ends the
+ * session closes what is open, however far this got.
+ */
+async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => void): Promise<Socket | Pipe> {
   const socket = await session.connect(db.host, db.port);
+  own(socket);
   if (db.tls === 'disable') return socket;
   const writer = new Writer(socket.writable);
   await writer.write(concat(int32(8), int32(SSL_REQUEST)));
@@ -307,14 +336,16 @@ async function open(session: TunnelSession, db: Database): Promise<Socket | Pipe
     socket.close();
     throw new Error(`${db.host} sent bytes before TLS began`);
   }
-  return socket.startTls(db.host);
+  const secure = await socket.startTls(db.host);
+  own(secure);
+  return secure;
 }
 
 /** A cancel request of the app's: the key it was given, for one of this handle's sessions; to that session's database, with its own. */
-async function cancel(session: TunnelSession, given: string): Promise<void> {
+async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) => void): Promise<void> {
   const target = cancels.get(given);
   if (target === undefined || target.handle !== session.handle) return;
-  const socket = await open(session, target.database);
+  const socket = await open(session, target.database, own);
   const writer = new Writer(socket.writable);
   await writer.write(concat(int32(16), int32(CANCEL_REQUEST), int32(target.processId), int32(target.secret)));
   writer.release();
@@ -408,18 +439,23 @@ class Scram {
 /**
  * SASLprep (RFC 4013), as Postgres runs it on a SCRAM password: non-ASCII
  * spaces made spaces, what maps to nothing dropped, NFKC; and the password
- * as it is when the result holds a prohibited character, or mixes
- * right-to-left with left-to-right letters, which is Postgres's own
- * fallback (src/common/saslprep.c).
+ * as it is when nothing is left, or the result holds a prohibited or an
+ * unassigned character, or mixes right-to-left with left-to-right
+ * letters, which is Postgres's own fallback (src/common/saslprep.c). One
+ * difference stays: Postgres judges "unassigned" by Unicode 3.2 and this
+ * by the runtime's Unicode, so a password with a character assigned since
+ * (an emoji) is prepared here and taken as it is there. That matters only
+ * when preparing changes it, which for such passwords is rare.
  */
 export function saslprep(password: string): string {
   const mapped = password
-    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
-    .replace(/[\u00AD\u034F\u1806\u180B-\u180D\u200B-\u200D\u2060\uFE00-\uFE0F\uFEFF]/g, '')
+    .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
+    .replace(/[\u00AD\u034F\u1806\u180B-\u180D\u200C-\u200D\u2060\uFE00-\uFE0F\uFEFF]/g, '')
     .normalize('NFKC');
   // Controls, private use, non-characters, surrogates, and the bidirectional and tagging marks: C.2 to C.9.
   const prohibited = /[\u0000-\u001F\u007F-\u009F\u06DD\u070F\u180E\u200E\u200F\u2028-\u202E\u2060-\u2063\u206A-\u206F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF9-\uFFFF\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}\u{F0000}-\u{10FFFF}\u{1FFFE}\u{1FFFF}\u{2FFFE}\u{2FFFF}]|\p{Cs}/u;
-  if (prohibited.test(mapped)) return password;
+  // Nothing left, or a character Unicode leaves unassigned: Postgres's own fallback, the password as it is.
+  if (mapped === '' || prohibited.test(mapped) || /\p{Cn}/u.test(mapped)) return password;
   // Bidirectional text: right-to-left letters only, no left-to-right one, the first and the last right-to-left.
   const rtl = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
   const chars = [...mapped];

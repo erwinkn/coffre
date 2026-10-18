@@ -25,6 +25,9 @@ const FRAMING = new Set(['connection', 'content-length', 'transfer-encoding', 'k
  * handshake has none.
  */
 export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+  // Node lets go of the socket's errors before it hands an upgrade over: one reset while the plugin decides would crash the process.
+  const ignore = () => socket.destroy();
+  socket.on('error', ignore);
   const headers = new Headers();
   for (const [name, value] of Object.entries(incoming.headers)) if (typeof value === 'string') headers.set(name, value);
   const request = new Request(new URL(incoming.url ?? '/', runtime.publicUrl), { headers });
@@ -45,7 +48,9 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
     return;
   }
   const session = answer;
+  if (socket.destroyed) return;
   sockets.handleUpgrade(incoming, socket, head, (ws) => {
+    socket.off('error', ignore);
     void session(fromWebSocket(ws), connect).catch(() => undefined).finally(() => ws.terminate());
   });
 }

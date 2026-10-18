@@ -377,12 +377,15 @@ the user and database are the real URL's. Measured locally: a query adds
 54 ms against 6 ms direct: the handle's check, the read, the WebSocket and
 SCRAM. A pool pays that once per connection.
 
-**Revocation mid-session.** Every `recheckSeconds` (60 unless set), an
-open session asks whether its handle still stands (`coffre.handle`, which
-opens and logs nothing). When it does not, the session ends: both sockets
-close, the app's driver sees its connection drop, and every new connection
-is refused at once, whatever the cache holds. *Decision:* end open sessions
-rather than let them run out, within a minute.
+**Revocation mid-session.** Every `recheckSeconds` (60 unless set), the
+open sessions of a handle ask whether they may go on. The answer comes from
+opening the database's URL again, as the vault decides it, once per handle
+and tunnel for all their sessions, and logged as a use. So a revoked handle
+and a person's lost grant each end the sessions, within the minute: both
+sockets close and the app's driver sees its connection drop. Every new
+connection checks the handle afresh, at admission and again just before the
+login, whatever the cache holds. *Decision:* end open sessions rather than
+let them run out.
 
 **Cancel requests.** A `CancelRequest` comes on a connection of its own,
 before any password, with the key the app was given in `BackendKeyData`.
