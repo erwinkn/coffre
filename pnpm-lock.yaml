@@ -215,6 +215,9 @@ importers:
       '@types/pg':
         specifier: 8.20.0
         version: 8.20.0
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
       jsonc-parser:
         specifier: 3.3.1
         version: 3.3.1
@@ -230,6 +233,9 @@ importers:
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
 
   packages/client:
     devDependencies:
@@ -359,6 +365,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@cloudflare/workers-types@5.20260926.1)(@libsql/client@0.18.0)(@types/pg@8.20.0)(pg@8.16.3)
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -393,6 +402,9 @@ importers:
       '@types/pg':
         specifier: 8.20.0
         version: 8.20.0
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
       pg:
         specifier: 8.16.3
         version: 8.16.3
@@ -3364,6 +3376,18 @@ packages:
       utf-8-validate:
         optional: true
 
+  ws@8.21.3:
+    resolution: {integrity: sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xmlbuilder2@4.0.3:
     resolution: {integrity: sha512-bx8Q1STctnNaaDymWnkfQLKofs0mGNN7rLLapJlGuV3VlvegD7Ls4ggMjE3aUSWItCCzU0PEv45lI87iSigiCA==}
     engines: {node: '>=20.0'}
@@ -4307,7 +4331,7 @@ snapshots:
   '@libsql/isomorphic-ws@0.1.5':
     dependencies:
       '@types/ws': 8.18.1
-      ws: 8.21.0
+      ws: 8.21.3
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -5823,6 +5847,8 @@ snapshots:
       - utf-8-validate
 
   ws@8.21.0: {}
+
+  ws@8.21.3: {}
 
   xmlbuilder2@4.0.3:
     dependencies:

@@ -26,12 +26,16 @@
  * entry's `fetch` runs: `srvx --prod -s ../client app/dist/server/server.js`,
  * as TanStack Start documents for Node.
  */
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+
 import { openDatabase } from '@coffre/db/connect';
 import { migrateDatabase } from '@coffre/db/migrate';
 
 import { runScheduled } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { logged } from './logged.ts';
+import { upgrade } from './node-sockets.ts';
 import { createRuntime, type CoffreRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
@@ -52,6 +56,12 @@ export type CoffreNode = {
   request(request: Request): CoffreContext;
   /** Run the scheduled job, the audit heartbeat and the vault's checkpoint of it: now, and every five minutes after. */
   schedule(): void;
+  /**
+   * A WebSocket a plugin answers, the credential proxy's database tunnel:
+   * the deployment's own HTTP server hands its `upgrade` events here,
+   * `server.on('upgrade', (request, socket, head) => coffre.upgrade(request, socket, head))`.
+   */
+  upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void;
 };
 
 const SCHEDULE_MINUTES = 5;
@@ -78,6 +88,16 @@ export function createCoffre(config: NodeConfig): CoffreNode {
           respond: async (req, render) => (await scope).respond(req, render),
         },
       };
+    },
+    upgrade(incoming, socket, head) {
+      // From the first moment: Node no longer handles this socket's errors, and the database may still be opening.
+      socket.on('error', () => socket.destroy());
+      ready()
+        .then((rt) => upgrade(rt, incoming, socket, head))
+        .catch((error: unknown) => {
+          console.error('a WebSocket failed', logged(error));
+          socket.destroy();
+        });
     },
     schedule() {
       if (timer !== undefined) return;

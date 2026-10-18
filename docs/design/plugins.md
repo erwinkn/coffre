@@ -175,6 +175,14 @@ third-party plugin, later, is a package that peer-depends on
 `@coffre/server`. The peer range is the compatibility check, so nothing
 else is needed.
 
+**Added since, for the credential proxy** ([credential-proxy.md](credential-proxy.md)):
+
+- `use(handle, …)`: an environment's values, for a handle's person, opened
+  to be used for them or exposed to their app, in process only.
+- `handle(handle)`: whether a handle still stands, opening nothing.
+- `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
+  out, on Node through `createCoffre(…).upgrade`.
+
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):
 
