@@ -1031,6 +1031,66 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
   );
 }
 
+/** What a person's app gets through the credential proxy (`standIns`): its environment, and what the proxy left out. */
+type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string };
+
+/**
+ * Stand-ins for the environments named, where the instance has the
+ * credential proxy (docs/design/credential-proxy.md) and the session is a
+ * person's: one handle for the run, which the proxy takes in place of each
+ * credential's keys, the credentials' base URLs on the proxy, and the
+ * values the deployment exposes. Null where the instance has no proxy, or
+ * for a service account, which reads values (R13).
+ */
+async function standIns(paths: readonly string[], to: Target = target()): Promise<StandIns | null> {
+  if (!(await proxied(to))) return null;
+  const at = (path: string, headers: Record<string, string>) =>
+    fetch(`${to.origin}/use${path}`, { headers, redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
+  // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
+  const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
+  const handle = await client(to).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
+  const plans: [string, { env: Record<string, string>; credentials: Record<string, string>; left: string[] }][] = [];
+  for (const path of paths) {
+    const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });
+    const body = (await response.json().catch(() => ({}))) as { message?: string };
+    if (!response.ok) fail(`${path}: ${body.message ?? `the credential proxy answered ${response.status}`}`);
+    plans.push([path, body as (typeof plans)[number][1]]);
+  }
+  const shared = clash(plans.map(([path, plan]) => [path, [...Object.keys(plan.env), ...plan.left]]));
+  if (shared !== null) fail(`${shared}: a key comes from one environment only`);
+  // Merged as entries: a variable may be named __proto__, which assigning into an object would drop.
+  const credentials = Object.fromEntries(plans.flatMap(([, plan]) => Object.entries(plan.credentials)));
+  const env: Record<string, string> = Object.fromEntries(plans.flatMap(([, plan]) => Object.entries(plan.env)));
+  return {
+    // What `credential(name)` (`@coffre/client/credential`) reads: each credential's URL on the proxy, and the handle.
+    env: { ...env, COFFRE_CREDENTIALS: JSON.stringify(credentials), COFFRE_HANDLE: handle.token },
+    left: plans.flatMap(([, plan]) => plan.left).sort(),
+    credentials: Object.keys(credentials).sort(),
+    exposed: Object.keys(env).filter((key) => env[key] !== handle.token && !Object.values(credentials).includes(env[key]!)).sort(),
+    expiresAt: handle.expiresAt,
+  };
+}
+
+/** Whether `to` is a person's session, a personal token's included, on an instance with the credential proxy: what gets stand-ins. */
+async function proxied(to: Target): Promise<boolean> {
+  const person = to.by === 'person' || (to.credential.kind === 'token' && to.credential.token.startsWith('coffre_pat_'));
+  if (!person) return false;
+  const proxy = await fetch(`${to.origin}/use`, { headers: await headersFor(to), redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
+  if (proxy.status === 404 || !isJsonContentType(proxy.headers.get('content-type'))) return false;
+  if (!proxy.ok) fail(`${to.origin}'s credential proxy answered ${proxy.status}`);
+  return true;
+}
+
+/** What `run` and `export` say of a person's stand-ins, on stderr: what the app holds, and what it does without. */
+function sayStandIns(stood: StandIns, paths: readonly string[], to: Target): void {
+  const lines = [
+    `coffre: stand-ins for ${listOf(paths)}: ${stood.credentials.length === 0 ? 'no credential the proxy covers' : `${stood.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(stood.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
+    ...(stood.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${stood.exposed.join(', ')}`]),
+    ...(stood.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${stood.left.join(', ')}`]),
+  ];
+  process.stderr.write(`${lines.join('\n')}\n`);
+}
+
 /**
  * Fetch every secret of the environments named and exec a command with them
  * in its environment: one audited read per environment, and one audit row
@@ -1053,7 +1113,10 @@ async function run(args: string[]): Promise<void> {
   const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
-  const values = Object.fromEntries(await readOrEnd(paths));
+  // A person's app gets stand-ins, where the instance has the proxy; a service account, the values.
+  const stood = await standIns(paths);
+  if (stood !== null) sayStandIns(stood, paths, target());
+  const values = stood?.env ?? Object.fromEntries(await readOrEnd(paths));
   // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
   const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
   for (const key of kept) delete values[key];
@@ -1111,6 +1174,7 @@ async function exportEnv(args: string[]): Promise<void> {
     const intervalMs = attempt(() => interval(values.interval ?? '60s'));
     const to = target();
     if (to.by === 'run' || to.credential.kind === 'workload') fail("--watch outlives a CI run's credential, which lasts five minutes: watch with a session or a bearer token");
+    if (await proxied(to)) fail("--watch keeps a file of values current, and a person's gets stand-ins, which change only with the deployment: export again then");
     const api = enduringClient(to);
     process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
     await watch({
@@ -1126,7 +1190,10 @@ async function exportEnv(args: string[]): Promise<void> {
     }).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   }
 
-  const entries = byKey(await readOrEnd(paths));
+  // GitHub's environment is a CI run's, which a service account signs in for.
+  const stood = format === 'github' ? null : await standIns(paths);
+  if (stood !== null) sayStandIns(stood, paths, target());
+  const entries = byKey(stood === null ? await readOrEnd(paths) : Object.entries(stood.env));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.
@@ -1134,7 +1201,7 @@ async function exportEnv(args: string[]): Promise<void> {
     attempt(() => appendFileSync(githubEnv!, githubEnvironment(entries), { encoding: 'utf8', mode: 0o600 }));
   } else if (file !== undefined) attempt(() => replaceFile(file, text(entries)));
   else process.stdout.write(attempt(() => text(entries)));
-  if (process.stderr.isTTY) {
+  if (process.stderr.isTTY && stood === null) {
     const count = entries.length;
     process.stderr.write(
       `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}${file === undefined ? '' : ` into ${file}`}; each read is in the audit log under your name\n`,

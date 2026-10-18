@@ -384,7 +384,10 @@ export const routes = {
   }),
   ...route('POST /reveals', {
     input: z.object({ path: z.string().max(400) }),
-    run: (ctx, { input }) => reveal(ctx, parsePath(input.path, [2, 3])),
+    run: async (ctx, { input }) => {
+      const { operationId, values, version } = await reveal(ctx, parsePath(input.path, [2, 3]));
+      return { operationId, values, version };
+    },
   }),
 
   // Who
@@ -434,6 +437,16 @@ export const routes = {
         ? signin(ctx).planServiceToken(ctx, member.id, service)
         : signin(ctx).issueServiceToken(ctx, member.id, service);
     },
+  }),
+  // A handle, for `coffre run`: a stand-in for the values of `paths`, which only the credential proxy takes (docs/design/credential-proxy.md).
+  ...route('POST /handles', {
+    input: z.object({
+      label: tokenInput.shape.label.unwrap().unwrap(),
+      // Twelve hours unless told: a working day's dev loop, a week at most, as a personal token.
+      expiresInMinutes: z.number().int().min(1).max(MAX_PERSONAL_TOKEN_MINUTES).default(12 * 60),
+      paths: z.array(z.string().max(200)).min(1).max(MAX_SCOPE_PLACES),
+    }),
+    run: (ctx, { input }) => signin(ctx).issueHandle(ctx, input),
   }),
   ...route('DELETE /members/:member/tokens/:id', {
     run: async (ctx, { params }) => {

@@ -2,8 +2,10 @@ import { createHash, randomBytes } from 'node:crypto';
 
 /**
  * Bearer credentials coffre issues itself: browser sessions, CLI sessions,
- * service tokens, and personal tokens, which act as the person who made
- * them within the scope they named.
+ * service tokens, personal tokens, which act as the person who made
+ * them within the scope they named, and handles, which reach nothing but
+ * the credential proxy (`@coffre/server/plugins/credential-proxy`): the
+ * stand-in a person's app holds in place of a secret's value.
  *
  * A token is a kind prefix and 32 random bytes, e.g.
  * `coffre_cli_Qm9Y...`. The prefix tells a person (or a secret scanner) what a
@@ -12,16 +14,17 @@ import { createHash, randomBytes } from 'node:crypto';
  * right tool here, unlike for passwords: 256 bits of randomness leave nothing
  * to brute-force.
  */
-export type CredentialKind = 'browser' | 'cli' | 'service' | 'personal';
+export type CredentialKind = 'browser' | 'cli' | 'service' | 'personal' | 'handle';
 
 const PREFIX: Record<CredentialKind, string> = {
   browser: 'coffre_web_',
   cli: 'coffre_cli_',
   service: 'coffre_svc_',
   personal: 'coffre_pat_',
+  handle: 'coffre_use_',
 };
 
-const TOKEN = /^coffre_(web|cli|svc|pat)_[A-Za-z0-9_-]{43}$/;
+const TOKEN = /^coffre_(web|cli|svc|pat|use)_[A-Za-z0-9_-]{43}$/;
 
 export function generateToken(kind: CredentialKind): string {
   return PREFIX[kind] + randomBytes(32).toString('base64url');

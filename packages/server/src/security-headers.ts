@@ -70,7 +70,8 @@ export function setSecurityHeaders(response: Response, options: SecurityHeaderOp
   // where it is written rather than once deployed. The first header set
   // finds out whether the response takes them.
   try {
-    headers.set('content-security-policy', contentSecurityPolicy(options));
+    // A sandboxed answer's own policy only narrows coffre's: a plugin's document from elsewhere, the credential proxy's.
+    if (!/^sandbox(;|$)/.test(headers.get('content-security-policy') ?? '')) headers.set('content-security-policy', contentSecurityPolicy(options));
   } catch (error) {
     throw new Error(IMMUTABLE, { cause: error });
   }

@@ -126,8 +126,16 @@ export async function authenticateRequest(
   requestId: string = crypto.randomUUID(),
   token = accessTokenForRequest(request, runtime.auth),
   sourceIp: string | null = null,
+  /** `handle`: the credential proxy's, which takes a handle and nothing else; everything else takes anything but one. */
+  options: { handle?: boolean } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
+  // A handle is a stand-in for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
+  const handle = tokenKind(token) === 'handle';
+  if (handle && options.handle !== true) {
+    return errorResponse(new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle'));
+  }
+  if (!handle && options.handle === true) return errorResponse(new ApiError('unauthenticated', 'the credential proxy takes a handle (coffre_use_…), as `coffre run` gives your app one'));
 
   let principal: Principal;
   let credentialId: string | null = null;
@@ -173,7 +181,7 @@ export async function authenticateRequest(
       sourceIp,
       credentialId,
       credentialExpiresAt,
-      provenance: exchanged || personalToken !== null ? credentialId : null,
+      provenance: exchanged || personalToken !== null || handle ? credentialId : null,
       personalToken,
       via: null,
     };

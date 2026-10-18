@@ -51,6 +51,11 @@
       "types": "./dist/plugins/vault-kv.d.ts",
       "default": "./dist/plugins/vault-kv.js"
     },
+    "./plugins/credential-proxy": {
+      "coffre:source": "./src/plugins/credential-proxy.ts",
+      "types": "./dist/plugins/credential-proxy.d.ts",
+      "default": "./dist/plugins/credential-proxy.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

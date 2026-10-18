@@ -1347,6 +1347,21 @@ export type Api = {
       }[];
     };
   };
+  "POST /handles": {
+    input: {
+      label: string;
+      paths: string[];
+      expiresInMinutes?: number;
+    };
+    output: {
+      id: string;
+      token: string;
+      expiresAt: string;
+      scope: {
+        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      };
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {

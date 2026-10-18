@@ -13,7 +13,9 @@ import { coffreRoute } from '../src/app.ts';
 import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import type { People } from '@coffre/vault';
+
+import { contextFor, openTestDatabase, resetDatabase, testDeps, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
 
 export const ORIGIN = 'https://secrets.acme.example';
@@ -59,13 +61,13 @@ export let runtime: CoffreRuntime;
  * test, which `seed` then fills. `approvalWaitMs` is how long a call waits
  * on its approval before saying it still waits.
  */
-export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: number } = {}): void {
+export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: number; people?: People } = {}): void {
   before(async () => {
     db = await openTestDatabase();
-    deps = testDeps(db.runtime, [ROOT]);
+    deps = testDeps(db.runtime, [ROOT], options.people === undefined ? {} : { vault: testVault([ROOT], { people: options.people }) });
     if (auth.mode !== 'signin') throw new Error('unreachable');
     const service = new SigninService({ ...deps, signin: auth.signin });
-    const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport, ...options });
+    const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport, approvalWaitMs: options.approvalWaitMs });
     runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, rotateAfterDays: 365, plugins: [] };
   });
   after(async () => {

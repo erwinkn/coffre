@@ -164,6 +164,12 @@ export type RefusalCode =
   /** The wrapped key does not belong to the secret it was presented as, or a reference is not the vault's. */
   | 'bad_claim'
   /**
+   * A person asked for values to be handed back, where people get stand-ins
+   * (`people: 'stand-ins'`): their apps use values through the credential
+   * proxy instead, and only service accounts read them.
+   */
+  | 'stand_ins'
+  /**
    * The project or environment was deleted for good: nothing under it is
    * opened or wrapped again, whatever grant would cover it.
    */
@@ -228,8 +234,21 @@ export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: strin
  */
 export type KeyChecks = { current: { kekProvider: string; kekId: string }; checks: (WrappedKey & { seq: number })[] };
 
-/** Why someone reads: shown in the log, and the same rules apply to each. A fork reads to `copy`. */
-export type Purpose = 'reveal' | 'run' | 'compare' | 'copy';
+/**
+ * Why someone reads: shown in the log, and the same rules apply to each. A
+ * fork reads to `copy`. The credential proxy reads to `use`, a value it
+ * injects into a request and never hands back, or to `expose`, one the
+ * deployment lets people's apps hold. Where people get stand-ins
+ * (`people: 'stand-ins'`), a person opens nothing to `reveal`, `run` or
+ * `compare` (`HANDED_BACK`).
+ */
+export type Purpose = 'reveal' | 'run' | 'compare' | 'copy' | 'use' | 'expose';
+
+/**
+ * What a person never opens where people get stand-ins: values handed back
+ * to them, and a dry run's `compare`, which tells them whether a guess was right.
+ */
+export const HANDED_BACK: readonly Purpose[] = ['reveal', 'run', 'compare'];
 
 /** Ties the vault's entries to the app's request and audit rows. */
 type Correlation = {

@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { MAX_PERSONAL_TOKEN_MINUTES, runsInstance, type CredentialScope } from '@coffre/core/access';
+import { allows, MAX_PERSONAL_TOKEN_MINUTES, runsInstance, type CredentialScope, type Holdings } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -31,7 +31,9 @@ import {
   memberOf,
   memberStanding,
   places,
+  MAX_PARENTS,
   principalOf,
+  resolvePath,
   type PlaceRow,
   revokePriorMembership,
   update,
@@ -40,7 +42,7 @@ import {
 import { callerFrom, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
-import { formatMember } from './paths.ts';
+import { formatMember, parsePath } from './paths.ts';
 import {
   issuedScope,
   managedAccount,
@@ -137,6 +139,9 @@ export type TokenPlan = { scope: ScopeByPath };
 
 /** What a personal token is made with: all three said, none assumed. */
 export type PersonalTokenInput = { label: string; expiresInMinutes: number; scope: ScopeByPath };
+
+/** What a handle is made with: a label, which its entries name, how long it lasts, and the environments it stands in for, by path. */
+export type HandleInput = { label: string; expiresInMinutes: number; paths: string[] };
 
 /** The personal token a request came in on: its row's id, its label and when it ends. */
 export type PersonalToken = { id: string; label: string; expiresAt: string };
@@ -258,7 +263,7 @@ function userCode(): string {
 
 /** Whether a credential is a member's token, a service account's or a person's, rather than a session. */
 function isToken(row: { kind: string }): boolean {
-  return row.kind === 'service' || row.kind === 'personal';
+  return row.kind === 'service' || row.kind === 'personal' || row.kind === 'handle';
 }
 
 type HeldCredential = NonNullable<Awaited<ReturnType<typeof members>>[number]>['credentials'][number];
@@ -649,7 +654,7 @@ export class SigninService {
           exchanged: false,
           access,
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
-          credentialScope: row.kind === 'personal' ? readScope(row.scope) ?? [] : null,
+          credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,
           personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,
           expiresAt: row.expiresAt.toISOString(),
         };
@@ -680,7 +685,7 @@ export class SigninService {
         requestId: meta.requestId,
         sourceIp: meta.sourceIp,
         // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
-        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' ? { credentialId: row.id } : {}) },
+        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id } : {}) },
       });
     });
   }
@@ -903,6 +908,83 @@ export class SigninService {
         return { ...credential, scope: byPath };
       });
     });
+  }
+
+  /**
+   * Mint a handle (docs/design/credential-proxy.md): the stand-in a
+   * person's app holds in place of the values of `paths`, which only the
+   * credential proxy takes, to use those values for them. It reaches
+   * nothing else: no API route, no page. It holds what both its scope,
+   * `viewer` on each path, and its person hold then, as a personal token
+   * does, so their losing a grant narrows it and their leaving ends it.
+   * Made by a person, on a session or a personal token of theirs: from a
+   * token, within its scope, and never past its end. `coffre run` makes
+   * one per run.
+   */
+  async issueHandle(ctx: Asker & Pick<ApiContext, 'personalToken'>, input: HandleInput): Promise<IssuedToken> {
+    return withRefusals(this.#deps, async () => {
+      const person = ctx.caller.principal;
+      const details = { kind: 'handle', principalType: person.type, principalId: person.id, label: input.label };
+      if (!Number.isInteger(input.expiresInMinutes) || input.expiresInMinutes < 1 || input.expiresInMinutes > MAX_PERSONAL_TOKEN_MINUTES) {
+        throw badRequest(`a handle lasts between a minute and ${MAX_PERSONAL_TOKEN_MINUTES / 1440} days`);
+      }
+      // A service account reads its values: it needs no stand-in. A connected app's or a binding's scope is not a person's to hand on.
+      if (person.type !== 'user' || (ctx.caller.credentialScope !== null && ctx.personalToken === null)) {
+        throw new Refusal(
+          forbidden('only a person makes a handle, on a session or a personal token of theirs: a service account reads its values'),
+          denied(ctx, 'token.create', 'handle', { metadata: details }),
+        );
+      }
+      const access = await this.#standing(person);
+      // What the person holds now, and, on a personal token, what it does: a handle never reaches past the credential that made it.
+      const holder = { ...callerFrom(person, access), credentialScope: ctx.caller.credentialScope };
+      const wanted = Object.fromEntries((await this.#handlePlaces(holder, input.paths)).map((path) => [path, 'viewer' as const]));
+      const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details);
+      const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
+      return audited(this.#deps, async (tx, log) => {
+        const standing = await this.#currentCaller(tx, ctx, access);
+        if (standing === null) {
+          throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
+        }
+        const credential = await this.#issue(tx, 'handle', person, {
+          generation: standing.generation,
+          identityId: null,
+          label: input.label,
+          createdBy: person.id,
+          expiresAt: new Date(ends),
+          scope,
+        });
+        log.push(
+          allowed(ctx, 'token.create', {
+            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
+          }),
+        );
+        return { ...credential, scope: byPath };
+      });
+    });
+  }
+
+  /**
+   * The environments a handle for `paths` stands in for: each named, a
+   * personal config by the environment it is a config of (`dev@me`, read as
+   * its owner, is held to the scope on dev), and each parent a fork inherits
+   * from that the holder reads too, so that inherited keys open through it
+   * as they would for its person. A parent they do not read stays out, and
+   * its keys refused, as for a read.
+   */
+  async #handlePlaces(holder: Holdings, paths: readonly string[]): Promise<string[]> {
+    const places = new Set<string>();
+    for (const raw of paths) {
+      const path = parsePath(raw.replace(/@me$/, ''), [2]);
+      places.add(`${path.project}/${path.environment}`);
+      let place = await resolvePath(this.#deps.db, path);
+      for (let depth = 0; place?.environment?.parentSlug != null && depth < MAX_PARENTS; depth += 1) {
+        place = await resolvePath(this.#deps.db, { project: path.project, environment: place.environment.parentSlug });
+        if (place?.environment == null) break;
+        if (allows(holder, 'secret.read', { projectId: place.project.id, environmentId: place.environment.id, environmentSlug: place.environment.slug })) places.add(`${path.project}/${place.environment.slug}`);
+      }
+    }
+    return [...places];
   }
 
   /** What a personal token made now would reach, checked as making one is (`issuePersonalToken`); makes nothing. */
