@@ -62,8 +62,11 @@ configuration (`people: 'stand-ins'`). Left out, it is `values`, as in
 holds in place of a value. It is a credential row of its own kind
 (migration `0009_handles`, which only widens a check):
 
-- It acts as its person, within its scope, `viewer` on each environment
-  it was made for, as a personal token does. Their losing a grant narrows
+- It acts as its person, within its scope, as a personal token does:
+  `viewer` on each environment it was made for, and on each parent a fork
+  of them inherits from that the person reads too, so inherited keys work
+  through it. `market/dev@me` is scoped as `market/dev`, which is what a
+  personal config's owner needs to read it. Their losing a grant narrows
   it, and their removal ends it.
 - It reaches nothing but the proxy. The API, the pages and a plugin's
   `api(token)` all refuse it (`authenticateRequest`, reason `handle`), so
@@ -168,7 +171,9 @@ still open values, though, so nothing stops the agent from asking for them.
 
 `GET /use/<project>/<env>`, with the handle as a bearer token, is the
 **plan**: one read of what the environment holds, which opens only the
-keys it exposes. It answers:
+keys it exposes, chosen from the very rows it opens (`PickKeys`), so an
+override reset between two reads cannot swap a parent's value in. It
+answers:
 
 ```json
 {
@@ -201,17 +206,21 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    host. A key the environment lacks is a 409.
 4. **Sent on.** Every header but those about the hop, coffre's caller,
    its cookies and the handle; then the rule's header, parameter or
-   Basic authorization, filled in. If the handle is still anywhere in the
-   request, it is refused rather than leaked to a third party. The body is
-   read whole, up to 16 MiB. The request goes out with
-   `redirect: 'manual'`, so a 302 to another host comes back to the app
-   and is never followed with the key.
+   Basic authorization, filled in. The body is read up to 16 MiB and no
+   further, whatever it declares. If the handle is still anywhere in the
+   request (a header, inside another header's Basic base64, the URL, the
+   body), it is refused rather than leaked to a third party. The request
+   goes out with `redirect: 'manual'`.
 5. **Back.** The upstream's answer, without `set-cookie` (it would land on
-   coffre's origin). Every value the request carried, 8 characters or
-   longer, is replaced by `[redacted by coffre]` in its headers and in a
-   text body (JSON, XML, text, event streams), streamed, holding back as
-   much as the longest value so that one split across chunks is caught. A
-   binary body passes as it is.
+   coffre's origin). A redirect stays on the proxy. A `Location` under
+   the upstream becomes the proxy's own URL for it. A redirect anywhere
+   else is a 502, so the app never follows it with the handle. Every value
+   the request carried, 8 characters or longer, is replaced by `[redacted
+   by coffre]` in each form the upstream may echo: as it is, URL-encoded
+   both ways, and Basic's base64. That covers its headers and a text body
+   (JSON, XML, text, event streams), streamed, holding back as much as the
+   longest value so that one split across chunks is caught, and never half
+   a surrogate pair. A binary body passes as it is.
 
 coffre's own refusals carry `coffre-proxy: refused`, so the app can tell
 them from the upstream's.

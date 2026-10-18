@@ -172,13 +172,26 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
   const handle = bearer(request);
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  // One read of what the environment holds, opening only what it exposes: logged as one use, of those values.
-  const held = await coffre.use(handle, { path, keys: [], purpose: 'expose', logged: { plan: true } });
+  // The credentials the environment holds every key of: their keys are stand-ins, never exposed.
+  const covering = (keys: readonly string[]) => [...proxy.credentials.values()].filter((credential) => credential.keys.every((key) => keys.includes(key)));
+  // One read, which opens what the exact environment exposes, never through a parent; and a personal config's own
+  // values, which only its owner writes, so they hand back nothing they did not write. Chosen from the rows it opens.
+  const held = await coffre.use(handle, {
+    path,
+    purpose: 'expose',
+    logged: { plan: true },
+    keys: (environment, rows) => {
+      const covered = new Set(covering(rows.map((row) => row.key)).flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]));
+      const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
+      return rows
+        .filter((row) => !covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false)))
+        .map((row) => row.key);
+    },
+  });
   const env: Record<string, string> = Object.create(null);
   const credentials: Record<string, string> = {};
   const covered = new Set<string>();
-  for (const credential of proxy.credentials.values()) {
-    if (!credential.keys.every((key) => held.keys.includes(key))) continue;
+  for (const credential of covering(held.keys)) {
     const at = `${coffre.publicUrl}/use/${path}/${credential.name}`;
     credentials[credential.name] = at;
     for (const key of credential.keys) {
@@ -190,14 +203,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       covered.add(credential.baseUrl);
     }
   }
-  // What the exact environment exposes, never through a parent; and a personal config's own values, which only its owner
-  // writes and reads, so they hand back nothing they did not write. Neither for a key a credential covers: that is a stand-in.
-  const exposedHere = held.environment.personal ? held.own : proxy.expose.get(held.environment.path);
-  const exposed = held.keys.filter((key) => !covered.has(key) && (exposedHere === 'all' || (exposedHere?.includes(key) ?? false)));
-  const opened = exposed.length === 0 ? {} : (await coffre.use(handle, { path, keys: exposed, purpose: 'expose', logged: { exposed: true } })).values;
-  for (const key of exposed) {
-    if (opened[key] === undefined) continue;
-    env[key] = opened[key];
+  for (const [key, value] of Object.entries(held.values)) {
+    env[key] = value;
     covered.add(key);
   }
   return answer({
@@ -218,6 +225,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(400, `${credential.name} reaches ${credential.base.href} only`);
   }
   const relative = target.pathname.slice(under.length) || '/';
+  const proxied = `${coffre.publicUrl}/use/${path}/${credential.name}`;
   if (credential.methods !== undefined && !credential.methods.includes(request.method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
@@ -235,21 +243,57 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
   if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(`${render(inject.user, values)}:${render(inject.password, values)}`)}`);
   if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
-  // The handle goes no further than coffre: anywhere else the app put it, the request stops.
-  const leaked = [...headers].find(([, value]) => HANDLE.test(value));
-  if (leaked !== undefined || HANDLE.test(target.href)) {
-    return failure(400, `the handle is somewhere ${credential.name} does not take its key${leaked === undefined ? '' : `: the ${leaked[0]} header`}`);
-  }
-
   const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await boundedBody(request);
   if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB`);
+  // The handle goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
+  const leaked = [...headers].find(([, value]) => carries(value)) ?? (carries(safeDecode(target.href)) ? ['URL'] : undefined)
+    ?? (body !== undefined && HANDLE.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);
+  if (leaked !== undefined) {
+    return failure(400, `the handle is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch(target, { method: request.method, headers, body, redirect: 'manual' });
   } catch (error) {
     return failure(502, `${target.host} did not answer: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return redacted(upstream, Object.values(values));
+  // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
+  const location = upstream.headers.get('location');
+  let at: string | null = null;
+  if (location !== null) {
+    const to = new URL(location, target);
+    const inside = to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
+    if (inside) at = `${proxied}${to.pathname.slice(under.length)}${to.search}`;
+    else if (upstream.status >= 300 && upstream.status < 400) {
+      await upstream.body?.cancel();
+      return failure(502, `${target.host} redirected to ${to.origin}${to.pathname}, where ${credential.name}'s key does not go`);
+    } else at = location;
+  }
+  // What the request carried, in each form the upstream may echo it in: as it is, URL-encoded both ways, and Basic's base64.
+  const forms = Object.values(values).flatMap((value) => [value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2)]);
+  if (inject.kind === 'basic') forms.push(headers.get('authorization')!.slice('Basic '.length));
+  return redacted(upstream, forms, at);
+}
+
+/** Whether a header's value carries a handle: as it is, or inside Basic authentication's base64. */
+function carries(value: string): boolean {
+  if (HANDLE.test(value)) return true;
+  const basic = /^Basic\s+(\S+)$/i.exec(value);
+  if (basic === null) return false;
+  try {
+    return HANDLE.test(atob(basic[1]!));
+  } catch {
+    return false;
+  }
+}
+
+function safeDecode(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
 }
 
 /** The credential's values for the handle: remembered for `cacheSeconds`, or opened now, logged as one use. */
@@ -292,12 +336,30 @@ function bearer(request: Request): string | null {
   return /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
 }
 
-/** The body, read whole up to the limit: null past it. */
-async function boundedBody(request: Request): Promise<ArrayBuffer | null> {
-  const declared = Number(request.headers.get('content-length') ?? '0');
-  if (declared > MAX_BODY_BYTES) return null;
-  const body = await request.arrayBuffer();
-  return body.byteLength > MAX_BODY_BYTES ? null : body;
+/** The body, read whole up to the limit, and no further: null past it, the rest left unread. */
+async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | undefined | null> {
+  if (Number(request.headers.get('content-length') ?? '0') > MAX_BODY_BYTES) return null;
+  if (request.body === null) return undefined;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return body;
 }
 
 /** `{KEY}` in a template, each the environment's value. */
@@ -310,13 +372,15 @@ function render(template: string, values: Record<string, string>): string {
  * wherever it shows: in headers, and in a text body, streamed, holding back
  * as much as the longest value so that one split across chunks is caught
  * too. A binary body passes as it is. Cookies stay with the upstream: one
- * set on coffre's origin could stand in for coffre's own.
+ * set on coffre's origin could stand in for coffre's own. `location`, a
+ * redirect's, is already the proxy's own URL for it.
  */
-function redacted(upstream: Response, values: string[]): Response {
-  const secrets = values.filter((value) => value.length >= MIN_REDACTED).sort((a, b) => b.length - a.length);
+function redacted(upstream: Response, values: string[], location: string | null): Response {
+  const secrets = [...new Set(values)].filter((value) => value.length >= MIN_REDACTED).sort((a, b) => b.length - a.length);
   const scrub = (text: string) => secrets.reduce((out, secret) => out.split(secret).join(REDACTED), text);
   const headers = new Headers();
   for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, scrub(value));
+  if (location !== null) headers.set('location', scrub(location));
   headers.set('cache-control', upstream.headers.get('cache-control') ?? 'no-store');
   const type = upstream.headers.get('content-type') ?? '';
   const text = /^text\/|json|xml|javascript|x-www-form-urlencoded|event-stream/i.test(type);
@@ -329,8 +393,9 @@ function redacted(upstream: Response, values: string[]): Response {
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, out) {
         const all = scrub(carry + decoder.decode(chunk, { stream: true }));
-        // Hold back what could be the start of a value the next chunk ends.
-        const cut = Math.max(0, all.length - hold);
+        // Hold back what could be the start of a value the next chunk ends, and never half of a surrogate pair.
+        let cut = Math.max(0, all.length - hold);
+        if (cut > 0 && /[\uD800-\uDBFF]/.test(all[cut - 1]!)) cut -= 1;
         carry = all.slice(cut);
         if (cut > 0) out.enqueue(encoder.encode(all.slice(0, cut)));
       },

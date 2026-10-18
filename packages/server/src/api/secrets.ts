@@ -1174,6 +1174,13 @@ export async function restoreVersion(
 }
 
 /**
+ * The keys the credential proxy opens, chosen from what the read resolved:
+ * the environment it resolved to, and each key it holds, and whether a
+ * parent's. Chosen once, from the rows that are then opened.
+ */
+export type PickKeys = (environment: { path: string; personal: boolean }, held: { key: string; inherited: boolean }[]) => readonly string[];
+
+/**
  * The only way to decrypt, and a POST so nothing can trigger it by
  * prefetching. The vault logs one `secret.read` per secret it releases,
  * sharing the operation id: "they read the whole environment" is true but
@@ -1191,8 +1198,8 @@ export async function reveal(
    * entry of it, `credential.use`. A key the environment does not hold is
    * left out, not refused: the proxy says which it needs.
    */
-  use?: { purpose: 'use' | 'expose'; keys: readonly string[]; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; version: string | null; environment: { path: string; personal: boolean }; keys: string[]; own: string[] }> {
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
+): Promise<{ operationId: string; values: Record<string, string>; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1213,8 +1220,10 @@ export async function reveal(
       metadata: path.key === undefined ? {} : { key: path.key },
     });
     const read = await readableValues(ctx.db, place, environment, path.key);
-    // The proxy's keys, and what stops them: a parent or a reference one of them reads through, or the environment's own chain.
-    const wanted = (item: { key?: string }) => use === undefined || item.key === undefined || use.keys.includes(item.key);
+    const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
+    // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
+    const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({ key: item.key, inherited: item.parent !== undefined }))) : use.keys;
+    const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
     const rows = read.items.filter(wanted);
     const unreadable = read.unreadable.filter(wanted);
     // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
@@ -1252,18 +1261,17 @@ export async function reveal(
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
     for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
-    const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     if (use !== undefined) {
       // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
       log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
-      return { operationId, values: { ...values }, version: null, environment: named, keys: read.items.map((item) => item.key), own: read.items.flatMap((item) => (item.parent === undefined ? [item.key] : [])) };
+      return { operationId, values: { ...values }, version: null, environment: named, keys: read.items.map((item) => item.key) };
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key), own: rows.flatMap((row) => (row.parent === undefined ? [row.key] : [])) };
+    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
 }
 

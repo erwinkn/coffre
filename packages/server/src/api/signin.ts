@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { MAX_PERSONAL_TOKEN_MINUTES, runsInstance, type CredentialScope } from '@coffre/core/access';
+import { allows, MAX_PERSONAL_TOKEN_MINUTES, runsInstance, type CredentialScope, type Holdings } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -31,7 +31,9 @@ import {
   memberOf,
   memberStanding,
   places,
+  MAX_PARENTS,
   principalOf,
+  resolvePath,
   type PlaceRow,
   revokePriorMembership,
   update,
@@ -40,7 +42,7 @@ import {
 import { callerFrom, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
-import { formatMember } from './paths.ts';
+import { formatMember, parsePath } from './paths.ts';
 import {
   issuedScope,
   managedAccount,
@@ -936,7 +938,7 @@ export class SigninService {
       const access = await this.#standing(person);
       // What the person holds now, and, on a personal token, what it does: a handle never reaches past the credential that made it.
       const holder = { ...callerFrom(person, access), credentialScope: ctx.caller.credentialScope };
-      const wanted = Object.fromEntries(input.paths.map((path) => [path, 'viewer' as const]));
+      const wanted = Object.fromEntries((await this.#handlePlaces(holder, input.paths)).map((path) => [path, 'viewer' as const]));
       const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details);
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       return audited(this.#deps, async (tx, log) => {
@@ -960,6 +962,29 @@ export class SigninService {
         return { ...credential, scope: byPath };
       });
     });
+  }
+
+  /**
+   * The environments a handle for `paths` stands in for: each named, a
+   * personal config by the environment it is a config of (`dev@me`, read as
+   * its owner, is held to the scope on dev), and each parent a fork inherits
+   * from that the holder reads too, so that inherited keys open through it
+   * as they would for its person. A parent they do not read stays out, and
+   * its keys refused, as for a read.
+   */
+  async #handlePlaces(holder: Holdings, paths: readonly string[]): Promise<string[]> {
+    const places = new Set<string>();
+    for (const raw of paths) {
+      const path = parsePath(raw.replace(/@me$/, ''), [2]);
+      places.add(`${path.project}/${path.environment}`);
+      let place = await resolvePath(this.#deps.db, path);
+      for (let depth = 0; place?.environment?.parentSlug != null && depth < MAX_PARENTS; depth += 1) {
+        place = await resolvePath(this.#deps.db, { project: path.project, environment: place.environment.parentSlug });
+        if (place?.environment == null) break;
+        if (allows(holder, 'secret.read', { projectId: place.project.id, environmentId: place.environment.id, environmentSlug: place.environment.slug })) places.add(`${path.project}/${place.environment.slug}`);
+      }
+    }
+    return [...places];
   }
 
   /** What a personal token made now would reach, checked as making one is (`issuePersonalToken`); makes nothing. */

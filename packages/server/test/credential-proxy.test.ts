@@ -41,11 +41,23 @@ before(async () => {
       }
       if (request.url!.includes('/echo')) {
         response.writeHead(200, { 'content-type': 'application/json', 'x-echo': String(request.headers['x-api-key']), 'set-cookie': 'upstream=1' });
-        response.end(JSON.stringify({ youSent: request.headers['x-api-key'] }));
+        response.end(JSON.stringify({ youSent: request.headers['x-api-key'], authorization: request.headers.authorization, url: request.url }));
+        return;
+      }
+      if (request.url!.includes('/redirect-inside')) {
+        response.writeHead(302, { location: `${upstreamUrl}/v1/companies?page=2` }).end();
         return;
       }
       if (request.url!.includes('/redirect')) {
         response.writeHead(302, { location: 'https://evil.example/steal' }).end();
+        return;
+      }
+      if (request.url!.includes('/emoji')) {
+        // Split mid-pair, and a short multi-byte answer around it.
+        response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+        const bytes = Buffer.from('😀xxxxxx héllo wörld 😀');
+        response.write(bytes.subarray(0, 2));
+        response.end(bytes.subarray(2));
         return;
       }
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ companies: [{ siren: '123' }], path: request.url, body }));
@@ -82,7 +94,7 @@ useMcp(
     await root.secrets.set('market/dev', {
       SCHUMANN_API_KEY: KEY,
       SCHUMANN_BASE_URL: 'https://api.schumann.example/v1',
-      MAPS_KEY: 'maps_real_key_0123456789',
+      MAPS_KEY: 'maps+real/key=0123456789',
       TWILIO_SID: 'AC0123456789',
       TWILIO_TOKEN: 'twilio_real_token_0123456789',
       WEBHOOK_SECRET: WEBHOOK,
@@ -244,9 +256,34 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
   assert.equal(echoed.headers.get('x-echo'), '[redacted by coffre]');
   assert.equal(echoed.headers.get('set-cookie'), null);
 
+  // A redirect elsewhere never reaches the app, which would follow it with the handle; one under the upstream is the proxy's URL for it.
   const redirect = await call('/redirect');
-  assert.equal(redirect.status, 302, 'passed back, not followed');
+  assert.equal(redirect.status, 502);
+  assert.equal(redirect.headers.get('location'), null);
   assert.equal(received.filter((request) => request.url.includes('steal')).length, 0);
+  const inside = await call('/redirect-inside');
+  assert.equal(inside.status, 302);
+  assert.equal(inside.headers.get('location'), `${ORIGIN}/use/market/dev/schumann/companies?page=2`);
+
+  // The handle goes nowhere else: not in a body, not inside another header's Basic authentication.
+  assert.equal((await call('/companies', { method: 'POST', body: JSON.stringify({ token: handle }) })).status, 400);
+  assert.equal((await call('/companies', { headers: { 'x-coffre-handle': handle, 'x-api-key': '', authorization: `Basic ${btoa(`client:${handle}`)}` } })).status, 400);
+
+  // A body is read no further than the limit, whatever it declares.
+  let sent = 0;
+  const endless = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      sent += 1024 * 1024;
+      controller.enqueue(new Uint8Array(1024 * 1024));
+      if (sent > 64 * 1024 * 1024) controller.close();
+    },
+  });
+  const big = await route('/use/market/dev/schumann/upload', { method: 'POST', headers: { 'x-api-key': handle }, body: endless, duplex: 'half' } as RequestInit);
+  assert.equal(big.status, 413);
+  assert.ok(sent <= 20 * 1024 * 1024, `read ${sent} bytes`);
+
+  // Redaction keeps text whole: a pair split across chunks, multi-byte letters.
+  assert.equal(await (await call('/emoji')).text(), '😀xxxxxx héllo wörld 😀');
 
   // A dot segment, encoded or not, is resolved before coffre sees it, out of the credential's path altogether; an encoded slash is refused.
   for (const path of ['/../admin', '/%2e%2e/admin', '/.%2E/admin']) assert.equal((await call(path)).headers.get('coffre-proxy'), 'refused', path);
@@ -266,7 +303,7 @@ test('query and Basic credentials, with their methods and paths', async () => {
   const handle = await handleFor();
   const maps = await route(`/use/market/dev/maps/geocode?address=paris&key=${handle}`);
   assert.equal(maps.status, 200);
-  assert.equal(new URL(received.at(-1)!.url, 'http://x').searchParams.get('key'), 'maps_real_key_0123456789');
+  assert.equal(new URL(received.at(-1)!.url, 'http://x').searchParams.get('key'), 'maps+real/key=0123456789');
   assert.equal((await route(`/use/market/dev/maps/geocode?key=${handle}`, { method: 'POST' })).status, 405);
 
   const basicAuth = `Basic ${btoa(`${handle}:${handle}`)}`;
@@ -276,6 +313,31 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(sent.headers.authorization, `Basic ${btoa('AC0123456789:twilio_real_token_0123456789')}`);
   assert.equal(sent.body, 'To=%2B33600000000&Body=hi');
   assert.equal((await route('/use/market/dev/twilio/Other', { headers: { authorization: basicAuth } })).status, 403);
+
+  // An upstream echoing what it got gives back neither form of the keys: Basic's base64, the query's encoding.
+  const echoedBasic = await (await route('/use/market/dev/twilio/Accounts/echo', { headers: { authorization: basicAuth } })).text();
+  assert.equal(echoedBasic.includes(btoa('AC0123456789:twilio_real_token_0123456789')), false, echoedBasic);
+  assert.equal(echoedBasic.includes('twilio_real_token'), false);
+  const echoedQuery = await (await route(`/use/market/dev/maps/echo?key=${handle}`)).text();
+  assert.equal(echoedQuery.includes(encodeURIComponent('maps+real/key=0123456789')) || echoedQuery.includes('maps%2Breal%2Fkey%3D0123456789') || echoedQuery.includes('maps+real'), false, echoedQuery);
+});
+
+test('a handle for a fork reads what it inherits, and one for dev@me stands in for the personal config', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  const session = await sessionFor(DEV);
+  const fork = await bearer(session).handles.create({ label: 'run', paths: ['market/dev-eu'] });
+  assert.deepEqual(fork.scope, { 'market/dev-eu': 'viewer', 'market/dev': 'viewer' }, 'and the parent it inherits from, which DEV reads');
+  const inherited = await route('/use/market/dev-eu/schumann/companies', { headers: { 'x-api-key': fork.token } });
+  assert.equal(inherited.status, 200, await inherited.clone().text());
+  assert.equal(received.at(-1)!.headers['x-api-key'], KEY);
+
+  await clientFor(deps, DEV).secrets.set('market/dev@me', { DATABASE_URL: 'postgres://localhost/dev' });
+  const mine = await bearer(session).handles.create({ label: 'run', paths: ['market/dev@me'] });
+  assert.deepEqual(mine.scope, { 'market/dev': 'viewer' });
+  const plan = (await (await route('/use/market/dev@me', { headers: { authorization: `Bearer ${mine.token}` } })).json()) as { env: Record<string, string> };
+  assert.equal(plan.env.DATABASE_URL, 'postgres://localhost/dev', "the personal config's own value, not dev's");
+  assert.equal(plan.env.WEBHOOK_SECRET, undefined);
 });
 
 test('the plan: stand-ins for what the proxy covers, values only for what the exact environment exposes, never a fork or a personal config of it', async () => {

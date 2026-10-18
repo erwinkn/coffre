@@ -10,9 +10,11 @@ import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
 import { ApiError } from './api/errors.ts';
 import { parsePath } from './api/paths.ts';
-import { reveal } from './api/secrets.ts';
+import { reveal, type PickKeys } from './api/secrets.ts';
 import { fetchApi } from './fetch-api.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
+
+export type { PickKeys };
 
 /** One plugin, as its constructor returns it: `vaultKv({ mount: 'secret' })`. */
 export type CoffrePlugin = {
@@ -58,22 +60,22 @@ export type PluginContext = {
    * in process and nowhere else: the same checks, its person's grants and
    * the handle's scope, one vault entry naming the keys, and one
    * `credential.use` entry of the app's, with `logged` in it. Only the keys
-   * asked for, those the environment holds; `environment` is the one the
-   * read resolved to (`market/dev@me` may be a personal config). A refusal
-   * throws a `CoffreError`.
+   * asked for, or chosen, those the environment holds; `environment` is the
+   * one the read resolved to (`market/dev@me` may be a personal config). A
+   * refusal throws a `CoffreError`.
    */
   use(handle: string, asked: UseAsked): Promise<Used>;
 };
 
-/** What a plugin opens values for (`PluginContext.use`). */
-export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' | 'expose'; logged: Record<string, unknown> };
-
 /**
- * Values a plugin opened, every key the environment holds and those it
- * holds itself (not a parent's), the environment they came from, and when
- * the handle that opened them ends.
+ * What a plugin opens values for (`PluginContext.use`): `keys` by name, or
+ * chosen from what the read resolved (`PickKeys`), so that a choice about
+ * an environment's rows is made on the rows that are opened.
  */
-export type Used = { values: Record<string, string>; keys: string[]; own: string[]; environment: { path: string; personal: boolean }; expiresAt: string };
+export type UseAsked = { path: string; keys: readonly string[] | PickKeys; purpose: 'use' | 'expose'; logged: Record<string, unknown> };
+
+/** Values a plugin opened, every key the environment holds, the environment they came from, and when the handle that opened them ends. */
+export type Used = { values: Record<string, string>; keys: string[]; environment: { path: string; personal: boolean }; expiresAt: string };
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const PREFIX = /^(\/[a-z0-9][a-z0-9._-]*)+$/;
@@ -127,7 +129,7 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
       try {
         if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
         const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), asked);
-        return { values: read.values, keys: read.keys, own: read.own, environment: read.environment, expiresAt: caller.credentialExpiresAt! };
+        return { values: read.values, keys: read.keys, environment: read.environment, expiresAt: caller.credentialExpiresAt! };
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
         throw new CoffreError(error.status, error.code, error.message, error.reason);
