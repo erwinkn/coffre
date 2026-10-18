@@ -95,6 +95,17 @@ before(async () => {
         setTimeout(() => response.end(`${P_PASS.slice('acct_one'.length)} end`), 30);
         return;
       }
+      if (request.url!.includes('/geocode/bare')) {
+        // A trailing-slash redirect that drops the query.
+        response.writeHead(301, { location: `${upstreamUrl}/maps/geocode/` }).end();
+        return;
+      }
+      if (request.url === '/token/' || request.url === '/token') {
+        // An upstream at a path of its own, which canonicalizes away a trailing slash.
+        if (request.url === '/token/') response.writeHead(308, { location: `${upstreamUrl}/token` }).end();
+        else response.writeHead(200, { 'content-type': 'application/json' }).end('{"token":"t"}');
+        return;
+      }
       if (request.url!.includes('/geocode/redirect')) {
         // A trailing-slash redirect that keeps the query, key and all.
         response.writeHead(301, { location: `${upstreamUrl}/maps/geocode/?${request.url!.split('?')[1]}` }).end();
@@ -143,6 +154,7 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
       prefixed: { upstream: `${upstreamUrl}/prefixed`, inject: basic('{P_USER}', '{P_PASS}') },
       accented: { upstream: `${upstreamUrl}/accented`, inject: header('x-api-key', '{ACCENT_KEY}') },
+      token: { upstream: `${upstreamUrl}/token`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
       ubasic: { upstream: `${upstreamUrl}/ubasic`, inject: basic('{TWILIO_SID}', '{U_PASS}') },
     },
     expose: { 'market/dev': ['WEBHOOK_SECRET'] },
@@ -447,6 +459,16 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(to.origin + to.pathname, `${ORIGIN}/use/market/dev/maps/geocode/`);
   assert.equal(to.searchParams.get('key'), handle);
   assert.equal(to.searchParams.get('address'), 'paris');
+  const bare = await route(`/use/market/dev/maps/geocode/bare?key=${handle}`);
+  assert.equal(new URL(bare.headers.get('location')!).searchParams.get('key'), handle, 'a query the redirect dropped gets the handle back');
+
+  // The credential's own URL is its upstream's, with no slash added: no loop with an upstream that drops one.
+  const own = await route('/use/market/dev/token', { headers: { 'x-api-key': handle } });
+  assert.equal(own.status, 200);
+  assert.equal(received.at(-1)!.url, '/token');
+  const slashed = await route('/use/market/dev/token/', { headers: { 'x-api-key': handle } });
+  assert.equal(slashed.status, 308);
+  assert.equal(slashed.headers.get('location'), `${ORIGIN}/use/market/dev/token`);
 
   // An upstream echoing what it got gives back neither form of the keys: Basic's base64, the query's encoding.
   const echoedBasic = await (await route('/use/market/dev/twilio/Accounts/echo', { headers: { authorization: basicAuth } })).text();

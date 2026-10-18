@@ -229,7 +229,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
   // Nothing the app writes leaves the credential's upstream: no dot segment, no slash or backslash smuggled in a segment.
   if (rest.some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment))) return failure(400, 'the path may not climb out of the credential\'s upstream');
-  const target = new URL(`${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}${search}`);
+  // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
+  const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) {
     return failure(400, `${credential.name} reaches ${credential.base.href} only`);
@@ -281,9 +282,9 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const to = new URL(location, target);
     const inside = to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
-      // The proxy's URL for it, the key's parameter back to the handle, as the app sent it, for the app to follow.
+      // The proxy's URL for it, and a query rule's parameter, kept or not, the handle, for the app to follow and be let in.
       const back = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);
-      if (inject.kind === 'query' && back.searchParams.has(inject.name)) back.searchParams.set(inject.name, handle);
+      if (inject.kind === 'query') back.searchParams.set(inject.name, handle);
       at = back.href;
     } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
