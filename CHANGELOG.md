@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.0 (2026-10-18)
+
 - **Stand-ins: people's apps use secrets without holding them.** A vault
   option, `people: 'stand-ins'`, makes every read a person asks for, on
   any credential of theirs (a session, a personal token, MCP), refused if
