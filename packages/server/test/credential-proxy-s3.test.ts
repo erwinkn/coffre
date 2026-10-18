@@ -133,7 +133,6 @@ useMcp(
           s3: {
             upstream: s3Url,
             inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: REGION, service: 's3' }),
-            baseUrl: 'AWS_ENDPOINT_URL_S3',
           },
         },
         insecureUpstreams: true,
@@ -151,16 +150,15 @@ useMcp(
   { people: 'stand-ins' },
 );
 
-/** The app's S3 client, configured from what `coffre run` gave it, as an app configures one for MinIO. */
+/** The app's S3 client, its keys from what `coffre run` gave it and its endpoint the proxy's stable URL, as an app configures one for MinIO. */
 async function appClient(): Promise<{ client: S3Client; handle: string }> {
   const handle = (await (await route('/api/handles', { method: 'POST', headers: { authorization: `Bearer ${await sessionFor(DEV)}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: ['market/dev'] }) })).json() as { token: string }).token;
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string> };
   assert.equal(plan.env.AWS_ACCESS_KEY_ID, handle);
-  assert.equal(plan.env.AWS_ENDPOINT_URL_S3, `${ORIGIN}/use/market/dev/s3`);
   const client = new S3Client({
     region: REGION,
-    // The test's coffre listens on loopback; deployed, the plan's URL is it.
-    endpoint: plan.env.AWS_ENDPOINT_URL_S3!.replace(ORIGIN, coffreUrl),
+    // The app's own config: `<publicUrl>/use/s3`, which the test's coffre, on loopback, answers.
+    endpoint: `${coffreUrl}/use/s3`,
     forcePathStyle: true,
     credentials: { accessKeyId: plan.env.AWS_ACCESS_KEY_ID!, secretAccessKey: plan.env.AWS_SECRET_ACCESS_KEY! },
     // No aws-chunked uploads: their chunk signatures chain from one only the real key makes.
@@ -230,7 +228,7 @@ test("coffre's signer signs as the AWS SDK's does: S3's path encoded once, anoth
 });
 
 test('a key no header can carry is refused, and quoted nowhere', async () => {
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: { s3: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: '{AWS_SESSION_TOKEN}', region: REGION, service: 's3' }), baseUrl: 'AWS_ENDPOINT_URL_S3' } }, insecureUpstreams: true })]);
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: { s3: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: '{AWS_SESSION_TOKEN}', region: REGION, service: 's3' }) } }, insecureUpstreams: true })]);
   await clientFor(deps, ROOT).secrets.set('market/dev', { AWS_SESSION_TOKEN: 'token-line\nbreak-0123456789' });
   const { handle } = await appClient();
   const logged: unknown[] = [];

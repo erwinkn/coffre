@@ -671,6 +671,8 @@ export const credentials = sqliteTable(
     identityId: text('identity_id'),
     // What a service or personal token reaches (`CredentialScope`), JSON: null for a session, one a binding issued (its binding's), or one of 0.4 the app has not sealed yet.
     scope: text(),
+    // The environments a handle was made for, by id, each with whether it was asked for as `@me`, JSON: null for any other credential, or a handle of 0.8.
+    places: text(),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),

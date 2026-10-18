@@ -5,7 +5,7 @@ import type { Access } from '@coffre/core/vault';
 import { callerFrom, loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
-import { CredentialUncheckable, type PersonalToken } from './api/signin.ts';
+import { CredentialUncheckable, type HandlePlace, type PersonalToken } from './api/signin.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -25,6 +25,8 @@ export type AuthenticatedIdentity = {
   provenance: string | null;
   /** The personal token the request came in on, which acts as its person within its scope; null for anything else. */
   personalToken: PersonalToken | null;
+  /** The environments the handle it came in on was made for; null for anything else, or a handle of 0.8. */
+  handlePlaces: readonly HandlePlace[] | null;
   /** The MCP connection a tool's call came through; null for every other request. */
   via: McpVia | null;
 };
@@ -144,6 +146,7 @@ export async function authenticateRequest(
   let exchanged = false;
   let credentialScope: CredentialScope | null = null;
   let personalToken: PersonalToken | null = null;
+  let handlePlaces: readonly HandlePlace[] | null = null;
   let checked: Access | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
@@ -153,9 +156,10 @@ export async function authenticateRequest(
       exchanged?: boolean;
       credentialScope?: CredentialScope | null;
       personalToken?: PersonalToken | null;
+      handlePlaces?: readonly HandlePlace[] | null;
       expiresAt?: string;
     };
-    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, ...principal } = verified);
+    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
@@ -183,6 +187,7 @@ export async function authenticateRequest(
       credentialExpiresAt,
       provenance: exchanged || personalToken !== null || handle ? credentialId : null,
       personalToken,
+      handlePlaces,
       via: null,
     };
   } catch (error) {

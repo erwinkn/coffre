@@ -5,18 +5,22 @@
 // it opens the credential's values for them and injects them into the
 // request, for the credential's upstream alone. Here Schumann's client, as
 // Equisafe's backend has it, reaches a fake Schumann through the proxy with
-// no change but its base URL and key, and the fake checks it got the real key.
-import test, { after, before } from 'node:test';
+// no change but its base URL, the proxy's stable URL in the app's own
+// config, and its key, and the fake checks it got the real key.
+import test, { after, before, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { credential } from '@coffre/client/credential';
+import { eq } from 'drizzle-orm';
 
 import { clientFor, contextFor } from './api-fixture.ts';
-import { callRaw, connect, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { callRaw, connect, db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { credentials, environments } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
+import { authMac } from '../src/auth-rows.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { setSecurityHeaders } from '../src/security-headers.ts';
 import { basic, credentialProxy, header, query, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
@@ -126,6 +130,11 @@ before(async () => {
         response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600', expires: 'Thu, 01 Jan 2099 00:00:00 GMT' }).end('{}');
         return;
       }
+      if (request.url!.includes('/redirect-collide')) {
+        // Under the upstream, at a path that begins with an environment's name, then a credential's.
+        response.writeHead(307, { location: `${upstreamUrl}/v1/dev/maps/companies` }).end();
+        return;
+      }
       if (request.url!.includes('/redirect-inside')) {
         response.writeHead(302, { location: `${upstreamUrl}/v1/companies?page=2` }).end();
         return;
@@ -154,7 +163,7 @@ after(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
 function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): CredentialProxyOptions {
   return {
     credentials: {
-      schumann: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
+      schumann: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
       maps: { upstream: `${upstreamUrl}/maps`, inject: query('key', '{MAPS_KEY}'), methods: ['GET'] },
       twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'], paths: ['/Accounts'] },
       padded: { upstream: `${upstreamUrl}/padded`, inject: header('x-api-key', '{PADDED_KEY}') },
@@ -181,7 +190,6 @@ useMcp(
     await root.environments.create('market/dev');
     await root.secrets.set('market/dev', {
       SCHUMANN_API_KEY: KEY,
-      SCHUMANN_BASE_URL: 'https://api.schumann.example/v1',
       MAPS_KEY: 'maps+real/key=0123456789',
       TWILIO_SID: 'AC0123456789',
       TWILIO_TOKEN: 'twilio_real_token_0??0123456789',
@@ -324,13 +332,15 @@ test("a personal token makes handles within its scope and its end, and never a s
   assert.equal((await refusal(bearer(ci).handles.create({ label: 'x', paths: ['market/dev'] }))).status, 403);
 });
 
-test("Schumann's own client, its base URL and key from `coffre run`, reaches the fake Schumann with the real key, and nothing else does", async () => {
+test("Schumann's own client, its base URL the proxy's stable URL and its key from `coffre run`, reaches the fake Schumann with the real key, and nothing else does", async () => {
   const handle = await handleFor();
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; credentials: Record<string, string>; left: string[] };
   assert.equal(plan.env.SCHUMANN_API_KEY, handle);
-  assert.equal(plan.env.SCHUMANN_BASE_URL, `${ORIGIN}/use/market/dev/schumann`);
+  assert.equal(Object.keys(plan.env).some((key) => key.endsWith('_BASE_URL')), false, 'the app sets its base URLs itself');
+  assert.equal(plan.credentials.schumann, `${ORIGIN}/use/market/dev/schumann`, "the helper's: the environment's URL");
 
-  const schumann = new SchumannApiClient({ baseUrl: plan.env.SCHUMANN_BASE_URL!, apiKey: plan.env.SCHUMANN_API_KEY! });
+  // The app's own config, the same for every environment: `local` maps to the stable URL.
+  const schumann = new SchumannApiClient({ baseUrl: `${ORIGIN}/use/schumann`, apiKey: plan.env.SCHUMANN_API_KEY! });
   const answer = await schumann.get<{ companies: unknown[]; path: string }>('/companies?q=acme');
   assert.deepEqual(answer.companies, [{ siren: '123' }]);
   assert.equal(answer.path, '/v1/companies?q=acme');
@@ -549,6 +559,115 @@ test('a handle for a fork reads what it inherits, and one for dev@me stands in f
   assert.equal(plan.env.WEBHOOK_SECRET, undefined);
 });
 
+test("the stable URL, /use/<credential>, is the handle's environment's: a fork's, a personal config's, or a refusal that names the environment's", async () => {
+  const handle = await handleFor();
+  const stable = (path: string, token = handle, init: RequestInit = {}) => route(`/use/schumann${path}`, { ...init, headers: { 'x-api-key': token, ...(init.headers as Record<string, string> | undefined) } });
+  const root = await stable('');
+  assert.equal(((await root.json()) as { path: string }).path, '/v1', 'the credential itself is its upstream');
+  // One opening for the environment, whichever URL names it.
+  assert.equal((await route('/use/market/dev/schumann/companies', { headers: { 'x-api-key': handle } })).status, 200);
+  assert.equal((await entries('credential.use')).filter((entry) => entry.metadata.credential === 'schumann').length, 1);
+  // A redirect under the upstream stays on the proxy, at the environment's URL, which nothing else can mean.
+  assert.equal((await stable('/redirect-inside')).headers.get('location'), `${ORIGIN}/use/market/dev/schumann/companies?page=2`);
+
+  // No handle where Schumann takes its key, nor as x-coffre-handle, and nothing goes: a bearer is the plan's.
+  const sent = received.length;
+  for (const headers of [{}, { authorization: `Bearer ${handle}` }, { 'x-api-key': 'sk_guess' }] as Record<string, string>[]) {
+    const refused = await route('/use/schumann/companies', { headers });
+    assert.equal(refused.status, 401, JSON.stringify(headers));
+    assert.equal(refused.headers.get('coffre-proxy'), 'refused');
+  }
+  assert.equal(received.length, sent);
+
+  // A fork's handle reads what it inherits; a personal config's, its own value over dev's.
+  const session = await sessionFor(DEV);
+  await clientFor(deps, ROOT).environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  const fork = await bearer(session).handles.create({ label: 'run', paths: ['market/dev-eu'] });
+  assert.equal((await stable('/companies', fork.token)).status, 200);
+  assert.equal(received.at(-1)!.headers['x-api-key'], KEY);
+  await clientFor(deps, DEV).secrets.set('market/dev@me', { SCHUMANN_API_KEY: QUOTED });
+  const mine = await bearer(session).handles.create({ label: 'run', paths: ['market/dev@me'] });
+  assert.equal((await stable('/companies', mine.token)).status, 200);
+  assert.equal(received.at(-1)!.headers['x-api-key'], QUOTED, "the personal config's");
+  assert.equal((await stable('/companies', await handleFor())).status, 200);
+  assert.equal(received.at(-1)!.headers['x-api-key'], KEY, "dev's, for a run of dev");
+
+  // A handle for several environments names none: the environment's URL does, and still works.
+  const both = await bearer(session).handles.create({ label: 'run', paths: ['market/dev', 'market/dev-eu'] });
+  const ambiguous = await stable('/companies', both.token);
+  assert.equal(ambiguous.status, 409);
+  assert.match(((await ambiguous.json()) as { message: string }).message, new RegExp(`2 environments.*${ORIGIN}/use/market/dev/schumann or ${ORIGIN}/use/market/dev-eu/schumann`));
+  assert.equal((await route('/use/market/dev-eu/schumann/companies', { headers: { 'x-api-key': both.token } })).status, 200);
+
+  // Renamed, it is the same environment: the handle keeps it by id, and the stable URL follows within the cache's minute.
+  runtime.plugins = checkPlugins([credentialProxy(proxyOptions({ cacheSeconds: 0 }))]);
+  await clientFor(deps, ROOT).environments.update('market/dev-eu', { slug: 'europe' });
+  assert.equal((await stable('/companies', fork.token)).status, 200);
+  const moved = await stable('/companies', both.token);
+  assert.match(((await moved.json()) as { message: string }).message, new RegExp(`${ORIGIN}/use/market/europe/schumann`));
+  // Deleted, it still counts: the handle was made for two, and the stable URL picks neither.
+  await clientFor(deps, ROOT).environments.update('market/europe', { archived: true });
+  await clientFor(deps, ROOT).environments.delete('market/europe');
+  assert.equal((await stable('/companies', both.token)).status, 409);
+  assert.equal((await stable('/companies', fork.token)).status, 409, 'nor any, for a handle whose one environment is gone');
+});
+
+test('/use/<a>/<b>/… names an environment exactly when <a>/<b> is one the handle was made for, a project named like a credential included', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('schumann');
+  await root.environments.create('schumann/dev');
+  await root.secrets.set('schumann/dev', { SCHUMANN_API_KEY: KEY, MAPS_KEY: 'maps_of_schumann_0123456789' });
+  await root.access.set(`user:${DEV}`, { market: 'developer', schumann: 'developer' });
+  const session = await sessionFor(DEV);
+  const handle = (await bearer(session).handles.create({ label: 'run', paths: ['schumann/dev'] })).token;
+  const path = async (url: string, headers: Record<string, string>) => {
+    const response = await route(url, { headers });
+    assert.equal(response.status, 200, `${url}: ${await response.clone().text()}`);
+    return received.at(-1)!.url;
+  };
+  assert.equal(await path('/use/schumann/dev/schumann/companies', { 'x-api-key': handle }), '/v1/companies', "the environment's");
+  assert.equal(await path('/use/schumann/companies', { 'x-api-key': handle }), '/v1/companies', 'the stable URL');
+  assert.equal(await path(`/use/schumann/dev/maps/geocode?key=${handle}`, {}), '/maps/geocode?key=maps_of_schumann_0123456789', 'another credential of the environment, its key where that one takes it');
+  const plan = await route('/use/schumann/dev', { headers: { authorization: `Bearer ${handle}` } });
+  assert.equal(((await plan.json()) as { environment: string }).environment, 'schumann/dev', 'and its plan');
+  // For a run of market/dev, schumann/dev is no environment of the handle's: it is a path under Schumann's upstream.
+  assert.equal(await path('/use/schumann/dev/companies', { 'x-api-key': await handleFor() }), '/v1/dev/companies');
+  // A redirect from the stable URL to Schumann's /v1/dev/maps/… keeps to Schumann: on the stable URL it would read as schumann/dev's maps.
+  const moved = await route('/use/schumann/redirect-collide', { method: 'POST', headers: { 'x-api-key': handle }, body: '{}' });
+  const location = moved.headers.get('location')!;
+  assert.equal(location, `${ORIGIN}/use/schumann/dev/schumann/dev/maps/companies`);
+  assert.equal(await path(location.slice(ORIGIN.length), { 'x-api-key': handle }), '/v1/dev/maps/companies');
+});
+
+test("a handle keeps the environments it was made for under its row's MAC; one of 0.8, which has none, gets no stable URL rather than a guess", async () => {
+  const made = await bearer(await sessionFor(DEV)).handles.create({ label: 'run', paths: ['market/dev@me', 'market/dev@me'] });
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, made.id));
+  const [dev] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
+  assert.deepEqual(JSON.parse(row!.places!), [{ environmentId: dev!.id, personal: true }], 'by id, as asked, once each');
+  const at = (token: string) => route('/use/schumann/companies', { headers: { 'x-api-key': token } });
+  assert.equal((await at(made.token)).status, 200);
+
+  // Edited around the app, it is refused: the places are the MAC's.
+  const report = mock.method(console, 'error', () => {});
+  try {
+    runtime.plugins = checkPlugins([credentialProxy(proxyOptions())]);
+    await db.owner.update(credentials).set({ places: JSON.stringify([{ environmentId: dev!.id, personal: false }]) }).where(eq(credentials.id, made.id));
+    assert.equal((await at(made.token)).status, 401);
+    assert.ok(report.mock.calls.some((call) => (call.arguments[0] as { event?: string } | undefined)?.event === 'auth_row_tampered'));
+  } finally {
+    report.mock.restore();
+  }
+
+  // As 0.8 made it: no paths, its MAC over 0.8's tuple. It works where it names its environment, and nowhere else.
+  runtime.plugins = checkPlugins([credentialProxy(proxyOptions())]);
+  const old = { ...row!, places: null };
+  await db.owner.update(credentials).set({ places: null, authMac: authMac(deps.chainKey, 'credentials', old) }).where(eq(credentials.id, made.id));
+  assert.equal((await route('/use/market/dev@me/schumann/companies', { headers: { 'x-api-key': made.token } })).status, 200);
+  const refused = await at(made.token);
+  assert.equal(refused.status, 409);
+  assert.match(((await refused.json()) as { message: string }).message, /before coffre 0\.9.*coffre run/);
+});
+
 test('the plan: stand-ins for what the proxy covers, values only for what the exact environment exposes, never a fork or a personal config of it', async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
@@ -606,6 +725,9 @@ test('the configuration is checked: HTTPS upstreams, no private address, rules t
   assert.throws(make({ a: { upstream: 'https://api.example.com', inject: header('x', 'static') } }), /names no key/);
   assert.throws(make({ A: { upstream: 'https://api.example.com', inject: header('x', '{K}') } }), /lowercase/);
   assert.throws(make({}, { expose: { 'market/*': 'all' } }), /exact|by path/);
+  // `baseUrl` is gone in 0.9: refused at typecheck and at startup, naming the URL the app's config points at instead.
+  // @ts-expect-error -- the type says where the URL goes now
+  assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), baseUrl: 'SCHUMANN_BASE_URL' } }), /schumann's baseUrl is gone in 0\.9.*SCHUMANN_BASE_URL.*<publicUrl>\/use\/schumann/);
   assert.doesNotThrow(make({ a: { upstream: 'https://api.example.com/v1', inject: header('authorization', 'Bearer {K}') } }));
   assert.doesNotThrow(make({ a: { upstream: 'http://127.0.0.1:9000', inject: header('x', '{K}') } }, { insecureUpstreams: true }));
 });

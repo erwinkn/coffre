@@ -3,7 +3,9 @@
 A design for 0.8, written on 2026-10-18 (W125), from Erwin's R11 and R13.
 PR 1 is built: stand-ins for people, handles, the proxy's HTTP shapes
 (a header, a query parameter, Basic) and `coffre run`'s side of it. PR 2
-adds SigV4, for S3. PR 3 adds the Postgres tunnel, on Node (section 9). The decisions in section 8
+adds SigV4, for S3. PR 3 adds the Postgres tunnel, on Node (section 9).
+0.9 (W127) adds the stable URL, `/use/<credential>`, and removes
+`baseUrl` (section 4). The decisions in section 8
 were taken on the recommended option while Erwin was away (R10), and each
 is his to revisit.
 
@@ -26,18 +28,26 @@ The app's environment, as the backend sees it:
 
 ```sh
 SCHUMANN_API_KEY=coffre_use_Qm9Y…            # the handle, where the key was
-SCHUMANN_BASE_URL=https://secrets.acme.example/use/market/dev/schumann
 STRIPE_WEBHOOK_SECRET=whsec_local_…          # exposed: a local-only value
 COFFRE_CREDENTIALS={"schumann":"https://secrets.acme.example/use/market/dev/schumann"}
 COFFRE_HANDLE=coffre_use_Qm9Y…
 ```
 
+and the base URL is the app's own configuration, which already maps each
+of its environments to Schumann's: its local one points at the proxy's
+stable URL for the credential, the same for every coffre environment.
+
+```ts
+const schumannUrl = { local: 'https://secrets.acme.example/use/schumann', production: 'https://api.schumann.example/v1' }[APP_ENV];
+```
+
 Schumann's client is unchanged. It still appends `/companies` to its base
 URL and sends the key as `x-api-key`. The request reaches coffre, which
-finds the handle where the key goes, opens `SCHUMANN_API_KEY` for the
-person the handle stands in for, puts the real key in `x-api-key` and
-sends the request to `https://api.schumann.example/v1/companies`. The real
-key never reaches the machine.
+finds the handle where the key goes, opens `SCHUMANN_API_KEY` of the
+environment the handle was made for, `market/dev`, for the person it
+stands in for, puts the real key in `x-api-key` and sends the request to
+`https://api.schumann.example/v1/companies`. The real key never reaches
+the machine.
 
 ## 2. The model
 
@@ -78,6 +88,13 @@ holds in place of a value. It is a credential row of its own kind
 - `coffre run` makes one per run, with the person's session or personal
   token (`POST /api/handles`), labelled `coffre run market/dev on
   <hostname>`.
+- It keeps the environments it was made for, by id and whether as `@me`
+  (`market/dev@me`), under its row's MAC (migration `0010_handle_places`,
+  a nullable column). They are what the stable URL resolves to (section
+  4), by the names they have now: a project or an environment renamed
+  while the handle lasts is still its environment. Its scope cannot say:
+  `market/dev@me` is scoped as `market/dev`, and a fork's scope holds its
+  parents too.
 
 **A credential** is a named bundle of an environment's keys, plus the
 rule by which they authenticate, declared in the deployment's
@@ -86,8 +103,8 @@ configuration:
 ```ts
 credentialProxy({
   credentials: {
-    schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
-    openai: { upstream: 'https://api.openai.com/v1', inject: header('authorization', 'Bearer {OPENAI_API_KEY}'), baseUrl: 'OPENAI_BASE_URL' },
+    schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
+    openai: { upstream: 'https://api.openai.com/v1', inject: header('authorization', 'Bearer {OPENAI_API_KEY}') },
     maps: { upstream: 'https://maps.googleapis.com/maps/api', inject: query('key', '{MAPS_API_KEY}'), methods: ['GET'] },
     // The account's id is in Twilio's paths, /Accounts/{sid}/Messages.json: an identifier, which the app holds as it is.
     twilio: { upstream: 'https://api.twilio.com/2010-04-01', inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'], paths: ['/Accounts'] },
@@ -97,10 +114,12 @@ credentialProxy({
 ```
 
 - The keys are the rule's `{KEY}` placeholders, and come from the
-  environment the request names. One credential then serves `market/dev`
-  and `market/staging` alike, each with its own values.
-- `upstream` is where its requests go: `/use/<project>/<env>/<name>/<path>`
-  goes to `<upstream>/<path>` and nowhere else.
+  request's environment: the one the handle was made for, or the one its
+  URL names. One credential then serves `market/dev` and `market/staging`
+  alike, each with its own values.
+- `upstream` is where its requests go: `/use/<name>/<path>`, and
+  `/use/<project>/<env>/<name>/<path>`, go to `<upstream>/<path>` and
+  nowhere else.
 - A handle grants the use of every credential its environment holds, and
   each only to its own upstream.
 - `identifiers` names the keys a rule reads that are no secret and that
@@ -186,7 +205,7 @@ answers:
 ```json
 {
   "environment": "market/dev",
-  "env": { "SCHUMANN_API_KEY": "coffre_use_…", "SCHUMANN_BASE_URL": "https://…/use/market/dev/schumann", "STRIPE_WEBHOOK_SECRET": "whsec_…" },
+  "env": { "SCHUMANN_API_KEY": "coffre_use_…", "STRIPE_WEBHOOK_SECRET": "whsec_…" },
   "credentials": { "schumann": "https://…/use/market/dev/schumann" },
   "left": ["SENTRY_DSN"]
 }
@@ -196,8 +215,89 @@ A credential appears when its environment holds every key of its rule.
 Each of those keys becomes the handle, so a rule that frames its keys
 (`Bearer {K}`, Basic's `user:password`) finds the handle wherever it ends
 up. `left` lists what the app does without, and `coffre run` prints it.
+`credentials` is what `COFFRE_CREDENTIALS` holds for `credential(name)`:
+each credential's URL for the environment, which a run of several
+environments tells apart, and from which `presign()` finds the
+environment's.
 
-`ANY /use/<project>/<env>/<credential>/<path>` is a request sent on:
+`ANY /use/<credential>/<path>` is the **stable URL**, the same for every
+environment, which the app's own configuration names. Its environment is
+the one the handle was made for: a fork, or
+`market/dev@me` and with it the person's own values over dev's. Nothing
+of the app's (no `APP_ENV`, no environment's name) reaches coffre:
+
+```sh
+$ coffre run market/dev -- pnpm dev        # GET https://…/use/schumann/companies → market/dev's key
+$ coffre run market/dev@me -- pnpm dev     # the same URL → the personal config's key, or dev's while it has none
+$ coffre run market/dev-eu -- pnpm dev     # → dev-eu's, or the key it inherits from dev
+```
+
+- **A handle made for several environments** (`coffre run market/dev
+  auth/dev`) gets a 409 on the stable URL, naming each environment's
+  (`…/use/market/dev/schumann or …/use/auth/dev/schumann`), which still
+  work. The rule depends on the handle alone, never on what the
+  environments hold now, so a key set in one of them later cannot move a
+  running app's requests to the other, and nothing is opened to find out.
+  One of them deleted still counts, and a handle whose one environment
+  was deleted gets a 409 too.
+- **No handle**, where the credential takes its key or as
+  `x-coffre-handle`, is a 401, and nothing goes upstream: there is no
+  default environment.
+- **A handle of 0.8**, which kept no environments, gets a 409 that says to
+  run `coffre run` again. Its environments' URLs work as before, unless
+  the project is named like a credential: the rule below needs them.
+- **Which route.** `/use/<a>/<b>/…` names an environment exactly when
+  `<a>/<b>` is one the handle was made for, and is otherwise the stable
+  URL of credential `<a>`. The URL and the handle decide, and a request
+  never goes through an environment its handle was not made for by
+  accident. Project slugs and credential names overlap
+  (`^[a-z0-9][a-z0-9-]{0,62}…$` and `^[a-z][a-z0-9-]{0,31}$`), so a
+  project named `schumann`, beside the credential, is the case this rule
+  is for. With a handle made for `schumann/dev`:
+
+  | Request | Is |
+  |---|---|
+  | `GET /use/schumann/dev` (a bearer) | `schumann/dev`'s plan |
+  | `ANY /use/schumann/dev/schumann/companies` | `schumann/dev`'s, through credential schumann |
+  | `ANY /use/schumann/companies` | the stable URL: credential schumann, `/companies` |
+  | `ANY /use/schumann/dev/companies` with a handle for `market/dev` | the stable URL: credential schumann, `/dev/companies` |
+  | `ANY /use/schumann/dev/companies` with the handle for `schumann/dev` | `schumann/dev`'s, through a credential `companies`: Schumann's own `/dev/…` is `/use/schumann/dev/schumann/dev/…` for this run |
+
+  Where `<a>` names no credential, the URL is an environment's, as in 0.8,
+  and costs nothing more. Where it does, the request carries a handle (in
+  the slot of credential `<a>` or of `<c>`, or as a bearer, for a plan),
+  whose environments' paths are asked of coffre (the handle's check, and
+  one read of their names) and kept for `cacheSeconds`, as values are. Its
+  values are opened and kept as an environment URL's are, in the same
+  cache, so both URLs of one environment share one opening a minute.
+
+  The other rule is a reserved segment, one no project slug can be:
+  `/use/-/schumann/…`, as GitLab's `/-/` keeps its own routes apart from
+  its users' names. It decides from the URL alone, with no lookup, and
+  has no case like the last row above. It was not taken because the
+  stable URL is what people write in their configuration, and
+  `https://secrets.acme.example/use/schumann` is the one they would
+  expect. The last row, the one case it reads differently, needs a
+  project named like a credential, a run of it, and an upstream path
+  that begins with the name of the environment it runs.
+- **Tunnels and `presign` stay an environment's** (`/use/<project>/<env>/<tunnel>`,
+  `POST /use/<project>/<env>`). `coffre run` sets a tunnel's URL itself,
+  and `presign()` reads the environment's from `COFFRE_CREDENTIALS`: no
+  app configuration names either, so a stable form would serve no one.
+
+**`baseUrl` is gone (0.9).** In 0.8 a credential named the key the app
+read its upstream's address from, and `coffre run` set it to the
+environment's proxy URL (`SCHUMANN_BASE_URL=…/use/market/dev/schumann`).
+That URL changed with each environment, fork and `@me`, so the app could
+not name it, and coffre wrote into the app's configuration. With the
+stable URL the app names it, once. A configuration that still has
+`baseUrl` fails, at typecheck (its type is the message) and at startup
+(`credentialProxy: schumann's baseUrl is gone in 0.9, … point the app's
+own config at … <publicUrl>/use/schumann …`), rather than be ignored. A
+key of that name the environment still holds is listed in `left`.
+
+`ANY /use/<project>/<env>/<credential>/<path>`, or the stable URL, is a
+request sent on:
 
 1. **Where.** The target is `<upstream>/<path>?<query>`, checked to
    stay under `upstream`'s origin and path. A dot segment is resolved
@@ -229,8 +329,11 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    origin runs no script and holds no cookie of coffre's, so a file an
    agent uploads cannot act as an Owner who opens its link. A redirect
    stays on the proxy. A `Location` under the upstream becomes the proxy's
-   own URL for it, with the app's stand-in back in a query rule's
-   parameter (what it sent there, if that stands in for its handle). A
+   own URL for it, the environment's even from the stable URL, with the
+   app's stand-in back in a query rule's parameter (what it sent there, if
+   that stands in for its handle). On the stable URL, a path that begins
+   with an environment of the handle's would read as that environment's
+   (`/use/schumann/dev/maps/…`, another credential). A
    redirect anywhere else is a 502, naming no destination, so the app
    never follows it with the handle.
 6. **Redacted.** Every string the request carried, each value and
@@ -276,7 +379,6 @@ small enough to read.
 s3: {
   upstream: 'https://s3.eu-west-3.amazonaws.com',
   inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }),
-  baseUrl: 'AWS_ENDPOINT_URL_S3',
 },
 ```
 
@@ -284,7 +386,7 @@ and the app's client, as an app configures one for MinIO:
 
 ```ts
 new S3Client({
-  endpoint: process.env.AWS_ENDPOINT_URL_S3,      // https://secrets.acme.example/use/market/dev/s3
+  endpoint: 'https://secrets.acme.example/use/s3', // the app's own config for local; the stable URL
   forcePathStyle: true,                           // the bucket in the path: the proxy has one host
   requestChecksumCalculation: 'WHEN_REQUIRED',    // no aws-chunked uploads (below)
   responseChecksumValidation: 'WHEN_REQUIRED',
@@ -467,10 +569,12 @@ dfns: {
   upstream: 'https://api.dfns.io',
   inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'),
   standIn: jwt({ claims: ['https://custom/app_metadata'] }),
-  baseUrl: 'DFNS_API_URL',
 },
 stripe: { upstream: 'https://api.stripe.com', inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), standIn: prefix('sk_test_') },
 ```
+
+and the app's SDK, its base URL the stable URL in its own config:
+`new DfnsApiClient({ baseUrl: 'https://secrets.acme.example/use/dfns', authToken: process.env.DFNS_AUTH_TOKEN, … })`.
 
 - `jwt({ claims })` gives the app `header.payload.<handle>`. The header is
   `{"alg":"none","typ":"JWT"}`. The payload holds the named claims,
@@ -597,8 +701,8 @@ cache's minute (`cacheSeconds: 0` turns both off).
 
 **What `coffre run` makes a stand-in, and what it leaves out.** A person
 on an instance with the proxy gets the plan (section 4): stand-ins for each
-credential's keys, the proxy's URL for its `baseUrl`, the exposed values
-as they are, and nothing else. A service account gets values, as before.
+credential's keys, the exposed values as they are, and nothing else. It
+sets no base URL: the app's configuration names the stable URL. A service account gets values, as before.
 An instance without the proxy gets the old read, which the vault refuses
 to people with `people: 'stand-ins'`. `coffre export` writes the same
 stand-ins (a `.env` for Docker Compose holds handles, not keys).
@@ -670,6 +774,29 @@ is reversible.
     `Content-Length`. Uploads larger than that go through S3's own path
     (PR 2) or a presigned URL.
 
+Taken in 0.9 (W127), each for Erwin to review, each reversible:
+
+12. **The stable URL is `/use/<credential>`, told apart by the handle's
+    environments**: `/use/<a>/<b>/…` is an environment's when the handle was made
+    for `<a>/<b>`. *Alternative:* a reserved segment, `/use/-/<credential>`,
+    decided by the URL alone (section 4).
+13. **A handle keeps the environments it was made for** (`0010_handle_places`),
+    by id and whether as `@me`, under its MAC: its scope cannot tell
+    `market/dev@me` from `market/dev`, nor a fork from the parents it
+    holds. By id, as its scope is, so a rename keeps them.
+14. **A handle for several environments gets a 409 on the stable URL**,
+    naming the environments' URLs. *Alternative:* resolve to the one
+    environment that holds the credential's keys, which `coffre run`'s
+    own rule (a key comes from one environment only) makes unique within
+    a run, but which costs a read of each to find, and moves when a key is
+    set later.
+15. **`COFFRE_CREDENTIALS` keeps the environment's URLs.** `coffre run`
+    sets it for every run, so its URLs need not be stable; an
+    environment's works for a run of several, and `presign()` derives the
+    environment's URL from it.
+16. **`baseUrl` is removed, not deprecated**: refused at startup and by
+    its type, with the URL to configure instead.
+
 ## 9. Plan
 
 | PR | What |
@@ -677,6 +804,7 @@ is reversible.
 | 1 | Stand-ins in the vault (`people`), handles (`0009_handles`, `POST /api/handles`), the plugin's `use` capability, `credentialProxy` with header, query and Basic, the plan, `coffre run`/`export` stand-ins, `@coffre/client/credential`. Built |
 | 2 | `sigv4()`: S3 through the proxy, tested with the AWS SDK against a signature-checking fake, and by hand against MinIO. Built |
 | 3 | The Postgres tunnel: a socket capability for plugins (`routes.socket`, Node's `upgrade`), the listener in `coffre run`, SCRAM, cancel, revocation mid-session. Built |
+| 0.9 E | The stable URL, `/use/<credential>`, from the environments a handle keeps (`0010_handle_places`); `baseUrl` removed. Built |
 | 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), checked on a deployed Worker; the privileged-role warning |
 | 4 | Redis through the tunnel |
 | 5 | `sign`/`presign`/`verify` helpers, SDK credential files |

@@ -335,6 +335,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     exchanged: false,
     credentialScope: null,
     personalToken: null,
+    handlePlaces: null,
     expiresAt: result.credential.expiresAt,
   });
   // What the vault said of them, which the request's caller is: no second call.
@@ -792,6 +793,7 @@ test('owners issue service tokens that verify as the service', async () => {
     exchanged: false,
     credentialScope: [{ projectId: reads, environmentId: null, role: 'viewer' }],
     personalToken: null,
+    handlePlaces: null,
     expiresAt: issued.expiresAt,
   });
   assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
@@ -960,6 +962,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     exchanged: false,
     credentialScope: null,
     personalToken: null,
+    handlePlaces: null,
     expiresAt: approved.credential.expiresAt,
   });
   assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);

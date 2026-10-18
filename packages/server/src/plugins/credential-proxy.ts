@@ -2,15 +2,15 @@
  * The credential proxy (docs/design/credential-proxy.md): a person's app,
  * an agent's included, uses secrets without ever holding them. `coffre run`
  * gives it a stand-in for each, a handle (`coffre_use_…`) that reaches
- * nothing but this proxy, and points its base URL here; the proxy swaps in
- * the real value at the edge, for the credential's own upstream only. In
- * the deployment's configuration:
+ * nothing but this proxy, and the app's own config points its client here;
+ * the proxy swaps in the real value at the edge, for the credential's own
+ * upstream only. In the deployment's configuration:
  *
  *   import { credentialProxy, header, sigv4 } from '@coffre/server/plugins/credential-proxy';
  *   plugins: [credentialProxy({
  *     credentials: {
- *       schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
- *       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }), baseUrl: 'AWS_ENDPOINT_URL_S3' },
+ *       schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
+ *       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
  *     },
  *     expose: { 'market/local': 'all' },
  *   })],
@@ -18,8 +18,14 @@
  * and its app's route, `routes/use.$.ts`, `createFileRoute('/use/$')({ ...plugin })`.
  * Then, for a person's `coffre run market/dev`:
  *
- *   GET /use/market/dev                     what the app's environment holds: stand-ins, base URLs, exposed values
- *   ANY /use/market/dev/schumann/<path>     the request, sent to https://api.schumann.example/v1/<path> with the key
+ *   GET /use/market/dev                     what the app's environment holds: stand-ins and exposed values
+ *   ANY /use/schumann/<path>                the request, sent to https://api.schumann.example/v1/<path> with market/dev's key
+ *   ANY /use/market/dev/schumann/<path>     the same, naming the environment
+ *
+ * The first is the stable URL, the same for every environment, which the
+ * app's own config names: its environment is the one the handle was made
+ * for. `/use/<a>/<b>/…` names an environment when `<a>/<b>` is one the
+ * handle was made for, and is the stable URL of credential `<a>` otherwise.
  *
  * Each credential names the keys its rule reads, from the environment the
  * request names, and one upstream: the request goes there or nowhere, over
@@ -101,11 +107,15 @@ export function prefix(prefix: string): StandIn {
 
 /** One credential: its upstream, how its keys reach it, and what of it a caller may ask. */
 export type Credential = {
-  /** Where its requests go, `https://api.schumann.example/v1`: `/use/<project>/<env>/<name>/<path>` goes to `<upstream>/<path>`, and nowhere else. */
+  /** Where its requests go, `https://api.schumann.example/v1`: `/use/<name>/<path>` goes to `<upstream>/<path>`, and nowhere else. */
   upstream: string;
   inject: Inject;
-  /** The key the app reads the upstream's address from, `SCHUMANN_BASE_URL`: `coffre run` sets it to this proxy's URL for the credential. */
-  baseUrl?: string;
+  /**
+   * @deprecated Gone in 0.9, and refused: `coffre run` sets no base URL.
+   * The app's own config points at the proxy's stable URL for the
+   * credential, `<publicUrl>/use/<name>`, the same for every environment.
+   */
+  baseUrl?: "gone in 0.9: point the app's own config at <publicUrl>/use/<name>, the proxy's stable URL for this credential";
   /**
    * Keys the rule reads that are no secret, and that the app needs as they
    * are: an account's id it puts in its URLs, Twilio's `TWILIO_SID` in
@@ -205,6 +215,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
   const cache = new Map<string, { values: Record<string, string>; until: number }>();
+  const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
   const groups = new Map<string, Group>();
   return {
     name: 'credential-proxy',
@@ -212,7 +223,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+          return await serve(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -220,7 +231,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+          return await open(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -246,6 +257,8 @@ type Proxy = {
   expose: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
   cache: Map<string, { values: Record<string, string>; until: number }>;
+  /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). */
+  handles: Map<string, { paths: readonly (string | null)[] | null; until: number }>;
 };
 
 async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response> {
@@ -262,21 +275,60 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   } catch {
     return failure(400, 'the path is not valid percent-encoding');
   }
+  // `/use/<credential>/<path>`, the stable URL, for the environment the handle was made for; unless `<a>/<b>` is an
+  // environment the handle was made for, which `/use/<project>/<env>/…` names below. Never a guess: the URL and the handle decide.
+  const stable = proxy.credentials.get(place[0]!);
+  if (stable !== undefined) {
+    const named = place[2] === undefined ? undefined : proxy.credentials.get(place[2]);
+    const handle = handleIn(request, stable, url) ?? (named === undefined ? null : handleIn(request, named, url)) ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? null;
+    if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${stable.name} takes its key, or as x-coffre-handle`);
+    const paths = await madeFor(coffre, proxy, handle);
+    if (raw.length === 1 || !(paths ?? []).includes(`${place[0]}/${place[1]}`)) {
+      if (paths === null) return failure(409, `this handle was made before coffre 0.9 and names no environment: run the app with \`coffre run\` again, or name the environment, ${coffre.publicUrl}/use/<project>/<environment>/${stable.name}`);
+      // As many as it was made for, a deleted one too: what the handle names decides, never what is left of it.
+      const live = paths.filter((path) => path !== null);
+      if (paths.length > 1) {
+        const urls = live.map((path) => `${coffre.publicUrl}/use/${path}/${stable.name}`).join(' or ');
+        return failure(409, `this handle stands in for ${paths.length} environments, and the stable URL is for a run of one: name it${live.length === 0 ? '' : `, ${urls}`}`);
+      }
+      if (live.length === 0) return failure(409, 'the environment this handle was made for is gone');
+      return forward(request, coffre, proxy, live[0]!, stable, raw.slice(1), url.search);
+    }
+  }
   if (raw.length === 2) {
     if (request.method === 'POST') return presign(request, coffre, proxy, `${place[0]}/${place[1]}`);
     if (request.method !== 'GET') return failure(405, 'GET for the plan, POST to presign');
     return plan(request, coffre, proxy, `${place[0]}/${place[1]}`);
   }
-  if (raw.length < 3) return failure(404, 'name /use/<project>/<environment>/<credential>/<path>');
+  if (raw.length < 3) return failure(404, 'name /use/<credential>/<path>, or /use/<project>/<environment>/<credential>/<path>');
   const credential = proxy.credentials.get(place[2]!);
   if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search);
 }
 
 /**
+ * The environments `handle` was made for, by path as they are named now,
+ * null for one deleted: asked of coffre, and kept for `cacheSeconds`, as
+ * the values they open are, so a rename reaches the stable URL within the
+ * minute. Null for a handle of 0.8.
+ */
+async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Promise<readonly (string | null)[] | null> {
+  const now = Date.now();
+  const kept = proxy.handles.get(handle);
+  if (kept !== undefined && kept.until > now) return kept.paths;
+  const { paths, expiresAt } = await coffre.handle(handle);
+  if (proxy.cacheMs > 0) {
+    // A handful of handles in a dev loop: past a thousand, the oldest go.
+    if (proxy.handles.size >= 1000) for (const [old, entry] of proxy.handles) if (entry.until <= now || proxy.handles.size >= 1000) proxy.handles.delete(old);
+    proxy.handles.set(handle, { paths, until: Math.min(now + proxy.cacheMs, Date.parse(expiresAt)) });
+  }
+  return paths;
+}
+
+/**
  * What `coffre run` gives the app for an environment: each credential whose
- * keys it holds, its keys as the handle and its base URL as the proxy's;
- * the values `expose` lets it hold as they are; and what the app reads for
+ * keys it holds, its keys as the handle; the values `expose` lets it hold
+ * as they are; and what the app reads for
  * `credential(name)`. Each key the environment holds that none of these
  * covers is named in `left`, for `coffre run` to say.
  */
@@ -294,10 +346,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     keys: (environment, rows) => {
       const using = covering(rows.map((row) => row.key));
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
-      const covered = new Set([
-        ...using.flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]),
-        ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
-      ]);
+      const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key)]);
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
       return rows
         // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's.
@@ -309,17 +358,13 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   const credentials: Record<string, string> = {};
   const covered = new Set<string>();
   for (const credential of covering(held.keys)) {
-    const at = `${coffre.publicUrl}/use/${path}/${credential.name}`;
-    credentials[credential.name] = at;
+    // The environment's URL, which a run of several environments tells apart, and which `presign()` derives the environment's from.
+    credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
     // Every key the stand-in, and an identifier given as it is below, where its environment holds it itself.
     const standIn = credential.standIn === undefined ? handle : await shaped(coffre, credential, handle, path);
     for (const key of credential.keys) {
       env[key] = standIn;
       covered.add(key);
-    }
-    if (credential.baseUrl !== undefined) {
-      env[credential.baseUrl] = at;
-      covered.add(credential.baseUrl);
     }
   }
   for (const [key, value] of Object.entries(held.values)) {
@@ -586,6 +631,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(400, `${credential.name} reaches ${credential.base.href} only`);
   }
   const relative = target.pathname.slice(under.length) || '/';
+  // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
+  // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
   const proxied = `${coffre.publicUrl}/use/${path}/${credential.name}`;
   if (credential.methods !== undefined && !credential.methods.includes(request.method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
@@ -972,7 +1019,9 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   if (inject.kind === 'sigv4' && (!/^[a-z0-9-]{1,32}$/.test(inject.region) || !/^[a-z0-9-]{1,32}$/.test(inject.service))) throw new Error(`credentialProxy: ${name} signs for a region and a service, eu-west-3 and s3`);
   const keys = [...new Set(templates.flatMap((template) => [...template.matchAll(PLACEHOLDER)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);
-  if (credential.baseUrl !== undefined && (!KEY.test(credential.baseUrl) || keys.includes(credential.baseUrl))) throw new Error(`credentialProxy: ${name}'s baseUrl is the key the app reads its address from, and none of its rule's`);
+  if (credential.baseUrl !== undefined) {
+    throw new Error(`credentialProxy: ${name}'s baseUrl is gone in 0.9, and \`coffre run\` no longer sets ${String(credential.baseUrl)}: point the app's own config at the proxy's stable URL for ${name}, <publicUrl>/use/${name}, the same for every environment`);
+  }
   if (credential.identifiers?.some((key) => !keys.includes(key))) throw new Error(`credentialProxy: ${name}'s identifiers are keys its rule reads`);
   if (credential.identifiers !== undefined && keys.every((key) => credential.identifiers!.includes(key))) throw new Error(`credentialProxy: ${name}'s rule needs a key that is no identifier, for the handle to stand in for`);
   const methods = credential.methods?.map((method) => method.toUpperCase());

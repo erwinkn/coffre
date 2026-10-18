@@ -59,15 +59,17 @@ export function issuingBinding(createdBy: unknown): string | null {
  * token's or a binding's scope makes another kind again, which covers it:
  * the rows of 0.4 had none, and still check as they were sealed until the
  * app seals them with one (`sealScopes`); a scope cleared or changed fails
- * either way.
+ * either way. A handle's places do the same.
  */
 function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
-  const { createdBy, scope, jwks } = row as { createdBy?: unknown; scope?: unknown; jwks?: unknown };
+  const { createdBy, scope, jwks, places } = row as { createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown };
   const exchanged = table === 'credentials' && issuingBinding(createdBy) !== null;
   const uploaded = table === 'service_bindings' && jwks != null;
   const kind = exchanged ? 'exchanged_credentials' : uploaded ? 'uploaded_service_bindings' : table;
   const fields = exchanged ? [...FIELDS.credentials, 'createdBy'] : uploaded ? [...FIELDS.service_bindings, 'jwks'] : FIELDS[table];
-  return scope == null ? { kind, fields } : { kind: `scoped_${kind}`, fields: [...fields, 'scope'] };
+  const scoped = scope == null ? { kind, fields } : { kind: `scoped_${kind}`, fields: [...fields, 'scope'] };
+  // A handle's places, which the proxy's stable URL resolves to, make a kind of their own: a handle of 0.8 has none, and checks as it was sealed.
+  return table === 'credentials' && places != null ? { kind: `placed_${scoped.kind}`, fields: [...scoped.fields, 'places'] } : scoped;
 }
 
 export type AuthRow = { [K in AuthTable]: Fields[K] & { authMac: Buffer } }[AuthTable];

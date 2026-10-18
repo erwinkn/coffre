@@ -272,6 +272,18 @@ export async function personalConfig(db: Queryable, parentId: string, owner: str
   return row;
 }
 
+/** Live environments' paths by id, `market/dev`, as they are named now: one deleted, or of a project deleted, is left out. */
+export async function environmentPaths(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { projects, environments } = tablesOf(db);
+  const rows = await db
+    .select({ id: environments.id, environment: environments.slug, project: projects.slug })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(and(inArray(environments.id, [...ids]), standing(environments.slug), standing(projects.slug)));
+  return new Map(rows.map((row) => [row.id, `${row.project}/${row.environment}`]));
+}
+
 export type PlaceRow = {
   id: string;
   slug: string;

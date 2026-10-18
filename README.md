@@ -141,6 +141,8 @@ coffre references market/prod               # what reads it through references; 
 coffre run      market/dev -- printenv
 coffre run      market/prod auth/prod -- ./deploy   # several: their keys together; a key in two of them stops it
 coffre run --keep-existing market/dev -- ./app      # a variable already set in your shell (empty too) wins over coffre's
+                                            # a person, where the deployment has the credential proxy: stand-ins, not values;
+                                            # the app's own config points at <coffre>/use/<credential> (docs/design/credential-proxy.md)
 coffre export   market/dev --format dotenv  # or json, shell, github; several environments, as run
 coffre export   market/prod --output-file .env --watch --on-change 'systemctl reload app'   # kept current, read only once it changed
 coffre version  market/prod                 # what a read would open, as a version that changes when it would; reads no value

@@ -143,6 +143,9 @@ export type PersonalTokenInput = { label: string; expiresInMinutes: number; scop
 /** What a handle is made with: a label, which its entries name, how long it lasts, and the environments it stands in for, by path. */
 export type HandleInput = { label: string; expiresInMinutes: number; paths: string[] };
 
+/** An environment a handle was made for, by id, so that a rename keeps it, and whether as `@me`, its holder's personal config of it. */
+export type HandlePlace = { environmentId: string; personal: boolean };
+
 /** The personal token a request came in on: its row's id, its label and when it ends. */
 export type PersonalToken = { id: string; label: string; expiresAt: string };
 
@@ -172,6 +175,8 @@ export type CredentialPrincipal = Principal & {
   exchanged: boolean;
   /** A personal token, which acts as its person within its scope: the request's entries name it too. Null for anything else. */
   personalToken: PersonalToken | null;
+  /** The environments a handle was made for; null for any other credential, or a handle of 0.8. */
+  handlePlaces: readonly HandlePlace[] | null;
   /** When the credential ends, ISO 8601. */
   expiresAt: string;
 };
@@ -284,6 +289,17 @@ export function tokenRows(held: readonly HeldCredential[], known: readonly Place
       lastUsedIp: row.lastUsedIp,
       scope: scopeByPath(readScope(row.scope), known),
     }));
+}
+
+/** A handle's places, as its row stores them under its MAC: null for one of 0.8, and none for one that does not read as them. */
+function readPlaces(stored: string | null): readonly HandlePlace[] | null {
+  if (stored === null) return null;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {}
+  const isPlace = (place: unknown) => typeof place === 'object' && place !== null && typeof (place as HandlePlace).environmentId === 'string' && typeof (place as HandlePlace).personal === 'boolean';
+  return Array.isArray(parsed) && parsed.every(isPlace) ? parsed : [];
 }
 
 /** Accept what a person types: any case, with or without the dash. */
@@ -564,7 +580,7 @@ export class SigninService {
     tx: Transaction,
     kind: CredentialKind,
     principal: PrincipalRef,
-    options: { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope },
+    options: { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[] },
   ): Promise<IssuedCredential> {
     const token = generateToken(kind);
     const id = randomUUID();
@@ -580,6 +596,7 @@ export class SigninService {
       createdBy: options.createdBy,
       expiresAt: options.expiresAt,
       scope: options.scope === undefined ? null : storedScope(options.scope),
+      places: options.places === undefined ? null : JSON.stringify(options.places.map(({ environmentId, personal }) => ({ environmentId, personal }))),
       revokedAt: null,
     };
     await insert(tx, credentials, { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) });
@@ -642,6 +659,7 @@ export class SigninService {
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
           personalToken: null,
+          handlePlaces: null,
           expiresAt: row.expiresAt.toISOString(),
         }
       : {
@@ -656,6 +674,7 @@ export class SigninService {
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
           credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,
           personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,
+          handlePlaces: row.kind === 'handle' ? readPlaces(row.places) : null,
           expiresAt: row.expiresAt.toISOString(),
         };
   }
@@ -938,7 +957,8 @@ export class SigninService {
       const access = await this.#standing(person);
       // What the person holds now, and, on a personal token, what it does: a handle never reaches past the credential that made it.
       const holder = { ...callerFrom(person, access), credentialScope: ctx.caller.credentialScope };
-      const wanted = Object.fromEntries((await this.#handlePlaces(holder, input.paths)).map((path) => [path, 'viewer' as const]));
+      const { reached, madeFor } = await this.#handlePlaces(holder, input.paths);
+      const wanted = Object.fromEntries(reached.map((path) => [path, 'viewer' as const]));
       const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details);
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       return audited(this.#deps, async (tx, log) => {
@@ -953,6 +973,8 @@ export class SigninService {
           createdBy: person.id,
           expiresAt: new Date(ends),
           scope,
+          // What the proxy's stable URL, `/use/<credential>`, resolves to: the environments as asked, `@me` included.
+          places: madeFor,
         });
         log.push(
           allowed(ctx, 'token.create', {
@@ -965,26 +987,29 @@ export class SigninService {
   }
 
   /**
-   * The environments a handle for `paths` stands in for: each named, a
+   * The environments a handle for `paths` reaches, by path: each named, a
    * personal config by the environment it is a config of (`dev@me`, read as
    * its owner, is held to the scope on dev), and each parent a fork inherits
    * from that the holder reads too, so that inherited keys open through it
    * as they would for its person. A parent they do not read stays out, and
-   * its keys refused, as for a read.
+   * its keys refused, as for a read. And those it was made for, once each.
    */
-  async #handlePlaces(holder: Holdings, paths: readonly string[]): Promise<string[]> {
+  async #handlePlaces(holder: Holdings, paths: readonly string[]): Promise<{ reached: string[]; madeFor: HandlePlace[] }> {
     const places = new Set<string>();
+    const madeFor: HandlePlace[] = [];
     for (const raw of paths) {
       const path = parsePath(raw.replace(/@me$/, ''), [2]);
       places.add(`${path.project}/${path.environment}`);
       let place = await resolvePath(this.#deps.db, path);
+      const named = { environmentId: place?.environment?.id, personal: raw.endsWith('@me') };
+      if (named.environmentId != null && !madeFor.some((made) => made.environmentId === named.environmentId && made.personal === named.personal)) madeFor.push({ environmentId: named.environmentId, personal: named.personal });
       for (let depth = 0; place?.environment?.parentSlug != null && depth < MAX_PARENTS; depth += 1) {
         place = await resolvePath(this.#deps.db, { project: path.project, environment: place.environment.parentSlug });
         if (place?.environment == null) break;
         if (allows(holder, 'secret.read', { projectId: place.project.id, environmentId: place.environment.id, environmentSlug: place.environment.slug })) places.add(`${path.project}/${place.environment.slug}`);
       }
     }
-    return [...places];
+    return { reached: [...places], madeFor };
   }
 
   /** What a personal token made now would reach, checked as making one is (`issuePersonalToken`); makes nothing. */

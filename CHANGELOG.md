@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Breaking: the credential proxy's `baseUrl` is gone, for a stable
+  URL.** `ANY /use/<credential>/<path>` (`https://secrets.acme.example/use/schumann`)
+  is the same for every environment, fork and `@me`: its environment is
+  the one the handle `coffre run` made is for. So the app's own
+  configuration names it, and `coffre run` sets no `*_BASE_URL` any more.
+  A deployment's `credentialProxy` that still has `baseUrl` fails at
+  typecheck and at startup, naming the URL to use. To move, delete each
+  `baseUrl` and point the app's local configuration at the stable URL:
+  where the app had `SCHUMANN_BASE_URL` from `coffre run`, map `local` to
+  `https://<instance>/use/schumann`. `/use/<project>/<env>/<credential>/…`
+  still works, and is the URL for a run of several environments, which
+  the stable URL refuses with a 409 naming each. Handles now keep the
+  environments they were made for (migration `0010_handle_places`, a
+  nullable column); one made by 0.8 works on its environments' URLs, and
+  on the stable URL once `coffre run` makes a new one. See
+  docs/design/credential-proxy.md, section 4.
 - **Shaped stand-ins.** A credential's `standIn` gives its client a
   stand-in in the shape it checks: `jwt({ claims })`, a JWT of the real
   token's named claims whose last part is the handle, or `prefix('sk_test_')`.
