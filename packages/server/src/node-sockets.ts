@@ -110,7 +110,7 @@ function fromWebSocket(ws: WebSocket): Pipe {
       };
       // Frames `ws` still drains while it terminates find the stream ended, and are dropped.
       const deliver = (data: Buffer, binary: boolean) => {
-        if (!binary || done) return;
+        if (!binary || done || data.length === 0) return;
         controller.enqueue(new Uint8Array(data));
         if ((controller.desiredSize ?? 1) <= 0) ws.pause();
       };

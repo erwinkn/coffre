@@ -50,6 +50,8 @@ class Reader {
     while (this.#size < length) {
       const { done, value } = await this.#reader.read();
       if (done) throw new Error('the connection closed');
+      // An empty chunk adds nothing: kept, it would only grow the queue.
+      if (value.length === 0) continue;
       this.#chunks.push(value);
       this.#size += value.length;
     }
