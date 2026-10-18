@@ -15,6 +15,9 @@ import type { CoffreRuntime } from './runtime.ts';
 
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
 
+/** How long a plugin has to admit a WebSocket or refuse it. */
+const ADMISSION_MS = 15_000;
+
 /** What frames an HTTP answer, which the refusal writer says itself. */
 const FRAMING = new Set(['connection', 'content-length', 'transfer-encoding', 'keep-alive', 'upgrade']);
 
@@ -28,18 +31,26 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
   // Node lets go of the socket's errors before it hands an upgrade over: one reset while the plugin decides would crash the process.
   const ignore = () => socket.destroy();
   socket.on('error', ignore);
+  // A peer that leaves while the plugin decides takes its socket with it.
+  socket.once('end', ignore);
   const headers = new Headers();
   for (const [name, value] of Object.entries(incoming.headers)) if (typeof value === 'string') headers.set(name, value);
   const request = new Request(new URL(incoming.url ?? '/', runtime.publicUrl), { headers });
   let answer: Response | Awaited<NonNullable<ReturnType<typeof pluginSocket>>>;
+  let late: ReturnType<typeof setTimeout> | undefined;
   try {
-    // The migration door, as `respond` keeps it for every other request.
-    answer = !(await schemaReady(runtime))
-      ? new Response("coffre's database lacks this version's migrations", { status: 503 })
-      : ((await pluginSocket(request, runtime, incoming.socket.remoteAddress ?? null)) ?? new Response('no WebSocket here', { status: 404 }));
+    // The migration door, as `respond` keeps it for every other request; and a plugin that has not decided in time has refused.
+    const decided = (async () =>
+      !(await schemaReady(runtime))
+        ? new Response("coffre's database lacks this version's migrations", { status: 503 })
+        : ((await pluginSocket(request, runtime, incoming.socket.remoteAddress ?? null)) ?? new Response('no WebSocket here', { status: 404 })))();
+    answer = await Promise.race([decided, new Promise<Response>((resolve) => (late = setTimeout(() => resolve(new Response('coffre took too long to decide', { status: 503 })), ADMISSION_MS)))]);
   } catch {
     answer = new Response('the plugin failed', { status: 500 });
+  } finally {
+    clearTimeout(late);
   }
+  if (socket.destroyed) return;
   if (answer instanceof Response) {
     // The plugin's refusal as it said it, its headers included (`coffre-proxy`, `www-authenticate`), framed for this one answer.
     const body = Buffer.from(await answer.arrayBuffer());
@@ -53,6 +64,7 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
   }
   const session = answer;
   if (socket.destroyed) return;
+  socket.off('end', ignore);
   sockets.handleUpgrade(incoming, socket, head, (ws) => {
     socket.off('error', ignore);
     void session(fromWebSocket(ws), connect).catch(() => undefined).finally(() => ws.terminate());

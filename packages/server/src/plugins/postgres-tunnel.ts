@@ -392,6 +392,9 @@ async function hmac(key: Uint8Array<ArrayBuffer>, data: string): Promise<Uint8Ar
   return new Uint8Array(await crypto.subtle.sign('HMAC', imported, encoder.encode(data)));
 }
 
+/** The most PBKDF2 iterations the tunnel computes for one login: well past any real database's (Postgres's default is 4096). */
+const MAX_ITERATIONS = 100_000;
+
 /** SCRAM-SHA-256 (RFC 5802, RFC 7677), the client's side, as Postgres runs it: no channel binding, the user name left empty. */
 class Scram {
   readonly clientFirst: string;
@@ -417,6 +420,8 @@ class Scram {
     if (!nonce.startsWith(this.#bare.slice('n=,r='.length))) throw new Error("the database's SCRAM nonce is not ours");
     const salt = unbase64(fields.get('s')!);
     const iterations = Number(fields.get('i'));
+    // A count no database needs is a server spending the tunnel's time (RFC 5802, section 9): 4096 is Postgres's default.
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > MAX_ITERATIONS) throw new Error(`the database asks for ${fields.get('i')} SCRAM iterations, past the ${MAX_ITERATIONS} the tunnel computes`);
     const key = await crypto.subtle.importKey('raw', encoder.encode(saslprep(this.#password)), 'PBKDF2', false, ['deriveBits']);
     const salted = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256));
     const clientKey = await hmac(salted, 'Client Key');

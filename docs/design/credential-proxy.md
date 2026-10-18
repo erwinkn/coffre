@@ -447,6 +447,16 @@ which is the point. It cannot read a value, send one to another host, or
 keep using one after the handle is revoked (within `cacheSeconds`) or
 expires. Every use is logged against the person and the handle.
 
+**A database the tunnel reaches must accept connections only from coffre.**
+Any Postgres role may change its own password (`ALTER ROLE CURRENT_USER
+PASSWORD '…'`), superuser or not, and the tunnel pipes that query like any
+other. If the database also accepts the holder's own connections, they
+can set a password they know, connect directly, and outlive the handle.
+So the role connects from coffre's address and nothing else: a firewall
+rule or a private network in front of the database, or a `pg_hba.conf`
+line that takes the role only from that address. The tunnel stops a
+holder from reading the password, not from changing it.
+
 **A credential that can mint credentials defeats this.** A Postgres login
 with CREATEROLE or superuser lets the agent `CREATE ROLE me LOGIN PASSWORD
 …` and connect directly. An AWS key with IAM write lets it create an

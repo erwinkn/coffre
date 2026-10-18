@@ -448,6 +448,47 @@ test("a new group let in on a cached URL decides at once: a grant lost meanwhile
   assert.ok(outcome - started < 150, `${outcome - started} ms`);
 });
 
+test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', postgresOnly, async () => {
+  const fake = createTcp((socket) => {
+    let stage = 0;
+    socket.on('data', (chunk: Buffer) => {
+      if (stage === 0) {
+        stage = 1;
+        socket.write(message('R', Buffer.concat([Buffer.from([0, 0, 0, 10]), cstring('SCRAM-SHA-256'), Buffer.from([0])])));
+      } else if (stage === 1) {
+        stage = 2;
+        const nonce = /r=([^,]+)/.exec(chunk.toString('latin1'))![1]!;
+        socket.write(message('R', Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from(`r=${nonce}server,s=${Buffer.from('salt').toString('base64')},i=2147483647`)])));
+      }
+    });
+  });
+  fake.listen(0, '127.0.0.1');
+  await once(fake, 'listening');
+  try {
+    await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@127.0.0.1:${(fake.address() as AddressInfo).port}/d?sslmode=disable` });
+    const started = Date.now();
+    await assert.rejects(appClient().connect(), /SCRAM iterations/);
+    assert.ok(Date.now() - started < 2000);
+  } finally {
+    fake.close();
+  }
+});
+
+test('a peer that leaves while a plugin has not decided takes its socket with it', postgresOnly, async () => {
+  runtime.plugins = checkPlugins([{ name: 'stall', routes: { prefix: '/stall', fetch: async () => new Response(null, { status: 404 }), socket: () => new Promise(() => undefined) } }]);
+  const before = await new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count)));
+  const socket = tcp({ host: '127.0.0.1', port: Number(new URL(coffreAt).port) });
+  await once(socket, 'connect');
+  socket.write('GET /stall HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  socket.end();
+  for (let waited = 0; waited < 1500; waited += 50) {
+    if ((await new Promise<number>((resolve) => coffre.getConnections((_, n) => resolve(n)))) <= before) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(await new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count))), before);
+});
+
 /** Revoke the suite's handle, as its person would. */
 async function revoke(): Promise<void> {
   const session = await sessionFor(DEV);
