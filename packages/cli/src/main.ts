@@ -1123,7 +1123,11 @@ async function run(args: string[]): Promise<void> {
   if (stood !== null) sayStandIns(stood, paths, target());
   const values = stood?.env ?? Object.fromEntries(await readOrEnd(paths));
   // Each database the app reaches through a tunnel: a listener of this run's, for as long as its command runs.
-  for (const tunnel of stood?.tunnels ?? []) values[tunnel.key] = (await listen(tunnel, stood!.handle).catch((error: unknown) => fail((error as Error).message))).url;
+  for (const tunnel of stood?.tunnels ?? []) {
+    const { url } = await listen(tunnel, stood!.handle).catch((error: unknown) => fail((error as Error).message));
+    // As an own property: a variable may be named __proto__, which assigning would drop.
+    Object.defineProperty(values, tunnel.key, { value: url, enumerable: true, writable: true, configurable: true });
+  }
   // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
   const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
   for (const key of kept) delete values[key];

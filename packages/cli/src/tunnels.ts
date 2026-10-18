@@ -21,7 +21,8 @@ export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: str
     sockets.add(socket);
     // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
     socket.pause();
-    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}` } });
+    // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it.
+    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}` }, handshakeTimeout: 15_000 });
     ws.on('open', () => socket.resume());
     socket.on('data', (chunk: Buffer) => {
       ws.send(chunk, { binary: true }, () => {

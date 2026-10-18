@@ -451,7 +451,7 @@ export function saslprep(password: string): string {
     .replace(/[\u00AD\u034F\u1806\u180B-\u180D\u200C-\u200D\u2060\uFE00-\uFE0F\uFEFF]/g, '')
     .normalize('NFKC');
   // Controls, private use, non-characters, surrogates, and the bidirectional and tagging marks: C.2 to C.9.
-  const prohibited = /[\u0000-\u001F\u007F-\u009F\u06DD\u070F\u180E\u200E\u200F\u2028-\u202E\u2060-\u2063\u206A-\u206F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF9-\uFFFF\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}\u{F0000}-\u{10FFFF}\u{1FFFE}\u{1FFFF}\u{2FFFE}\u{2FFFF}]|\p{Cs}/u;
+  const prohibited = /[\u0000-\u001F\u007F-\u009F\u06DD\u070F\u180E\u200E\u200F\u2028-\u202E\u2FF0-\u2FFB\u2060-\u2063\u206A-\u206F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF9-\uFFFF\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}\u{F0000}-\u{10FFFF}\u{1FFFE}\u{1FFFF}\u{2FFFE}\u{2FFFF}]|\p{Cs}/u;
   // Nothing left, or a character Unicode leaves unassigned: Postgres's own fallback, the password as it is.
   if (mapped === '' || prohibited.test(mapped) || /\p{Cn}/u.test(mapped)) return password;
   // Bidirectional text: right-to-left letters only, no left-to-right one, the first and the last right-to-left.

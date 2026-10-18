@@ -266,6 +266,8 @@ test("SASLprep maps as Postgres does, and falls back to the password as it is", 
   assert.equal(saslprep(soft), soft, 'nothing left: the password as it is');
   const arabicOne = String.fromCharCode(0x661);
   assert.equal(saslprep(`${arabicOne}${soft}a`), `${arabicOne}a`, 'a digit has no direction of a letter');
+  const ideographic = `${String.fromCharCode(0x2ff0)}a${soft}`;
+  assert.equal(saslprep(ideographic), ideographic, 'an ideographic description character (C.7): the password as it is');
 });
 
 test('a database that ends SCRAM without its signature is no database the URL names: refused', postgresOnly, async () => {

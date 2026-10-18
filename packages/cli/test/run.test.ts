@@ -439,3 +439,27 @@ test("a person's run carries each tunnel's connections to coffre, with the handl
   assert.deepEqual(asked, [`/use/market/dev/db Bearer ${handle}`]);
   assert.match(stderr, /DATABASE_URL through a tunnel to its database/);
 });
+
+test('a tunnel whose coffre never answers the upgrade gives up on it, closing the app connection', { timeout: 30_000 }, async () => {
+  const { listen } = await import('../src/tunnels.ts');
+  // A coffre that takes the connection and never answers it.
+  const held: import('node:net').Socket[] = [];
+  const silent = (await import('node:net')).createServer((socket) => held.push(socket));
+  silent.listen(0, '127.0.0.1');
+  await once(silent, 'listening');
+  try {
+    const { port } = silent.address() as { port: number };
+    const tunnel = await listen({ key: 'DATABASE_URL', url: `ws://127.0.0.1:${port}/use/market/dev/db` }, `coffre_use_${'h'.repeat(43)}`);
+    const url = new URL(tunnel.url);
+    const app = (await import('node:net')).connect(Number(url.port), url.hostname);
+    await once(app, 'connect');
+    app.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
+    const started = Date.now();
+    await once(app, 'close');
+    assert.ok(Date.now() - started < 20_000);
+    tunnel.close();
+  } finally {
+    for (const socket of held) socket.destroy();
+    silent.close();
+  }
+});
