@@ -65,6 +65,11 @@ before(async () => {
         response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ key }).replace(/[\u0080-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`));
         return;
       }
+      if (request.url!.includes('/utf8-header')) {
+        // The key, as UTF-8 bytes in a header: the header arrived as Latin-1, one byte a character.
+        response.writeHead(400, { 'content-type': 'text/plain', 'x-error-key': Buffer.from(Buffer.from(key, 'latin1').toString('latin1'), 'utf8').toString('latin1') }).end('no');
+        return;
+      }
       if (request.url!.includes('/reason')) {
         response.writeHead(401, `Invalid API key ${key}`, { 'content-type': 'text/plain' }).end('no');
         return;
@@ -408,6 +413,8 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(xml, '<Error><Message>bad key [redacted by coffre]</Message></Error>');
   const python = await (await route('/use/market/dev/accented/python', { headers: { 'x-api-key': handle } })).text();
   assert.equal(python, '{"key":"[redacted by coffre]"}');
+  const header = await route('/use/market/dev/accented/utf8-header', { headers: { 'x-api-key': handle } });
+  assert.equal(header.headers.get('x-error-key'), '[redacted by coffre]');
   const reason = await route('/use/market/dev/schumann/reason', { headers: { 'x-api-key': handle } });
   assert.equal(reason.statusText.includes(KEY), false, reason.statusText);
   // A body in another charset passes byte for byte.
@@ -483,6 +490,14 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   // Each exposure is logged as the vault's read to expose, and the proxy's entry of it.
   const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
   assert.equal(exposed.length, 2);
+});
+
+test("a key named as an object's own property is still missing when the environment lacks it", async () => {
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: { odd: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{constructor}') } }, insecureUpstreams: true })]);
+  const handle = await handleFor();
+  const missing = await route('/use/market/dev/odd/companies', { headers: { 'x-api-key': handle } });
+  assert.equal(missing.status, 409);
+  assert.equal(received.length, 0);
 });
 
 test('the configuration is checked: HTTPS upstreams, no private address, rules that name keys, expose by exact path', () => {

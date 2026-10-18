@@ -340,7 +340,7 @@ async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, pa
   const kept = proxy.cache.get(key);
   if (kept !== undefined && kept.until > now) return kept.values;
   const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host } });
-  const missing = credential.keys.filter((name) => used.values[name] === undefined);
+  const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
   if (proxy.cacheMs > 0) {
     // A handful of handles in a dev loop: past a thousand, the oldest go.
@@ -442,8 +442,8 @@ function redacted(upstream: Response, values: string[], location: string | null)
     const cut = Math.max(from, settled);
     return { done: done + text.slice(from, cut), rest: text.slice(cut) };
   };
-  // A header's value, and the reason phrase, as the bytes they are sent as.
-  const whole = (text: string) => new TextDecoder().decode(Uint8Array.from(scrub(binary(new TextEncoder().encode(text)), true).done, (char) => char.charCodeAt(0)));
+  // A header's value and the reason phrase are already bytes, one character each, as fetch gives them.
+  const whole = (text: string) => scrub(text, true).done;
   const headers = new Headers();
   for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, whole(value));
   if (location !== null) headers.set('location', whole(location));
