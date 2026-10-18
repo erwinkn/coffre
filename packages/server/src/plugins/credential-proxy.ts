@@ -353,8 +353,14 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key)]);
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
-      // What the proxy fills in itself, a tunnel's URL, never the value the environment holds.
-      const filled = new Set([...proxy.tunnels.values()].map((tunnel) => tunnel.key));
+      // What the proxy fills in itself, a tunnel's URL, never the value the environment holds; and a credential's plain
+      // keys where giving them would leave the handle nowhere the proxy finds it: S3's access key id, which the SDK
+      // sends as `Credential=`, or every key of a header's. Those stay stand-ins, as secrets do.
+      const plain = new Set(rows.filter((row) => row.plain).map((row) => row.key));
+      const filled = new Set([
+        ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
+        ...using.filter((credential) => !carriesHandle(credential.inject, plain)).flatMap((credential) => credential.keys),
+      ]);
       return rows
         // A plain value is no secret, wherever it is held. An identifier as `expose` is: the environment's own value,
         // never a parent's, never a personal config's.
@@ -726,7 +732,9 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
     : inject.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(inject.name)!;
   const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
-  const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), injected].flatMap(echoed));
+  // What the rule made of them too, unless it is made of plain values alone: an account's id in a header is quoted back.
+  const made = credential.keys.some((key) => !plain.includes(key)) ? [injected] : [];
+  const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
   // Redacted as the bytes it came in, before a URL encodes them again.
   const raw = upstream.headers.get('location');
@@ -864,6 +872,17 @@ async function valuesFor(
     proxy.cache.set(key, { values: used.values, plain: used.plain, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
   }
   return { values: used.values, plain: used.plain };
+}
+
+/**
+ * Whether the app's request still carries the handle where the proxy looks
+ * for it (`handleIn`) when the `plain` keys of its rule are given as they
+ * are: a key that is no plain one in the header's or the parameter's
+ * template, in Basic's user or password, or in SigV4's access key id.
+ */
+function carriesHandle(inject: Inject, plain: ReadonlySet<string>): boolean {
+  const slots = inject.kind === 'basic' ? [inject.user, inject.password] : inject.kind === 'sigv4' ? [inject.accessKeyId] : [inject.template];
+  return slots.some((slot) => [...slot.matchAll(PLACEHOLDER)].some((match) => !plain.has(match[1]!)));
 }
 
 /** The handle, where the app sends it: `x-coffre-handle` (the `credential(name)` helper), or where the credential takes its key. */

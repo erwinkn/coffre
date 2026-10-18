@@ -15,10 +15,10 @@ import { eq } from 'drizzle-orm';
 
 import { clientFor } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { secrets, secretVersions } from './db/tables.ts';
+import { environments, secrets, secretVersions } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
-import { basic, credentialProxy } from '../src/plugins/credential-proxy.ts';
+import { basic, credentialProxy, header, sigv4 } from '../src/plugins/credential-proxy.ts';
 
 const SID = 'AC0123456789abcdef';
 const TOKEN = 'twilio_real_token_0123456789';
@@ -31,8 +31,8 @@ let upstreamUrl: string;
 before(async () => {
   upstream = createServer((request, response) => {
     const sent = Buffer.from((request.headers.authorization ?? '').replace(/^Basic /, ''), 'base64').toString();
-    response.writeHead(sent === `${SID}:${TOKEN}` ? 200 : 401, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ account_sid: SID, uri: request.url, echoed: sent }));
+    response.writeHead(sent === `${SID}:${TOKEN}` || !request.url!.startsWith('/twilio') ? 200 : 401, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ account_sid: SID, uri: request.url, echoed: sent, account: request.headers['x-account'] ?? null }));
   });
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
@@ -45,7 +45,11 @@ let root: CoffreClient;
 useMcp(
   async () => {
     runtime.plugins = checkPlugins([credentialProxy({
-      credentials: { twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] } },
+      credentials: {
+        twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
+        account: { upstream: `${upstreamUrl}/account`, inject: header('x-account', '{ACCOUNT_ID}') },
+        s3: { upstream: `${upstreamUrl}/s3`, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
+      },
       insecureUpstreams: true,
     })]);
     root = clientFor(deps, ROOT);
@@ -55,6 +59,12 @@ useMcp(
     await root.projects.create('market');
     await root.environments.create('market/dev');
     await root.secrets.set('market/dev', { TWILIO_SID: { value: SID, plain: true }, TWILIO_TOKEN: TOKEN, REGION: { value: 'eu-west-3', plain: true } });
+    await root.environments.create('market/other');
+    await root.secrets.set('market/other', {
+      ACCOUNT_ID: { value: 'acct_public_42', plain: true },
+      AWS_ACCESS_KEY_ID: { value: 'AKIAPLAINBUTNEEDED', plain: true },
+      AWS_SECRET_ACCESS_KEY: 'aws_secret_0123456789',
+    });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
     await root.access.set('token:ci', { 'market/dev': 'viewer' });
   },
@@ -179,4 +189,29 @@ test("the proxy hands a credential's plain key to the app as it is, and leaves i
   assert.equal(body.account_sid, SID);
   assert.equal(body.uri, `/twilio/Accounts/${SID}/Messages.json`);
   assert.equal(body.echoed, `${SID}:[redacted by coffre]`);
+});
+
+test("a credential's plain key stays a stand-in where the handle would go nowhere else: S3's access key id, a header's only key", async () => {
+  const handle = (await bearer(await sessionFor(DEV)).handles.create({ label: 'coffre run market/other', paths: ['market/other'] })).token;
+  const plan = (await (await route('/use/market/other', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; left: string[] };
+  // The SDK sends its access key id as Credential=, the handle's one place: given as it is, the handle would be in a signature.
+  assert.equal(plan.env.AWS_ACCESS_KEY_ID, handle);
+  assert.equal(plan.env.AWS_SECRET_ACCESS_KEY, handle);
+  assert.equal(plan.env.ACCOUNT_ID, handle);
+  assert.deepEqual(plan.left, []);
+
+  // The real plain value goes in, and comes back as it is: being no secret, it is not redacted, nor what the rule made of it.
+  const answer = await route('/use/market/other/account/whoami', { headers: { 'x-account': handle } });
+  assert.equal(answer.status, 200);
+  assert.equal(((await answer.json()) as { account: string }).account, 'acct_public_42');
+});
+
+test("a listing shows no plain value from past a parent archived around coffre, as a read refuses there", async () => {
+  await root.environments.create('market/middle', { from: 'dev', inherit: true });
+  await root.environments.create('market/leaf', { from: 'middle', inherit: true });
+  assert.equal((await valuesIn(root, 'market/leaf')).REGION, 'eu-west-3');
+  const [middle] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.slug, 'middle'));
+  await db.owner.update(environments).set({ archivedAt: new Date() }).where(eq(environments.id, middle!.id));
+  assert.equal((await refusal(root.secrets.reveal('market/leaf/REGION'))).status, 409);
+  assert.equal((await valuesIn(root, 'market/leaf')).REGION, null);
 });

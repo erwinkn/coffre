@@ -266,6 +266,10 @@ export async function listSecrets(
     const changed = reads(held.from) && mine !== null && theirs !== null && theirs > mine;
     return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
   });
+  // A parent archived or deleted, which only a write around coffre leaves in a chain, cuts it: a read refuses there, and no
+  // plain value is listed from it or past it.
+  const cut = inherited.parents.findIndex((parent) => parent.archivedAt !== null || parent.deleted);
+  const live = (from: { slug: string }) => cut === -1 || inherited.parents.findIndex((parent) => parent.slug === from.slug) < cut;
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;
     const removed = inherited.removed.has(key);
@@ -273,6 +277,7 @@ export async function listSecrets(
     keys.push({
       ...view(held.row),
       ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null }),
+      ...(shown && live(held.from) ? {} : { value: null }),
       // A removed key resolves to nothing here, and has nothing to regenerate.
       ...(removed ? { generated: null, value: null } : {}),
       archived: false,

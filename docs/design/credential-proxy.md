@@ -153,7 +153,8 @@ TWILIO_TOKEN	v1	admin@acme.example	today
   reveal, `coffre run` and `export` through the plan), it is in no
   `secret.read` entry, and it counts towards no bulk limit. The proxy
   leaves it unredacted in an upstream's answer: Twilio quotes the account
-  back in every one. The ciphertext stays for what opens values through
+  back in every one, and a rule made of plain values alone is not redacted
+  either. The ciphertext stays for what opens values through
   the vault: a reference, KEK rotation.
 - **A write says it, every time.** `{ "value": "…", "plain": true }` in
   `PATCH /secrets/…`; any other write is a secret, so writing over a plain
@@ -268,7 +269,11 @@ between two reads cannot swap a parent's value in. It answers:
 A credential appears when its environment holds every key of its rule.
 Each of those keys becomes the handle, but a plain one, which the app holds
 as it is, so a rule that frames its keys (`Bearer {K}`, Basic's
-`user:password`) finds the handle wherever it ends up. A tunnel's URL,
+`user:password`) finds the handle wherever it ends up. A plain key stays
+the handle where giving it would leave the handle nowhere the proxy looks:
+S3's access key id, which the SDK sends as `Credential=` while the secret
+only signs, or a header's only key. Twilio's `TWILIO_SID` is given, its
+token still carrying the handle in Basic's password. A tunnel's URL,
 which the proxy fills itself, is never given as the environment holds it,
 plain or not. `left` lists what the app does without, and `coffre run` prints it.
 `credentials` is what `COFFRE_CREDENTIALS` holds for `credential(name)`:

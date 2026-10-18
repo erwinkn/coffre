@@ -655,6 +655,7 @@ function EnvironmentLedger({
                       lent={lentBy.get(entry.key) ?? []}
                       // A personal config holds values only: no reference.
                       environments={personal ? [] : readable}
+                      personal={personal}
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
@@ -698,6 +699,7 @@ function EnvironmentLedger({
                     key={draft.id}
                     draft={draft}
                     existingVersion={versionOf(draft.key)}
+                    personal={personal}
                     disabled={false}
                     onChange={(patch) =>
                       setDrafts((rows) =>
@@ -1188,6 +1190,7 @@ function SecretRow({
   versionOf,
   saveReady,
   onMarkArchive,
+  personal,
 }: {
   number: number;
   project: string;
@@ -1229,6 +1232,8 @@ function SecretRow({
   versionOf: (key: string) => number | null;
   saveReady: boolean;
   onMarkArchive: () => void;
+  /** In a personal config, whose values are its owner's alone: never plain. */
+  personal: boolean;
 }) {
   const [reads, dispatch] = useReducer(rowReads, noReads);
   const { reveal, revealing, error, copyError } = reads;
@@ -1262,8 +1267,11 @@ function SecretRow({
   const holderPath = `${project}/${environment}/${entry.key}`;
   // A plain value is no secret: listed as it is, shown inline and copied with no read.
   const rowPlain = entry.value !== null;
-  // What the edit writes: plain or not as the row is, until the toggle says otherwise.
-  const plainNow = change.value !== null ? change.plain === true : rowPlain;
+  // What the edit writes: plain or not as the row is, until the toggle says otherwise; in a personal config, a secret.
+  const plainNow = change.value !== null ? change.plain === true : rowPlain && !personal;
+  // The version the edit started from, by id: what a stored secret made plain replaces.
+  const [startedAt, setStartedAt] = useState<string | undefined>(undefined);
+  const replacing = (plain: boolean) => (plain && !rowPlain && startedAt !== undefined ? { replaces: startedAt } : { replaces: undefined });
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
   // version identical to the one it came from.
@@ -1359,6 +1367,7 @@ function SecretRow({
   const [focusName, setFocusName] = useState(false);
   async function startEdit({ name = false } = {}) {
     setFocusName(name);
+    setStartedAt(entry.versionId ?? undefined);
     if (entry.value !== null) setBase({ value: entry.value, version: readVersion, from: readFrom, at: Date.now() });
     else if (canRead) {
       setOpening(true);
@@ -1461,6 +1470,7 @@ function SecretRow({
                       onPatch({
                         value: value === (editBase?.value ?? '') && plainNow === rowPlain ? null : value,
                         plain: plainNow,
+                        ...replacing(plainNow),
                         companion: undefined,
                         recipe: undefined,
                       })
@@ -1472,22 +1482,24 @@ function SecretRow({
                       renamable: false,
                       companion: change.companion,
                       // A generated value is a secret.
-                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false }),
+                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false, replaces: undefined }),
                     }}
                   />
-                  <PlainToggle
-                    plain={plainNow}
-                    disabled={disabled}
-                    onToggle={() => {
-                      // The value as it stands, written the other way: back where it started, it is no change.
-                      const start = editBase?.value ?? '';
-                      const value = change.value ?? start;
-                      const plain = !plainNow;
-                      onPatch(value === start && plain === rowPlain
-                        ? { value: null, plain: undefined }
-                        : { value, plain, companion: undefined, recipe: undefined });
-                    }}
-                  />
+                  {!personal && (
+                    <PlainToggle
+                      plain={plainNow}
+                      disabled={disabled}
+                      onToggle={() => {
+                        // The value as it stands, written the other way: back where it started, it is no change.
+                        const start = editBase?.value ?? '';
+                        const value = change.value ?? start;
+                        const plain = !plainNow;
+                        onPatch(value === start && plain === rowPlain
+                          ? { value: null, plain: undefined, replaces: undefined }
+                          : { value, plain, ...replacing(plain), companion: undefined, recipe: undefined });
+                      }}
+                    />
+                  )}
                   {plainNow && !rowPlain && editBase === null && (
                     <span className="edit-note">Type its value: a stored secret is never shown, and so never made plain</span>
                   )}
@@ -2063,6 +2075,7 @@ function DraftRow({
   onSave,
   versionOf,
   saveReady,
+  personal,
 }: {
   draft: SecretDraft;
   existingVersion: number | null;
@@ -2074,6 +2087,8 @@ function DraftRow({
   /** The current version of a key in this environment, for a companion's note. */
   versionOf: (key: string) => number | null;
   saveReady: boolean;
+  /** In a personal config, whose values are its owner's alone: never plain. */
+  personal: boolean;
 }) {
   const [touched, setTouched] = useState(false);
   const trimmed = draft.key.trim();
@@ -2134,11 +2149,13 @@ function DraftRow({
                   onUse: ({ value, name, companion, recipe }) => onChange({ key: name, value, companion, recipe, plain: false }),
                 }}
               />
-              <PlainToggle
-                plain={draft.plain === true}
-                disabled={disabled}
-                onToggle={() => onChange({ plain: draft.plain !== true, companion: undefined, recipe: undefined })}
-              />
+              {!personal && (
+                <PlainToggle
+                  plain={draft.plain === true}
+                  disabled={disabled}
+                  onToggle={() => onChange({ plain: draft.plain !== true, companion: undefined, recipe: undefined })}
+                />
+              )}
               <CompanionNote companion={draft.companion} versionOf={versionOf} />
             </div>
           </div>

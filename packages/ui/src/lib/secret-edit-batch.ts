@@ -28,6 +28,12 @@ export type SecretChange = {
   recipe?: string;
   /** Only beside a new value: whether it is written plain, no secret. A value is a secret unless it says so. */
   plain?: boolean;
+  /**
+   * Only beside a plain value: the version the edit started from, by id,
+   * which a stored secret made plain replaces, or the write is refused, so
+   * that it never publishes a value someone has written over since.
+   */
+  replaces?: string;
 };
 
 type ActiveSecret = { key: string };
@@ -37,7 +43,7 @@ type ActiveSecret = { key: string };
  * how it was generated sets it with its recipe; a plain one, no secret,
  * says so; `null` archives it.
  */
-export type SecretPatch = Record<string, string | { value: string; generated: Generation } | { value: string; plain: true } | null>;
+export type SecretPatch = Record<string, string | { value: string; generated: Generation } | { value: string; plain: true; replaces?: string } | null>;
 
 /**
  * How a row's generated value was made, as its write says it: its recipe,
@@ -51,9 +57,10 @@ function generationOf(key: string, edit: { recipe?: string; companion?: Companio
 }
 
 /** What a row writes under each key: its value, and its companion's beside it. */
-function rowPatch(key: string, value: string, edit: { recipe?: string; companion?: Companion; plain?: boolean }): SecretPatch {
+function rowPatch(key: string, value: string, edit: { recipe?: string; companion?: Companion; plain?: boolean; replaces?: string }): SecretPatch {
   const generated = generationOf(key, edit);
-  const entry = (each: string) => (generated !== undefined ? { value: each, generated } : edit.plain === true ? { value: each, plain: true as const } : each);
+  const plain = (each: string) => (edit.replaces === undefined ? { value: each, plain: true as const } : { value: each, plain: true as const, replaces: edit.replaces });
+  const entry = (each: string) => (generated !== undefined ? { value: each, generated } : edit.plain === true ? plain(each) : each);
   const patch: SecretPatch = Object.create(null);
   patch[key] = entry(value);
   if (edit.companion !== undefined) patch[edit.companion.key.trim()] = entry(edit.companion.value);

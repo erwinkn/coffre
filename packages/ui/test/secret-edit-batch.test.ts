@@ -349,3 +349,28 @@ test("an edit whose key left the list on a refresh writes no companion either", 
   });
   assert.deepEqual(writes, [{ OTHER: 'other' }]);
 });
+
+test('a plain value is written plain, a stored secret made plain with the version it replaces, and the rest as secrets', async () => {
+  const patches: unknown[] = [];
+  await applySecretEditBatch({
+    active,
+    drafts: [{ id: 1, key: 'ACCOUNT', value: 'acct_42', plain: true }],
+    changes: {
+      A: { ...change('A', 'region-eu'), plain: true },
+      B: { ...change('B', 'revealed'), plain: true, replaces: 'version-b-1' },
+      C: { ...change('C', 'secret-again'), plain: false },
+    },
+    operations: {
+      rename: async () => assert.fail('nothing was renamed'),
+      write: async (patch) => {
+        patches.push(patch);
+      },
+    },
+  });
+  assert.deepEqual(patches, [{
+    A: { value: 'region-eu', plain: true },
+    B: { value: 'revealed', plain: true, replaces: 'version-b-1' },
+    C: 'secret-again',
+    ACCOUNT: { value: 'acct_42', plain: true },
+  }]);
+});
