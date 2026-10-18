@@ -930,7 +930,7 @@ export class SigninService {
   }
 
   /**
-   * Mint a handle (docs/design/credential-proxy.md): the stand-in a
+   * Mint a handle (docs/design/credential-proxy.md): the placeholder a
    * person's app holds in place of the values of `paths`, which only the
    * credential proxy takes, to use those values for them. It reaches
    * nothing else: no API route, no page. It holds what both its scope,
@@ -947,7 +947,7 @@ export class SigninService {
       if (!Number.isInteger(input.expiresInMinutes) || input.expiresInMinutes < 1 || input.expiresInMinutes > MAX_PERSONAL_TOKEN_MINUTES) {
         throw badRequest(`a handle lasts between a minute and ${MAX_PERSONAL_TOKEN_MINUTES / 1440} days`);
       }
-      // A service account reads its values: it needs no stand-in. A connected app's or a binding's scope is not a person's to hand on.
+      // A service account reads its values: it needs no placeholder. A connected app's or a binding's scope is not a person's to hand on.
       if (person.type !== 'user' || (ctx.caller.credentialScope !== null && ctx.personalToken === null)) {
         throw new Refusal(
           forbidden('only a person makes a handle, on a session or a personal token of theirs: a service account reads its values'),

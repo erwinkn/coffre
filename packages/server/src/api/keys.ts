@@ -51,7 +51,7 @@ export async function sealValues(
  * Have the vault unwrap each envelope's key, and decrypt; `via` reads a
  * source through a reference, and `through` names the fork an inherited
  * value is read in. A plain value is no secret: it is its `plaintext`,
- * with no vault call and no `secret.read` of it, so stand-ins and the bulk
+ * with no vault call and no `secret.read` of it, so placeholders and the bulk
  * limit pass it by. Each caller has checked the read itself, a parent's
  * included. A reference's is opened through the vault all the same, which
  * holds the reference to its rules.

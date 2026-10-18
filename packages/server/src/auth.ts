@@ -132,7 +132,7 @@ export async function authenticateRequest(
   options: { handle?: boolean } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
-  // A handle is a stand-in for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
+  // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
   const handle = tokenKind(token) === 'handle';
   if (handle && options.handle !== true) {
     return errorResponse(new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle'));

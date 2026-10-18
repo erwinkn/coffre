@@ -91,7 +91,7 @@ useMcp(
   async () => {
     runtime.plugins = checkPlugins([
       credentialProxy({
-        credentials: { dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: ['https://custom/app_metadata'] }) } },
+        credentials: { dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: ['https://custom/app_metadata'] }) } },
         signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY'), 'ed-key': privateKey('ED_KEY'), 'rsa-key': privateKey('RSA_KEY'), absent: privateKey('NOT_HELD') },
         expose: { 'market/dev': ['DFNS_CRED_ID', 'DFNS_PRIVATE_KEY'] },
         insecureUpstreams: true,
@@ -218,5 +218,5 @@ test('a signer is configured by the key that holds it, under a name of its own',
   assert.throws(() => credentialProxy({ credentials: {}, signers: { Bad: privateKey('K') } }), /lowercase/);
   assert.throws(() => credentialProxy({ credentials: {}, signers: { a: privateKey('not a key') } }), /names the key that holds its private key/);
   assert.throws(() => credentialProxy({ credentials: { a: { upstream: 'https://api.example.com', inject: header('x', '{K}') } }, signers: { a: privateKey('K2') } }), /names a credential and a signer/);
-  assert.throws(() => credentialProxy({ credentials: { a: { upstream: 'https://api.example.com', inject: header('x', '{K}'), standIn: jwt() } }, signers: { b: privateKey('K') } }), /a and b read K with different stand-ins/);
+  assert.throws(() => credentialProxy({ credentials: { a: { upstream: 'https://api.example.com', inject: header('x', '{K}'), placeholder: jwt() } }, signers: { b: privateKey('K') } }), /a and b read K with different placeholders/);
 });

@@ -1,7 +1,7 @@
 /**
  * The credential proxy (docs/design/credential-proxy.md): a person's app,
  * an agent's included, uses secrets without ever holding them. `coffre run`
- * gives it a stand-in for each, a handle (`coffre_use_…`) that reaches
+ * gives it a placeholder for each, a handle (`coffre_use_…`) that reaches
  * nothing but this proxy, and the app's own config points its client here;
  * the proxy swaps in the real value at the edge, for the credential's own
  * upstream only. In the deployment's configuration:
@@ -19,7 +19,7 @@
  * and its app's route, `routes/use.$.ts`, `createFileRoute('/use/$')({ ...plugin })`.
  * Then, for a person's `coffre run market/dev`:
  *
- *   GET /use/market/dev                     what the app's environment holds: stand-ins and exposed values
+ *   GET /use/market/dev                     what the app's environment holds: placeholders and exposed values
  *   ANY /use/schumann/<path>                the request, sent to https://api.schumann.example/v1/<path> with market/dev's key
  *   ANY /use/market/dev/schumann/<path>     the same, naming the environment
  *   POST /use/market/dev                    a presigned URL, or a signature by a signer's key, made with the values and never them
@@ -90,10 +90,10 @@ export function sigv4(keys: SigV4): Inject {
  * the key's shape before it sends it: a JWT whose claims it reads, or a
  * prefix it expects. Unless set, the handle as it is.
  */
-export type StandIn = { kind: 'jwt'; claims: readonly string[] } | { kind: 'prefix'; prefix: string };
+export type Placeholder = { kind: 'jwt'; claims: readonly string[] } | { kind: 'prefix'; prefix: string };
 
 /**
- * A stand-in shaped as a JWT, for a client that reads the token's claims
+ * A placeholder shaped as a JWT, for a client that reads the token's claims
  * before it sends it, as DFNS's SDK reads its organization from
  * `https://custom/app_metadata`: `jwt({ claims: ['https://custom/app_metadata'] })`.
  * The app holds `header.payload.<handle>`, an unsigned header, and a payload
@@ -101,12 +101,12 @@ export type StandIn = { kind: 'jwt'; claims: readonly string[] } | { kind: 'pref
  * with `exp` the handle's end. The proxy takes the handle from the third
  * part and replaces the whole token with the real one.
  */
-export function jwt(options: { claims?: readonly string[] } = {}): StandIn {
+export function jwt(options: { claims?: readonly string[] } = {}): Placeholder {
   return { kind: 'jwt', claims: options.claims ?? [] };
 }
 
-/** A stand-in that starts as the real key does, for a client that checks it: `prefix('sk_test_')` gives `sk_test_coffre_use_…`. */
-export function prefix(prefix: string): StandIn {
+/** A placeholder that starts as the real key does, for a client that checks it: `prefix('sk_test_')` gives `sk_test_coffre_use_…`. */
+export function prefix(prefix: string): Placeholder {
   return { kind: 'prefix', prefix };
 }
 
@@ -121,6 +121,8 @@ export type Credential = {
    * credential, `<publicUrl>/use/<name>`, the same for every environment.
    */
   baseUrl?: "gone in 0.9: point the app's own config at <publicUrl>/use/<name>, the proxy's stable URL for this credential";
+  /** @deprecated Called `placeholder` in 0.10, and refused: rename it. */
+  standIn?: 'called placeholder in 0.10: rename it';
   /**
    * Deprecated: mark the key plain instead (`coffre set … --plain`), which
    * says it in the data, for every environment and fork alike. Keys the rule
@@ -134,7 +136,7 @@ export type Credential = {
    */
   identifiers?: readonly string[];
   /** The shape of what the app holds for its key, `jwt(…)` or `prefix(…)`, where a header or query rule carries that one key: the handle as it is, unless set. */
-  standIn?: StandIn;
+  placeholder?: Placeholder;
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. */
   methods?: readonly string[];
   /** The paths under `upstream` it may be used on, by prefix, `['/companies']`; any, unless set. */
@@ -210,7 +212,8 @@ export type CredentialProxyOptions = {
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-const PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
+/** A key a rule's template names, `{SCHUMANN_API_KEY}`. */
+const TEMPLATE_KEY = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
 /** A handle, wherever the app put it: alone, or inside a header the upstream's own scheme frames. */
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
 /** A request's body is read whole before it is sent on: an API call's, not an upload's. */
@@ -218,7 +221,7 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** An AWS-signed upload streams through, up to S3's own limit for one request; past it, a multipart upload's parts each pass. */
 const MAX_STREAM_BYTES = 5 * 1024 ** 3;
 const HANDLE_LENGTH = 'coffre_use_'.length + 43;
-/** What heads a JWT stand-in: no signature, which the third part, the handle, takes the place of. */
+/** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
 const UNSIGNED = base64url(new TextEncoder().encode('{"alg":"none","typ":"JWT"}'));
 /** Values shorter than this are not redacted from answers: too short to tell from the text around them. */
 const MIN_REDACTED = 8;
@@ -230,16 +233,16 @@ const DROPPED = new Set([
 ]);
 const DROPPED_ANSWER = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'set-cookie', 'content-length', 'content-encoding', 'trailer']);
 
-/** `shape`: what a shaped stand-in's slot must be, the handle its one group. */
+/** `shape`: what a shaped placeholder's slot must be, the handle its one group. */
 type Resolved = Credential & { name: string; base: URL; keys: string[]; shape?: RegExp };
 
 /** The credential proxy, as a plugin of the deployment's (`plugins: [credentialProxy({…})]`). */
 export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const credentials = new Map(Object.entries(options.credentials).map(([name, credential]) => [name, resolve(name, credential, options.insecureUpstreams === true)]));
-  // The app holds one value for a key: every credential that reads it gives it the same stand-in.
+  // The app holds one value for a key: every credential that reads it gives it the same placeholder.
   for (const one of credentials.values()) {
-    const other = [...credentials.values()].find((two) => two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.standIn) !== JSON.stringify(one.standIn));
-    if (other !== undefined) throw new Error(`credentialProxy: ${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different stand-ins, and the app holds one value for it`);
+    const other = [...credentials.values()].find((two) => two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.placeholder) !== JSON.stringify(one.placeholder));
+    if (other !== undefined) throw new Error(`credentialProxy: ${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different placeholders, and the app holds one value for it`);
   }
   const expose = checkListed('expose', options.expose ?? {});
   const generate = checkListed('generate', options.generate ?? {});
@@ -377,7 +380,7 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
   const handle = bearer(request);
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  // The credentials the environment holds every key of: their keys are stand-ins, never exposed.
+  // The credentials the environment holds every key of: their keys are placeholders, never exposed.
   const covering = (keys: readonly string[]) => [...proxy.credentials.values()].filter((credential) => credential.keys.every((key) => keys.includes(key)));
   // What the read resolved, for what `coffre run` generates below.
   let resolved: Parameters<PickKeys>[1] = [];
@@ -402,7 +405,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const identified = (row: { key: string; inherited: boolean; from: string | null }) => identifiers.has(row.key) && own(row);
       // What the proxy fills in itself, a tunnel's URL or a signer's handle, never the value the environment holds; and a
       // credential's plain keys and identifiers where giving them would leave the handle nowhere the proxy finds it:
-      // S3's access key id, which the SDK sends as `Credential=`, or every key of a header's. Those stay stand-ins,
+      // S3's access key id, which the SDK sends as `Credential=`, or every key of a header's. Those stay placeholders,
       // as secrets do.
       const asTheyAre = new Set(rows.filter((row) => row.plain || identified(row)).map((row) => row.key));
       const filled = new Set([
@@ -423,10 +426,10 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const credential of covering(held.keys)) {
     // The environment's URL, which a run of several environments tells apart, and which `presign()` derives the environment's from.
     credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
-    // Every key the stand-in, and a plain value or an identifier given as it is below.
-    const standIn = credential.standIn === undefined ? handle : await shaped(coffre, credential, handle, readOf(proxy, path));
+    // Every key the placeholder, and a plain value or an identifier given as it is below.
+    const placeholder = credential.placeholder === undefined ? handle : await shaped(coffre, credential, handle, readOf(proxy, path));
     for (const key of credential.keys) {
-      env[key] = standIn;
+      env[key] = placeholder;
       covered.add(key);
     }
   }
@@ -470,18 +473,18 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
 }
 
 /**
- * A credential's stand-in in the shape its client checks: the handle behind
+ * A credential's placeholder in the shape its client checks: the handle behind
  * a prefix, or a JWT of the real token's named claims, which are opened for
  * it as a use of the credential, logged, and go no further than those.
  */
 async function shaped(coffre: PluginContext, credential: Resolved, handle: string, path: string): Promise<string> {
-  const standIn = credential.standIn!;
-  if (standIn.kind === 'prefix') return `${standIn.prefix}${handle}`;
+  const placeholder = credential.placeholder!;
+  if (placeholder.kind === 'prefix') return `${placeholder.prefix}${handle}`;
   const key = credential.keys[0]!;
-  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', logged: { credential: credential.name, standIn: { claims: standIn.claims } } });
+  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', logged: { credential: credential.name, placeholder: { claims: placeholder.claims } } });
   const real = claimsOf(used.values[key]);
-  if (real === null) throw new CoffreError(409, 'conflict', `${used.environment.path}'s ${key} is no JWT, which ${credential.name}'s stand-in copies its claims from`);
-  const claims = Object.fromEntries(standIn.claims.filter((claim) => Object.hasOwn(real, claim)).map((claim) => [claim, real[claim]]));
+  if (real === null) throw new CoffreError(409, 'conflict', `${used.environment.path}'s ${key} is no JWT, which ${credential.name}'s placeholder copies its claims from`);
+  const claims = Object.fromEntries(placeholder.claims.filter((claim) => Object.hasOwn(real, claim)).map((claim) => [claim, real[claim]]));
   return `${UNSIGNED}.${base64url(new TextEncoder().encode(JSON.stringify({ ...claims, exp: Math.floor(Date.parse(used.expiresAt) / 1000) })))}.${handle}`;
 }
 
@@ -779,11 +782,11 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const handle = handleIn(request, credential, target);
   if (handle === null) return failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`);
   // A query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
-  // under the upstream gives back. Otherwise the stand-in's shape around the handle, which the proxy reads as the app's own
+  // under the upstream gives back. Otherwise the placeholder's shape around the handle, which the proxy reads as the app's own
   // (`e30` is `{}`: the proxy reads no claim).
   const given = inject.kind === 'query' ? target.searchParams.get(inject.name) : null;
   const back = inject.kind !== 'query' ? null : given !== null && handleOf(credential, given) === handle ? given
-    : credential.standIn === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.standIn.kind === 'prefix' ? `${credential.standIn.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
+    : credential.placeholder === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.placeholder.kind === 'prefix' ? `${credential.placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
   // An AWS-signed upload that says its payload's hash and length streams through, never held whole: an S3 object may be
   // gigabytes, and its signature needs no byte of it. Anything else is read whole first, however long it takes to come,
   // so the handle is checked, and the values opened, as the request goes out.
@@ -857,7 +860,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const to = new URL(location, target);
     const inside = to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
-      // The proxy's URL for it, and a query rule's parameter, kept or not, the app's stand-in, for it to follow and be let in.
+      // The proxy's URL for it, and a query rule's parameter, kept or not, the app's placeholder, for it to follow and be let in.
       const moved = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);
       if (inject.kind === 'query' && back !== null) moved.searchParams.set(inject.name, back);
       at = moved.href;
@@ -995,7 +998,7 @@ async function valuesFor(
  */
 function carriesHandle(inject: Inject, plain: ReadonlySet<string>): boolean {
   const slots = inject.kind === 'basic' ? [inject.user, inject.password] : inject.kind === 'sigv4' ? [inject.accessKeyId] : [inject.template];
-  return slots.some((slot) => [...slot.matchAll(PLACEHOLDER)].some((match) => !plain.has(match[1]!)));
+  return slots.some((slot) => [...slot.matchAll(TEMPLATE_KEY)].some((match) => !plain.has(match[1]!)));
 }
 
 /** The handle, where the app sends it: `x-coffre-handle` (the `credential(name)` helper), or where the credential takes its key. */
@@ -1019,7 +1022,7 @@ function handleIn(request: Request, credential: Resolved, target: URL): string |
   return slot === null ? null : handleOf(credential, slot);
 }
 
-/** The handle in what the app put where the credential takes its key: a shaped stand-in's slot is that shape exactly; the handle alone is found wherever the rule frames it. */
+/** The handle in what the app put where the credential takes its key: a shaped placeholder's slot is that shape exactly; the handle alone is found wherever the rule frames it. */
 function handleOf(credential: Resolved, slot: string): string | null {
   return credential.shape === undefined ? (HANDLE.exec(slot)?.[0] ?? null) : (credential.shape.exec(slot)?.[1] ?? null);
 }
@@ -1056,7 +1059,7 @@ async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | 
 
 /** `{KEY}` in a template, each the environment's value. */
 function render(template: string, values: Record<string, string>): string {
-  return template.replace(PLACEHOLDER, (_, key: string) => values[key]!);
+  return template.replace(TEMPLATE_KEY, (_, key: string) => values[key]!);
 }
 
 /**
@@ -1160,38 +1163,39 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
     : [inject.template];
   if ((inject.kind === 'header' || inject.kind === 'query') && !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
   if (inject.kind === 'sigv4' && (!/^[a-z0-9-]{1,32}$/.test(inject.region) || !/^[a-z0-9-]{1,32}$/.test(inject.service))) throw new Error(`credentialProxy: ${name} signs for a region and a service, eu-west-3 and s3`);
-  const keys = [...new Set(templates.flatMap((template) => [...template.matchAll(PLACEHOLDER)].map((match) => match[1]!)))];
+  const keys = [...new Set(templates.flatMap((template) => [...template.matchAll(TEMPLATE_KEY)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);
   if (credential.baseUrl !== undefined) {
     throw new Error(`credentialProxy: ${name}'s baseUrl is gone in 0.9, and \`coffre run\` no longer sets ${String(credential.baseUrl)}: point the app's own config at the proxy's stable URL for ${name}, <publicUrl>/use/${name}, the same for every environment`);
   }
+  if (credential.standIn !== undefined) throw new Error(`credentialProxy: ${name}'s standIn is called placeholder in 0.10: rename it`);
   if (credential.identifiers?.some((key) => !keys.includes(key))) throw new Error(`credentialProxy: ${name}'s identifiers are keys its rule reads`);
   if (credential.identifiers !== undefined && keys.every((key) => credential.identifiers!.includes(key))) throw new Error(`credentialProxy: ${name}'s rule needs a key that is no identifier, for the handle to stand in for`);
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
-  const shape = credential.standIn === undefined ? undefined : standInShape(name, credential.standIn, inject);
+  const shape = credential.placeholder === undefined ? undefined : placeholderShape(name, credential.placeholder, inject);
   return { ...credential, ...(methods === undefined ? {} : { methods }), ...(shape === undefined ? {} : { shape }), name, base, keys };
 }
 
 /**
- * The slot a shaped stand-in fills, as a pattern: the rule's template, the
- * stand-in where its key goes, the handle its one group. Only a header or
- * a query parameter that carries one key, once, takes a shaped stand-in:
+ * The slot a shaped placeholder fills, as a pattern: the rule's template, the
+ * placeholder where its key goes, the handle its one group. Only a header or
+ * a query parameter that carries one key, once, takes a shaped placeholder:
  * Basic's pair, and an AWS key pair, are no one token to shape.
  */
-function standInShape(name: string, standIn: StandIn, inject: Inject): RegExp {
-  if (standIn.kind !== 'jwt' && standIn.kind !== 'prefix') throw new Error(`credentialProxy: ${name}'s standIn is jwt(…) or prefix(…)`);
-  if ((inject.kind !== 'header' && inject.kind !== 'query') || [...inject.template.matchAll(PLACEHOLDER)].length !== 1) {
-    throw new Error(`credentialProxy: ${name}'s standIn shapes the one key a header or query rule carries, header('authorization', 'Bearer {TOKEN}'), not a ${inject.kind === 'basic' || inject.kind === 'sigv4' ? `${inject.kind}() rule` : 'template with several keys, or one twice'}`);
+function placeholderShape(name: string, placeholder: Placeholder, inject: Inject): RegExp {
+  if (placeholder.kind !== 'jwt' && placeholder.kind !== 'prefix') throw new Error(`credentialProxy: ${name}'s placeholder is jwt(…) or prefix(…)`);
+  if ((inject.kind !== 'header' && inject.kind !== 'query') || [...inject.template.matchAll(TEMPLATE_KEY)].length !== 1) {
+    throw new Error(`credentialProxy: ${name}'s placeholder shapes the one key a header or query rule carries, header('authorization', 'Bearer {TOKEN}'), not a ${inject.kind === 'basic' || inject.kind === 'sigv4' ? `${inject.kind}() rule` : 'template with several keys, or one twice'}`);
   }
-  if (standIn.kind === 'jwt' && (!Array.isArray(standIn.claims) || standIn.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === 'exp'))) {
+  if (placeholder.kind === 'jwt' && (!Array.isArray(placeholder.claims) || placeholder.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === 'exp'))) {
     throw new Error(`credentialProxy: ${name}'s jwt() names the claims it copies from the real token, each a string; exp is the handle's end, never copied`);
   }
-  if (standIn.kind === 'prefix' && !/^[A-Za-z0-9._~+/:=-]{1,64}$/.test(standIn.prefix)) throw new Error(`credentialProxy: ${name}'s prefix() is up to 64 letters, digits and ._~+/:=-, sk_test_; got ${JSON.stringify(standIn.prefix)}`);
+  if (placeholder.kind === 'prefix' && !/^[A-Za-z0-9._~+/:=-]{1,64}$/.test(placeholder.prefix)) throw new Error(`credentialProxy: ${name}'s prefix() is up to 64 letters, digits and ._~+/:=-, sk_test_; got ${JSON.stringify(placeholder.prefix)}`);
   const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const handle = `(${HANDLE.source})`;
-  const token = standIn.kind === 'jwt' ? `[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.${handle}` : `${escape(standIn.prefix)}${handle}`;
-  const [before, after] = inject.template.split(PLACEHOLDER).filter((_, at) => at % 2 === 0);
+  const token = placeholder.kind === 'jwt' ? `[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.${handle}` : `${escape(placeholder.prefix)}${handle}`;
+  const [before, after] = inject.template.split(TEMPLATE_KEY).filter((_, at) => at % 2 === 0);
   return new RegExp(`^${escape(before!)}${token}${escape(after!)}$`);
 }
 
@@ -1212,8 +1216,8 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
   if (signer.kind !== 'private-key') throw new Error(`credentialProxy: signer ${name} is privateKey(…), the only kind there is`);
   if (!KEY.test(signer.key)) throw new Error(`credentialProxy: signer ${name} names the key that holds its private key, DFNS_PRIVATE_KEY`);
   // The app holds one value for a key, and a signer's is the handle as it is.
-  const shaped = [...credentials.values()].find((credential) => credential.standIn !== undefined && credential.keys.includes(signer.key));
-  if (shaped !== undefined) throw new Error(`credentialProxy: ${shaped.name} and ${name} read ${signer.key} with different stand-ins, and the app holds one value for it`);
+  const shaped = [...credentials.values()].find((credential) => credential.placeholder !== undefined && credential.keys.includes(signer.key));
+  if (shaped !== undefined) throw new Error(`credentialProxy: ${shaped.name} and ${name} read ${signer.key} with different placeholders, and the app holds one value for it`);
   return signer;
 }
 

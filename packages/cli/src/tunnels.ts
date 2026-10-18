@@ -50,7 +50,7 @@ export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: str
   server.unref();
   const { port } = server.address() as { port: number };
   return {
-    // The database's user and name are coffre's to set, from the real URL; the app's are placeholders.
+    // The database's user and name are coffre's to set, from the real URL; the app's, `app`, are filler.
     url: `postgres://app:${encodeURIComponent(handle)}@127.0.0.1:${port}/app?sslmode=disable`,
     close: () => {
       for (const socket of sockets) socket.destroy();

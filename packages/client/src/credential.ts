@@ -1,6 +1,6 @@
 /**
  * A credential through coffre's credential proxy, for an app `coffre run`
- * started with stand-ins (docs/design/credential-proxy.md): where its
+ * started with placeholders (docs/design/credential-proxy.md): where its
  * client takes no base URL to point at the proxy, or the code is new.
  *
  *   import { credential } from '@coffre/client/credential';

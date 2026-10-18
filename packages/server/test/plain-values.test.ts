@@ -1,10 +1,10 @@
 // Plain values (docs/design/credential-proxy.md, section 2): a key marked
 // not secret, an account's id, lists as it is to whoever reads its
 // environment, reads with no `secret.read` and no vault call, and reaches a
-// person's app as it is under stand-ins. A value is a secret unless its
+// person's app as it is under placeholders. A value is a secret unless its
 // write says otherwise, so writing over a plain one without saying so makes
 // it a secret again. Making a stored secret plain is a reveal of it, which
-// stand-ins refuse a person, then a plain write of what it showed.
+// placeholders refuse a person, then a plain write of what it showed.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
@@ -90,7 +90,7 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
 
 const valuesIn = async (client: CoffreClient, path: string) => Object.fromEntries((await client.secrets.list(path)).keys.map((entry) => [entry.key, entry.value]));
 
-test('a plain value lists as it is, and reads with no secret read, for a person under stand-ins too', async () => {
+test('a plain value lists as it is, and reads with no secret read, for a person under placeholders too', async () => {
   assert.deepEqual(await valuesIn(root, 'market/dev'), { REGION: 'eu-west-3', TWILIO_SID: SID, TWILIO_TOKEN: null });
   const dev = clientFor(deps, DEV);
   const reads = (await entries('secret.read')).length;
@@ -116,7 +116,7 @@ test('a write says it is plain, in its version and in the log; written again wit
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_SID, SID);
 });
 
-test('making a stored secret plain is a reveal first, which stand-ins refuse a person; a stale one is refused', async () => {
+test('making a stored secret plain is a reveal first, which placeholders refuse a person; a stale one is refused', async () => {
   // The client reveals the value, then writes it plain: a person has no reveal here, so no way to publish one.
   assert.equal((await refusal(root.secrets.reveal('market/dev/TWILIO_TOKEN'))).reason, 'stand_ins');
   // A service account may, saying the version it revealed; one written meanwhile stops it.
@@ -186,7 +186,7 @@ test('deleting an environment erases its plain values too', async () => {
 test("the proxy hands a credential's plain key to the app as it is, and leaves it in the answer", async () => {
   const handle = (await bearer(await sessionFor(DEV)).handles.create({ label: 'coffre run market/dev', paths: ['market/dev'] })).token;
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; left: string[] };
-  // The account's id as it is, the token a stand-in: what `identifiers` said in configuration, said in the data.
+  // The account's id as it is, the token a placeholder: what `identifiers` said in configuration, said in the data.
   assert.equal(plan.env.TWILIO_SID, SID);
   assert.equal(plan.env.TWILIO_TOKEN, handle);
   assert.equal(plan.env.REGION, 'eu-west-3');
@@ -202,14 +202,14 @@ test("the proxy hands a credential's plain key to the app as it is, and leaves i
   assert.equal(body.echoed, `${SID}:[redacted by coffre]`);
 });
 
-test("a credential's plain key stays a stand-in where the handle would go nowhere else: S3's access key id, a header's only key", async () => {
+test("a credential's plain key stays a placeholder where the handle would go nowhere else: S3's access key id, a header's only key", async () => {
   const handle = (await bearer(await sessionFor(DEV)).handles.create({ label: 'coffre run market/other', paths: ['market/other'] })).token;
   const plan = (await (await route('/use/market/other', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; left: string[] };
   // The SDK sends its access key id as Credential=, the handle's one place: given as it is, the handle would be in a signature.
   assert.equal(plan.env.AWS_ACCESS_KEY_ID, handle);
   assert.equal(plan.env.AWS_SECRET_ACCESS_KEY, handle);
   assert.equal(plan.env.ACCOUNT_ID, handle);
-  // An identifier counts as given: with its password plain too, Basic would carry no handle, so both stay stand-ins.
+  // An identifier counts as given: with its password plain too, Basic would carry no handle, so both stay placeholders.
   assert.equal(plan.env.LEGACY_USER, handle);
   assert.equal(plan.env.LEGACY_PASSWORD, handle);
   assert.deepEqual(plan.left, []);

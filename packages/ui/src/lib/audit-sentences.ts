@@ -597,7 +597,7 @@ const TAMPERING: Record<string, string> = {
 const REASONS: Record<string, string> = {
   no_grant: 'no grant',
   bulk_limit: 'bulk limit',
-  stand_ins: 'people get stand-ins',
+  stand_ins: 'people get placeholders',
   expired: 'grant expired',
   removed: 'removed from coffre',
   not_a_member: 'not a member',
