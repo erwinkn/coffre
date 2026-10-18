@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, secretPlaces, type ResolvedPath } from '../db/queries.ts';
+import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type PlaceView } from './projects.ts';
-import { readableValues, unreadParents, type Readable } from './references.ts';
+import { readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -88,11 +88,17 @@ export async function forkEnvironment(
 
     const target = await resolvePath(ctx.db, { project: project.slug, environment: slug });
     if (target?.environment == null) throw notFound(`${project.slug}/${slug} went away while it was being forked`);
-    // Each copied value is still its source's current version, under the head the copy is written under: a key
-    // written, or marked sensitive, since it was opened would be copied as it was, and held looser than it is.
+    // Each copied key still reads what was opened, `from` resolved again under the head the copy is written under:
+    // the same version, through the same reference, held in the same environment. A key written, marked sensitive,
+    // retargeted or overridden since it was opened would be copied as it was, and held looser than it is. The
+    // version says its level too: a mark is a new version.
     await setSecrets(ctx, target, { ...patch }, async (tx) => {
-      const now = await secretPlaces(tx, copies.map((item) => item.secret.secretId));
-      const moved = copies.find((item) => now.get(item.secret.secretId)?.currentVersionId !== item.secretVersionId);
+      const now = new Map((await resolveValues(tx, source, sourcePlace)).items.map((item) => [item.key, item]));
+      const moved = copies.find((item) => {
+        const current = now.get(item.key);
+        return current?.secretVersionId !== item.secretVersionId || current.via?.reference !== item.via?.reference
+          || current.parent?.environmentId !== item.parent?.environmentId;
+      });
       if (moved !== undefined) throw conflict(`${project.slug}/${from}/${moved.key} changed while it was forked: fork again, into the same environment`);
     });
 

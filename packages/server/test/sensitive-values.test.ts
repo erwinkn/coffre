@@ -246,6 +246,43 @@ test("a fork's copy of a key marked sensitive while it was opened is refused, ne
   assert.equal((await levels('market/copy')).WEBHOOK, 'sensitive');
 });
 
+/** Fork `from` into market/copy, running `meanwhile` once as the copy's values are opened. */
+async function forkedWhile(t: test.TestContext, from: string, meanwhile: () => Promise<unknown>) {
+  const unwrap = deps.vault.unwrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'unwrap', async (input: Parameters<typeof unwrap>[0]) => {
+    const result = await unwrap(input);
+    if (compete && input.purpose === 'copy') {
+      compete = false;
+      await meanwhile();
+    }
+    return result;
+  });
+  return refusal(root.environments.create('market/copy', { from }));
+}
+
+test("a fork's copy of a reference retargeted to a sensitive source while it was opened is refused", async (t) => {
+  await root.environments.create('market/base');
+  await root.secrets.set('market/base', { OPEN: 'open_0123456789', HIDDEN: { value: 'hidden_0123456789', sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { LINKED: { ref: 'market/base/OPEN' } });
+  const refused = await forkedWhile(t, 'dev', () => root.secrets.set('market/dev', { LINKED: { ref: 'market/base/HIDDEN' } }));
+  assert.equal(refused.status, 409);
+  assert.match(refused.message, /market\/dev\/LINKED changed while it was forked: fork again/);
+  assert.deepEqual((await root.secrets.list('market/copy')).keys, []);
+  await root.environments.create('market/copy', { from: 'dev' });
+  assert.equal((await levels('market/copy')).LINKED, 'sensitive');
+});
+
+test("a fork's copy of an inherited key overridden as sensitive while it was opened is refused", async (t) => {
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  const refused = await forkedWhile(t, 'dev-eu', () => root.secrets.set('market/dev-eu', { WEBHOOK: { value: 'whsec_eu_0123456789', sensitivity: 'sensitive' } }));
+  assert.equal(refused.status, 409);
+  assert.match(refused.message, /market\/dev-eu\/WEBHOOK changed while it was forked: fork again/);
+  assert.deepEqual((await root.secrets.list('market/copy')).keys, []);
+  await root.environments.create('market/copy', { from: 'dev-eu' });
+  assert.equal((await levels('market/copy')).WEBHOOK, 'sensitive');
+});
+
 test("a value written over a reference to a sensitive source, saying nothing, is sensitive; a mark of a reference is refused", async () => {
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' } });
@@ -291,6 +328,43 @@ test("an override, saying nothing, over a parent's reference retargeted to a sen
   });
   await root.secrets.set('market/dev-eu', { LINKED: 'mine_0123456789' });
   assert.equal((await levels('market/dev-eu')).LINKED, 'sensitive');
+});
+
+test("a write over a reference whose source is marked sensitive while it is wrapped is sensitive: the reference it ended still says so", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK: { ref: 'market/dev/WEBHOOK' } });
+  const wrap = deps.vault.wrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/WEBHOOK')) {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  await root.secrets.set('market/prod', { WEBHOOK: 'whsec_prod_0123456789abcdef' });
+  assert.equal((await levels('market/prod')).WEBHOOK, 'sensitive');
+  assert.equal((await refusal(root.secrets.reveal('market/prod/WEBHOOK'))).reason, 'sensitive');
+});
+
+test("a rollback over a reference whose source is marked sensitive while it is rewrapped brings the old value back sensitive", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK: 'whsec_old_0123456789abcdef' });
+  await root.secrets.set('market/prod', { WEBHOOK: { ref: 'market/dev/WEBHOOK' } });
+  const rewrap = deps.vault.rewrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'rewrap', async (input: Parameters<typeof rewrap>[0]) => {
+    const result = await rewrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/WEBHOOK')) {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  await root.secrets.restore('market/prod/WEBHOOK', 1);
+  assert.equal((await levels('market/prod')).WEBHOOK, 'sensitive');
+  assert.equal((await refusal(root.secrets.reveal('market/prod/WEBHOOK'))).reason, 'sensitive');
 });
 
 test('a rollback over a reference to a sensitive source brings the old value back sensitive', async () => {

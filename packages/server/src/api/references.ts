@@ -297,7 +297,8 @@ export async function readableValues(
   return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
 }
 
-async function resolveValues(
+/** `readableValues` in a transaction of the caller's, as it is under that transaction: a fork's copy, under the log's head. */
+export async function resolveValues(
   tx: Queryable,
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },

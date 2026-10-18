@@ -611,8 +611,8 @@ export async function setSecrets(
   const marks = Object.entries(patch).flatMap(([key, value]) => (isMark(value) ? [{ key, to: value.sensitivity }] : []));
   const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'ref' in value ? [{ key, ref: value.ref }] : []));
   const archives = keysIn.filter((key) => patch[key] === null);
-  // The keys found sensitive by any attempt of this write, which a write that says nothing keeps sensitive: an
-  // attempt that ended a reference to a sensitive source before it prepared again finds no reference left.
+  // The keys found sensitive by any attempt of this write, which a write that says nothing keeps sensitive: a
+  // reference's source written again as a secret, or a reference retargeted, between attempts makes it no looser.
   const sticky = new Set<string>();
   const result = await optimistic(ctx, async () => {
     const operationId = randomUUID();
@@ -839,10 +839,11 @@ export async function setSecrets(
 
 /**
  * Who sees each key's value now: its own live value's level; a reference's,
- * its source's current value's, sensitive or a secret; or, in a fork, the
- * level of what it inherits, a parent's reference resolved the same way.
- * Null for a key with nothing to read. Read in `db`: a transaction's
- * resolves it as the write commits.
+ * live or ended, its source's current value's, sensitive or a secret; or, in
+ * a fork, the level of what it inherits, a parent's reference resolved the
+ * same way. Null for a key with nothing to read, a reference's with no
+ * source value. Read in `db`: a transaction's resolves it as the write
+ * commits.
  */
 async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: string, keys: readonly string[]): Promise<Map<string, Sensitivity | null>> {
   const heads = new Map((await secretHeads(db, environmentId, { keys: [...keys] })).map((row) => [row.key, row]));
@@ -857,10 +858,9 @@ async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: strin
     const held = passedDown(key);
     return [...(mine !== undefined && mine.current === null ? [mine.id] : []), ...(held !== undefined && held.current === null ? [held.id] : [])];
   }));
-  const sourceOf = (holder: string) => {
-    const reference = references.get(holder);
-    return reference?.state === 'live' ? reference.source!.currentVersionId! : undefined;
-  };
+  // Live or not: a write ends the reference it replaces before it commits, and the value it writes is still the one that
+  // reference read. A reference ended otherwise, or to a source archived meanwhile, is held as its source is too.
+  const sourceOf = (holder: string) => references.get(holder)?.source?.currentVersionId ?? undefined;
   const sensitive = await sensitiveVersions(db, [...references.keys()].flatMap((holder) => sourceOf(holder) ?? []));
   const throughReference = (holder: string): Sensitivity | null | undefined => {
     if (!references.has(holder)) return undefined;
@@ -1429,7 +1429,7 @@ export async function restoreVersion(
     // The old value comes back as it was held, plain or a secret, and sensitive while the key is, a reference's source
     // included: never looser than that. Resolved again under the head.
     const was = (await levelsAt(ctx.db, place, environment.environmentId, [prepared.key])).get(prepared.key) ?? null;
-    // Sensitive once found so, by any attempt: one that ended the reference it is before preparing again finds none left.
+    // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if (was === 'sensitive') foundSensitive = true;
     const level = foundSensitive ? 'sensitive' : sensitivityOf(target);
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
