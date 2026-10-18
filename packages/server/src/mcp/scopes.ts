@@ -42,7 +42,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'GET /members/:member/tokens': 'read',
   'POST /members/:member/tokens': 'manage-access',
   'DELETE /members/:member/tokens/:id': 'manage-access',
-  // A stand-in is for a person's own app, made by `coffre run`: a connected app holds no handle.
+  // A placeholder is for a person's own app, made by `coffre run`: a connected app holds no handle.
   'POST /handles': null,
   'GET /members/:member/bindings': 'read',
   'POST /members/:member/bindings': 'manage-access',

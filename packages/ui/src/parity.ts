@@ -133,7 +133,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /members/:member': { ui: [{ does: 'a user or service account › ⋯ › Remove…', in: 'components/directory.tsx', call: 'members.remove' }] },
   'GET /members/:member/tokens': { ui: [{ does: 'a service account › Sign-in › Bearer tokens', in: 'components/service-tokens.tsx', call: 'tokens.list' }] },
   'POST /members/:member/tokens': { ui: [{ does: 'a service account › Sign-in › Issue token', in: 'components/service-tokens.tsx', call: 'tokens.issue' }] },
-  'POST /handles': { not: "a handle is a stand-in for an app `coffre run` starts, which only the credential proxy takes: a page has no app to give one" },
+  'POST /handles': { not: "a handle is the placeholder `coffre run` gives the app it starts, which only the credential proxy takes: a page has no app to give one" },
   'DELETE /members/:member/tokens/:id': { ui: [{ does: 'a bearer token › Revoke', in: 'components/service-tokens.tsx', call: 'tokens.revoke' }] },
   'GET /members/:member/bindings': { ui: [{ does: 'a service account › Sign-in › Sign in with OIDC', in: 'components/trusted-workloads.tsx', call: 'bindings.list' }] },
   'POST /members/:member/bindings': {

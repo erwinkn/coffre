@@ -1,5 +1,5 @@
-// Shaped stand-ins (docs/design/credential-proxy.md, section 5): a client
-// that checks its key's shape before it sends it gets a stand-in in that
+// Shaped placeholders (docs/design/credential-proxy.md, section 5): a client
+// that checks its key's shape before it sends it gets a placeholder in that
 // shape, the handle inside. DFNS's SDK reads its organization out of the
 // token's claims on every request (`extractTokenScope`), so an opaque handle
 // throws before anything is sent; with `jwt({ claims })` it holds a JWT of
@@ -46,7 +46,7 @@ before(async () => {
     received.push({ url: request.url!, authorization, scope });
     const send = (status: number, body: unknown) => response.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
     if (token !== TOKEN && authorization !== `Bearer ${STRIPE}`) return send(401, { error: { message: 'Unauthorized' } });
-    // A redirect that drops the query, for a query rule's stand-in to be given back.
+    // A redirect that drops the query, for a query rule's placeholder to be given back.
     if (request.url!.startsWith('/q/moved')) return response.writeHead(302, { location: `${dfnsUrl}/q/wallets` }).end();
     if (request.url!.startsWith('/echo')) return send(401, { error: { message: `token ${token} is not allowed here` } });
     send(200, { items: [{ id: 'wa-1', network: 'EthereumSepolia' }] });
@@ -76,11 +76,11 @@ after(async () => {
 function proxyOptions(): CredentialProxyOptions {
   return {
     credentials: {
-      dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: [APP_METADATA] }) },
-      stripe: { upstream: `${dfnsUrl}/stripe`, inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), standIn: prefix('sk_test_') },
-      broken: { upstream: dfnsUrl, inject: query('token', '{NOT_A_JWT}'), standIn: jwt() },
-      // The same token in a query parameter: the same stand-in, which the app holds once.
-      q: { upstream: `${dfnsUrl}/q`, inject: query('token', '{DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: [APP_METADATA] }) },
+      dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: [APP_METADATA] }) },
+      stripe: { upstream: `${dfnsUrl}/stripe`, inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), placeholder: prefix('sk_test_') },
+      broken: { upstream: dfnsUrl, inject: query('token', '{NOT_A_JWT}'), placeholder: jwt() },
+      // The same token in a query parameter: the same placeholder, which the app holds once.
+      q: { upstream: `${dfnsUrl}/q`, inject: query('token', '{DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: [APP_METADATA] }) },
     },
     insecureUpstreams: true,
   };
@@ -111,7 +111,7 @@ async function planFor(handle: string): Promise<{ env: Record<string, string>; l
   return (await plan.json()) as { env: Record<string, string>; left: string[] };
 }
 
-test("DFNS's own SDK, its token a JWT stand-in, reads its organization from it and reaches the fake DFNS with the real token", async () => {
+test("DFNS's own SDK, its token a JWT placeholder, reads its organization from it and reaches the fake DFNS with the real token", async () => {
   const { token: handle, expiresAt } = await handleFor();
   const { env } = await planFor(handle);
   const [head, payload, last] = env.DFNS_AUTH_TOKEN!.split('.');
@@ -131,18 +131,18 @@ test("DFNS's own SDK, its token a JWT stand-in, reads its organization from it a
   assert.deepEqual(wallets.items.map((wallet) => wallet.id), ['wa-1']);
   const [sent] = received;
   assert.equal(sent!.url, '/wallets');
-  assert.equal(sent!.authorization, `Bearer ${TOKEN}`, 'the whole header replaced: the real token, and nothing of the stand-in');
+  assert.equal(sent!.authorization, `Bearer ${TOKEN}`, 'the whole header replaced: the real token, and nothing of the placeholder');
   assert.deepEqual(sent!.scope, { orgId: 'or-sandbox', tenantId: 'tn-sandbox' });
 
-  // An opaque handle is what the SDK refuses before it sends anything, as 0.8's stand-in was.
+  // An opaque handle is what the SDK refuses before it sends anything, as 0.8's placeholder was.
   await assert.rejects(new DfnsApiClient({ baseUrl: coffreUrl, authToken: handle }).wallets.listWallets(), /could not be properly parsed/);
 
   // The plan opened the real token for its claims, as a use of the credential, logged; the request opened it again.
   const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'dfns');
-  assert.deepEqual(uses.map((entry) => entry.metadata.standIn ?? entry.metadata.host), [{ claims: [APP_METADATA] }, new URL(dfnsUrl).host]);
+  assert.deepEqual(uses.map((entry) => entry.metadata.placeholder ?? entry.metadata.host), [{ claims: [APP_METADATA] }, new URL(dfnsUrl).host]);
 });
 
-test("a shaped stand-in's slot is that shape exactly; the handle goes nowhere else, and the real token echoed back is redacted", async () => {
+test("a shaped placeholder's slot is that shape exactly; the handle goes nowhere else, and the real token echoed back is redacted", async () => {
   const { token: handle } = await handleFor();
   const { env } = await planFor(handle);
   const call = (path: string, authorization: string, init: RequestInit = {}) => route(`/use/market/dev/dfns${path}`, { ...init, headers: { authorization, ...(init.headers as Record<string, string> | undefined) } });
@@ -150,7 +150,7 @@ test("a shaped stand-in's slot is that shape exactly; the handle goes nowhere el
   assert.equal((await call('/wallets', `Bearer ${env.DFNS_AUTH_TOKEN}`)).status, 200);
   // Any header and payload, as the proxy reads neither: the handle in the third part is what lets it in.
   assert.equal((await call('/wallets', `Bearer e30.e30.${handle}`)).status, 200);
-  // Not the bare handle, nor the stand-in out of its frame, nor a JWT with something after the handle.
+  // Not the bare handle, nor the placeholder out of its frame, nor a JWT with something after the handle.
   for (const slot of [`Bearer ${handle}`, env.DFNS_AUTH_TOKEN!, `Bearer x ${env.DFNS_AUTH_TOKEN}`, `Bearer ${env.DFNS_AUTH_TOKEN}.x`, `Bearer e30.${handle}`]) {
     const refused = await call('/wallets', slot);
     assert.equal(refused.status, 401, slot);
@@ -159,7 +159,7 @@ test("a shaped stand-in's slot is that shape exactly; the handle goes nowhere el
   // The helper's way, the handle as x-coffre-handle, still holds.
   assert.equal((await route('/use/market/dev/dfns/wallets', { headers: { 'x-coffre-handle': handle } })).status, 200);
 
-  // The handle anywhere but its slot is refused before it leaves, the stand-in in a body included.
+  // The handle anywhere but its slot is refused before it leaves, the placeholder in a body included.
   const leaked = await call('/wallets', `Bearer ${env.DFNS_AUTH_TOKEN}`, { method: 'POST', body: JSON.stringify({ token: env.DFNS_AUTH_TOKEN }) });
   assert.equal(leaked.status, 400);
   assert.equal((await call('/wallets', `Bearer ${env.DFNS_AUTH_TOKEN}`, { headers: { 'x-other': env.DFNS_AUTH_TOKEN! } })).status, 400);
@@ -170,7 +170,7 @@ test("a shaped stand-in's slot is that shape exactly; the handle goes nowhere el
   assert.match(text, /token \[redacted by coffre\] is not allowed/);
   assert.ok(received.every((request) => !request.authorization.includes(handle)), 'the handle never reaches DFNS');
 
-  // A redirect under a query rule's upstream gives back the app's stand-in, or, where the app sent none that stands in for
+  // A redirect under a query rule's upstream gives back the app's placeholder, or, where the app sent none that stands in for
   // this handle, one of the same shape: the app follows it with no header of coffre's and is let in.
   const follow = async (path: string, headers: Record<string, string> = {}) => {
     const moved = await route(`/use/market/dev/q${path}`, { headers });
@@ -189,30 +189,30 @@ test("a shaped stand-in's slot is that shape exactly; the handle goes nowhere el
   assert.equal((await route('/use/market/dev/stripe/v1/charges', { headers: { authorization: `Bearer ${handle}` } })).status, 401);
 });
 
-test('a JWT stand-in for a key that holds no JWT fails the plan, saying so and quoting nothing', async () => {
+test('a JWT placeholder for a key that holds no JWT fails the plan, saying so and quoting nothing', async () => {
   await clientFor(deps, ROOT).secrets.set('market/dev', { NOT_A_JWT: 'opaque-secret-0123456789' });
   const { token: handle } = await handleFor();
   const plan = await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } });
   assert.equal(plan.status, 409);
   const text = await plan.text();
-  assert.match(text, /market\/dev's NOT_A_JWT is no JWT, which broken's stand-in copies its claims from/);
+  assert.match(text, /market\/dev's NOT_A_JWT is no JWT, which broken's placeholder copies its claims from/);
   assert.equal(text.includes('opaque-secret'), false);
 });
 
-test('a shaped stand-in is for a header or query rule that carries one key: anything else is refused at configuration', () => {
+test('a shaped placeholder is for a header or query rule that carries one key: anything else is refused at configuration', () => {
   const make = (credential: CredentialProxyOptions['credentials'][string]) => () => credentialProxy({ credentials: { a: credential } });
   const upstream = 'https://api.example.com';
-  assert.throws(make({ upstream, inject: basic('{ID}', '{SECRET}'), standIn: prefix('sk_') }), /a's standIn shapes the one key a header or query rule carries.*not a basic\(\) rule/);
-  assert.throws(make({ upstream, inject: sigv4({ accessKeyId: '{A}', secretAccessKey: '{B}', region: 'eu-west-3', service: 's3' }), standIn: jwt() }), /not a sigv4\(\) rule/);
-  assert.throws(make({ upstream, inject: header('authorization', '{ID}:{TOKEN}'), identifiers: ['ID'], standIn: jwt() }), /several keys/);
-  assert.throws(make({ upstream, inject: header('x', '{K}{K}'), standIn: prefix('a') }), /several keys, or one twice/);
-  assert.throws(make({ upstream, inject: header('x', '{K}'), standIn: prefix('has space') }), /prefix\(\) is up to 64/);
-  assert.throws(make({ upstream, inject: header('x', '{K}'), standIn: jwt({ claims: ['exp'] }) }), /exp is the handle's end/);
-  assert.throws(make({ upstream, inject: header('x', '{K}'), standIn: { kind: 'other' } as never }), /jwt\(…\) or prefix\(…\)/);
-  // The app holds one value for a key: two credentials that read it give it one stand-in.
-  const two = (standIn?: ReturnType<typeof jwt>) => () => credentialProxy({ credentials: { a: { upstream, inject: header('authorization', 'Bearer {K}'), standIn: jwt({ claims: ['org'] }) }, b: { upstream, inject: query('k', '{K}'), ...(standIn === undefined ? {} : { standIn }) } } });
-  assert.throws(two(), /a and b read K with different stand-ins/);
-  assert.throws(two(jwt({ claims: ['other'] })), /different stand-ins/);
+  assert.throws(make({ upstream, inject: basic('{ID}', '{SECRET}'), placeholder: prefix('sk_') }), /a's placeholder shapes the one key a header or query rule carries.*not a basic\(\) rule/);
+  assert.throws(make({ upstream, inject: sigv4({ accessKeyId: '{A}', secretAccessKey: '{B}', region: 'eu-west-3', service: 's3' }), placeholder: jwt() }), /not a sigv4\(\) rule/);
+  assert.throws(make({ upstream, inject: header('authorization', '{ID}:{TOKEN}'), identifiers: ['ID'], placeholder: jwt() }), /several keys/);
+  assert.throws(make({ upstream, inject: header('x', '{K}{K}'), placeholder: prefix('a') }), /several keys, or one twice/);
+  assert.throws(make({ upstream, inject: header('x', '{K}'), placeholder: prefix('has space') }), /prefix\(\) is up to 64/);
+  assert.throws(make({ upstream, inject: header('x', '{K}'), placeholder: jwt({ claims: ['exp'] }) }), /exp is the handle's end/);
+  assert.throws(make({ upstream, inject: header('x', '{K}'), placeholder: { kind: 'other' } as never }), /jwt\(…\) or prefix\(…\)/);
+  // The app holds one value for a key: two credentials that read it give it one placeholder.
+  const two = (placeholder?: ReturnType<typeof jwt>) => () => credentialProxy({ credentials: { a: { upstream, inject: header('authorization', 'Bearer {K}'), placeholder: jwt({ claims: ['org'] }) }, b: { upstream, inject: query('k', '{K}'), ...(placeholder === undefined ? {} : { placeholder }) } } });
+  assert.throws(two(), /a and b read K with different placeholders/);
+  assert.throws(two(jwt({ claims: ['other'] })), /different placeholders/);
   assert.doesNotThrow(two(jwt({ claims: ['org'] })));
-  assert.doesNotThrow(make({ upstream, inject: query('token', 'v1:{K}'), standIn: jwt({ claims: ['org'] }) }));
+  assert.doesNotThrow(make({ upstream, inject: query('token', 'v1:{K}'), placeholder: jwt({ claims: ['org'] }) }));
 });

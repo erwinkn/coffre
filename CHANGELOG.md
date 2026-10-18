@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Breaking: stand-ins are now called placeholders.** What a person's
+  app holds in place of a key, the opaque handle or a shaped one, is a
+  placeholder in the docs, the pages, `coffre run`'s output
+  (`coffre: placeholders for market/dev: …`) and the log, whose
+  `credential.use` entries now say `placeholder: { claims }`. A
+  credential's `standIn` is now `placeholder`: `standIn: jwt({ claims })`
+  becomes `placeholder: jwt({ claims })`. One that still has `standIn`
+  fails at typecheck and at startup, saying to rename it.
+
 ## 0.9.0 (2026-10-18)
 
 - **Breaking: the credential proxy's `baseUrl` is gone, for a stable

@@ -1,7 +1,7 @@
-# Stand-ins, and the credential proxy
+# Placeholders, and the credential proxy
 
 A design for 0.8, written on 2026-10-18 (W125), from Erwin's R11 and R13.
-PR 1 is built: stand-ins for people, handles, the proxy's HTTP shapes
+PR 1 is built: placeholders for people, handles, the proxy's HTTP shapes
 (a header, a query parameter, Basic) and `coffre run`'s side of it. PR 2
 adds SigV4, for S3. PR 3 adds the Postgres tunnel, on Node (section 9).
 0.9 (W127) adds the stable URL, `/use/<credential>`, and removes
@@ -16,11 +16,11 @@ An agent on a developer's machine runs the backend and its tests. The
 backend needs Schumann's API key, an S3 key pair and a database password.
 Until now `coffre run market/dev -- pnpm dev` put those values in its
 environment, and the agent could print them, paste them into a prompt or
-commit them. With stand-ins it holds none of them:
+commit them. With placeholders it holds none of them:
 
 ```sh
 $ coffre run market/dev -- pnpm dev
-coffre: stand-ins for market/dev: schumann, s3 through https://secrets.acme.example/use; the handle lasts 12 hours (`coffre tokens` lists it)
+coffre: placeholders for market/dev: schumann, s3 through https://secrets.acme.example/use; the handle lasts 12 hours (`coffre tokens` lists it)
 coffre: exposed as they are, by the deployment: STRIPE_WEBHOOK_SECRET
 coffre: left out, neither proxied nor exposed: SENTRY_DSN
 ```
@@ -56,7 +56,7 @@ the machine.
 
 | Who | What a read opens | How |
 |---|---|---|
-| A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection | **Stand-ins.** Values are opened only for coffre to use for them | The vault refuses `reveal`, `run` and `compare` reads to any `user:` principal (`stand_ins`), and allows `use`, `expose` and a fork's `copy` |
+| A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection | **Placeholders.** Values are opened only for coffre to use for them | The vault refuses `reveal`, `run` and `compare` reads to any `user:` principal (`stand_ins`), and allows `use`, `expose` and a fork's `copy` |
 | A service account: a service token, a CI run's or a cluster's ID token | **Values**, as before | Unchanged: CI and production read their environment once, at full speed |
 
 The rule is in the vault, the one place every read goes through, not in
@@ -114,7 +114,7 @@ credentialProxy({
 })
 ```
 
-- The keys are the rule's `{KEY}` placeholders, and come from the
+- The keys are those the rule names, `{KEY}`, and come from the
   request's environment: the one the handle was made for, or the one its
   URL names. One credential then serves `market/dev` and `market/staging`
   alike, each with its own values.
@@ -149,7 +149,7 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 - **Reading it is no secret read.** A plain version keeps its value in
   the clear beside its ciphertext (`secret_versions.plaintext`, migration
   `0011_plain_values`), and a read serves that, with no vault call
-  (`openValues`). So a person gets it under stand-ins (`coffre get`, a
+  (`openValues`). So a person gets it under placeholders (`coffre get`, a
   reveal, `coffre run` and `export` through the plan), it is in no
   `secret.read` entry, and it counts towards no bulk limit. The proxy
   leaves it unredacted in an upstream's answer: Twilio quotes the account
@@ -165,7 +165,7 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 - **Making a stored secret plain discloses it**, so it is a reveal and a
   write: the client reads the value (an audited `secret.read`), then writes
   it plain with the version it `replaces`, refused if someone wrote since.
-  Under stand-ins a person has no reveal, so a person never publishes a
+  Under placeholders a person has no reveal, so a person never publishes a
   value they cannot read: they type it again, plain (decision 17). A
   service account may.
 - **Never in a personal config.** Its values are its owner's alone (R8):
@@ -175,7 +175,7 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 **Values of a person's own (0.9).** A backend that refuses to boot without
 its own keys (a key that seals its local data, its webhooks' HMAC secret,
 the key that encrypts its local database) needs *a* value, not the one
-in `backend/local`. Under stand-ins nobody reads that one, so each person
+in `backend/local`. Under placeholders nobody reads that one, so each person
 gets one of their own, made once, kept in their personal config:
 
 ```ts
@@ -221,7 +221,7 @@ kind:
 | No secret | A plain value | `DFNS_CREDENTIAL_ID`, `STARKNET_TESTNET_ACCOUNT_ADDRESS` |
 | The app's own key: sealing, encryption, HMAC, webhook secrets | A value generated for each person in `<env>@me` | `POLICY_SEAL_KEY`, `IFRAME_TOKEN_SECRET`, `DELEGATED_SESSION_SECRET`, `PLAYWRIGHT_SERVICE_SECRET`, `ROOT_ENCRYPTION_KEY`, `FIAT_CHALLENGE_SECRET`, `*_WEBHOOK_SECRET` |
 | A key whose host is in the app's code | A credential, the app pointing at its proxy URL | `LEMONWAY_API_KEY`, `YOUSIGN_API_KEY`, and `backend/tests`' `TEST_LEMONWAY_SANDBOX_API_KEY` |
-| A token the SDK decodes (a JWT) | A shaped stand-in | `DFNS_AUTH_TOKEN` |
+| A token the SDK decodes (a JWT) | A shaped placeholder | `DFNS_AUTH_TOKEN` |
 | A key the app signs with | `credential(name).sign()` | `DFNS_PRIVATE_KEY` |
 | A key no proxy can use yet (a STARK-curve key) | `expose`, still | `STARKNET_TESTNET_PRIVATE_KEY` |
 
@@ -283,7 +283,7 @@ export default vault((env: Env) => ({ …, people: 'stand-ins' }));
 ```
 
 The proxy without `people: 'stand-ins'` works too: people's `coffre run`
-gets stand-ins wherever the instance has the proxy. Their other reads
+gets placeholders wherever the instance has the proxy. Their other reads
 still open values, though, so nothing stops the agent from asking for them.
 
 ## 4. The proxy, request by request
@@ -407,7 +407,7 @@ request sent on:
    and `paths` narrow it further.
 2. **Who.** The handle, from `x-coffre-handle` if present, else from
    where the rule puts the key: the header, the query parameter, or
-   Basic's user or password. A shaped stand-in's slot must be that shape
+   Basic's user or password. A shaped placeholder's slot must be that shape
    exactly (section 5). No handle gets a 401.
 3. **What.** The credential's keys, from the cache for the handle,
    environment and credential, or opened now: `use(handle, …)`, the API's
@@ -431,7 +431,7 @@ request sent on:
    agent uploads cannot act as an Owner who opens its link. A redirect
    stays on the proxy. A `Location` under the upstream becomes the proxy's
    own URL for it, the environment's even from the stable URL, with the
-   app's stand-in back in a query rule's parameter (what it sent there, if
+   app's placeholder back in a query rule's parameter (what it sent there, if
    that stands in for its handle). On the stable URL, a path that begins
    with an environment of the handle's would read as that environment's
    (`/use/schumann/dev/maps/…`, another credential). A
@@ -469,7 +469,7 @@ same resolution, checks and vault call, for those keys only) and returns
 the values to the plugin, never over HTTP. It exists only in process, so
 no caller reaches it. The honest limit of section 2 of
 [plugins.md](plugins.md) applies: a plugin is deployment code, and one that
-returned what it opened would undo stand-ins. The proxy is first-party and
+returned what it opened would undo placeholders. The proxy is first-party and
 small enough to read.
 
 ## 5. The other shapes
@@ -659,19 +659,19 @@ isolates, the map would live in a Durable Object.
   `rolcreaterole` after login, before the app's first query.
 - *Minted short-lived logins* (W108), which replace the shared password.
 
-**Shaped stand-ins.** Some clients check their key before they send it.
+**Shaped placeholders.** Some clients check their key before they send it.
 DFNS's SDK decodes its token's middle part on every request, to read the
 organization from the `https://custom/app_metadata` claim, so an opaque
 handle throws before anything is sent. A credential whose header or query
-rule carries one key may say what shape its stand-in takes:
+rule carries one key may say what shape its placeholder takes:
 
 ```ts
 dfns: {
   upstream: 'https://api.dfns.io',
   inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'),
-  standIn: jwt({ claims: ['https://custom/app_metadata'] }),
+  placeholder: jwt({ claims: ['https://custom/app_metadata'] }),
 },
-stripe: { upstream: 'https://api.stripe.com', inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), standIn: prefix('sk_test_') },
+stripe: { upstream: 'https://api.stripe.com', inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), placeholder: prefix('sk_test_') },
 ```
 
 and the app's SDK, its base URL the stable URL in its own config:
@@ -680,28 +680,28 @@ and the app's SDK, its base URL the stable URL in its own config:
 - `jwt({ claims })` gives the app `header.payload.<handle>`. The header is
   `{"alg":"none","typ":"JWT"}`. The payload holds the named claims,
   copied from the real token, and `exp`, the handle's end. The plan opens
-  the real token for them, as a use of the credential, logged (`standIn:
+  the real token for them, as a use of the credential, logged (`placeholder:
   { claims }`), and copies nothing else: DFNS's `sub` and `iss` stay in
   coffre. A key that holds no JWT fails the plan with a 409 that names it.
 - `prefix('sk_test_')` gives `sk_test_coffre_use_…`.
 
-The proxy reads the slot as the rule's template with the stand-in in its
+The proxy reads the slot as the rule's template with the placeholder in its
 place, exactly: `Bearer <anything>.<anything>.<handle>` for DFNS. It reads
 the handle from the last part, ignores the rest, and the rule's header or
 parameter replaces the whole with the real value. The bare handle, or the
-stand-in framed otherwise, is a 401; `x-coffre-handle` still works. An
-opaque stand-in is found wherever the rule frames it, as before. The leak
+placeholder framed otherwise, is a 401; `x-coffre-handle` still works. An
+opaque placeholder is found wherever the rule frames it, as before. The leak
 check and redaction are unchanged: the handle anywhere else is refused,
-and the real token quoted back is redacted. A shaped stand-in is refused
+and the real token quoted back is redacted. A shaped placeholder is refused
 at configuration for Basic (two keys), `sigv4()` (a key pair), and a
 template with more than one key or the same key twice. Two credentials
-that read one key must give it the same stand-in, since the app holds
+that read one key must give it the same placeholder, since the app holds
 one value for it.
 
 Tested with DFNS's own SDK (`@dfns/sdk`, a dev dependency): it reads its
-organization from the stand-in, and a fake DFNS reads the token it gets
+organization from the placeholder, and a fake DFNS reads the token it gets
 with the SDK's own `extractTokenScope` and requires the real one
-(`packages/server/test/credential-proxy-stand-ins.test.ts`).
+(`packages/server/test/credential-proxy-placeholders.test.ts`).
 
 **Redis.** The same tunnel, intercepting the first `AUTH <password>` or
 `HELLO 3 AUTH <user> <password>` and replacing the handle with the real
@@ -743,7 +743,7 @@ cache.
 
 DFNS's own signer, `AsymmetricKeySigner`, signs a user action's challenge
 with the key. Equisafe's backend replaces it, where `coffre run` gave the
-app stand-ins, with one that asks coffre:
+app placeholders, with one that asks coffre:
 
 ```ts
 import type { CredentialSigner, KeyAssertion, UserActionChallenge } from '@dfns/sdk';
@@ -781,12 +781,12 @@ for computation get helpers of the same kind: an HMAC that signs or
 verifies a webhook (a signer of another kind, `hmac('WEBHOOK_SECRET')`), a
 JWT signed with a service account's key. An SDK that reads a credentials
 file (Google's service-account JSON) gets a file whose private key is a
-stand-in and whose `token_uri` points at coffre, which signs the token
+placeholder and whose `token_uri` points at coffre, which signs the token
 exchange with the real key. Both change app code or its configuration.
 
 ## 6. Security
 
-**What an agent with stand-ins can still do.** It can use every credential
+**What an agent with placeholders can still do.** It can use every credential
 of the environment, against that credential's upstream, for as long as the
 handle lives. It can, for example, call Schumann's API with the real key,
 which is the point. It cannot read a value, send one to another host, or
@@ -866,13 +866,13 @@ tests. The cost: between openings the log says "used schumann from 10:41"
 rather than each call, and a revoked handle keeps working for up to the
 cache's minute (`cacheSeconds: 0` turns both off).
 
-**What `coffre run` makes a stand-in, and what it leaves out.** A person
-on an instance with the proxy gets the plan (section 4): stand-ins for each
+**What `coffre run` makes a placeholder, and what it leaves out.** A person
+on an instance with the proxy gets the plan (section 4): placeholders for each
 credential's keys, the exposed values as they are, and nothing else. It
 sets no base URL: the app's configuration names the stable URL. A service account gets values, as before.
 An instance without the proxy gets the old read, which the vault refuses
 to people with `people: 'stand-ins'`. `coffre export` writes the same
-stand-ins (a `.env` for Docker Compose holds handles, not keys).
+placeholders (a `.env` for Docker Compose holds handles, not keys).
 `export --watch` is refused for people: nothing it would watch changes.
 
 **Workers.** The HTTP shapes are a `fetch` from the app's Worker, so they
@@ -909,7 +909,7 @@ is reversible.
    the default once the proxy covers the common shapes (after PR 3), with
    a release note.*
 2. **No new permission or role.** A person's `secret.read` is the use
-   right: with stand-ins, it opens values to be used, never handed back.
+   right: with placeholders, it opens values to be used, never handed back.
    `use` and `expose` are purposes of the same read, checked by the same
    grants. A `consumer` role (use without read) adds nothing while people
    never read values anyway. It would also need a migration of the grants'
@@ -968,12 +968,12 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
     its type, with the URL to configure instead.
 17. **Making a stored secret plain is a reveal, then a write (0.9).**
     Erwin's brief had it need `secret.read` on the key, and audited. Under
-    stand-ins, though, `secret.read` is a person's right to *use* a value,
+    placeholders, though, `secret.read` is a person's right to *use* a value,
     never to see it (decision 2), and a plain value is shown to everyone
     who lists the environment: a person, or their agent with a personal
     token, could publish any key they may use. So the flip is the client's
-    reveal, which the vault refuses a person under stand-ins (R13), and a
-    plain write of what it showed. Without stand-ins, that is exactly
+    reveal, which the vault refuses a person under placeholders (R13), and a
+    plain write of what it showed. Without placeholders, that is exactly
     `secret.read` and an audited read and write. A person types a value
     they know again, plain. *Alternative:* a flip the server does, allowed
     to people, if publishing what one may use is wanted.
@@ -997,14 +997,14 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
 
 | PR | What |
 |---|---|
-| 1 | Stand-ins in the vault (`people`), handles (`0009_handles`, `POST /api/handles`), the plugin's `use` capability, `credentialProxy` with header, query and Basic, the plan, `coffre run`/`export` stand-ins, `@coffre/client/credential`. Built |
+| 1 | Placeholders in the vault (`people`), handles (`0009_handles`, `POST /api/handles`), the plugin's `use` capability, `credentialProxy` with header, query and Basic, the plan, `coffre run`/`export` placeholders, `@coffre/client/credential`. Built |
 | 2 | `sigv4()`: S3 through the proxy, tested with the AWS SDK against a signature-checking fake, and by hand against MinIO. Built |
 | 3 | The Postgres tunnel: a socket capability for plugins (`routes.socket`, Node's `upgrade`), the listener in `coffre run`, SCRAM, cancel, revocation mid-session. Built |
 | 0.9 E | The stable URL, `/use/<credential>`, from the environments a handle keeps (`0010_handle_places`); `baseUrl` removed. Built |
 | 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), checked on a deployed Worker; the privileged-role warning |
 | 4 | Redis through the tunnel |
 | 5 | `presign` (built in 0.8.1) and `sign` (0.9 D); `verify`, HMAC, SDK credential files |
-| 0.9 C | Shaped stand-ins, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
+| 0.9 C | Shaped placeholders, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
 | 0.9 A | Plain values (`0011_plain_values`, `coffre set --plain`, the page's Plain toggle), which deprecate `identifiers`. Built |
 | 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |
 | 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |

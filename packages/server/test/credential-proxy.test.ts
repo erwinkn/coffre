@@ -1,5 +1,5 @@
-// Stand-ins (docs/design/credential-proxy.md, R13): where the vault gives
-// people stand-ins, a person opens no value to be handed back, on any
+// Placeholders (docs/design/credential-proxy.md, R13): where the vault gives
+// people placeholders, a person opens no value to be handed back, on any
 // credential of theirs, while a service account reads values as before. A
 // person's app holds handles instead, which only the credential proxy takes:
 // it opens the credential's values for them and injects them into the
@@ -23,7 +23,7 @@ import { coffreRoute } from '../src/app.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { setSecurityHeaders } from '../src/security-headers.ts';
-import { basic, credentialProxy, header, query, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
+import { basic, credentialProxy, header, jwt, query, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
 import { vaultKv } from '../src/plugins/vault-kv.ts';
 
 const KEY = 'sk_schumann_real_0123456789abcdef';
@@ -249,7 +249,7 @@ function fetchThrough(input: string | URL | Request, init?: RequestInit): Promis
   return coffreRoute(request, runtime, '203.0.113.7').then((response) => response!);
 }
 
-test('where people get stand-ins, a person opens no value on any credential of theirs, nor through MCP; a service account reads them', async () => {
+test('where people get placeholders, a person opens no value on any credential of theirs, nor through MCP; a service account reads them', async () => {
   const session = await sessionFor(DEV);
   assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev')), { status: 403, reason: 'stand_ins' });
   assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 403, reason: 'stand_ins' });
@@ -262,7 +262,7 @@ test('where people get stand-ins, a person opens no value on any credential of t
   const mcp = await connect(DEV, 'read reveal');
   const revealed = await callRaw(mcp, 'reveal_secret_values', { path: 'market/dev' });
   assert.equal(JSON.stringify(revealed.body).includes(KEY), false);
-  assert.match(JSON.stringify(revealed.body), /stand-ins/);
+  assert.match(JSON.stringify(revealed.body), /placeholders/);
 
   // The vault refused each, and logged it: the app's API holds no rule of its own for this.
   const refused = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author === 'vault');
@@ -324,7 +324,7 @@ test("a personal token makes handles within its scope and its end, and never a s
   assert.ok(Date.parse(handle.expiresAt) <= Date.parse(pat.expiresAt), 'it ends no later than the token that made it');
   await clientFor(deps, ROOT).environments.create('market/prod');
   assert.equal((await refusal(bearer(pat.token).handles.create({ label: 'x', paths: ['market/prod'] }))).status, 403, 'nothing past its scope');
-  // The service-token route is the escape hatch, and a stand-in principal's token does not reach it.
+  // The service-token route is the escape hatch, and a person's token, which gets placeholders, does not reach it.
   assert.equal((await refusal(bearer(pat.token).tokens.issue('token:ci', { label: 'x', expiresInDays: 1 }))).status, 403);
   assert.equal((await refusal(bearer(pat.token).bindings.create('token:ci', { profile: 'github', claims: { repository: 'acme/market' } } as never))).status, 403);
   // A service account holds no handle: it reads its values.
@@ -668,7 +668,7 @@ test("a handle keeps the environments it was made for under its row's MAC; one o
   assert.match(((await refused.json()) as { message: string }).message, /before coffre 0\.9.*coffre run/);
 });
 
-test('the plan: stand-ins for what the proxy covers, values only for what the exact environment exposes, never a fork of it', async () => {
+test('the plan: placeholders for what the proxy covers, values only for what the exact environment exposes, never a fork of it', async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
   await root.secrets.set('market/dev@me', { EXTRA: 'mine' }).catch(() => undefined);
@@ -691,7 +691,7 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   const fork = await plan('market/dev-eu');
   assert.equal(fork.env.WEBHOOK_SECRET, undefined, "a fork inherits dev's value, not its exposure");
   assert.ok(fork.left.includes('WEBHOOK_SECRET'));
-  assert.equal(fork.env.SCHUMANN_API_KEY?.startsWith('coffre_use_'), true, 'its inherited keys are still stand-ins');
+  assert.equal(fork.env.SCHUMANN_API_KEY?.startsWith('coffre_use_'), true, 'its inherited keys are still placeholders');
   assert.equal(fork.env.TWILIO_SID?.startsWith('coffre_use_'), true, "nor is an inherited identifier given: it is dev's, not the fork's");
 
   const mine = await plan('market/dev@me');
@@ -728,6 +728,9 @@ test('the configuration is checked: HTTPS upstreams, no private address, rules t
   // `baseUrl` is gone in 0.9: refused at typecheck and at startup, naming the URL the app's config points at instead.
   // @ts-expect-error -- the type says where the URL goes now
   assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), baseUrl: 'SCHUMANN_BASE_URL' } }), /schumann's baseUrl is gone in 0\.9.*SCHUMANN_BASE_URL.*<publicUrl>\/use\/schumann/);
+  // `standIn` is `placeholder` in 0.10: refused at typecheck and at startup, saying so.
+  // @ts-expect-error -- the type says to rename it
+  assert.throws(make({ dfns: { upstream: 'https://api.example.com', inject: header('authorization', 'Bearer {K}'), standIn: jwt() } }), /dfns's standIn is called placeholder in 0\.10: rename it/);
   assert.doesNotThrow(make({ a: { upstream: 'https://api.example.com/v1', inject: header('authorization', 'Bearer {K}') } }));
   assert.doesNotThrow(make({ a: { upstream: 'http://127.0.0.1:9000', inject: header('x', '{K}') } }, { insecureUpstreams: true }));
 });

@@ -293,7 +293,7 @@ export function createClient(options: ClientOptions) {
     },
 
     /**
-     * Handles: stand-ins a person's app holds in place of an environment's
+     * Handles: placeholders a person's app holds in place of an environment's
      * values, which only the credential proxy (`/use`) takes. The value is
      * in the answer, and only there; it is revoked as a token is.
      */

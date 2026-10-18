@@ -951,7 +951,7 @@ async function set(args: string[]): Promise<void> {
     return;
   }
 
-  // Plain, no secret: whoever lists the environment sees it, and its apps get it as it is, stand-ins or not.
+  // Plain, no secret: whoever lists the environment sees it, and its apps get it as it is, placeholders or not.
   const value = given ?? await readValue(key);
   const result = await client().secrets.set(`${project}/${environment}`, { [key]: values.plain === true ? { value, plain: true } : value });
   const outcome = result.keys[key];
@@ -1039,23 +1039,23 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
 }
 
 /**
- * What a person's app gets through the credential proxy (`standIns`): its
+ * What a person's app gets through the credential proxy (`placeholders`): its
  * environment, what the proxy left out, and what this run made of the
  * person's own, by personal config.
  */
-type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
+type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
 
 /** A plan, `GET /use/<project>/<env>`: what the app gets, and what this run is to make of the person's own. */
 type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string }> };
 
 /**
- * Stand-ins for the environments named, where the instance has the
+ * Placeholders for the environments named, where the instance has the
  * credential proxy (docs/design/credential-proxy.md) and the session is a
  * person's: one handle for the run, which the proxy takes in place of each
  * credential's keys, and the values the deployment exposes. Null where the instance has no proxy, or
  * for a service account, which reads values (R13).
  */
-async function standIns(paths: readonly string[], to: Target = target()): Promise<StandIns | null> {
+async function placeholders(paths: readonly string[], to: Target = target()): Promise<Placeholders | null> {
   if (!(await proxied(to))) return null;
   const at = (path: string, headers: Record<string, string>) =>
     fetch(`${to.origin}/use${path}`, { headers, redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
@@ -1103,7 +1103,7 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
     env: { ...env, COFFRE_CREDENTIALS: JSON.stringify(credentials), COFFRE_HANDLE: handle.token },
     left: plans.flatMap(([, plan]) => plan.left).sort(),
     credentials: Object.keys(credentials).sort(),
-    // A stand-in is the handle, or holds it in the shape its client checks (`sk_test_coffre_use_…`, a JWT's last part).
+    // A placeholder is the handle, or holds it in the shape its client checks (`sk_test_coffre_use_…`, a JWT's last part).
     exposed: Object.keys(env).filter((key) => !env[key]!.includes(handle.token)).sort(),
     expiresAt: handle.expiresAt,
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
@@ -1112,7 +1112,7 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
   };
 }
 
-/** Whether `to` is a person's session, a personal token's included, on an instance with the credential proxy: what gets stand-ins. */
+/** Whether `to` is a person's session, a personal token's included, on an instance with the credential proxy: what gets placeholders. */
 async function proxied(to: Target): Promise<boolean> {
   const person = to.by === 'person' || (to.credential.kind === 'token' && to.credential.token.startsWith('coffre_pat_'));
   if (!person) return false;
@@ -1122,14 +1122,14 @@ async function proxied(to: Target): Promise<boolean> {
   return true;
 }
 
-/** What `run` and `export` say of a person's stand-ins, on stderr: what the app holds, and what it does without. */
-function sayStandIns(stood: StandIns, paths: readonly string[], to: Target): void {
+/** What `run` and `export` say of a person's placeholders, on stderr: what the app holds, and what it does without. */
+function sayPlaceholders(placed: Placeholders, paths: readonly string[], to: Target): void {
   const lines = [
-    `coffre: stand-ins for ${listOf(paths)}: ${stood.credentials.length === 0 ? 'no credential the proxy covers' : `${stood.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(stood.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
-    ...stood.made.map(([mine, keys]) => `coffre: made your own ${keys.join(', ')} in ${mine}, each by its recipe: your next runs use them`),
-    ...(stood.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${stood.exposed.join(', ')}`]),
-    ...(stood.tunnels.length === 0 ? [] : [`coffre: ${stood.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
-    ...(stood.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${stood.left.join(', ')}`]),
+    `coffre: placeholders for ${listOf(paths)}: ${placed.credentials.length === 0 ? 'no credential the proxy covers' : `${placed.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(placed.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
+    ...placed.made.map(([mine, keys]) => `coffre: made your own ${keys.join(', ')} in ${mine}, each by its recipe: your next runs use them`),
+    ...(placed.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${placed.exposed.join(', ')}`]),
+    ...(placed.tunnels.length === 0 ? [] : [`coffre: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
+    ...(placed.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${placed.left.join(', ')}`]),
   ];
   process.stderr.write(`${lines.join('\n')}\n`);
 }
@@ -1156,13 +1156,13 @@ async function run(args: string[]): Promise<void> {
   const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
-  // A person's app gets stand-ins, where the instance has the proxy; a service account, the values.
-  const stood = await standIns(paths);
-  if (stood !== null) sayStandIns(stood, paths, target());
-  const values = stood?.env ?? Object.fromEntries(await readOrEnd(paths));
+  // A person's app gets placeholders, where the instance has the proxy; a service account, the values.
+  const placed = await placeholders(paths);
+  if (placed !== null) sayPlaceholders(placed, paths, target());
+  const values = placed?.env ?? Object.fromEntries(await readOrEnd(paths));
   // Each database the app reaches through a tunnel: a listener of this run's, for as long as its command runs.
-  for (const tunnel of stood?.tunnels ?? []) {
-    const { url } = await listen(tunnel, stood!.handle).catch((error: unknown) => fail((error as Error).message));
+  for (const tunnel of placed?.tunnels ?? []) {
+    const { url } = await listen(tunnel, placed!.handle).catch((error: unknown) => fail((error as Error).message));
     // As an own property: a variable may be named __proto__, which assigning would drop.
     Object.defineProperty(values, tunnel.key, { value: url, enumerable: true, writable: true, configurable: true });
   }
@@ -1223,7 +1223,7 @@ async function exportEnv(args: string[]): Promise<void> {
     const intervalMs = attempt(() => interval(values.interval ?? '60s'));
     const to = target();
     if (to.by === 'run' || to.credential.kind === 'workload') fail("--watch outlives a CI run's credential, which lasts five minutes: watch with a session or a bearer token");
-    if (await proxied(to)) fail("--watch keeps a file of values current, and a person's gets stand-ins, which change only with the deployment: export again then");
+    if (await proxied(to)) fail("--watch keeps a file of values current, and a person's gets placeholders, which change only with the deployment: export again then");
     const api = enduringClient(to);
     process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
     await watch({
@@ -1240,12 +1240,12 @@ async function exportEnv(args: string[]): Promise<void> {
   }
 
   // GitHub's environment is a CI run's, which a service account signs in for.
-  const stood = format === 'github' ? null : await standIns(paths);
-  if (stood !== null) sayStandIns(stood, paths, target());
-  if (stood !== null && stood.tunnels.length > 0) {
-    process.stderr.write(`coffre: left out of the export: ${stood.tunnels.map((tunnel) => tunnel.key).join(', ')}, whose tunnel lives only as long as \`coffre run\`\n`);
+  const placed = format === 'github' ? null : await placeholders(paths);
+  if (placed !== null) sayPlaceholders(placed, paths, target());
+  if (placed !== null && placed.tunnels.length > 0) {
+    process.stderr.write(`coffre: left out of the export: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')}, whose tunnel lives only as long as \`coffre run\`\n`);
   }
-  const entries = byKey(stood === null ? await readOrEnd(paths) : Object.entries(stood.env));
+  const entries = byKey(placed === null ? await readOrEnd(paths) : Object.entries(placed.env));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.
@@ -1253,7 +1253,7 @@ async function exportEnv(args: string[]): Promise<void> {
     attempt(() => appendFileSync(githubEnv!, githubEnvironment(entries), { encoding: 'utf8', mode: 0o600 }));
   } else if (file !== undefined) attempt(() => replaceFile(file, text(entries)));
   else process.stdout.write(attempt(() => text(entries)));
-  if (process.stderr.isTTY && stood === null) {
+  if (process.stderr.isTTY && placed === null) {
     const count = entries.length;
     process.stderr.write(
       `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}${file === undefined ? '' : ` into ${file}`}; each read is in the audit log under your name\n`,

@@ -2038,7 +2038,7 @@ function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays
 /**
  * Whether the value being written is plain, no secret: an account's id,
  * which whoever reads the environment then sees as it is, and its apps get
- * as it is under stand-ins. Off, it is a secret, as every value is unless
+ * as it is under placeholders. Off, it is a secret, as every value is unless
  * this says otherwise.
  */
 function PlainToggle({ plain, disabled, onToggle }: { plain: boolean; disabled: boolean; onToggle: () => void }) {

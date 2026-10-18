@@ -283,7 +283,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   deleted: 'this project or environment was deleted',
   ended: 'the reference read through was ended',
   personal: "a personal config's values are its owner's alone",
-  stand_ins: "people use this instance's values through stand-ins, never as values: `coffre run` gives your app them; a service account reads values",
+  stand_ins: "people use this instance's values through placeholders, never as values: `coffre run` gives your app them; a service account reads values",
   not_allowed: 'not allowed to change this',
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
@@ -1057,7 +1057,7 @@ class VaultService implements Vault {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
       }
       let first = codes.find((code) => code !== null) ?? null;
-      // A person's values are only ever used for them, where people get stand-ins: by whatever credential of theirs asks.
+      // A person's values are only ever used for them, where people get placeholders: by whatever credential of theirs asks.
       if (first === null && action === 'secret.read' && this.#config.people === 'stand-ins' && principal.startsWith('user:') && HANDED_BACK.includes(call.input.purpose as Purpose)) first = 'stand_ins';
       if (first === null && action === 'secret.read' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
       if (first !== null) {

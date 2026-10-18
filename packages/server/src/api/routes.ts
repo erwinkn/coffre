@@ -450,7 +450,7 @@ export const routes = {
         : signin(ctx).issueServiceToken(ctx, member.id, service);
     },
   }),
-  // A handle, for `coffre run`: a stand-in for the values of `paths`, which only the credential proxy takes (docs/design/credential-proxy.md).
+  // A handle, for `coffre run`: a placeholder for the values of `paths`, which only the credential proxy takes (docs/design/credential-proxy.md).
   ...route('POST /handles', {
     input: z.object({
       label: tokenInput.shape.label.unwrap().unwrap(),
