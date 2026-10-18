@@ -197,7 +197,13 @@ test("aws-chunked uploads and presigned URLs are refused, before anything reache
 
 test("coffre's signer signs as the AWS SDK's does: S3's path encoded once, another service's twice, header whitespace AWS's way", async () => {
   const date = new Date('2026-10-18T10:00:00Z');
-  for (const [service, path] of [['s3', '/uploads/a%20b%2Bc/%C3%A9t%C3%A9.txt'], ['execute-api', '/prod/a%20b/c%2Bd']] as const) {
+  const cases = [
+    ['s3', '/uploads/a%20b%2Bc/%C3%A9t%C3%A9.txt'],
+    ['s3', '/uploads/a//b/'],
+    ['execute-api', '/prod/a%20b/c%2Bd'],
+    ['execute-api', '/prod/a//b/'],
+  ] as const;
+  for (const [service, path] of cases) {
     const url = new URL(`https://upstream.example${path}?b=2&a=1&empty=&a=0`);
     const headers = new Headers({ 'content-type': 'text/plain', 'x-amz-meta-description': '  a b \t c  ', 'x-amz-user-agent': 'aws-sdk-js/3' });
     await signV4('PUT', url, headers, 'UNSIGNED-PAYLOAD', { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET, sessionToken: 'session-token' }, { region: REGION, service }, date);
@@ -208,7 +214,7 @@ test("coffre's signer signs as the AWS SDK's does: S3's path encoded once, anoth
     const sent: Record<string, string> = { host: url.host };
     for (const name of signedHeaders) if (name !== 'host') sent[name] = headers.get(name)!;
     const expected = await signer.sign({ method: 'PUT', protocol: 'https:', hostname: url.hostname, path: url.pathname, query, headers: sent }, { signingDate: date, signableHeaders: new Set(signedHeaders) });
-    assert.equal(headers.get('authorization'), expected.headers.authorization, service);
+    assert.equal(headers.get('authorization'), expected.headers.authorization, `${service} ${path}`);
   }
 });
 

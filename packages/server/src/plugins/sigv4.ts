@@ -21,17 +21,21 @@ function strict(text: string): string {
 
 /**
  * Each segment of a path as AWS signs it: decoded, then encoded strictly,
- * once for S3, and twice for every other service, whose canonical path is
- * the path as sent, encoded again.
+ * once for S3, which signs the path as it is, repeated slashes and all;
+ * and twice for every other service, whose canonical path is the path as
+ * sent, normalized, encoded again.
  */
 function canonicalPath(pathname: string, service: string): string {
-  return pathname
-    .split('/')
-    .map((segment) => {
-      const once = strict(decodeURIComponent(segment));
-      return service === 's3' ? once : strict(once);
-    })
-    .join('/');
+  if (service === 's3') return pathname.split('/').map((segment) => strict(decodeURIComponent(segment))).join('/');
+  // Any other service's path is normalized first, as AWS's signers do: no empty or `.` segment, a `..` taking one back.
+  const segments: string[] = [];
+  for (const segment of pathname.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') segments.pop();
+    else segments.push(segment);
+  }
+  const normalized = `/${segments.map((segment) => strict(strict(decodeURIComponent(segment)))).join('/')}`;
+  return segments.length > 0 && pathname.endsWith('/') ? `${normalized}/` : normalized;
 }
 
 /** A header's value as AWS signs it: ASCII spaces and tabs trimmed and runs of them made one space; any other whitespace kept. */
