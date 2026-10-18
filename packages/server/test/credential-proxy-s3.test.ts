@@ -202,6 +202,7 @@ test("coffre's signer signs as the AWS SDK's does: S3's path encoded once, anoth
     ['s3', '/uploads/a//b/'],
     ['execute-api', '/prod/a%20b/c%2Bd'],
     ['execute-api', '/prod/a//b/'],
+    ['execute-api', '/prod/a+b/c@d=e/%7e/./x/../y'],
   ] as const;
   for (const [service, path] of cases) {
     const url = new URL(`https://upstream.example${path}?b=2&a=1&empty=&a=0`);

@@ -20,10 +20,10 @@ function strict(text: string): string {
 }
 
 /**
- * Each segment of a path as AWS signs it: decoded, then encoded strictly,
- * once for S3, which signs the path as it is, repeated slashes and all;
- * and twice for every other service, whose canonical path is the path as
- * sent, normalized, encoded again.
+ * Each segment of a path as AWS signs it. For S3, decoded, then encoded
+ * strictly, once, repeated slashes and all. For every other service, the
+ * path as sent, normalized, then encoded again as it is: `%20` is `%2520`,
+ * `+` is `%2B`.
  */
 function canonicalPath(pathname: string, service: string): string {
   if (service === 's3') return pathname.split('/').map((segment) => strict(decodeURIComponent(segment))).join('/');
@@ -34,7 +34,7 @@ function canonicalPath(pathname: string, service: string): string {
     if (segment === '..') segments.pop();
     else segments.push(segment);
   }
-  const normalized = `/${segments.map((segment) => strict(strict(decodeURIComponent(segment)))).join('/')}`;
+  const normalized = `/${segments.map(strict).join('/')}`;
   return segments.length > 0 && pathname.endsWith('/') ? `${normalized}/` : normalized;
 }
 
