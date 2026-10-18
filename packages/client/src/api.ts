@@ -50,14 +50,14 @@ export type Api = {
         label: string;
         expiresAt: string;
         scope: {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
       };
       credentialExpiresAt: string | null;
       environments: {
         project: string;
         environment: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
       }[];
     };
   };
@@ -69,7 +69,7 @@ export type Api = {
         name: string;
         archivedAt: string | null;
         folder: string | null;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         environments: {
           slug: string;
           name: string;
@@ -228,7 +228,7 @@ export type Api = {
   "GET /secrets/:project/:environment": {
     input: undefined;
     output: {
-      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
       keys: {
         key: string;
         reference: null | {
@@ -258,6 +258,7 @@ export type Api = {
         };
         value: string | null;
         sensitivity: "plain" | "secret" | "sensitive" | null;
+        readable: boolean;
         parent: null | {
           from: string;
           state: "inherited" | "overridden" | "removed";
@@ -470,9 +471,9 @@ export type Api = {
           id: string;
           project: string;
           environment: string | null;
-          role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
           roleName: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
           expiresAt: string | null;
         }[];
       }[];
@@ -529,7 +530,7 @@ export type Api = {
         expiresAt: string;
         lastUsedAt: string | null;
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
       }[];
       apps: {
@@ -553,7 +554,7 @@ export type Api = {
         lastUsedAt: string | null;
         lastUsedIp: string | null;
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
       }[];
       references: {
@@ -590,8 +591,8 @@ export type Api = {
         };
       };
       access?: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
-          role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
+          role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
           until: string | null;
         };
       };
@@ -671,7 +672,7 @@ export type Api = {
           expiresAt: string;
           lastUsedAt: string | null;
           scope: null | {
-            [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+            [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
           };
         }[];
         apps: {
@@ -695,7 +696,7 @@ export type Api = {
           lastUsedAt: string | null;
           lastUsedIp: string | null;
           scope: null | {
-            [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+            [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
           };
         }[];
         references: {
@@ -730,7 +731,7 @@ export type Api = {
         lastUsedAt: string | null;
         lastUsedIp: string | null;
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
       }[];
     };
@@ -741,7 +742,7 @@ export type Api = {
       expiresInDays?: number;
       expiresInMinutes?: number;
       scope?: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
       };
     };
     output: {
@@ -749,11 +750,11 @@ export type Api = {
       token: string;
       expiresAt: string;
       scope: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
       };
     } | {
       scope: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
       };
     };
   };
@@ -780,7 +781,7 @@ export type Api = {
           [key: string]: string | string[];
         };
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
         label: string | null;
         createdAt: string;
@@ -797,7 +798,7 @@ export type Api = {
       };
       issuer?: string | null;
       scope?: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
       };
       label?: string | null;
       replaces?: string[];
@@ -820,7 +821,7 @@ export type Api = {
         [key: string]: string | string[];
       };
       scope: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
       };
       replaces: {
         id: string;
@@ -841,7 +842,7 @@ export type Api = {
           [key: string]: string | string[];
         };
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
         label: string | null;
         createdAt: string;
@@ -878,8 +879,8 @@ export type Api = {
   };
   "PATCH /access/:member": {
     input: {
-      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
-        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
+        role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         until: string | null;
       };
     };
@@ -1228,9 +1229,9 @@ export type Api = {
         id: string;
         project: string;
         environment: string | null;
-        role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         roleName: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         expiresAt: string | null;
       }[];
     };
@@ -1340,7 +1341,7 @@ export type Api = {
           [key: string]: string | string[];
         };
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
         };
         label: string | null;
         createdAt: string;
@@ -1374,14 +1375,14 @@ export type Api = {
       token: string;
       expiresAt: string;
       scope: {
-        [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
       };
     };
   };
 };
 
-export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
-  role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+export type AccessValue = "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
+  role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
   until: string | null;
 };
 
@@ -1511,7 +1512,7 @@ export type BindingPlan = {
     [key: string]: string | string[];
   };
   scope: {
-    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
   };
   replaces: {
     id: string;
@@ -1533,7 +1534,7 @@ export type BindingView = {
     [key: string]: string | string[];
   };
   scope: null | {
-    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
   };
   label: string | null;
   createdAt: string;
@@ -1710,14 +1711,14 @@ export type Me = {
     label: string;
     expiresAt: string;
     scope: {
-      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
     };
   };
   credentialExpiresAt: string | null;
   environments: {
     project: string;
     environment: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
   }[];
 };
 
@@ -1746,9 +1747,9 @@ export type Member = {
     id: string;
     project: string;
     environment: string | null;
-    role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
     roleName: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
   }[];
 };
@@ -1776,9 +1777,9 @@ export type MemberAccess = {
     id: string;
     project: string;
     environment: string | null;
-    role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
     roleName: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
   }[];
 };
@@ -1848,7 +1849,7 @@ export type OffboardingReport = {
     expiresAt: string;
     lastUsedAt: string | null;
     scope: null | {
-      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
     };
   }[];
   apps: {
@@ -1872,7 +1873,7 @@ export type OffboardingReport = {
     lastUsedAt: string | null;
     lastUsedIp: string | null;
     scope: null | {
-      [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
     };
   }[];
   references: {
@@ -1922,7 +1923,7 @@ export type ProjectSummary = {
   name: string;
   archivedAt: string | null;
   folder: string | null;
-  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
   environments: {
     slug: string;
     name: string;
@@ -1984,6 +1985,7 @@ export type SecretKey = {
   };
   value: string | null;
   sensitivity: "plain" | "secret" | "sensitive" | null;
+  readable: boolean;
   parent: null | {
     from: string;
     state: "inherited" | "overridden" | "removed";
@@ -2032,7 +2034,7 @@ export type SetResult = {
 
 export type TokenPlan = {
   scope: {
-    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
   };
 };
 
@@ -2046,6 +2048,6 @@ export type TokenRow = {
   lastUsedAt: string | null;
   lastUsedIp: string | null;
   scope: null | {
-    [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
   };
 };

@@ -34,7 +34,7 @@ import {
   fileSecrets,
   secretFolderOf,
 } from '../db/queries.ts';
-import { can, permissionsAt, placeOf } from './caller.ts';
+import { can, lists, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -91,6 +91,14 @@ export type SecretKey = {
    * value to read.
    */
   sensitivity: Sensitivity | null;
+  /**
+   * Whether you may see its current value: a plain one listed here, or a
+   * secret where it is held, here or, inherited, on the parent that holds
+   * it. A Contributor's personal config reads their own values, and none of
+   * its parent's. False for a sensitive value, which nobody sees, and where
+   * there is no value to read.
+   */
+  readable: boolean;
   /**
    * In a fork, the key its parents hold under this name
    * (docs/design/forking.md): `inherited`, no row here, the parent's value
@@ -285,7 +293,7 @@ export async function listSecrets(
     const reference = references.get(secretId);
     if (reference === undefined) return null;
     const { source } = reference;
-    const canOpenSource = source !== null && can(ctx.caller, 'secret.read', placeOfRow(source));
+    const canOpenSource = source !== null && lists(ctx.caller, placeOfRow(source));
     return { ...reference.view, canOpenSource };
   };
   // A reference's value is its source's: as old as the version it reads.
@@ -301,7 +309,7 @@ export async function listSecrets(
     ...rows,
     ...[...inherited.held].filter(([key]) => !own.has(key) && !inherited.removed.has(key)).map(([, held]) => held.row),
   ]);
-  const view = (row: SecretRow): Omit<SecretKey, 'parent'> => ({
+  const view = (row: SecretRow): Omit<SecretKey, 'parent' | 'readable'> => ({
     key: row.key,
     reference: referenceOf(row.id),
     folder: row.folder,
@@ -314,19 +322,29 @@ export async function listSecrets(
     value: row.current?.plaintext ?? null,
     sensitivity: levelOfRow(row),
   });
-  const reads = (from: { id: string; slug: string }) =>
+  // Told of a parent's key, its version, age and plain value, as a lister of the parent is: a reader, or a Contributor who uses it.
+  const told = (from: { id: string; slug: string }) =>
+    lists(ctx.caller, { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
+  // Whether the caller reads a value where it is held: a Contributor only uses dev, and reads their own values in dev@me.
+  const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
+  const readsAt = (from: { id: string; slug: string }) =>
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
+  const readable = (key: Pick<SecretKey, 'value' | 'sensitivity'>, reader: boolean) =>
+    key.sensitivity !== null && key.sensitivity !== 'sensitive' && (key.value !== null || reader);
 
   // An override reset to the parent's: its key is listed once, as inherited or removed, saying its own value is kept.
   const removedSince = (key: string) => inherited.removed.has(key) && inherited.cut.has(key);
   const reset = new Set(rows.filter((row) => row.archivedAt !== null && (inherited.held.has(row.key) || removedSince(row.key))).map((row) => row.key));
   const keys: SecretKey[] = rows.filter((row) => !reset.has(row.key)).map((row) => {
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
-    if (held === undefined) return { ...view(row), parent: null };
+    // An archived key has no value to read: a read of it is refused.
+    const listed = view(row);
+    const here = { ...listed, readable: row.archivedAt === null && readable(listed, readsHere) };
+    if (held === undefined) return { ...here, parent: null };
     // Flagged while the parent's value is newer than the override, to whoever may know when it was written.
     const [mine, theirs] = [writtenAt(row), writtenAt(held.row)];
-    const changed = reads(held.from) && mine !== null && theirs !== null && theirs > mine;
-    return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
+    const changed = told(held.from) && mine !== null && theirs !== null && theirs > mine;
+    return { ...here, parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
   });
   // A parent archived or deleted, which only a write around coffre leaves in a chain, cuts it: a read refuses there, and no
   // plain value is listed from it or past it.
@@ -335,13 +353,18 @@ export async function listSecrets(
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;
     const removed = inherited.removed.has(key);
-    const shown = !removed && reads(held.from);
-    keys.push({
+    const shown = !removed && told(held.from);
+    const listed = {
       ...view(held.row),
       ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null }),
       ...(shown && live(held.from) ? {} : { value: null }),
       // A removed key resolves to nothing here, and has nothing to regenerate.
       ...(removed ? { generated: null, value: null, sensitivity: null } : {}),
+    };
+    keys.push({
+      ...listed,
+      // Read through here, so by a reader of here and of the parent that holds it, while the chain to it is whole.
+      readable: readable(listed, live(held.from) && readsHere && readsAt(held.from)),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
@@ -351,7 +374,7 @@ export async function listSecrets(
     const from = inherited.cut.get(key);
     if (from === undefined || own.has(key)) continue;
     keys.push({
-      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null,
+      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null, readable: false,
       parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
     });
   }
@@ -1527,7 +1550,8 @@ export async function reveal(
         }),
       );
     }
-    need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', {
+    // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.
+    need(ctx, use === undefined ? 'secret.read' : 'secret.use', placeOf(place.project, place.environment), 'secret.read', {
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
@@ -1536,15 +1560,18 @@ export async function reveal(
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
     // else, its key is a key like any other.
-    const told = (item: Readable) => item.parent === undefined
-      || can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: item.parent.environmentId, environmentSlug: item.parent.slug });
+    const parentOf = (item: Readable) => ({ projectId: environment.projectId, environmentId: item.parent!.environmentId, environmentSlug: item.parent!.slug });
+    const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
+    // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
+    const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
+    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
     const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
       key: item.key,
       inherited: item.parent !== undefined,
       from: item.parent?.slug ?? null,
       plain: plain(item) && told(item),
       sensitive: item.secret.sensitive === true,
-      reads: told(item),
+      reads: readsAt(item),
       versionId: told(item) ? item.secretVersionId : null,
       recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
     }))) : use.keys;
@@ -1562,7 +1589,8 @@ export async function reveal(
       );
     }
     // Before any other refusal: past a key's name, a fork says nothing of what its reader cannot read.
-    const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable });
+    // The proxy's: what it uses takes use on each parent, and what it hands back was chosen only where its reader reads.
+    const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable }, use === undefined ? ['secret.read'] : ['secret.read', 'secret.use']);
     if (unread.size > 0) {
       const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
       throw new Refusal(
@@ -1625,7 +1653,7 @@ export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): 
   // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
   const person = ctx.caller.principal.type === 'user';
   const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) };
-  const unread = unreadParents(ctx, environment.projectId, opened);
+  const unread = unreadParents(ctx, environment.projectId, opened, ['secret.read', 'secret.use']);
   if (unread.size > 0) {
     const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
     await refuse(ctx, new Refusal(

@@ -1,5 +1,5 @@
 /**
- * Who may do what: seven permissions, the six project roles a grant names,
+ * Who may do what: eight permissions, the seven project roles a grant names,
  * and the five instance roles a person holds across every project.
  *
  * Deliberately constants and not tables or a policy language. A grant names
@@ -8,8 +8,16 @@
  * stays something you can read end to end.
  */
 
+/**
+ * `secret.read` hands a value back: a reveal, `coffre get`, `coffre run`'s
+ * values. `secret.use` uses it without handing it back: a placeholder in a
+ * person's app, the credential proxy filling it in (docs/design/credential-proxy.md).
+ * Every role that reads uses too. What a person gets is the narrower of the
+ * two and the key's sensitivity: a sensitive key is only ever used.
+ */
 export const PERMISSIONS = [
   'secret.read',
+  'secret.use',
   'secret.write',
   'secret.archive',
   'audit.read',
@@ -34,18 +42,23 @@ export const PROJECT_ONLY_PERMISSIONS: readonly Permission[] = [
 export const ROLES = {
   viewer: {
     name: 'Viewer',
-    description: 'Read secret values.',
-    permissions: ['secret.read'],
+    description: 'Read and use secret values.',
+    permissions: ['secret.read', 'secret.use'],
+  },
+  contributor: {
+    name: 'Contributor',
+    description: 'Use and write secrets, never read them: apps get placeholders through the credential proxy.',
+    permissions: ['secret.use', 'secret.write'],
   },
   developer: {
     name: 'Developer',
-    description: 'Read and write secrets.',
-    permissions: ['secret.read', 'secret.write'],
+    description: 'Read, use and write secrets.',
+    permissions: ['secret.read', 'secret.use', 'secret.write'],
   },
   maintainer: {
     name: 'Maintainer',
-    description: 'Read, write and retire secrets, and manage environments.',
-    permissions: ['secret.read', 'secret.write', 'secret.archive', 'environment.manage'],
+    description: 'Read, use, write and retire secrets, and manage environments.',
+    permissions: ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'environment.manage'],
   },
   'access-manager': {
     name: 'Access manager',
@@ -106,8 +119,8 @@ export const INSTANCE_ROLES = {
   },
   developer: {
     name: 'Developer',
-    description: 'Read and write secrets.',
-    permissions: ['secret.read', 'secret.write'],
+    description: 'Read, use and write secrets.',
+    permissions: ['secret.read', 'secret.use', 'secret.write'],
   },
   admin: {
     name: 'Admin',

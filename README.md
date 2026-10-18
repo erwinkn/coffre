@@ -356,9 +356,9 @@ only.
 |---|---|---|
 | Member | nothing: only what grants give | no |
 | Auditor | `audit.read` | **no** |
-| Developer | `secret.read`, `secret.write` | yes |
+| Developer | `secret.read`, `secret.use`, `secret.write` | yes |
 | Admin | `audit.read`, `environment.manage`, `grant.manage`, `project.manage`; people and service accounts | **no** |
-| Owner | all seven, and what an Admin does | yes |
+| Owner | all eight, and what an Admin does | yes |
 
 A role's **scope** has two filters, Projects and Environments, each all,
 only some, or all except some. Projects are named by id, so a rename keeps
@@ -372,12 +372,21 @@ them; environments by name, so `dev` is the `dev` of every project:
 
 | Project role | Permissions | Reads secrets? |
 |---|---|---|
-| `viewer` | `secret.read` | yes |
-| `developer` | `secret.read`, `secret.write` | yes |
+| `viewer` | `secret.read`, `secret.use` | yes |
+| `contributor` | `secret.use`, `secret.write` | **no**: uses them, through placeholders |
+| `developer` | `secret.read`, `secret.use`, `secret.write` | yes |
 | `maintainer` | + `secret.archive`, `environment.manage` | yes |
 | `access-manager` | `grant.manage` | **no** |
 | `auditor` | `audit.read` | **no** |
-| `owner` | all seven | yes |
+| `owner` | all eight | yes |
+
+`secret.read` hands values back: a reveal, `coffre get`, the values of
+`coffre run`. `secret.use` only uses them: a person's app gets
+placeholders, which the credential proxy fills in
+([design](docs/design/credential-proxy.md)). A Contributor adds and
+changes values without ever reading one. What a person gets is the
+narrower of their role and the key: a sensitive key is only ever used,
+whatever the role.
 
 Grants and the role add up, and none takes anything away: a Developer scoped
 to `dev`, with `viewer` on `billing`, writes every `dev` and reads all of

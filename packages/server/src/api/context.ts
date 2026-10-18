@@ -215,8 +215,10 @@ export function need(
   fields: EntryFields = {},
 ): void {
   if (can(ctx.caller, permission, place)) return;
+  // One who uses values and reads none, a Contributor, is told how they use them.
+  const uses = permission === 'secret.read' && can(ctx.caller, 'secret.use', place);
   throw new Refusal(
-    forbidden(),
+    uses ? forbidden('you use these values without reading them (secret.use): `coffre run` gives your app placeholders, which the credential proxy fills in') : forbidden(),
     denied(ctx, action, missing(permission), {
       projectId: place.projectId,
       environmentId: place.environmentId ?? null,

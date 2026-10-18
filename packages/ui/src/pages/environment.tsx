@@ -232,6 +232,8 @@ function EnvironmentLedger({
   const canWrite = permissions.includes('secret.write');
   const canArchive = permissions.includes('secret.archive');
   const canReveal = canRevealSecrets(permissions);
+  // What a Contributor does without reading: lists the keys, their history, and keeps a personal config.
+  const canList = canReveal || permissions.includes('secret.use');
 
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
@@ -535,7 +537,7 @@ function EnvironmentLedger({
         title={environment}
         actions={personal ? (
           <DeletePersonal project={project} environment={environment} of={parents[0]!} />
-        ) : principal?.type === 'user' && canReveal && (
+        ) : principal?.type === 'user' && canList && (
           <Link className="btn btn-sm" to="/projects/$project/$environment" params={{ project, environment: `${environment}@me` }}>
             <Key size={14} />
             My own {environment}
@@ -677,6 +679,7 @@ function EnvironmentLedger({
                       canWrite={canWrite}
                       canArchive={canArchive}
                       canReveal={canReveal}
+                      canList={canList}
                       folders={folders}
                       onMove={(folder) => move({ key: entry.key, folder })}
                       lent={lentBy.get(entry.key) ?? []}
@@ -831,7 +834,7 @@ function EnvironmentLedger({
                     environment={environment}
                     entry={entry}
                     canArchive={canArchive}
-                    canReveal={canReveal}
+                    canList={canList}
                     status={status(entry.key)}
                     onRestore={() => restoreSecretKey(entry.key)}
                     onDismiss={dismiss}
@@ -1215,6 +1218,7 @@ function SecretRow({
   canWrite,
   canArchive,
   canReveal,
+  canList,
   folders,
   onMove,
   lent,
@@ -1249,6 +1253,8 @@ function SecretRow({
   canWrite: boolean;
   canArchive: boolean;
   canReveal: boolean;
+  /** Whether the caller lists the environment: reads it, or uses it as a Contributor does. */
+  canList: boolean;
   /** The folders in use in this environment, offered when moving it. */
   folders: readonly string[];
   onMove: (folder: string | null) => void;
@@ -1300,11 +1306,10 @@ function SecretRow({
   const removed = parent?.state === 'removed';
   const overridden = parent?.state === 'overridden';
   const own = !inherited && !removed;
-  // Inherited from a parent you do not read: its name is yours to know, its value is not.
-  const parentHidden = inherited && entry.version === null && reference === null;
   // A sensitive value is shown to nobody, its readers included: no Reveal, no Copy, and an edit starts empty.
   const sensitive = entry.sensitivity === 'sensitive';
-  const canRead = canReveal && !removed && !parentHidden && !sensitive;
+  // Read where it is held: inherited, on its parent, which a Contributor's dev@me tells of and does not read.
+  const canRead = entry.readable;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
   // And where that version is held: a reset, an override or a new reference changes it under the same number.
@@ -1407,7 +1412,8 @@ function SecretRow({
   }
 
   // An edit starts from the current value, read the way Reveal reads it, so
-  // the audit log shows who opened it. One that cannot be read starts empty.
+  // the audit log shows who opened it. One its editor does not read starts
+  // empty: sensitive, or a parent's in a Contributor's dev@me, overridden unread.
   const [opening, setOpening] = useState(false);
   // Rename opens the same editor, its name field focused rather than its value.
   const [focusName, setFocusName] = useState(false);
@@ -1539,7 +1545,7 @@ function SecretRow({
                       loosening ? 'Its value, typed again'
                         : editBase !== null ? 'Value'
                           : sensitive ? 'Type a new value'
-                            : canReveal ? 'New value' : 'New value; the current one is hidden from you'
+                            : canRead ? 'New value' : 'New value; the current one is hidden from you'
                     }
                     plain={level === 'plain'}
                     disabled={disabled}
@@ -1712,7 +1718,7 @@ function SecretRow({
           {status.state === 'pending' ? (
             <RowPending status={status} />
           ) : (
-            !removed && (canReveal || (canWrite && !editing && !leaving) || (canArchive && !leaving && own && !overridden)) && (
+            !removed && (canList || (canWrite && !editing && !leaving) || (canArchive && !leaving && own && !overridden)) && (
               <Menu.Root>
                 <Menu.Trigger
                   className="act act-icon act-quiet"
@@ -1722,7 +1728,7 @@ function SecretRow({
                   <MoreHorizontal size={16} />
                 </Menu.Trigger>
                 <MenuPopup align="end">
-                  <SecretReadOnly canReveal={canReveal && own}>
+                  <SecretReadOnly canReveal={canList && own}>
                     <Menu.Item className="menu-item" onClick={() => setHistoryOpen((open) => !open)}>
                       <History size={14} />
                       {historyOpen ? 'Hide history' : 'Version history'}
@@ -1927,7 +1933,7 @@ function SecretRow({
         />
       )}
 
-      {historyOpen && canReveal && (
+      {historyOpen && canList && (
         <tr className="detail-row">
           <td colSpan={columns}>
             <VersionHistory
@@ -2340,7 +2346,7 @@ function ArchivedRow({
   environment,
   entry,
   canArchive,
-  canReveal,
+  canList,
   status: state,
   onRestore,
   onDismiss,
@@ -2350,7 +2356,8 @@ function ArchivedRow({
   environment: string;
   entry: SecretKey;
   canArchive: boolean;
-  canReveal: boolean;
+  /** Whether the caller lists the environment, as its history takes. */
+  canList: boolean;
   status: ItemStatus;
   onRestore: () => void;
   onDismiss: (mutationId: number) => void;
@@ -2374,7 +2381,7 @@ function ArchivedRow({
           {state.state === 'pending' ? (
             <RowPending status={state} />
           ) : (
-            (canReveal || canArchive) && (
+            (canList || canArchive) && (
               <div className="acts">
                 <Menu.Root>
                   <Menu.Trigger
@@ -2384,7 +2391,7 @@ function ArchivedRow({
                     <MoreHorizontal size={16} />
                   </Menu.Trigger>
                   <MenuPopup align="end">
-                    <SecretReadOnly canReveal={canReveal}>
+                    <SecretReadOnly canReveal={canList}>
                       <Menu.Item
                         className="menu-item"
                         onClick={() => setHistoryOpen((open) => !open)}
@@ -2395,7 +2402,7 @@ function ArchivedRow({
                     </SecretReadOnly>
                     {canArchive && (
                       <>
-                        {canReveal && <Menu.Separator className="menu-sep" />}
+                        {canList && <Menu.Separator className="menu-sep" />}
                         <Menu.Item className="menu-item" onClick={onRestore}>
                           <RotateBack size={14} />
                           Restore

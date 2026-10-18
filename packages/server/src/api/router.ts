@@ -198,14 +198,16 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     // `dev@me` for a route that handles it, made or not: its handler checks what that takes.
     const handled = place?.personal !== undefined && def.personal === 'handles';
     for (const check of handled ? [] : checks(def, input, query)) {
-      const permission = typeof check === 'string' ? check : check.permission;
-      const scope = placeOf(place!.project, typeof check === 'string' ? place!.environment : null);
-      if (can(ctx.caller, permission, scope)) continue;
+      const anyOf = typeof check === 'string' ? [check] : 'anyOf' in check ? check.anyOf : [check.permission];
+      const onProject = typeof check === 'object' && 'on' in check;
+      const scope = placeOf(place!.project, onProject ? null : place!.environment);
+      if (anyOf.some((permission) => can(ctx.caller, permission, scope))) continue;
+      const permission = anyOf[0]!;
       const path = formatPath({ project: found.params.project, environment: found.params.environment, key: found.params.key });
       await refuse(
         ctx,
         new Refusal(
-          forbidden(`you need ${permission} on ${typeof check === 'string' ? path : found.params.project}`),
+          forbidden(`you need ${anyOf.join(' or ')} on ${onProject ? found.params.project : path}`),
           denied(ctx, def.action ?? `${route.method} ${route.shape}`, missing(permission), {
             projectId: place!.project.id,
             environmentId: place!.environment?.id ?? null,

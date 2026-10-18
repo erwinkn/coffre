@@ -524,6 +524,7 @@ export function saveSecrets(
       const bumped = (entry: SecretKey | undefined, key: string): SecretKey => {
         // In a fork, a value written over the parent's is an override, whose own version the list read back says.
         const inherited = entry?.parent != null && entry.parent.state !== 'overridden' && entry.key === key;
+        const level = levels.get(key);
         return {
           key,
           // A rename keeps its folder; a new secret is in none.
@@ -537,8 +538,11 @@ export function saveSecrets(
           updatedAt: now,
           updatedBy: author,
           generated: generations.get(key) ?? null,
-          value: levels.get(key)?.value ?? null,
-          sensitivity: levels.get(key)?.sensitivity ?? 'secret',
+          value: level?.value ?? null,
+          sensitivity: level?.sensitivity ?? 'secret',
+          // Until the list is read back: a plain value as it is listed, a secret over one its writer read here, and nothing else.
+          readable: level?.value != null
+            || ((level?.sensitivity ?? 'secret') === 'secret' && !inherited && entry?.sensitivity === 'secret' && entry.readable),
           parent: entry?.parent == null || entry.key !== key ? null : { ...entry.parent, state: 'overridden', changed: false, reset: false },
         };
       };
@@ -549,10 +553,10 @@ export function saveSecrets(
         const key = change.key.trim();
         if (key !== entry.key) renames.set(entry.key, key);
         if (change.value !== null) return bumped(entry, key);
-        // A mark: the same value, as a new version, stricter, so a plain one no longer listed.
+        // A mark: the same value, as a new version, stricter, so a plain one no longer listed, nor read until the list says so.
         return change.sensitivity === undefined
           ? { ...entry, key }
-          : { ...entry, key, version: (entry.version ?? 0) + 1, versionId: null, updatedAt: now, updatedBy: author, value: null, sensitivity: change.sensitivity };
+          : { ...entry, key, version: (entry.version ?? 0) + 1, versionId: null, updatedAt: now, updatedBy: author, value: null, sensitivity: change.sensitivity, readable: false };
       });
       // A rename moves no value: a pair it touches names the new key, in both halves.
       next = renamePairs(next, renames);

@@ -221,7 +221,7 @@ test('project grants cover every environment and combine with environment grants
   assert.deepEqual(environments.map((entry) => entry.environment).sort(), ['dev', 'prod']);
   assert.deepEqual(
     environments.find((entry) => entry.environment === 'prod')?.permissions.sort(),
-    ['secret.read', 'secret.write'],
+    ['secret.read', 'secret.use', 'secret.write'],
   );
 });
 

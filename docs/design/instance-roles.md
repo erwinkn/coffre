@@ -20,7 +20,7 @@ and reading everywhere took a grant on `*` beside it. 0.5 keeps one of each:
 |---|---|---|
 | Member | nothing: only what projects grant | no |
 | Auditor | `audit.read` | no |
-| Developer | `secret.read`, `secret.write` | yes |
+| Developer | `secret.read`, `secret.use`, `secret.write` | yes |
 | Admin | `audit.read`, `environment.manage`, `grant.manage`, `project.manage`; people and service accounts | no |
 | Owner | everything an Admin holds, and every secret permission, `secret.archive` too | yes |
 

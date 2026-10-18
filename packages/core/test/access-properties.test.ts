@@ -33,12 +33,13 @@ import { propertySettings } from './properties.ts';
 
 // Independent specification from README's Roles tables. Do not derive these
 // tables or the scope rules from the implementation's constants/helpers.
-const permissions = ['secret.read', 'secret.write', 'secret.archive', 'audit.read', 'environment.manage', 'grant.manage', 'project.manage'] as const;
-const roles = ['viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'] as const;
+const permissions = ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'audit.read', 'environment.manage', 'grant.manage', 'project.manage'] as const;
+const roles = ['viewer', 'contributor', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'] as const;
 const rights: Record<Role, readonly Permission[]> = {
-  viewer: ['secret.read'],
-  developer: ['secret.read', 'secret.write'],
-  maintainer: ['secret.read', 'secret.write', 'secret.archive', 'environment.manage'],
+  viewer: ['secret.read', 'secret.use'],
+  contributor: ['secret.use', 'secret.write'],
+  developer: ['secret.read', 'secret.use', 'secret.write'],
+  maintainer: ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'environment.manage'],
   'access-manager': ['grant.manage'],
   auditor: ['audit.read'],
   owner: permissions,
@@ -47,7 +48,7 @@ const instanceRoles = ['member', 'auditor', 'developer', 'admin', 'owner'] as co
 const instanceRights: Record<InstanceRole, readonly Permission[]> = {
   member: [],
   auditor: ['audit.read'],
-  developer: ['secret.read', 'secret.write'],
+  developer: ['secret.read', 'secret.use', 'secret.write'],
   admin: ['audit.read', 'environment.manage', 'grant.manage', 'project.manage'],
   owner: permissions,
 };
@@ -214,7 +215,7 @@ test("a person's personal token holds their places within its scope, and nothing
   assert.equal(givesService(developer, everywhere, 'viewer', dev), true);
   assert.equal(givesService({ ...developer, credentialScope: [{ projectId: 'market', environmentId: 'market/dev', role: 'developer' }] }, everywhere, 'viewer', dev), false);
   // No role it may name manages access, so it gives and takes no grant anywhere.
-  assert.deepEqual(DELEGABLE_ROLES, ['viewer', 'developer', 'maintainer', 'auditor']);
+  assert.deepEqual(DELEGABLE_ROLES, ['viewer', 'contributor', 'developer', 'maintainer', 'auditor']);
   assert.ok(DELEGABLE_ROLES.every((role) => !roleGrants(role, 'grant.manage')));
 });
 

@@ -9,7 +9,8 @@ import { markable, stricter, waitsForValue } from '../src/lib/sensitivity.ts';
 function listed(key: string, sensitivity: SecretKey['sensitivity'], more: Partial<SecretKey> = {}): SecretKey {
   return {
     key, reference: null, folder: null, archived: false, version: 1, versionId: `${key}-v1`, updatedAt: null, updatedBy: null,
-    generated: null, parent: null, value: sensitivity === 'plain' ? 'acct_42' : null, sensitivity, ...more,
+    generated: null, parent: null, value: sensitivity === 'plain' ? 'acct_42' : null, sensitivity,
+    readable: sensitivity !== null && sensitivity !== 'sensitive', ...more,
   };
 }
 
@@ -58,4 +59,18 @@ test('a save shows at once who sees each value: a mark hides a plain one, a plai
     REGION: ['plain', 'eu', 2],
     STRIPE_KEY: ['sensitive', null, 2],
   });
+});
+
+test("a save shows at once who reads each value: a secret written over one its writer reads, read still; dev's, overridden in dev@me, not", () => {
+  const inherited = { from: 'dev', state: 'inherited', held: true, changed: false, reset: false } as const;
+  // A Contributor's dev@me: dev's API_KEY told of, unread; their own WEBHOOK read.
+  const entries = [listed('API_KEY', 'secret', { parent: inherited, readable: false }), listed('WEBHOOK', 'secret'), listed('REGION', 'plain')];
+  const typed = (key: string) => ({ key, value: `${key.toLowerCase()}_2`, archived: false, sensitivity: 'secret' as const });
+  const shown = saveSecrets({} as CoffreClient, { project: 'market', environment: 'dev@me' }, 'contributor@acme.example').apply(entries, {
+    active: entries,
+    drafts: [{ id: 1, key: 'NEW', value: 'n', sensitivity: 'secret' }],
+    changes: { API_KEY: typed('API_KEY'), WEBHOOK: typed('WEBHOOK'), REGION: mark('REGION', 'secret') },
+  });
+  // Known only once the list is read back: a new key's, an override's, and a plain one's made a secret.
+  assert.deepEqual(Object.fromEntries(shown.map((entry) => [entry.key, entry.readable])), { NEW: false, API_KEY: false, WEBHOOK: true, REGION: false });
 });

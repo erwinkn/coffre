@@ -153,7 +153,7 @@ holds in place of a value. It is a credential row of its own kind
 - It acts as its person, within its scope, as a personal token does:
   `viewer` on each environment it was made for, and on each parent a fork
   of them inherits from that the person reads too, so inherited keys work
-  through it. `market/dev@me` is scoped as `market/dev`, which is what a
+  through it; `contributor` where they only use (0.10, decision 26). `market/dev@me` is scoped as `market/dev`, which is what a
   personal config's owner needs to read it. Their losing a grant narrows
   it, and their removal ends it.
 - It reaches nothing but the proxy. The API, the pages and a plugin's
@@ -985,7 +985,7 @@ is reversible.
    test that reads as a person stay as they are. *Recommendation: make it
    the default once the proxy covers the common shapes (after PR 3), with
    a release note.*
-2. *(Revisited in 0.10: sensitivity, and `secret.use` after it.)* **No new permission or role.** A person's `secret.read` is the use
+2. *(Superseded in 0.10 by decision 26.)* **No new permission or role.** A person's `secret.read` is the use
    right: with placeholders, it opens values to be used, never handed back.
    `use` and `expose` are purposes of the same read, checked by the same
    grants. A `consumer` role (use without read) adds nothing while people
@@ -1099,6 +1099,22 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     app's configuration points at the proxy for them (R14), where the real
     key would be refused as no handle. A person who reads one still gets it
     with `coffre get`.
+
+26. **`secret.use` is a permission of its own, and Contributor the role
+    that holds it without read (0.10).** `secret.read` hands a value back;
+    `secret.use` lets coffre use it for its holder: the proxy's `use`, a
+    plan's placeholders, listing the keys. Every role that read uses too,
+    so nobody's access changed: Viewer, Developer, Maintainer and Owner
+    hold both, and the instance's Developer too. A Contributor (`secret.use`,
+    `secret.write`) writes values and runs its app on placeholders, and
+    reads none. A person gets the narrower of role and key: a Contributor
+    nothing of a secret but its placeholder, a Developer nothing of a
+    sensitive key but its placeholder. The vault decides: a read to `use`
+    takes `secret.use`, any other `secret.read`. A handle is scoped
+    `viewer` where its person reads, `contributor` where they only use.
+    The role is a project role, granted on a project or one of its
+    environments; *alternative:* an instance role too, for which 0.10's
+    role editor (PR 4) makes Developer's protected column use-only.
 
 ## 9. Plan
 
