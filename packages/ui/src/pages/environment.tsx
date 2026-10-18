@@ -834,7 +834,7 @@ function EnvironmentLedger({
                     environment={environment}
                     entry={entry}
                     canArchive={canArchive}
-                    canReveal={canReveal}
+                    canList={canList}
                     status={status(entry.key)}
                     onRestore={() => restoreSecretKey(entry.key)}
                     onDismiss={dismiss}
@@ -2346,7 +2346,7 @@ function ArchivedRow({
   environment,
   entry,
   canArchive,
-  canReveal,
+  canList,
   status: state,
   onRestore,
   onDismiss,
@@ -2356,7 +2356,8 @@ function ArchivedRow({
   environment: string;
   entry: SecretKey;
   canArchive: boolean;
-  canReveal: boolean;
+  /** Whether the caller lists the environment, as its history takes. */
+  canList: boolean;
   status: ItemStatus;
   onRestore: () => void;
   onDismiss: (mutationId: number) => void;
@@ -2380,7 +2381,7 @@ function ArchivedRow({
           {state.state === 'pending' ? (
             <RowPending status={state} />
           ) : (
-            (canReveal || canArchive) && (
+            (canList || canArchive) && (
               <div className="acts">
                 <Menu.Root>
                   <Menu.Trigger
@@ -2390,7 +2391,7 @@ function ArchivedRow({
                     <MoreHorizontal size={16} />
                   </Menu.Trigger>
                   <MenuPopup align="end">
-                    <SecretReadOnly canReveal={canReveal}>
+                    <SecretReadOnly canReveal={canList}>
                       <Menu.Item
                         className="menu-item"
                         onClick={() => setHistoryOpen((open) => !open)}
@@ -2401,7 +2402,7 @@ function ArchivedRow({
                     </SecretReadOnly>
                     {canArchive && (
                       <>
-                        {canReveal && <Menu.Separator className="menu-sep" />}
+                        {canList && <Menu.Separator className="menu-sep" />}
                         <Menu.Item className="menu-item" onClick={onRestore}>
                           <RotateBack size={14} />
                           Restore

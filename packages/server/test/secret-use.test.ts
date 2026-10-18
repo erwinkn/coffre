@@ -161,3 +161,21 @@ test("a Contributor of a fork and its parent is told the parent's plain values a
   const references = await contributor.references.list('market/dev');
   assert.deepEqual(references.references.map((reference) => reference.holder), ['market/dev/ALIAS']);
 });
+
+test("a token that only uses a place, its owner's grant narrowed since, still makes a handle there", async () => {
+  await root.access.set(`user:${CONTRIBUTOR}`, { 'market/dev': 'viewer' });
+  const session = await sessionFor(CONTRIBUTOR);
+  const token = await bearer(session).tokens.issue(`user:${CONTRIBUTOR}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  await root.access.set(`user:${CONTRIBUTOR}`, { 'market/dev': 'contributor' });
+  const handle = await bearer(token.token).handles.create({ label: 'coffre run market/dev', paths: ['market/dev'] });
+  assert.deepEqual(handle.scope, { 'market/dev': 'contributor' });
+});
+
+test("a Contributor of both ends of a reference may open its source", async () => {
+  await root.environments.create('market/base');
+  await root.secrets.set('market/base', { SHARED: 'shared_0123456789' });
+  await root.secrets.set('market/dev', { ALIAS: { ref: 'market/base/SHARED' } });
+  await root.access.set(`user:${CONTRIBUTOR}`, { 'market/dev': 'contributor', 'market/base': 'contributor' });
+  const alias = (await clientFor(deps, CONTRIBUTOR).secrets.list('market/dev')).keys.find((entry) => entry.key === 'ALIAS')!;
+  assert.equal(alias.reference?.canOpenSource, true);
+});

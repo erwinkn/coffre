@@ -285,7 +285,7 @@ export async function listSecrets(
     const reference = references.get(secretId);
     if (reference === undefined) return null;
     const { source } = reference;
-    const canOpenSource = source !== null && can(ctx.caller, 'secret.read', placeOfRow(source));
+    const canOpenSource = source !== null && lists(ctx.caller, placeOfRow(source));
     return { ...reference.view, canOpenSource };
   };
   // A reference's value is its source's: as old as the version it reads.

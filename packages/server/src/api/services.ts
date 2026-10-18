@@ -13,6 +13,7 @@ import {
   type CredentialScope,
   type Holdings,
   type Place,
+  type Permission,
   type Role,
   type ServiceAccount,
   type ServiceSetting,
@@ -244,6 +245,12 @@ export async function personalScope(
   holder: Holdings,
   wanted: ScopeByPath,
   metadata: Record<string, unknown>,
+  /**
+   * What the holder must hold at a place for its role: every permission of
+   * it, unless told. A handle's, only what the proxy exercises: it writes
+   * nothing, whatever its scope says, the API refusing it.
+   */
+  needs: (role: Role) => readonly Permission[] = (role) => ROLES[role].permissions,
 ): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
   const known = await places(db);
   const scope = placedScope(wanted, known);
@@ -254,7 +261,7 @@ export async function personalScope(
   if (managing !== undefined) {
     throw badRequest(`a personal token never manages access: name ${DELEGABLE_ROLES.join(', ')} on ${named(managing)}, not ${managing.role}`);
   }
-  const beyond = scope.find(({ role, place }) => !ROLES[role].permissions.every((permission) => allows(holder, permission, place)));
+  const beyond = scope.find(({ role, place }) => !needs(role).every((permission) => allows(holder, permission, place)));
   if (beyond !== undefined) {
     const path = named(beyond);
     throw new Refusal(

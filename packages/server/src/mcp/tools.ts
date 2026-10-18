@@ -225,7 +225,8 @@ export function usable(caller: Caller, tool: Tool): boolean {
   if (needs === 'anyone') return true;
   if (needs === 'new-project') return makesProjects(caller);
   if (needs === 'services') return runsInstance(caller) || (caller.principal.type === 'user' && PERMISSIONS.some((permission) => canAnywhere(caller, permission)));
-  return canAnywhere(caller, needs);
+  // Reading takes read, or, of a person's own personal config, use of the environment it configures (R8).
+  return canAnywhere(caller, needs) || (needs === 'secret.read' && caller.principal.type === 'user' && canAnywhere(caller, 'secret.use'));
 }
 
 /** A tool as `tools/list` describes it, in either era. */
