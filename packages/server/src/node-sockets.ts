@@ -53,7 +53,8 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
   if (socket.destroyed) return;
   if (answer instanceof Response) {
     // The plugin's refusal as it said it, its headers included (`coffre-proxy`, `www-authenticate`), framed for this one answer.
-    const body = Buffer.from(await answer.arrayBuffer());
+    const body = await refusalBody(answer);
+    if (socket.destroyed) return;
     const headers = [...answer.headers].filter(([name]) => !FRAMING.has(name)).map(([name, value]) => `${name}: ${value}\r\n`).join('');
     // Then gone, once said or a second on: a peer that keeps its side open keeps nothing of the server's.
     const gone = setTimeout(() => socket.destroy(), 1000);
@@ -71,25 +72,58 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
   });
 }
 
-/** A WebSocket's binary messages as a byte stream, each way, paused while the stream's reader is behind. */
+/** A refusal's body, at most 64 KiB and a second: a plugin's stream that stalls or runs on is cut there. */
+async function refusalBody(answer: Response): Promise<Buffer> {
+  if (answer.body === null) return Buffer.alloc(0);
+  const reader = answer.body.getReader();
+  const parts: Buffer[] = [];
+  let size = 0;
+  const late = setTimeout(() => void reader.cancel().catch(() => undefined), 1000);
+  try {
+    for (let part = await reader.read(); !part.done && size < 65_536; part = await reader.read()) {
+      parts.push(Buffer.from(part.value));
+      size += part.value.length;
+    }
+  } catch {
+    // Cut short: what came is the body.
+  } finally {
+    clearTimeout(late);
+    void reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(parts).subarray(0, 65_536);
+}
+
+/** A WebSocket's binary messages as a byte stream, each way, paused while the stream's reader is behind; nothing delivered once it ends. */
 function fromWebSocket(ws: WebSocket): Pipe {
   const closed = new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  let done = false;
+  let stop = () => {};
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
-      ws.on('message', (data: Buffer, binary: boolean) => {
-        if (!binary) return;
+      const finish = (end: () => void) => {
+        if (done) return;
+        done = true;
+        ws.off('message', deliver);
+        try {
+          end();
+        } catch {}
+      };
+      // Frames `ws` still drains while it terminates find the stream ended, and are dropped.
+      const deliver = (data: Buffer, binary: boolean) => {
+        if (!binary || done) return;
         controller.enqueue(new Uint8Array(data));
         if ((controller.desiredSize ?? 1) <= 0) ws.pause();
-      });
-      ws.on('close', () => {
-        try {
-          controller.close();
-        } catch {}
-      });
-      ws.on('error', (error) => controller.error(error));
+      };
+      ws.on('message', deliver);
+      ws.on('close', () => finish(() => controller.close()));
+      ws.on('error', (error) => finish(() => controller.error(error)));
+      stop = () => finish(() => undefined);
     },
     pull: () => ws.resume(),
-    cancel: () => ws.terminate(),
+    cancel: () => {
+      stop();
+      ws.terminate();
+    },
   }, { highWaterMark: 8 });
   const writable = new WritableStream<Uint8Array>({
     write: (chunk) => new Promise<void>((resolve, reject) => ws.send(chunk, { binary: true }, (error) => (error ? reject(error) : resolve()))),
@@ -121,6 +155,8 @@ function fromNetSocket(socket: NetSocket | ReturnType<typeof tls>): Socket {
   // Each event's own arguments.
   type Listener = (...args: any[]) => void;
   const listeners: [string, Listener][] = [];
+  // Once the stream ended, by either side: no chunk is delivered to it.
+  let done = false;
   const on = (event: string, listener: Listener) => {
     listeners.push([event, listener]);
     socket.on(event, listener);
@@ -129,22 +165,28 @@ function fromNetSocket(socket: NetSocket | ReturnType<typeof tls>): Socket {
     {
       start(controller) {
         on('data', (chunk: Buffer) => {
+          if (done) return;
           controller.enqueue(new Uint8Array(chunk));
           if ((controller.desiredSize ?? 1) <= 0) socket.pause();
         });
         on('end', () => {
+          done = true;
           try {
             controller.close();
           } catch {}
         });
         on('error', (error: Error) => {
+          done = true;
           try {
             controller.error(error);
           } catch {}
         });
       },
       pull: () => void socket.resume(),
-      cancel: () => void socket.destroy(),
+      cancel: () => {
+        done = true;
+        socket.destroy();
+      },
     },
     { highWaterMark: 8 },
   );

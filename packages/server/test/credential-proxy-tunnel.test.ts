@@ -489,6 +489,39 @@ test('a peer that leaves while a plugin has not decided takes its socket with it
   assert.equal(await new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count))), before);
 });
 
+test("a session ended while its app floods it, and nothing reads, ends cleanly: frames still arriving are dropped", postgresOnly, async () => {
+  let ended!: () => void;
+  const done = new Promise<void>((resolve) => (ended = resolve));
+  // A session that reads nothing, then cancels what it would have read and closes, as a revocation does mid-COPY.
+  runtime.plugins = checkPlugins([{ name: 'flood', routes: { prefix: '/flood', fetch: async () => new Response(null, { status: 404 }), socket: async () => async (client) => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await client.readable.cancel();
+    client.close();
+    ended();
+  } } }]);
+  const ws = new WebSocket(`${coffreAt}/flood`);
+  ws.on('error', () => undefined);
+  await once(ws, 'open');
+  const chunk = Buffer.alloc(64 * 1024);
+  for (let i = 0; i < 200; i += 1) ws.send(chunk);
+  await done;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  ws.terminate();
+});
+
+test('a refusal whose body never ends is cut, and the socket goes', postgresOnly, async () => {
+  runtime.plugins = checkPlugins([{ name: 'slow', routes: { prefix: '/slow', fetch: async () => new Response(null, { status: 404 }), socket: async () => new Response(new ReadableStream({ start: (controller) => controller.enqueue(new TextEncoder().encode('partial')) }), { status: 403 }) } }]);
+  const answered = await new Promise<string>((resolve) => {
+    const socket = tcp({ host: '127.0.0.1', port: Number(new URL(coffreAt).port) });
+    let text = '';
+    socket.on('connect', () => socket.write('GET /slow HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+    socket.on('data', (chunk: Buffer) => (text += chunk.toString('latin1')));
+    socket.on('close', () => resolve(text));
+  });
+  assert.match(answered, /^HTTP\/1\.1 403/);
+  assert.match(answered, /partial$/);
+});
+
 /** Revoke the suite's handle, as its person would. */
 async function revoke(): Promise<void> {
   const session = await sessionFor(DEV);
