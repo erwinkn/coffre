@@ -38,8 +38,8 @@ export type CoffrePlugin = {
   };
 };
 
-/** A connection's bytes both ways: a WebSocket's, a TCP socket's. */
-export type Pipe = { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array>; close(): void };
+/** A connection's bytes both ways, a WebSocket's or a TCP socket's, and when it ends, whichever side ends it. */
+export type Pipe = { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array>; close(): void; closed: Promise<void> };
 
 /** An outbound TCP connection, which can turn to TLS once the protocol on it says it will. */
 export type Socket = Pipe & { startTls(servername: string): Promise<Pipe> };

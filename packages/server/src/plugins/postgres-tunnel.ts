@@ -37,25 +37,34 @@ export function database(url: string): Database {
 /** Reads exact lengths from a stream, keeping what came beyond them. */
 class Reader {
   #reader: ReadableStreamDefaultReader<Uint8Array>;
-  #held = new Uint8Array(0);
+  #held: Uint8Array = new Uint8Array(0);
   constructor(stream: ReadableStream<Uint8Array>) {
     this.#reader = stream.getReader();
   }
   async take(length: number): Promise<Uint8Array> {
-    while (this.#held.length < length) {
+    const parts: Uint8Array[] = [this.#held];
+    let have = this.#held.length;
+    while (have < length) {
       const { done, value } = await this.#reader.read();
       if (done) throw new Error('the connection closed');
-      this.#held = concat(this.#held, value);
+      parts.push(value);
+      have += value.length;
     }
+    this.#held = parts.length === 1 ? this.#held : concat(...parts);
     const out = this.#held.slice(0, length);
     this.#held = this.#held.slice(length);
     return out;
   }
-  /** One backend or frontend message: its type byte and its body. */
-  async message(): Promise<{ type: string; body: Uint8Array }> {
+  /** One backend or frontend message: its type byte and its body, `max` bytes at most, refused before it is read. */
+  async message(max: number): Promise<{ type: string; body: Uint8Array }> {
     const head = await this.take(5);
     const length = view(head).getInt32(1);
+    if (length < 4 || length - 4 > max) throw new Error('a message longer than this step of the startup takes');
     return { type: String.fromCharCode(head[0]!), body: await this.take(length - 4) };
+  }
+  /** How many bytes it read beyond what was taken. */
+  get held(): number {
+    return this.#held.length;
   }
   /** What is left: what was read beyond the last message, then the rest of the stream. */
   rest(): ReadableStream<Uint8Array> {
@@ -140,84 +149,100 @@ export type TunnelSession = {
   handle: string;
   /** The real database. */
   database: Database;
-  /** Whether the handle still stands: asked every `recheckMs`, the session ended when it does not. */
+  /** Whether the handle still stands: asked before the login and every `recheckMs`, the session ended when it does not. */
   stands(): Promise<boolean>;
   recheckMs: number;
   connect: Connect;
 };
 
+/** How long a connection may take to log in, from its first byte to the database's AuthenticationOk. */
+const STARTUP_MS = 30_000;
+/** The longest message the startup takes from the app: a password is a handle, and parameters are few. */
+const MAX_STARTUP = 10_000;
+/** The longest message the database's login sends: a SASL exchange, an error. */
+const MAX_LOGIN = 65_536;
+
+/**
+ * The cancel keys the app was given, by key, for the sessions logged in
+ * now: each the database's own, which the app never sees, and the handle
+ * that may use it. A cancel request names one of these or reaches nothing.
+ * In this process only: a key outlives no session.
+ */
+const cancels = new Map<string, { processId: number; secret: number; handle: string; database: Database }>();
+
 /**
  * One connection of the app's, from its first byte to its last. A cancel
- * request is forwarded to the database as it is: its process id and secret
- * key are the database's own, which the app saw in BackendKeyData.
+ * request names the key the app was given for one of this handle's live
+ * sessions, and is forwarded to that session's database with its own key;
+ * any other reaches nothing.
  */
 export async function tunnel(client: Pipe, session: TunnelSession): Promise<void> {
   const from = new Reader(client.readable);
   const to = new Writer(client.writable);
   let upstream: Socket | Pipe | null = null;
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let key: string | null = null;
+  let ended = false;
   const end = () => {
+    ended = true;
     clearInterval(timer);
-    try {
-      client.close();
-    } catch {}
-    try {
-      upstream?.close();
-    } catch {}
+    if (key !== null) cancels.delete(key);
+    for (const pipe of [client, upstream]) {
+      try {
+        pipe?.close();
+      } catch {}
+    }
   };
+  // From the first byte: the handle checked every recheckMs, the app gone, or the login too slow, and the session ends.
+  const timer = setInterval(() => {
+    void session.stands().then((stands) => {
+      if (!stands) end();
+    }, () => end());
+  }, session.recheckMs);
+  const deadline = setTimeout(end, STARTUP_MS);
+  void client.closed.then(end, end);
+  /** A step of the startup, which an ended session does not wait for. */
+  const step = <T,>(work: Promise<T>): Promise<T> =>
+    ended ? Promise.reject(new Error('the session ended')) : Promise.race([work, client.closed.then(() => Promise.reject(new Error('the app went away')))]);
   try {
     // The startup: SSL and GSS refused (the hop to the listener is local), a cancel forwarded, or the real StartupMessage.
     let startup: Map<string, string> | null = null;
     while (startup === null) {
-      const length = view(await from.take(4)).getInt32(0);
-      if (length < 8 || length > 10_000) throw new Error('not a Postgres startup');
-      const body = await from.take(length - 4);
+      const length = view(await step(from.take(4))).getInt32(0);
+      if (length < 8 || length > MAX_STARTUP) throw new Error('not a Postgres startup');
+      const body = await step(from.take(length - 4));
       const code = view(body).getInt32(0);
       if (code === SSL_REQUEST || code === GSS_REQUEST) {
         await to.write(encoder.encode('N'));
         continue;
       }
       if (code === CANCEL_REQUEST) {
-        const socket = await session.connect(session.database.host, session.database.port);
-        const writer = new Writer(socket.writable);
-        await writer.write(concat(int32(16), body));
-        writer.release();
-        socket.close();
-        end();
+        if (body.length !== 12) throw new Error('not a cancel request');
+        await cancel(session, `${view(body).getInt32(4)}:${view(body).getInt32(8)}`);
         return;
       }
       if (code !== PROTOCOL_3) {
         await to.write(errorResponse('0A000', 'coffre tunnels protocol 3.0 only'));
-        end();
         return;
       }
       startup = parameters(body.slice(4));
     }
     // The app logs in with the handle as its password, which only who holds it knows: any process on the machine reaches the listener.
     await to.message('R', int32(3));
-    const password = await from.message();
+    const password = await step(from.message(MAX_STARTUP));
     if (password.type !== 'p' || decoder.decode(password.body).replace(/\0$/, '') !== session.handle) {
       await to.write(errorResponse('28P01', 'coffre: the password is the handle `coffre run` gave your app, in DATABASE_URL'));
-      end();
+      return;
+    }
+    // Asked again now, whatever the last check said: a connection held at the prompt logs in only while its handle stands.
+    if (!(await step(session.stands()))) {
+      await to.write(errorResponse('28P01', 'coffre: the handle ended: run the app with `coffre run` again'));
       return;
     }
 
     // The real database, logged in to with the real password.
     const db = session.database;
-    let socket: Socket | Pipe = await session.connect(db.host, db.port);
+    const socket = await step(open(session, db));
     upstream = socket;
-    if (db.tls === 'require') {
-      const plain = socket as Socket;
-      const writer = new Writer(plain.writable);
-      await writer.write(concat(int32(8), int32(SSL_REQUEST)));
-      writer.release();
-      const reader = new Reader(plain.readable);
-      const answer = await reader.take(1);
-      reader.release();
-      if (answer[0] !== 'S'.charCodeAt(0)) throw new Error(`${db.host} does not take TLS, which the tunnel requires: sslmode=disable for a local database`);
-      socket = await plain.startTls(db.host);
-      upstream = socket;
-    }
     const up = new Writer(socket.writable);
     const down = new Reader(socket.readable);
     // The app's own parameters (application_name, client_encoding, …), but who and where are the real database's.
@@ -226,41 +251,90 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
     const fields = [...startup].flatMap(([name, value]) => [cstring(name), cstring(value)]);
     const body = concat(int32(PROTOCOL_3), ...fields, new Uint8Array([0]));
     await up.write(concat(int32(body.length + 4), body));
-    await authenticate(up, down, db);
+    await step(authenticate(up, down, db));
 
-    // Logged in: from AuthenticationOk on, bytes both ways, until either side ends or the handle no longer stands.
+    // Logged in: what the database says until it is ready, its cancel key swapped for one of coffre's, then bytes both ways.
     await to.message('R', int32(0));
+    for (;;) {
+      const { type, body: said } = await step(down.message(MAX_LOGIN));
+      if (type === 'K' && said.length === 8) {
+        const mine = { processId: view(said).getInt32(0), secret: view(said).getInt32(4) };
+        const given = crypto.getRandomValues(new Int32Array(2));
+        key = `${given[0]}:${given[1]}`;
+        cancels.set(key, { ...mine, handle: session.handle, database: db });
+        await to.message('K', concat(int32(given[0]!), int32(given[1]!)));
+        continue;
+      }
+      await to.message(type, said);
+      if (type === 'E') return;
+      if (type === 'Z') break;
+    }
+    clearTimeout(deadline);
     up.release();
     to.release();
-    timer = setInterval(() => {
-      void session.stands().then((stands) => {
-        if (!stands) end();
-      }, () => end());
-    }, session.recheckMs);
-    const rest = down.rest();
-    const clientRest = from.rest();
     await Promise.race([
-      rest.pipeTo(client.writable).catch(() => undefined),
-      clientRest.pipeTo(socket.writable).catch(() => undefined),
+      down.rest().pipeTo(client.writable).catch(() => undefined),
+      from.rest().pipeTo(socket.writable).catch(() => undefined),
+      client.closed,
     ]);
   } catch (error) {
     try {
-      await to.write(errorResponse('08006', `coffre: ${error instanceof Error ? error.message : 'the tunnel failed'}`));
+      if (!ended) await to.write(errorResponse('08006', `coffre: ${error instanceof Error ? error.message : 'the tunnel failed'}`));
     } catch {}
   } finally {
+    clearTimeout(deadline);
     end();
   }
+}
+
+/** A connection to the database: TLS first, unless the URL says `sslmode=disable`, the server's one byte read alone. */
+async function open(session: TunnelSession, db: Database): Promise<Socket | Pipe> {
+  const socket = await session.connect(db.host, db.port);
+  if (db.tls === 'disable') return socket;
+  const writer = new Writer(socket.writable);
+  await writer.write(concat(int32(8), int32(SSL_REQUEST)));
+  writer.release();
+  const reader = new Reader(socket.readable);
+  const answer = await reader.take(1);
+  // Anything past the one byte came in plaintext, before TLS: a server that sends it is no Postgres, or someone between.
+  const extra = reader.held;
+  reader.release();
+  if (answer[0] !== 'S'.charCodeAt(0)) {
+    socket.close();
+    throw new Error(`${db.host} does not take TLS, which the tunnel requires: sslmode=disable for a local database`);
+  }
+  if (extra > 0) {
+    socket.close();
+    throw new Error(`${db.host} sent bytes before TLS began`);
+  }
+  return socket.startTls(db.host);
+}
+
+/** A cancel request of the app's: the key it was given, for one of this handle's sessions; to that session's database, with its own. */
+async function cancel(session: TunnelSession, given: string): Promise<void> {
+  const target = cancels.get(given);
+  if (target === undefined || target.handle !== session.handle) return;
+  const socket = await open(session, target.database);
+  const writer = new Writer(socket.writable);
+  await writer.write(concat(int32(16), int32(CANCEL_REQUEST), int32(target.processId), int32(target.secret)));
+  writer.release();
+  socket.close();
 }
 
 /** Log in to the database as it asks: SCRAM-SHA-256, or a cleartext password. MD5 is refused: WebCrypto has none. */
 async function authenticate(up: Writer, down: Reader, db: Database): Promise<void> {
   let scram: Scram | null = null;
+  let verified = false;
   for (;;) {
-    const { type, body } = await down.message();
+    const { type, body } = await down.message(MAX_LOGIN);
     if (type === 'E') throw new Error(`the database refused the login: ${fieldsOf(body).get('M') ?? 'no reason given'}`);
     if (type !== 'R') throw new Error(`the database sent ${type} before the login ended`);
     const code = view(body).getInt32(0);
-    if (code === 0) return;
+    // SCRAM ends with the server's signature, verified, or it did not end: a server that skips it proved nothing.
+    if (code === 0) {
+      if (scram !== null && !verified) throw new Error("the database ended SCRAM without proving it knows the password: it is not the database the URL names");
+      return;
+    }
     if (code === 3) await up.message('p', cstring(db.password));
     else if (code === 10) {
       const mechanisms = decoder.decode(body.slice(4)).split('\0');
@@ -268,9 +342,10 @@ async function authenticate(up: Writer, down: Reader, db: Database): Promise<voi
       scram = await Scram.start(db.password);
       const first = encoder.encode(scram.clientFirst);
       await up.message('p', concat(cstring('SCRAM-SHA-256'), int32(first.length), first));
-    } else if (code === 11 && scram !== null) await up.message('p', encoder.encode(await scram.clientFinal(decoder.decode(body.slice(4)))));
-    else if (code === 12 && scram !== null) {
+    } else if (code === 11 && scram !== null && !scram.answered) await up.message('p', encoder.encode(await scram.clientFinal(decoder.decode(body.slice(4)))));
+    else if (code === 12 && scram !== null && scram.answered && !verified) {
       if (!(await scram.verify(decoder.decode(body.slice(4))))) throw new Error("the database's SCRAM signature does not verify: it is not the database the URL names");
+      verified = true;
     } else throw new Error(code === 5 ? 'the database asks for MD5, which the tunnel does not speak: set password_encryption to scram-sha-256' : `the database asks for authentication ${code}`);
   }
 }
@@ -294,6 +369,10 @@ class Scram {
   #bare: string;
   #password: string;
   #serverKey: Uint8Array<ArrayBuffer> | null = null;
+  /** Whether the client's final message went out: the server's own comes after it, once. */
+  get answered(): boolean {
+    return this.#serverKey !== null;
+  }
   #authMessage = '';
   private constructor(password: string, nonce: string) {
     this.#password = password;
@@ -309,7 +388,7 @@ class Scram {
     if (!nonce.startsWith(this.#bare.slice('n=,r='.length))) throw new Error("the database's SCRAM nonce is not ours");
     const salt = unbase64(fields.get('s')!);
     const iterations = Number(fields.get('i'));
-    const key = await crypto.subtle.importKey('raw', encoder.encode(this.#password.normalize('NFKC')), 'PBKDF2', false, ['deriveBits']);
+    const key = await crypto.subtle.importKey('raw', encoder.encode(saslprep(this.#password)), 'PBKDF2', false, ['deriveBits']);
     const salted = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256));
     const clientKey = await hmac(salted, 'Client Key');
     const storedKey = new Uint8Array(await crypto.subtle.digest('SHA-256', clientKey));
@@ -324,4 +403,28 @@ class Scram {
     const expected = base64(await hmac(this.#serverKey!, this.#authMessage));
     return serverFinal.startsWith('v=') && serverFinal.slice(2) === expected;
   }
+}
+
+/**
+ * SASLprep (RFC 4013), as Postgres runs it on a SCRAM password: non-ASCII
+ * spaces made spaces, what maps to nothing dropped, NFKC; and the password
+ * as it is when the result holds a prohibited character, or mixes
+ * right-to-left with left-to-right letters, which is Postgres's own
+ * fallback (src/common/saslprep.c).
+ */
+export function saslprep(password: string): string {
+  const mapped = password
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .replace(/[\u00AD\u034F\u1806\u180B-\u180D\u200B-\u200D\u2060\uFE00-\uFE0F\uFEFF]/g, '')
+    .normalize('NFKC');
+  // Controls, private use, non-characters, surrogates, and the bidirectional and tagging marks: C.2 to C.9.
+  const prohibited = /[\u0000-\u001F\u007F-\u009F\u06DD\u070F\u180E\u200E\u200F\u2028-\u202E\u2060-\u2063\u206A-\u206F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF9-\uFFFF\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}\u{F0000}-\u{10FFFF}\u{1FFFE}\u{1FFFF}\u{2FFFE}\u{2FFFF}]|\p{Cs}/u;
+  if (prohibited.test(mapped)) return password;
+  // Bidirectional text: right-to-left letters only, no left-to-right one, the first and the last right-to-left.
+  const rtl = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+  const chars = [...mapped];
+  if (chars.some((char) => rtl.test(char))) {
+    if (chars.some((char) => /\p{L}/u.test(char) && !rtl.test(char)) || !rtl.test(chars[0]!) || !rtl.test(chars.at(-1)!)) return password;
+  }
+  return mapped;
 }

@@ -15,6 +15,9 @@ import type { CoffreRuntime } from './runtime.ts';
 
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
 
+/** What frames an HTTP answer, which the refusal writer says itself. */
+const FRAMING = new Set(['connection', 'content-length', 'transfer-encoding', 'keep-alive', 'upgrade']);
+
 /**
  * One `upgrade` of the server's: the plugin under the path decides, and
  * a path no plugin takes for a socket is a 404. The request reaches the
@@ -35,8 +38,10 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
     answer = new Response('the plugin failed', { status: 500 });
   }
   if (answer instanceof Response) {
+    // The plugin's refusal as it said it, its headers included (`coffre-proxy`, `www-authenticate`), framed for this one answer.
     const body = Buffer.from(await answer.arrayBuffer());
-    socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Refused'}\r\ncontent-type: ${answer.headers.get('content-type') ?? 'text/plain'}\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body.toString('latin1')}`, 'latin1');
+    const headers = [...answer.headers].filter(([name]) => !FRAMING.has(name)).map(([name, value]) => `${name}: ${value}\r\n`).join('');
+    socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Refused'}\r\n${headers}content-length: ${body.length}\r\nconnection: close\r\n\r\n${body.toString('latin1')}`, 'latin1');
     return;
   }
   const session = answer;
@@ -45,12 +50,15 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
   });
 }
 
-/** A WebSocket's binary messages as a byte stream, each way. */
+/** A WebSocket's binary messages as a byte stream, each way, paused while the stream's reader is behind. */
 function fromWebSocket(ws: WebSocket): Pipe {
+  const closed = new Promise<void>((resolve) => ws.once('close', () => resolve()));
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
       ws.on('message', (data: Buffer, binary: boolean) => {
-        if (binary) controller.enqueue(new Uint8Array(data));
+        if (!binary) return;
+        controller.enqueue(new Uint8Array(data));
+        if ((controller.desiredSize ?? 1) <= 0) ws.pause();
       });
       ws.on('close', () => {
         try {
@@ -59,14 +67,15 @@ function fromWebSocket(ws: WebSocket): Pipe {
       });
       ws.on('error', (error) => controller.error(error));
     },
+    pull: () => ws.resume(),
     cancel: () => ws.terminate(),
-  });
+  }, { highWaterMark: 8 });
   const writable = new WritableStream<Uint8Array>({
     write: (chunk) => new Promise<void>((resolve, reject) => ws.send(chunk, { binary: true }, (error) => (error ? reject(error) : resolve()))),
     close: () => ws.close(),
     abort: () => ws.terminate(),
   });
-  return { readable, writable, close: () => ws.terminate() };
+  return { readable, writable, close: () => ws.terminate(), closed };
 }
 
 /** TCP out, on Node: a socket, which `startTls` hands over to TLS as it stands, nothing read beyond what was asked. */
@@ -116,9 +125,11 @@ function fromNetSocket(socket: NetSocket | ReturnType<typeof tls>): Socket {
     close: () => void socket.end(),
     abort: () => void socket.destroy(),
   });
+  const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
   return {
     readable,
     writable,
+    closed,
     close: () => void socket.destroy(),
     startTls: (servername) =>
       new Promise<Pipe>((resolve, reject) => {

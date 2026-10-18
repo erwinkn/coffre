@@ -336,7 +336,8 @@ its command runs, and sets
 `DATABASE_URL=postgres://app:<handle>@127.0.0.1:<port>/app?sslmode=disable`.
 The listener (`packages/cli/src/tunnels.ts`) holds nothing and reads
 nothing. It carries each connection over a WebSocket to coffre, with the
-handle as its bearer token, and pipes bytes. `coffre export` leaves the key
+handle as its bearer token, and pipes bytes, each side reading only as fast
+as the other takes. `coffre export` leaves the key
 out: a tunnel lives only as long as a run.
 
 On coffre's side (`packages/server/src/plugins/postgres-tunnel.ts`, web
@@ -355,9 +356,20 @@ streams and WebCrypto only), each connection does this:
 4. Opens TCP to the database, TLS unless `sslmode=disable`, and logs in
    itself with the real password: SCRAM-SHA-256, or cleartext if the
    server asks. MD5 is refused, since WebCrypto has no MD5.
-5. Pipes bytes both ways from `AuthenticationOk` on, the server's
-   parameters and `BackendKeyData` included. Queries, the extended
-   protocol, COPY both ways and LISTEN/NOTIFY work unchanged.
+5. Relays what the database says until it is ready, with its
+   `BackendKeyData` swapped for a cancel key of coffre's own (below), then
+   pipes bytes both ways. Queries, the extended protocol, COPY both ways
+   and LISTEN/NOTIFY work unchanged.
+
+The startup is held to limits: 30 seconds from the first byte to the
+database's `AuthenticationOk`, messages bounded by step (a password is a
+handle, not 2 GiB), the handle checked again just before the login, and
+the session ended at once when the app goes away. SCRAM-SHA-256 checks
+the server's nonce and requires its final signature: a server that says
+`AuthenticationOk` without proving it knows the password is refused. The
+password goes through SASLprep, as Postgres's own does, and falls back to
+the password as it is when that fails. A server that sends anything past
+its one-byte answer to `SSLRequest`, before TLS begins, is refused.
 
 The app's own startup parameters go through (`application_name`, …), but
 the user and database are the real URL's. Measured locally: a query adds
@@ -373,10 +385,14 @@ is refused at once, whatever the cache holds. *Decision:* end open sessions
 rather than let them run out, within a minute.
 
 **Cancel requests.** A `CancelRequest` comes on a connection of its own,
-with the `BackendKeyData` the app was given, which is the real server's.
-The listener carries it like any other connection, with the handle, and
-coffre forwards it to the tunnel's database as it is. `pg_cancel_backend`
-from psql's Ctrl-C works, and a test holds it.
+before any password, with the key the app was given in `BackendKeyData`.
+That key is coffre's, random, and maps to one live session of this
+process: its database and the database's real key. A cancel request is
+forwarded, over TLS as the session is, only when its key names a live
+session of the same handle. A guessed key, or another handle's, reaches
+nothing, and the database's own keys never leave coffre. psql's Ctrl-C
+works, and tests hold both. On Workers, where calls land on different
+isolates, the map would live in a Durable Object.
 
 **Not yet:**
 - *Workers.* The tunnel's code is platform-neutral, but only Node's

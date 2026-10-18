@@ -22,12 +22,14 @@ import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } 
 import { upgrade } from '../src/node-sockets.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, postgres } from '../src/plugins/credential-proxy.ts';
+import { saslprep } from '../src/plugins/postgres-tunnel.ts';
 
 const postgresOnly = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false };
 // The suite's database, as the app's would name it: no TLS to a database on loopback.
 const REAL = `${TEST_RUNTIME_DATABASE_URL}?sslmode=disable`;
 
 let coffre: Server;
+let coffreAt: string;
 let listener: TcpServer;
 let listenerPort: number;
 let handle: string;
@@ -41,6 +43,7 @@ before(async () => {
   coffre.listen(0, '127.0.0.1');
   await once(coffre, 'listening');
   const at = `ws://127.0.0.1:${(coffre.address() as AddressInfo).port}`;
+  coffreAt = at;
   // `coffre run`'s listener, as it is: each connection, a WebSocket to the tunnel with the handle, bytes both ways.
   listener = createTcp((socket) => {
     carried.push(socket);
@@ -175,15 +178,134 @@ test("a cancel request, on a connection of its own, reaches the database with th
   }
 });
 
+test("a cancel request with a key no live session of this handle was given reaches nothing", postgresOnly, async () => {
+  const client = appClient();
+  await client.connect();
+  try {
+    const sleeping = client.query('SELECT pg_sleep(0.6) AS slept');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { processID, secretKey } = client as unknown as { processID: number; secretKey: number };
+    // The database's own key is never the app's: guess one, or flip one bit of the one given.
+    for (const [pid, key] of [[processID, secretKey ^ 1], [12345, 67890]]) {
+      const cancel = tcp({ host: '127.0.0.1', port: listenerPort });
+      await once(cancel, 'connect');
+      const packet = Buffer.alloc(16);
+      packet.writeInt32BE(16, 0);
+      packet.writeInt32BE(80877102, 4);
+      packet.writeInt32BE(pid!, 8);
+      packet.writeInt32BE(key!, 12);
+      cancel.write(packet);
+      await once(cancel, 'close');
+    }
+    assert.deepEqual((await sleeping).rows, [{ slept: '' }], 'the query ran to its end');
+  } finally {
+    await client.end();
+  }
+});
+
+test('a handle revoked while a connection waits at the password prompt does not log it in', postgresOnly, async () => {
+  const socket = tcp({ host: '127.0.0.1', port: listenerPort });
+  await once(socket, 'connect');
+  const startup = Buffer.concat([Buffer.from([0, 3, 0, 0]), cstring('user'), cstring('app'), Buffer.from([0])]);
+  const length = Buffer.alloc(4);
+  length.writeInt32BE(startup.length + 4);
+  socket.write(Buffer.concat([length, startup]));
+  await once(socket, 'data');
+  await revoke();
+  const answers: Buffer[] = [];
+  socket.on('data', (chunk: Buffer) => answers.push(chunk));
+  socket.write(message('p', cstring(handle)));
+  await once(socket, 'close');
+  const said = Buffer.concat(answers).toString('latin1');
+  assert.equal(said.includes('R\u0000\u0000\u0000\u0008\u0000\u0000\u0000\u0000'), false, 'no AuthenticationOk');
+});
+
+test('a password message longer than a handle is refused before it is read', postgresOnly, async () => {
+  const socket = tcp({ host: '127.0.0.1', port: listenerPort });
+  await once(socket, 'connect');
+  const startup = Buffer.concat([Buffer.from([0, 3, 0, 0]), cstring('user'), cstring('app'), Buffer.from([0])]);
+  const length = Buffer.alloc(4);
+  length.writeInt32BE(startup.length + 4);
+  socket.write(Buffer.concat([length, startup]));
+  await once(socket, 'data');
+  const head = Buffer.alloc(5);
+  head.write('p', 0);
+  head.writeInt32BE(0x7fffffff, 1);
+  socket.write(head);
+  socket.write(Buffer.alloc(64 * 1024));
+  await once(socket, 'close');
+});
+
+test("an upgrade refused keeps the proxy's own headers", postgresOnly, async () => {
+  const refused = await new Promise<{ status: string; headers: string }>((resolve) => {
+    const socket = tcp({ host: '127.0.0.1', port: Number(new URL(coffreAt).port) });
+    socket.on('connect', () => socket.write('GET /use/market/dev/db HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+    let text = '';
+    socket.on('data', (chunk: Buffer) => (text += chunk.toString('latin1')));
+    socket.on('close', () => resolve({ status: text.split('\r\n')[0]!, headers: text }));
+  });
+  assert.match(refused.status, / 401 /);
+  assert.match(refused.headers, /coffre-proxy: refused/);
+});
+
+test("SASLprep maps as Postgres does, and falls back to the password as it is", () => {
+  const soft = String.fromCharCode(0xad);
+  const space = String.fromCharCode(0xa0);
+  assert.equal(saslprep(`I${soft}X`), 'IX');
+  assert.equal(saslprep(`a${space}b`), 'a b');
+  assert.equal(saslprep(String.fromCharCode(0x2168)), 'IX', 'NFKC');
+  const control = `pass${String.fromCharCode(7)}word`;
+  assert.equal(saslprep(control), control, 'a prohibited character: the password as it is');
+});
+
+test('a database that ends SCRAM without its signature is no database the URL names: refused', postgresOnly, async () => {
+  // A fake that asks for SCRAM, takes the proof, and says AuthenticationOk with no server-final message.
+  const fake = createTcp((socket) => {
+    let stage = 0;
+    let buffered = Buffer.alloc(0);
+    socket.on('data', (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      if (stage === 0 && buffered.length >= 4 && buffered.length >= buffered.readInt32BE(0)) {
+        buffered = buffered.subarray(buffered.readInt32BE(0));
+        stage = 1;
+        socket.write(message('R', Buffer.concat([Buffer.from([0, 0, 0, 10]), cstring('SCRAM-SHA-256'), Buffer.from([0])])));
+      } else if (stage === 1 && buffered.length >= 5 && buffered.length >= 1 + buffered.readInt32BE(1)) {
+        const first = buffered.subarray(5 + 'SCRAM-SHA-256'.length + 1 + 4, 1 + buffered.readInt32BE(1)).toString();
+        buffered = buffered.subarray(1 + buffered.readInt32BE(1));
+        stage = 2;
+        const nonce = /r=([^,]+)/.exec(first)![1]!;
+        socket.write(message('R', Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from(`r=${nonce}server,s=${Buffer.from('salt').toString('base64')},i=4096`)])));
+      } else if (stage === 2 && buffered.length >= 5 && buffered.length >= 1 + buffered.readInt32BE(1)) {
+        stage = 3;
+        socket.write(message('R', Buffer.from([0, 0, 0, 0])));
+        socket.write(message('Z', Buffer.from('I')));
+      }
+    });
+  });
+  fake.listen(0, '127.0.0.1');
+  await once(fake, 'listening');
+  try {
+    await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@127.0.0.1:${(fake.address() as AddressInfo).port}/d?sslmode=disable` });
+    await assert.rejects(appClient().connect(), /without proving it knows the password/);
+  } finally {
+    fake.close();
+  }
+});
+
+/** Revoke the suite's handle, as its person would. */
+async function revoke(): Promise<void> {
+  const session = await sessionFor(DEV);
+  const listed = (await (await route(`/api/members/user:${DEV}/tokens`, { headers: { authorization: `Bearer ${session}` } })).json()) as { tokens: { id: string; hint: string }[] };
+  const id = listed.tokens.find((token) => token.hint.endsWith(handle.slice(-4)))!.id;
+  await route(`/api/members/user:${DEV}/tokens/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${session}` } });
+}
+
 test('a handle revoked mid-session ends the open session at the next check, and opens no other', postgresOnly, async () => {
   const client = appClient();
   client.on('error', () => undefined);
   await client.connect();
   assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
-  const session = await sessionFor(DEV);
-  const listed = await (await route(`/api/members/user:${DEV}/tokens`, { headers: { authorization: `Bearer ${session}` } })).json() as { tokens: { id: string; hint: string }[] };
-  const id = listed.tokens.find((token) => token.hint.endsWith(handle.slice(-4)))!.id;
-  await route(`/api/members/user:${DEV}/tokens/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${session}` } });
+  await revoke();
   await new Promise((resolve) => setTimeout(resolve, 600));
   await assert.rejects(client.query('SELECT 1'));
   await assert.rejects(appClient().connect(), 'nor is a new one opened');

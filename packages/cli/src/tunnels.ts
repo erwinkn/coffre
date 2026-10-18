@@ -6,30 +6,40 @@
 // password, the handle, is checked there.
 import { createServer, type Socket } from 'node:net';
 
+import { WebSocket } from 'ws';
+
 /** A tunnel the plan names: the key the app reads its database's URL from, and coffre's end of it. */
 export type Tunnel = { key: string; url: string };
 
+/** How much one side may hold for the other before it stops reading: a few COPY chunks. */
+const HIGH_WATER = 1024 * 1024;
+
 /** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. */
 export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: string; close: () => void }> {
-  const WebSocketClass = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
-  if (WebSocketClass === undefined) throw new Error(`${tunnel.key} goes through a tunnel, which takes Node 22 or later`);
   const sockets = new Set<Socket>();
   const server = createServer((socket) => {
     sockets.add(socket);
-    // Node's WebSocket takes headers, as undici's does: the handle, never in the URL.
-    const ws = new (WebSocketClass as unknown as new (url: string, init: { headers: Record<string, string> }) => WebSocket)(tunnel.url, { headers: { authorization: `Bearer ${handle}` } });
-    ws.binaryType = 'arraybuffer';
-    const early: Buffer[] = [];
-    socket.on('data', (chunk: Buffer) => (ws.readyState === ws.OPEN ? ws.send(chunk) : early.push(chunk)));
-    ws.addEventListener('open', () => early.splice(0).forEach((chunk) => ws.send(chunk)));
-    ws.addEventListener('message', (event) => socket.write(new Uint8Array(event.data as ArrayBuffer)));
-    ws.addEventListener('close', () => socket.destroy());
-    ws.addEventListener('error', () => socket.destroy());
+    // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
+    socket.pause();
+    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}` } });
+    ws.on('open', () => socket.resume());
+    socket.on('data', (chunk: Buffer) => {
+      ws.send(chunk, { binary: true }, () => {
+        if (ws.bufferedAmount < HIGH_WATER) socket.resume();
+      });
+      if (ws.bufferedAmount >= HIGH_WATER) socket.pause();
+    });
+    ws.on('message', (data: Buffer) => {
+      if (!socket.write(data)) ws.pause();
+    });
+    socket.on('drain', () => ws.resume());
+    ws.on('close', () => socket.destroy());
+    ws.on('error', () => socket.destroy());
     socket.on('close', () => {
       sockets.delete(socket);
       ws.close();
     });
-    socket.on('error', () => ws.close());
+    socket.on('error', () => ws.terminate());
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
