@@ -465,3 +465,96 @@ test('a tunnel whose coffre never answers the upgrade gives up on it, closing th
     silent.close();
   }
 });
+
+for (const raced of [false, true]) {
+  test(`a person's run makes their own value of each key a recipe made, in their personal config, once${raced ? ': a run that lost the race reads the winner' : ''}`, async (t) => {
+    const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const pat = `coffre_pat_${'p'.repeat(43)}`;
+    const handle = `coffre_use_${'h'.repeat(43)}`;
+    const requests: string[] = [];
+    const written: Record<string, { value: string; generated: { recipe: string }; replaces: string }>[] = [];
+    // What the person's personal config holds: the winner's, when another run wrote first.
+    let mine: string | null = null;
+    const server = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += String(chunk);
+      const url = decodeURIComponent(req.url ?? '');
+      requests.push(`${req.method} ${url}`);
+      const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+      if (url === '/use') return send(200, { proxy: 'coffre', credentials: [] });
+      if (url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/local': 'viewer' } });
+      if (url === '/use/market/local') {
+        return mine === null
+          ? send(200, { environment: 'market/local', env: { REGION: 'eu' }, credentials: {}, left: ['SEAL_KEY', 'TYPED'], generate: { SEAL_KEY: { recipe: 'bytes:32:hex', replaces: 'v-local-1' } } })
+          : send(200, { environment: 'market/local@me', env: { REGION: 'eu', SEAL_KEY: mine }, credentials: {}, left: ['TYPED'], generate: {} });
+      }
+      if (req.method === 'PATCH' && url === '/api/secrets/market/local@me') {
+        written.push(JSON.parse(body) as (typeof written)[number]);
+        if (raced) {
+          mine = 'the-other-runs-value';
+          return send(409, { error: 'conflict', reason: 'stale', message: 'SEAL_KEY changed since it was listed: it was written, rolled back or regenerated meanwhile. Nothing was written' });
+        }
+        mine = written[0]!.SEAL_KEY!.value;
+        return send(200, { operationId: 'op', keys: { SEAL_KEY: { version: 1 } } });
+      }
+      send(404, { error: 'not_found', message: `no route for ${url}` });
+    });
+    t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const { port } = server.address() as { port: number };
+    signedInWithToken(home, `http://127.0.0.1:${port}`, pat);
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+    const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/local', '--', ...printing('SEAL_KEY', 'REGION')], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
+    child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+    const [code] = await once(child, 'close');
+    assert.equal(code, 0, stderr);
+    // Made here by the recipe, sent with it and the version it replaces, never shown.
+    assert.equal(written.length, 1);
+    const { value, generated, replaces } = written[0]!.SEAL_KEY!;
+    assert.match(value, /^[0-9a-f]{64}$/);
+    assert.deepEqual([generated, replaces], [{ recipe: 'bytes:32:hex' }, 'v-local-1']);
+    assert.ok(!stderr.includes(value));
+    assert.deepEqual(JSON.parse(stdout), { SEAL_KEY: raced ? 'the-other-runs-value' : value, REGION: 'eu' });
+    assert.equal(/made your own SEAL_KEY in market\/local@me/.test(stderr), !raced);
+    assert.deepEqual(requests, ['GET /use', 'POST /api/handles', 'GET /use/market/local', 'PATCH /api/secrets/market/local@me', 'GET /use/market/local']);
+  });
+}
+
+test("a person's run says why their own value could not be made, rather than retry what never will", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pat = `coffre_pat_${'p'.repeat(43)}`;
+  const handle = `coffre_use_${'h'.repeat(43)}`;
+  let patches = 0;
+  const server = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    const url = decodeURIComponent(req.url ?? '');
+    const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (url === '/use') return send(200, { proxy: 'coffre', credentials: [] });
+    if (url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: {} });
+    if (url === '/use/market/deep') return send(200, { environment: 'market/deep', env: {}, credentials: {}, left: ['SEAL_KEY'], generate: { SEAL_KEY: { recipe: 'bytes:32', replaces: 'v1' } } });
+    if (req.method === 'PATCH') {
+      patches += 1;
+      return send(409, { error: 'conflict', message: 'market/deep already inherits from 3 environments: it takes no personal config' });
+    }
+    send(404, { error: 'not_found', message: `no route for ${url}` });
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  signedInWithToken(home, `http://127.0.0.1:${port}`, pat);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/deep', '--', 'true'], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 1);
+  assert.equal(patches, 1);
+  assert.match(stderr, /market\/deep@me: market\/deep already inherits from 3 environments: it takes no personal config/);
+});

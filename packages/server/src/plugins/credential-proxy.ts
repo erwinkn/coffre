@@ -37,7 +37,9 @@
  */
 import { CoffreError } from '@coffre/client';
 
-import type { CoffrePlugin, PluginContext, SocketSession } from '../plugins.ts';
+import { recipeProblem } from '@coffre/core/recipe';
+
+import type { CoffrePlugin, PickKeys, PluginContext, SocketSession } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { presignV4, signV4 } from './sigv4.ts';
 
@@ -165,6 +167,18 @@ export type CredentialProxyOptions = {
    * the proxy belongs here, and better a local-only value than a real one.
    */
   expose?: Record<string, 'all' | readonly string[]>;
+  /**
+   * The environments whose keys each person gets a value of their own for,
+   * by exact path, and which keys: `{ 'backend/local': 'all' }`. A person's
+   * use of one reads their personal config of it (`backend/local@me`, or
+   * the environment while they have none), and a key their app would go
+   * without, which its current value's recipe made (`coffre set …
+   * --generate`), `coffre run` generates into that personal config, by the
+   * same recipe, once: their app's own encryption or webhook key, kept for
+   * their next runs. For a local environment, never a real one: a value
+   * made this way protects nothing but the person's own data.
+   */
+  generate?: Record<string, 'all' | readonly string[]>;
   /** Upstreams over plain HTTP, and at private, loopback or link-local addresses: for local fakes in development, never in production. */
   insecureUpstreams?: boolean;
   /**
@@ -209,7 +223,8 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
     const other = [...credentials.values()].find((two) => two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.standIn) !== JSON.stringify(one.standIn));
     if (other !== undefined) throw new Error(`credentialProxy: ${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different stand-ins, and the app holds one value for it`);
   }
-  const expose = checkExpose(options.expose ?? {});
+  const expose = checkListed('expose', options.expose ?? {});
+  const generate = checkListed('generate', options.generate ?? {});
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
@@ -225,7 +240,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache, handles });
+          return await serve(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -233,7 +248,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache, handles });
+          return await open(request, coffre, { credentials, groups, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -257,6 +272,7 @@ type Proxy = {
   insecure: boolean;
   recheckMs: number;
   expose: Map<string, 'all' | readonly string[]>;
+  generate: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
   cache: Map<string, Opened & { until: number }>;
   /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). */
@@ -342,19 +358,27 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // The credentials the environment holds every key of: their keys are stand-ins, never exposed.
   const covering = (keys: readonly string[]) => [...proxy.credentials.values()].filter((credential) => credential.keys.every((key) => keys.includes(key)));
+  // What the read resolved, for what `coffre run` generates below.
+  let resolved: Parameters<PickKeys>[1] = [];
   // One read, which opens what the exact environment exposes, never through a parent; and a personal config's own
-  // values, which only its owner writes, so they hand back nothing they did not write. Chosen from the rows it opens.
+  // values, which only its owner writes, so they hand back nothing they did not write, and those it inherits as
+  // the environment it is a config of exposes them, which its owner reads anyway. Chosen from the rows it opens.
   const held = await coffre.use(handle, {
-    path,
+    path: readOf(proxy, path),
     purpose: 'expose',
     logged: { plan: true },
     keys: (environment, rows) => {
+      resolved = rows;
       const using = covering(rows.map((row) => row.key));
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key)]);
-      const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
-      // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's.
-      const identified = (row: { key: string; inherited: boolean }) => identifiers.has(row.key) && !row.inherited && !environment.personal;
+      const listed = proxy.expose.get(environment.personal ? environment.path.replace(/@me$/, '') : environment.path);
+      const exposed = (row: { key: string; inherited: boolean }) => (environment.personal && !row.inherited) || listed === 'all' || (listed?.includes(row.key) ?? false);
+      // The environment's own value: held there, or, read through a personal config of it, held by the environment it configures.
+      const configured = environment.path.replace(/@me$/, '').split('/')[1];
+      const own = (row: { inherited: boolean; from: string | null }) => (environment.personal ? row.from === configured : !row.inherited);
+      // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's own.
+      const identified = (row: { key: string; inherited: boolean; from: string | null }) => identifiers.has(row.key) && own(row);
       // What the proxy fills in itself, a tunnel's URL, never the value the environment holds; and a
       // credential's plain keys and identifiers where giving them would leave the handle nowhere the proxy finds it:
       // S3's access key id, which the SDK sends as `Credential=`, or every key of a header's. Those stay stand-ins,
@@ -367,7 +391,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       return rows
         // A plain value is no secret, wherever it is held.
         .filter((row) => ((row.plain || identified(row)) && !filled.has(row.key))
-          || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
+          || (!covered.has(row.key) && exposed(row)))
         .map((row) => row.key);
     },
   });
@@ -378,7 +402,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     // The environment's URL, which a run of several environments tells apart, and which `presign()` derives the environment's from.
     credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
     // Every key the stand-in, and a plain value or an identifier given as it is below.
-    const standIn = credential.standIn === undefined ? handle : await shaped(coffre, credential, handle, path);
+    const standIn = credential.standIn === undefined ? handle : await shaped(coffre, credential, handle, readOf(proxy, path));
     for (const key of credential.keys) {
       env[key] = standIn;
       covered.add(key);
@@ -396,12 +420,23 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     delete env[tunnel.key];
     covered.add(tunnel.key);
   }
+  // What the app would go without and a recipe made, in an environment the deployment generates for: `coffre run`
+  // makes each a value of the person's own, in their personal config, replacing the version read here, so that of
+  // two runs at once one writes and the other reads what it wrote.
+  const making = proxy.generate.get(path.replace(/@me$/, ''));
+  const generate: Record<string, { recipe: string; replaces: string }> = {};
+  const generates = (key: string) => making === 'all' || (making?.includes(key) ?? false);
+  for (const row of making === undefined ? [] : resolved) {
+    if (covered.has(row.key) || row.recipe === null || row.versionId === null || recipeProblem(row.recipe) !== null || !generates(row.key)) continue;
+    generate[row.key] = { recipe: row.recipe, replaces: row.versionId };
+  }
   return answer({
     environment: held.environment.path,
     env: { ...env },
     credentials,
     tunnels,
     left: held.keys.filter((key) => !covered.has(key)),
+    ...(making === undefined ? {} : { generate }),
   });
 }
 
@@ -435,6 +470,15 @@ function claimsOf(token: string | undefined): Record<string, unknown> | null {
 
 function base64url(bytes: Uint8Array): string {
   return btoa(binary(bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * What a person's use of `path` reads: their personal config of it, or the
+ * environment while they have none, where the deployment generates values
+ * for it; the environment itself anywhere else.
+ */
+function readOf(proxy: Proxy, path: string): string {
+  return proxy.generate.has(path) ? `${path}@me` : path;
 }
 
 /**
@@ -522,7 +566,7 @@ function watch(
       checked.checking = true;
       let late: ReturnType<typeof setTimeout> | undefined;
       const stands = await Promise.race([
-        coffre.use(tunnel.handle, { path: tunnel.path, keys: [tunnel.key], purpose: 'use', logged: { credential: tunnel.name, tunnel: true, recheck: true } }).then(
+        coffre.use(tunnel.handle, { path: readOf(proxy, tunnel.path), keys: [tunnel.key], purpose: 'use', logged: { credential: tunnel.name, tunnel: true, recheck: true } }).then(
           (used) => Object.hasOwn(used.values, tunnel.key),
           () => false,
         ),
@@ -601,7 +645,7 @@ async function presign(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
   // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
-  const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
+  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
   if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
   // Never past the handle's own end.
   const lasts = Math.min(expiresIn, Math.floor((Date.parse(used.expiresAt) - Date.now()) / 1000));
@@ -864,7 +908,7 @@ async function valuesFor(
   const now = Date.now();
   const kept = proxy.cache.get(key);
   if (kept !== undefined && kept.until > now) return kept;
-  const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
+  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
   decided?.();
@@ -1095,12 +1139,12 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
   return { ...tunnel, ...(hosts === undefined ? {} : { hosts }) };
 }
 
-function checkExpose(expose: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {
-  for (const [path, keys] of Object.entries(expose)) {
-    if (!/^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(path)) throw new Error(`credentialProxy: expose names environments by path, market/local; got ${JSON.stringify(path)}`);
-    if (keys !== 'all' && (!Array.isArray(keys) || keys.some((key) => !KEY.test(key)))) throw new Error(`credentialProxy: expose['${path}'] is 'all' or a list of keys`);
+function checkListed(option: 'expose' | 'generate', listed: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {
+  for (const [path, keys] of Object.entries(listed)) {
+    if (!/^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(path)) throw new Error(`credentialProxy: ${option} names environments by path, market/local; got ${JSON.stringify(path)}`);
+    if (keys !== 'all' && (!Array.isArray(keys) || keys.some((key) => !KEY.test(key)))) throw new Error(`credentialProxy: ${option}['${path}'] is 'all' or a list of keys`);
   }
-  return new Map(Object.entries(expose));
+  return new Map(Object.entries(listed));
 }
 
 /** Whether a host is a literal private, loopback or link-local address, or localhost. */

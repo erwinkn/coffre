@@ -556,7 +556,7 @@ test('a handle for a fork reads what it inherits, and one for dev@me stands in f
   assert.deepEqual(mine.scope, { 'market/dev': 'viewer' });
   const plan = (await (await route('/use/market/dev@me', { headers: { authorization: `Bearer ${mine.token}` } })).json()) as { env: Record<string, string> };
   assert.equal(plan.env.DATABASE_URL, 'postgres://localhost/dev', "the personal config's own value, not dev's");
-  assert.equal(plan.env.WEBHOOK_SECRET, undefined);
+  assert.equal(plan.env.WEBHOOK_SECRET, WEBHOOK, 'what dev exposes, which its owner reads through dev anyway');
 });
 
 test("the stable URL, /use/<credential>, is the handle's environment's: a fork's, a personal config's, or a refusal that names the environment's", async () => {
@@ -668,7 +668,7 @@ test("a handle keeps the environments it was made for under its row's MAC; one o
   assert.match(((await refused.json()) as { message: string }).message, /before coffre 0\.9.*coffre run/);
 });
 
-test('the plan: stand-ins for what the proxy covers, values only for what the exact environment exposes, never a fork or a personal config of it', async () => {
+test('the plan: stand-ins for what the proxy covers, values only for what the exact environment exposes, never a fork of it', async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
   await root.secrets.set('market/dev@me', { EXTRA: 'mine' }).catch(() => undefined);
@@ -696,15 +696,15 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
 
   const mine = await plan('market/dev@me');
   assert.equal(mine.environment, 'market/dev@me');
-  assert.equal(mine.env.WEBHOOK_SECRET, undefined, 'nor does a personal config of it');
-  assert.ok(mine.left.includes('WEBHOOK_SECRET'));
+  assert.equal(mine.env.WEBHOOK_SECRET, WEBHOOK, "a personal config of it does, as dev's own: its owner gets it through dev anyway");
   assert.equal(mine.env.LOCAL_ONLY, 'x', "but its own values, which only its owner wrote, are its owner's app's");
   assert.equal(mine.env.TWILIO_SID?.startsWith('coffre_use_'), true, 'nor an identifier it inherits');
 
   // Each exposure is logged as the vault's read to expose, one entry per environment it opens in: dev's webhook secret and
-  // Twilio's account id, and the personal config's own value. The fork exposes nothing.
+  // Twilio's account id; the personal config's own value; and dev's webhook secret, through the personal config. The fork
+  // exposes nothing.
   const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
-  assert.equal(exposed.length, 2);
+  assert.equal(exposed.length, 3);
 });
 
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {

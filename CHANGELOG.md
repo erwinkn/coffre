@@ -40,6 +40,14 @@
   write, which stand-ins refuse a person: type the value again. A personal
   config holds none. Migration `0011_plain_values` adds
   `secret_versions.plaintext`.
+- **Values of a person's own.** `credentialProxy({ generate: {
+  'backend/local': 'all' } })`: a person's use of `backend/local` reads
+  their personal config of it, and `coffre run` (and `export`) makes them
+  their own value of each key their app would go without that a recipe
+  made (`coffre set … --generate`), once, by that recipe, into
+  `backend/local@me`: their app's local encryption, sealing and webhook
+  keys, stable across runs. Two runs at once converge on one value. A
+  personal config now exposes what the environment it configures exposes.
 - **Deprecated: a credential's `identifiers`.** Mark the key plain instead:
   `coffre set <env>/TWILIO_SID <sid> --plain`. `identifiers` still works,
   and goes in a later release.
