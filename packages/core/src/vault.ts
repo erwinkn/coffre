@@ -259,13 +259,15 @@ export type KeyChecks = { current: { kekProvider: string; kekId: string }; check
 export type Purpose = 'reveal' | 'run' | 'compare' | 'copy' | 'use' | 'expose';
 
 /**
- * Whether a read to `purpose` hands values back to whoever asked, which a
- * person never gets of a sensitive value: every purpose but a fork's
- * `copy` and the proxy's `use`, a dry run's `compare` included, which tells
- * them whether a guess was right, and any purpose a later app may name.
+ * Whether a read hands values back to whoever asked, which a person never
+ * gets of a sensitive value: every purpose but the proxy's `use` and a
+ * fork's `copy` that keeps them sensitive (`keepsSensitive`), a dry run's
+ * `compare` included, which tells them whether a guess was right, and any
+ * purpose a later app may name.
  */
-export function handsBack(purpose: string): boolean {
-  return purpose !== 'copy' && purpose !== 'use';
+export function handsBack(read: { purpose: string; keepsSensitive?: boolean }): boolean {
+  if (read.purpose === 'use') return false;
+  return !(read.purpose === 'copy' && read.keepsSensitive === true);
 }
 
 /** Ties the vault's entries to the app's request and audit rows. */
@@ -295,6 +297,13 @@ export type Through = { credentialScope?: CredentialScope | null };
 export type UnwrapInput = Correlation & Through & {
   principal: string;
   purpose: Purpose;
+  /**
+   * That a `copy` keeps each sensitive value sensitive in what it writes:
+   * the vault opens a sensitive value to copy for a person only when told
+   * so, which an app older than 0.10, that would write it as a secret
+   * anyone with read sees, never says.
+   */
+  keepsSensitive?: boolean;
   /**
    * `via` reads a source's current version through a reference: the vault
    * checks the reader's grants on the holder's environment, as its

@@ -98,7 +98,11 @@ might name included.
   owner: AAD `|sensitive`, or `coffre:sensitive` in KMS's encryption
   context. A row flipped back to secret around coffre opens for nobody
   (`bad_claim`), rather than for people. The value's own ciphertext binds
-  the secret's ids alone, so a key made sensitive keeps it.
+  the secret's ids alone, so a key made sensitive keeps it. A fork's
+  `copy` opens one only for an app that says it keeps it sensitive
+  (`keepsSensitive`), which an app of 0.9, mid-deploy, never says; and
+  `wrap` answers what it bound, so this app stores no sensitive version a
+  vault of 0.9 wrapped as a secret.
 - **A person's read of a whole environment** (`coffre run` and `export`
   without the proxy, the page's Reveal all, `POST /api/reveals` of
   `market/prod`) leaves its sensitive values out and names them

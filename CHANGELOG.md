@@ -24,22 +24,35 @@
   "sensitivity": "sensitive" }`. The vault's `people` option, the
   proxy's `expose` and a credential's `identifiers` are removed: a
   deployment that still sets one fails at startup, saying what to do.
-  Migration `0012_sensitive_values` adds `secret_versions.sensitive`. To
-  move a deployment that ran `people: 'stand-ins'`, delete `people` from
-  its vault and `expose` from its `credentialProxy`, deploy, then mark
-  sensitive what no person should read, leaving secret what they read
-  (what `expose` listed):
+  Migration `0012_sensitive_values` adds `secret_versions.sensitive`.
 
-  ```sh
-  coffre mark backend/prod sensitive        # every key of prod, its values kept
-  coffre mark backend/staging sensitive
-  coffre mark backend/local/LEMONWAY_API_KEY sensitive   # the real keys a local environment holds
-  coffre mark backend/local/YOUSIGN_API_KEY sensitive
-  ```
+  **Moving a deployment that ran `people: 'stand-ins'`.** 0.10 has no
+  switch for every key: from its deploy until the keys are marked, a
+  person reads what their role reads, as 0.9 did without `people`. Make
+  that window seconds, and check it:
 
-  Between the deploy and the marks, a person reads what their role
-  reads, as 0.9 did without `people`: mark right after deploying, as an
-  Owner. See docs/design/credential-proxy.md, section 2.
+  1. On 0.9, `coffre migrate` as usual (0012 only adds a column).
+  2. Delete `people` from the vault's configuration and `expose` from
+     `credentialProxy`, and deploy 0.10 from a pipeline whose next step,
+     as a service account with write on the environments, marks
+     sensitive what no person should read, leaving secret what they read
+     (what `expose` listed):
+
+     ```sh
+     coffre mark backend/prod sensitive        # every key of prod, its values kept
+     coffre mark backend/staging sensitive
+     coffre mark backend/local/LEMONWAY_API_KEY sensitive   # the real keys a local environment holds
+     coffre mark backend/local/YOUSIGN_API_KEY sensitive
+     ```
+
+  3. Check that no person read a value in between: `coffre audit
+     backend/prod --json` lists each `secret.read`, by whom and when; any
+     the deploy window holds is a value to rotate.
+
+  For no window at all, take read away from people before the deploy (an
+  Owner narrows their grants and instance roles to what writes no value,
+  their apps going without until the marks), then give it back once the
+  keys are marked. See docs/design/credential-proxy.md, section 2.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output

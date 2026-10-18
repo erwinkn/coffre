@@ -72,7 +72,7 @@ function boundAsAsked(items: readonly { secret: SecretRef }[], result: { sensiti
  */
 export async function openValues(
   vault: Vault,
-  asking: Asking & { purpose: Purpose },
+  asking: Asking & { purpose: Purpose; keepsSensitive?: boolean },
   items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string }[],
 ): Promise<Keyed<string>> {
   const sealed = items.filter((item) => !plain(item));

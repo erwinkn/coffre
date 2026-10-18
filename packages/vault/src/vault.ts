@@ -794,6 +794,7 @@ class VaultService implements Vault {
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
     const { principal } = input;
     validateText(input.purpose);
+    if (input.keepsSensitive !== undefined && typeof input.keepsSensitive !== 'boolean') throw new Error('keepsSensitive is true, false or absent');
     const vias = input.items.map((item) => validateVia(item.via));
     const throughs = input.items.map((item) => validateThrough(item.through));
     const loaded = await this.#versions(input, 'secret.read', { purpose: input.purpose });
@@ -1027,7 +1028,7 @@ class VaultService implements Vault {
       vet?: (db: Queryable) => Promise<(RefusalCode | null)[]>;
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
-      input: Correlation & Through & { purpose?: string };
+      input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
     },
     /**
      * One per secret; null for a bad claim, an error for an outage or an
@@ -1069,7 +1070,7 @@ class VaultService implements Vault {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
       }
       // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks.
-      if (action === 'secret.read' && principal.startsWith('user:') && handsBack(call.input.purpose ?? '')) {
+      if (action === 'secret.read' && principal.startsWith('user:') && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true })) {
         secrets.forEach((secret, i) => {
           if (codes[i] === null && secret.sensitive === true) codes[i] = 'sensitive';
         });

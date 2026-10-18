@@ -20,6 +20,7 @@ import {
   resolvePath,
   secretHeads,
   secretPlaces,
+  sensitiveVersions,
   secretsInFolder,
   secretHistory,
   update,
@@ -85,8 +86,9 @@ export type SecretKey = {
    * Who sees its current value (`Sensitivity`): `plain`, whoever lists the
    * environment; `secret`, those whose role reads it; `sensitive`, nobody,
    * Owners included, its apps using it through the credential proxy and
-   * service accounts reading it. Null where `version` is, and for a
-   * reference, whose value is its source's.
+   * service accounts reading it. A live reference's is its source's
+   * current value's, a plain one read as a secret. Null where there is no
+   * value to read.
    */
   sensitivity: Sensitivity | null;
   /**
@@ -268,9 +270,17 @@ export async function listSecrets(
       : { parents: [], held: new Map<string, InheritedRow>(), removed: new Set<string>(), cut: new Map<string, ParentRow>() };
     if (inherited === null) throw conflict(`${place.project.slug}/${place.environment!.slug}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre`);
     const references = await currentReferences(db, [...rows, ...[...inherited.held.values()].map((held) => held.row)].filter((row) => row.current === null).map((row) => row.id));
-    return { rows, inherited, references };
+    // A reference reads as its source's current value does: sensitive, or a secret, a plain one's included.
+    const sensitiveSources = await sensitiveVersions(db, [...references.values()].flatMap((reference) => (reference.state === 'live' ? [reference.source!.currentVersionId!] : [])));
+    return { rows, inherited, references, sensitiveSources };
   };
-  const { rows, inherited, references } = fork ? await ctx.db.transaction(read, SNAPSHOT) : await read(ctx.db);
+  const { rows, inherited, references, sensitiveSources } = fork ? await ctx.db.transaction(read, SNAPSHOT) : await read(ctx.db);
+  const levelOfRow = (row: SecretRow): Sensitivity | null => {
+    if (row.current !== null) return sensitivityOf(row.current);
+    const reference = references.get(row.id);
+    if (reference?.state !== 'live') return null;
+    return sensitiveSources.has(reference.source!.currentVersionId!) ? 'sensitive' : 'secret';
+  };
   const referenceOf = (secretId: string): SecretKey['reference'] => {
     const reference = references.get(secretId);
     if (reference === undefined) return null;
@@ -302,7 +312,7 @@ export async function listSecrets(
     updatedBy: row.current?.createdBy ?? null,
     generated: generated.get(row.id) ?? null,
     value: row.current?.plaintext ?? null,
-    sensitivity: row.current == null ? null : sensitivityOf(row.current),
+    sensitivity: levelOfRow(row),
   });
   const reads = (from: { id: string; slug: string }) =>
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
@@ -729,6 +739,14 @@ export async function setSecrets(
         // The rows that were there when it was prepared: one this write just made for an override is not yet one.
         const before = new Map([...byKey].filter(([key]) => prepared.has(key)));
         if (regenerated(patch, before, await inheritedOf(tx, place)) !== null) throw new PrepareAgain();
+      }
+      // A level a write that said none took from what the fork inherits, again under the head: a parent value written
+      // or marked since, sensitive now, is prepared again rather than written over as a secret.
+      const fromParent = items.filter(({ key }) => !asked.has(key) && !personal && (prepared.get(key) === undefined || prepared.get(key)!.archivedAt !== null));
+      if (inherited !== null && fromParent.length > 0) {
+        const now = await inheritedOf(tx, place);
+        const versionOf = (of: Awaited<ReturnType<typeof inheritedOf>>, key: string) => (of?.removed.has(key) ? null : of?.held.get(key)?.row.current?.id ?? null);
+        if (fromParent.some(({ key }) => versionOf(now, key) !== versionOf(inherited, key))) throw new PrepareAgain();
       }
 
       const keys: Record<string, SetOutcome> = {};

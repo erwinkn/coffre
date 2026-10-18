@@ -202,6 +202,38 @@ test("a fork's copy keeps a sensitive value sensitive; an inheriting fork writes
   assert.equal((await refusal(root.secrets.set('market/dev-eu', { WEBHOOK: { sensitivity: 'sensitive' } }))).status, 409);
 });
 
+test("an override that takes its level from the parent is prepared again when the parent is marked sensitive meanwhile", async (t) => {
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  const wrap = deps.vault.wrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    if (compete) {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  await root.secrets.set('market/dev-eu', { WEBHOOK: 'whsec_eu_0123456789abcdef' });
+  assert.equal((await levels('market/dev-eu')).WEBHOOK, 'sensitive', 'written over the parent as it is now');
+  assert.equal((await refusal(root.secrets.reveal('market/dev-eu/WEBHOOK'))).reason, 'sensitive');
+});
+
+test("a reference lists as its source reads: sensitive, or a secret, a plain source's included", async () => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' }, WEBHOOK: { ref: 'market/dev/WEBHOOK' }, REGION: { ref: 'market/dev/REGION' } });
+  assert.deepEqual(await levels('market/prod'), { API_KEY: 'sensitive', REGION: 'secret', WEBHOOK: 'secret' });
+  assert.equal((await refusal(root.secrets.reveal('market/prod/API_KEY'))).reason, 'sensitive');
+});
+
+test("an app before 0.10 copies no sensitive value for a fork: the vault opens one to copy only for an app that keeps it sensitive", async () => {
+  const version = (await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'API_KEY')!.versionId!;
+  const asked = (keepsSensitive?: boolean) => deps.vault.unwrap({ principal: `user:${ROOT}`, purpose: 'copy', ...(keepsSensitive === undefined ? {} : { keepsSensitive }), items: [{ secretVersionId: version }] });
+  const old = await asked();
+  assert.equal(!old.ok && old.refusal.code, 'sensitive');
+  assert.equal((await asked(true)).ok, true);
+});
+
 test('a personal config holds no sensitive value: its own value over a sensitive one is a secret its owner reads', async () => {
   const dev = clientFor(deps, DEV);
   const writes: Parameters<typeof dev.secrets.set>[1][] = [{ MINE: { value: 'mine-0123456789', sensitivity: 'sensitive' } }, { API_KEY: { sensitivity: 'sensitive' } }];

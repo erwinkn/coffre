@@ -1781,6 +1781,17 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
   return found;
 }
 
+/** Which of these versions are sensitive: what a reference to one reads as. */
+export async function sensitiveVersions(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const { secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ id: secretVersions.id })
+    .from(secretVersions)
+    .where(and(inArray(secretVersions.id, [...new Set(ids)]), eq(secretVersions.sensitive, true)));
+  return new Set(rows.map((row) => row.id));
+}
+
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
 export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean }>> {
   if (ids.length === 0) return new Map();

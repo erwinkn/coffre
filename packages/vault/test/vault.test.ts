@@ -161,7 +161,7 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
 });
 
-test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork, read by a service", async () => {
+test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork that keeps it so, read by a service", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'developer']]);
   const SERVICE = 'token:deploy';
@@ -177,7 +177,11 @@ test("a sensitive value is never handed back to a person, an Owner included: use
       const refused = await w.vault.unwrap({ principal, purpose, items });
       assert.equal(!refused.ok && refused.refusal.code, 'sensitive', `${principal} to ${purpose}`);
     }
-    for (const purpose of ['use', 'copy'] as const) assert.deepEqual(await w.vault.unwrap({ principal, purpose, items }), { ok: true, keys: [key] });
+    assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'use', items }), { ok: true, keys: [key] });
+    assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
+    // A copy by an app before 0.10, which would write the value as a secret anyone with read sees.
+    const old = await w.vault.unwrap({ principal, purpose: 'copy', items });
+    assert.equal(!old.ok && old.refusal.code, 'sensitive', `${principal}'s copy that keeps nothing sensitive`);
   }
   // A purpose a later app may name is one that hands values back.
   const unknown = await w.vault.unwrap({ principal: ADA, purpose: 'peek' as 'reveal', items });

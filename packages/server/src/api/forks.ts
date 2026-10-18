@@ -73,7 +73,8 @@ export async function forkEnvironment(
 
     const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
     const copies = readable.items.filter((item) => !plan.has(item.key));
-    const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy' }, copies);
+    // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
+    const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const patch: Record<string, SecretValue> = Object.create(null);
