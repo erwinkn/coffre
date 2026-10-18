@@ -257,6 +257,7 @@ export type Api = {
           };
         };
         value: string | null;
+        sensitivity: "plain" | "secret" | "sensitive" | null;
         parent: null | {
           from: string;
           state: "inherited" | "overridden" | "removed";
@@ -285,10 +286,17 @@ export type Api = {
           };
         };
         replaces?: string;
+        sensitivity?: "secret" | "sensitive";
       } | {
         value: string;
         plain: true;
         replaces?: string;
+      } | {
+        value: string;
+        sensitivity: "plain" | "secret" | "sensitive";
+        replaces?: string;
+      } | {
+        sensitivity: "plain" | "secret" | "sensitive";
       } | {
         ref: string;
       };
@@ -337,6 +345,7 @@ export type Api = {
         kek: string;
         recipe: string | null;
         plain: boolean;
+        sensitivity: "plain" | "secret" | "sensitive";
       }[];
     };
   };
@@ -427,6 +436,7 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      sensitive: string[];
       version: string | null;
     };
   };
@@ -1973,6 +1983,7 @@ export type SecretKey = {
     };
   };
   value: string | null;
+  sensitivity: "plain" | "secret" | "sensitive" | null;
   parent: null | {
     from: string;
     state: "inherited" | "overridden" | "removed";
@@ -1990,6 +2001,7 @@ export type SecretVersion = {
   kek: string;
   recipe: string | null;
   plain: boolean;
+  sensitivity: "plain" | "secret" | "sensitive";
 };
 
 export type SessionRow = {

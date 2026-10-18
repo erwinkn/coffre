@@ -74,6 +74,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [
       { does: 'an environment › Add secret, Edit, then Save', in: 'pages/environment.tsx', call: 'secrets.set' },
       { does: 'an environment › Import .env, after its plan', in: 'pages/environment.tsx', call: 'secrets.set' },
+      { does: 'a secret › ⋯ › Who sees it, stricter: at once, its value kept', in: 'pages/environment.tsx', call: 'secrets.set' },
     ],
   },
   'PATCH /secrets/:project/:environment/:key': {

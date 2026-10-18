@@ -12,9 +12,12 @@ import { createHash } from 'node:crypto';
  * names would mean that renaming an environment or a secret key makes every
  * existing ciphertext permanently undecryptable.
  *
- * A personal config's values are bound to their owner too, `owner`, which
- * only the vault's wrap of the data key carries (docs/design/forking.md,
- * section 4): a forged owner column fails to open, rather than granting.
+ * A personal config's values are bound to their owner too, `owner`, and a
+ * sensitive value to being one, `sensitive`, which only the vault's wrap of
+ * the data key carries (docs/design/forking.md, section 4;
+ * docs/design/credential-proxy.md, section 2): a forged owner or sensitivity
+ * column fails to open, rather than granting. The value's own ciphertext
+ * binds the ids alone, so a version made sensitive keeps its ciphertext.
  */
 export type SecretContext = {
   projectId: string;
@@ -22,6 +25,8 @@ export type SecretContext = {
   secretId: string;
   /** A personal config's owner, as `ownerKey` hashes them. */
   owner?: string;
+  /** A sensitive value's: never handed back to a person (`sensitive` in @coffre/core/vault). Absent otherwise, never false. */
+  sensitive?: true;
 };
 
 /**
@@ -39,7 +44,7 @@ function assertUuid(value: string, field: string): void {
   }
 }
 
-/** Throw unless every field is a lowercase UUID, and an owner a lowercase SHA-256. */
+/** Throw unless every field is a lowercase UUID, an owner a lowercase SHA-256, and `sensitive` true if there. */
 export function checkContext(ctx: SecretContext): void {
   assertUuid(ctx.projectId, 'projectId');
   assertUuid(ctx.environmentId, 'environmentId');
@@ -47,6 +52,7 @@ export function checkContext(ctx: SecretContext): void {
   if (ctx.owner !== undefined && (typeof ctx.owner !== 'string' || !OWNER_RE.test(ctx.owner))) {
     throw new Error(`context.owner must be a lowercase SHA-256, got: ${String(ctx.owner)}`);
   }
+  if (ctx.sensitive !== undefined && ctx.sensitive !== true) throw new Error(`context.sensitive is true or absent, got: ${String(ctx.sensitive)}`);
 }
 
 const OWNER_RE = /^[0-9a-f]{64}$/;
@@ -70,7 +76,7 @@ export function ownerKey(member: string): string {
 export function encodeAad(ctx: SecretContext): Buffer {
   checkContext(ctx);
   return Buffer.from(
-    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}`,
+    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}${ctx.sensitive === true ? '|sensitive' : ''}`,
     'utf8',
   );
 }

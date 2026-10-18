@@ -1,0 +1,275 @@
+// Sensitive values (docs/design/credential-proxy.md, section 2): each key's
+// current version says who sees it. `plain`, whoever lists its environment;
+// `secret`, the default, whoever's role reads it; `sensitive`, no person,
+// Owners included, on any credential of theirs, while their apps use it
+// through the credential proxy and service accounts read it. A key is made
+// stricter at any time, its value kept as a new version; looser only by
+// writing a value again. The vault binds `sensitive` into the wrap of each
+// version's data key, so a column flipped around coffre opens nothing.
+import test, { after, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+import { createClient, type CoffreClient } from '@coffre/client';
+import { eq } from 'drizzle-orm';
+
+import { clientFor, testVault } from './api-fixture.ts';
+import { withTriggersLifted } from './db/engine.ts';
+import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { secretVersions } from './db/tables.ts';
+import { coffreRoute } from '../src/app.ts';
+import { checkPlugins } from '../src/plugins.ts';
+import { basic, credentialProxy, header } from '../src/plugins/credential-proxy.ts';
+
+const API_KEY = 'sk_live_real_0123456789abcdef';
+const DB_PASSWORD = 'db_password_0123456789';
+const WEBHOOK = 'whsec_0123456789abcdef';
+
+/** A fake API that says whether it got the real key. */
+let upstream: Server;
+let upstreamUrl: string;
+
+before(async () => {
+  upstream = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ real: request.headers['x-api-key'] === API_KEY }));
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+});
+
+after(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+
+let root: CoffreClient;
+let ci: CoffreClient;
+
+useMcp(async () => {
+  runtime.plugins = checkPlugins([credentialProxy({
+    credentials: { api: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{API_KEY}') } },
+    insecureUpstreams: true,
+  })]);
+  root = clientFor(deps, ROOT);
+  ci = clientFor(deps, 'ci', 'service');
+  await root.members.add(`user:${DEV}`);
+  await root.members.add('token:ci');
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', {
+    API_KEY: { value: API_KEY, sensitivity: 'sensitive' },
+    DB_PASSWORD: { value: DB_PASSWORD, sensitivity: 'sensitive' },
+    WEBHOOK,
+    REGION: { value: 'eu-west-3', plain: true },
+  });
+  await root.access.set(`user:${DEV}`, { market: 'developer' });
+  await root.access.set('token:ci', { 'market/dev': 'viewer' });
+});
+
+/** The API as whoever `token` is, over coffre's own routes. */
+function bearer(token: string): CoffreClient {
+  return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
+}
+
+async function refusal(promise: Promise<unknown>): Promise<{ status: number; reason: string | null; message: string }> {
+  try {
+    await promise;
+  } catch (error) {
+    const { status, reason, message } = error as { status: number; reason?: string; message: string };
+    return { status, reason: reason ?? null, message };
+  }
+  throw new Error('it was not refused');
+}
+
+const levels = async (path: string, as = root) => Object.fromEntries((await as.secrets.list(path)).keys.map((entry) => [entry.key, entry.sensitivity]));
+const history = async (path: string) => (await root.secrets.history(path)).versions.map(({ version, sensitivity }) => [version, sensitivity]);
+/** The metadata of each `secret.write` of `key`, oldest first. */
+const writesOf = async (key: string) => (await entries('secret.write')).filter((entry) => entry.decision === 'allow' && entry.metadata.key === key).map((entry) => entry.metadata);
+
+test('each key lists who sees its current value, and each version its own', async () => {
+  assert.deepEqual(await levels('market/dev'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'plain', WEBHOOK: 'secret' });
+  // A person who reads the environment is told the levels too, and no sensitive value.
+  const dev = (await clientFor(deps, DEV).secrets.list('market/dev')).keys.find((entry) => entry.key === 'API_KEY')!;
+  assert.deepEqual([dev.sensitivity, dev.value], ['sensitive', null]);
+  assert.deepEqual(await history('market/dev/API_KEY'), [[1, 'sensitive']]);
+  assert.deepEqual((await root.secrets.history('market/dev/REGION')).versions.map(({ plain, sensitivity }) => [plain, sensitivity]), [[true, 'plain']]);
+  assert.deepEqual((await writesOf('API_KEY'))[0], { key: 'API_KEY', version: 1, sensitive: true });
+});
+
+test('a write that names no sensitivity keeps a sensitive key sensitive and makes a plain one secret; its log says what it was', async () => {
+  await root.secrets.set('market/dev', { API_KEY: 'sk_live_rotated_0123456789', REGION: 'eu-west-1', WEBHOOK: { value: 'whsec_new_0123456789', sensitivity: 'sensitive' } });
+  assert.deepEqual(await levels('market/dev'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'secret', WEBHOOK: 'sensitive' });
+  assert.deepEqual((await ci.secrets.reveal('market/dev/API_KEY')).values, { API_KEY: 'sk_live_rotated_0123456789' });
+  // `was` only where the level changed.
+  assert.deepEqual((await writesOf('API_KEY'))[1], { key: 'API_KEY', version: 2, sensitive: true });
+  assert.deepEqual((await writesOf('REGION'))[1], { key: 'REGION', version: 2, was: 'plain' });
+  assert.deepEqual((await writesOf('WEBHOOK'))[1], { key: 'WEBHOOK', version: 2, sensitive: true, was: 'secret' });
+  // Looser takes a value written again, saying so.
+  await root.secrets.set('market/dev', { WEBHOOK: { value: 'whsec_back_0123456789', sensitivity: 'secret' } });
+  assert.equal((await levels('market/dev')).WEBHOOK, 'secret');
+  assert.deepEqual((await writesOf('WEBHOOK'))[2], { key: 'WEBHOOK', version: 3, was: 'sensitive' });
+});
+
+test('marking a key stricter keeps its value as a new version; as strict already is unchanged, and looser is refused', async () => {
+  const marked = await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' }, REGION: { sensitivity: 'secret' }, API_KEY: { sensitivity: 'sensitive' } });
+  assert.deepEqual({ ...marked.keys }, { WEBHOOK: { version: 2 }, REGION: { version: 2 }, API_KEY: { version: 1 } });
+  assert.deepEqual(await levels('market/dev'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'secret', WEBHOOK: 'sensitive' });
+  assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, null, 'a secret lists no value');
+  // The same values, which a service account reads as before.
+  assert.deepEqual((await ci.secrets.reveal('market/dev')).values, { API_KEY, DB_PASSWORD, REGION: 'eu-west-3', WEBHOOK });
+  assert.deepEqual(await history('market/dev/WEBHOOK'), [[2, 'sensitive'], [1, 'secret']]);
+  assert.deepEqual(await history('market/dev/API_KEY'), [[1, 'sensitive']], 'as strict already: no new version');
+  assert.deepEqual((await writesOf('WEBHOOK'))[1], { key: 'WEBHOOK', version: 2, sensitive: true, was: 'secret', kept: 1 });
+  assert.deepEqual((await writesOf('REGION'))[1], { key: 'REGION', version: 2, was: 'plain', kept: 1 });
+
+  for (const to of ['secret', 'plain'] as const) {
+    const looser = await refusal(root.secrets.set('market/dev', { WEBHOOK: { sensitivity: to } }));
+    assert.equal(looser.status, 409);
+    assert.match(looser.message, /WEBHOOK is sensitive: making it .* takes its value written again/);
+  }
+  const [denied] = (await entries('secret.write')).filter((entry) => entry.decision === 'deny');
+  assert.deepEqual(denied!.metadata, { key: 'WEBHOOK', sensitivity: 'secret', was: 'sensitive', reason: 'looser' });
+  assert.equal((await refusal(root.secrets.set('market/dev', { NOTHING: { sensitivity: 'sensitive' } }))).status, 409, 'no value to mark');
+  assert.deepEqual(await history('market/dev/WEBHOOK'), [[2, 'sensitive'], [1, 'secret']]);
+});
+
+test('a person reads every value of an environment but its sensitive ones, which it names; one is refused on any credential, an Owner included', async () => {
+  const session = await sessionFor(DEV);
+  const pat = (await bearer(session).tokens.issue(`user:${DEV}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })).token;
+  for (const person of [bearer(session), bearer(pat), bearer(await sessionFor(ROOT))]) {
+    const read = await person.secrets.reveal('market/dev');
+    assert.deepEqual(read.values, { REGION: 'eu-west-3', WEBHOOK });
+    assert.deepEqual([...read.sensitive].sort(), ['API_KEY', 'DB_PASSWORD']);
+    assert.deepEqual(await refusal(person.secrets.reveal('market/dev/API_KEY')), {
+      status: 403,
+      reason: 'sensitive',
+      message: 'a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it',
+    });
+  }
+  // The vault refused each read of one, and logged it, by the person and the version.
+  const refused = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'deny');
+  assert.deepEqual(refused.map((entry) => [entry.actor, entry.code]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
+  assert.ok(refused.every((entry) => entry.secretVersionId !== null));
+
+  const read = await ci.secrets.reveal('market/dev');
+  assert.deepEqual(read.values, { API_KEY, DB_PASSWORD, REGION: 'eu-west-3', WEBHOOK });
+  assert.deepEqual(read.sensitive, []);
+});
+
+test('a dry run never tells a person whether they guessed a sensitive value, and a change of level is a change', async () => {
+  const dev = clientFor(deps, DEV);
+  assert.deepEqual({ ...(await dev.secrets.dryRun('market/dev', { API_KEY })).keys }, { API_KEY: 'changed' }, 'the right value, told nothing');
+  assert.deepEqual({ ...(await ci.secrets.dryRun('market/dev', { API_KEY })).keys }, { API_KEY: 'unchanged' }, 'a service account reads it, and is told');
+  assert.deepEqual({ ...(await dev.secrets.dryRun('market/dev', { WEBHOOK })).keys }, { WEBHOOK: 'unchanged' });
+  assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { WEBHOOK: { value: WEBHOOK, sensitivity: 'sensitive' }, REGION: 'eu-west-3' })).keys }, { WEBHOOK: 'changed', REGION: 'changed' });
+  // A mark compares levels, as the write would.
+  assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { API_KEY: { sensitivity: 'sensitive' }, WEBHOOK: { sensitivity: 'sensitive' } })).keys }, { API_KEY: 'unchanged', WEBHOOK: 'changed' });
+  assert.equal((await refusal(root.secrets.dryRun('market/dev', { API_KEY: { sensitivity: 'secret' } }))).status, 409);
+  // None of it reads a sensitive value for a person: the vault refused nothing.
+  assert.deepEqual((await entries('secret.read')).filter((entry) => entry.decision === 'deny'), []);
+});
+
+test('a rollback brings an old value back as it was held, and sensitive while the key is: never looser', async () => {
+  // REGION: v1 plain, v2 a secret, v3 sensitive.
+  await root.secrets.set('market/dev', { REGION: { sensitivity: 'secret' } });
+  await root.secrets.set('market/dev', { REGION: { sensitivity: 'sensitive' } });
+  await root.secrets.restore('market/dev/REGION', 1);
+  assert.deepEqual((await history('market/dev/REGION'))[0], [4, 'sensitive']);
+  assert.deepEqual((await ci.secrets.reveal('market/dev/REGION')).values, { REGION: 'eu-west-3' });
+  const [restored] = (await entries('secret.restore')).filter((entry) => entry.decision === 'allow');
+  assert.deepEqual(restored!.metadata, { key: 'REGION', version: 4, from: 1, sensitive: true });
+
+  // Written again as a secret, the key takes back the plain value as plain, and the sensitive one as sensitive.
+  await root.secrets.set('market/dev', { REGION: { value: 'eu-west-1', sensitivity: 'secret' } });
+  await root.secrets.restore('market/dev/REGION', 1);
+  assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, 'eu-west-3');
+  await root.secrets.restore('market/dev/REGION', 3);
+  assert.deepEqual((await history('market/dev/REGION')).slice(0, 3), [[7, 'sensitive'], [6, 'plain'], [5, 'secret']]);
+  assert.deepEqual((await ci.secrets.reveal('market/dev/REGION')).values, { REGION: 'eu-west-3' });
+});
+
+test("a fork's copy keeps a sensitive value sensitive; an inheriting fork writes over one as sensitive, and marks only its own", async () => {
+  await root.environments.create('market/copy', { from: 'dev' });
+  assert.deepEqual(await levels('market/copy'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'plain', WEBHOOK: 'secret' });
+  assert.equal((await refusal(root.secrets.reveal('market/copy/API_KEY'))).reason, 'sensitive');
+
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  assert.equal((await levels('market/dev-eu')).API_KEY, 'sensitive', 'inherited, as its parent holds it');
+  await root.secrets.set('market/dev-eu', { API_KEY: 'sk_live_eu_0123456789' });
+  assert.equal((await levels('market/dev-eu')).API_KEY, 'sensitive');
+  const inherited = await refusal(root.secrets.set('market/dev-eu', { DB_PASSWORD: { sensitivity: 'sensitive' } }));
+  assert.equal(inherited.status, 409);
+  assert.match(inherited.message, /DB_PASSWORD is inherited: mark it where it is held/);
+  assert.equal((await refusal(root.secrets.set('market/dev-eu', { WEBHOOK: { sensitivity: 'sensitive' } }))).status, 409);
+});
+
+test('a personal config holds no sensitive value: its own value over a sensitive one is a secret its owner reads', async () => {
+  const dev = clientFor(deps, DEV);
+  const writes: Parameters<typeof dev.secrets.set>[1][] = [{ MINE: { value: 'mine-0123456789', sensitivity: 'sensitive' } }, { API_KEY: { sensitivity: 'sensitive' } }];
+  for (const write of writes) {
+    const refused = await refusal(dev.secrets.set('market/dev@me', write));
+    assert.equal(refused.status, 400);
+    assert.match(refused.message, /market\/dev@me is a personal config: its values are its owner's alone, which they read, never sensitive/);
+  }
+  await dev.secrets.set('market/dev@me', { API_KEY: 'sk_test_mine_0123456789' });
+  assert.equal((await levels('market/dev@me', dev)).API_KEY, 'secret');
+  assert.deepEqual((await dev.secrets.reveal('market/dev@me/API_KEY')).values, { API_KEY: 'sk_test_mine_0123456789' });
+  // dev's other sensitive value it inherits stays out of its owner's read.
+  assert.deepEqual((await dev.secrets.reveal('market/dev@me')).sensitive, ['DB_PASSWORD']);
+});
+
+test("an environment's version is of what the caller's read opens: a sensitive value's change moves a service account's alone", async () => {
+  const dev = clientFor(deps, DEV);
+  const [person, service] = [(await dev.environments.version('market/dev')).version, (await ci.environments.version('market/dev')).version];
+  assert.notEqual(person, service);
+  // A watch compares the version a read answered with the next: the same, for the same read.
+  assert.equal((await dev.secrets.reveal('market/dev')).version, person);
+  await root.secrets.set('market/dev', { API_KEY: 'sk_live_rotated_0123456789' });
+  assert.equal((await dev.environments.version('market/dev')).version, person);
+  assert.notEqual((await ci.environments.version('market/dev')).version, service);
+  await root.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' });
+  assert.notEqual((await dev.environments.version('market/dev')).version, person);
+});
+
+test("the plan gives a credential's sensitive key as a placeholder, filled upstream; a sensitive key no credential uses is left out, and a secret given", async () => {
+  const handle = (await bearer(await sessionFor(DEV)).handles.create({ label: 'coffre run market/dev', paths: ['market/dev'] })).token;
+  const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } });
+  assert.equal(response.status, 200, await response.clone().text());
+  const plan = (await response.json()) as { env: Record<string, string>; left: string[] };
+  assert.deepEqual(plan.env, { API_KEY: handle, REGION: 'eu-west-3', WEBHOOK });
+  assert.deepEqual(plan.left, ['DB_PASSWORD']);
+  assert.equal(JSON.stringify(plan).includes(API_KEY), false);
+  const answer = await route('/use/market/dev/api/thing', { headers: { 'x-api-key': handle } });
+  assert.equal(answer.status, 200);
+  assert.deepEqual(await answer.json(), { real: true });
+});
+
+test('0.9\'s people, expose and identifiers are refused at configuration, saying what to do instead', async () => {
+  // @ts-expect-error -- the type says each key says who sees it now
+  assert.throws(() => credentialProxy({ credentials: {}, expose: { 'market/dev': 'all' } }), /expose is gone in 0\.10.*coffre mark <env> sensitive/);
+  assert.throws(
+    // @ts-expect-error -- the type says to mark the key plain
+    () => credentialProxy({ credentials: { twilio: { upstream: 'https://api.twilio.com', inject: basic('{SID}', '{TOKEN}'), identifiers: ['SID'] } } }),
+    /twilio's identifiers are gone in 0\.10: mark each key plain instead/,
+  );
+  const vault = testVault([ROOT], { people: 'stand-ins' } as never);
+  await assert.rejects(vault.about(), /people is gone in 0\.10 \(it was "stand-ins"\).*mark the keys no person may read sensitive/);
+});
+
+test('a sensitive column flipped around coffre opens nothing: the wrap of its key binds it, so a read fails as bad_claim', async () => {
+  const id = (key: string) => root.secrets.list('market/dev').then(({ keys }) => keys.find((entry) => entry.key === key)!.versionId!);
+  const [apiKey, webhook] = [await id('API_KEY'), await id('WEBHOOK')];
+  // The database keeps a version's sensitivity as it keeps its value.
+  await assert.rejects(db.owner.update(secretVersions).set({ sensitive: false }).where(eq(secretVersions.id, apiKey)), (error: Error) => /only ever erased/.test(`${error.message} ${String(error.cause)}`));
+  // As the owner, with that guard lifted, as only someone around coffre could: sensitive made a secret, and a secret sensitive.
+  await withTriggersLifted(db.owner, 'secret_versions', async (owner) => {
+    await owner.update(secretVersions).set({ sensitive: false }).where(eq(secretVersions.id, apiKey));
+    await owner.update(secretVersions).set({ sensitive: true }).where(eq(secretVersions.id, webhook));
+  });
+  assert.equal((await levels('market/dev')).API_KEY, 'secret', 'the listing believes the column');
+  for (const reader of [clientFor(deps, DEV), ci]) {
+    const refused = await refusal(reader.secrets.reveal('market/dev/API_KEY'));
+    assert.deepEqual([refused.status, refused.reason], [403, 'bad_claim']);
+    assert.equal(refused.message.includes(API_KEY), false);
+  }
+  assert.equal((await refusal(ci.secrets.reveal('market/dev/WEBHOOK'))).reason, 'bad_claim');
+});

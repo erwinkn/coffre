@@ -122,6 +122,18 @@ test("a personal config's owner is in the KMS context: under another, or none, K
   await assert.rejects(kek.unwrap(wrapped, { ...ctx, owner: 'b'.repeat(64) }));
 });
 
+test("a sensitive value's key is sensitive in the KMS context: as anything else, KMS refuses", async () => {
+  const fake = fakeKms();
+  const kek = kms(fake);
+  const ctx = { ...context(), sensitive: true as const };
+  const dek = randomBytes(32);
+  const wrapped = await kek.wrap(dek, ctx);
+  assert.equal((fake.calls[0]!.context as Record<string, string>)['coffre:sensitive'], 'true');
+  assert.deepEqual(await kek.unwrap(wrapped, ctx), dek);
+  const { sensitive: _, ...secret } = ctx;
+  await assert.rejects(kek.unwrap(wrapped, secret));
+});
+
 test('a data key goes to KMS with the secret as its context, and comes back only as that secret', async () => {
   const fake = fakeKms();
   const kek = kms(fake);

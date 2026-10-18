@@ -39,7 +39,7 @@ import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
-import { openValues, plain, rewrapValue, sealValues } from './keys.ts';
+import { openValues, plain, rewrapValue, rewrapValues, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
@@ -82,6 +82,14 @@ export type SecretKey = {
    */
   value: string | null;
   /**
+   * Who sees its current value (`Sensitivity`): `plain`, whoever lists the
+   * environment; `secret`, those whose role reads it; `sensitive`, nobody,
+   * Owners included, its apps using it through the credential proxy and
+   * service accounts reading it. Null where `version` is, and for a
+   * reference, whose value is its source's.
+   */
+  sensitivity: Sensitivity | null;
+  /**
    * In a fork, the key its parents hold under this name
    * (docs/design/forking.md): `inherited`, no row here, the parent's value
    * read live; `overridden`, a value or reference of its own over the
@@ -106,23 +114,66 @@ export type SecretVersion = {
   recipe: string | null;
   /** Whether it was written plain, its value no secret. */
   plain: boolean;
+  /** Who sees it (`Sensitivity`): `plain` exactly when `plain` is. */
+  sensitivity: Sensitivity;
 };
 
 /**
+ * Who sees a key's value, loosest first: `plain`, anyone who lists its
+ * environment; `secret`, the default, people whose role reads secrets;
+ * `sensitive`, no person, Owners included, which their apps use through the
+ * credential proxy and service accounts read. A key is made stricter at
+ * any time, its value kept; looser only by writing a value again, so a
+ * value nobody could read is never shown by flipping it.
+ */
+export type Sensitivity = 'plain' | 'secret' | 'sensitive';
+
+export const SENSITIVITIES: readonly Sensitivity[] = ['plain', 'secret', 'sensitive'];
+
+/** How a version is held, from its columns. */
+export function sensitivityOf(version: { plaintext?: string | null; plain?: boolean; sensitive: boolean }): Sensitivity {
+  if (version.sensitive) return 'sensitive';
+  return version.plain === true || (version.plaintext ?? null) !== null ? 'plain' : 'secret';
+}
+
+/** Whether `a` lets fewer people see a value than `b`. */
+export function stricter(a: Sensitivity, b: Sensitivity): boolean {
+  return SENSITIVITIES.indexOf(a) > SENSITIVITIES.indexOf(b);
+}
+
+/**
  * A value, a value a client generated, with how (`@coffre/core/recipe`), a
- * plain value, or a reference to another secret by path. A value written
- * without a recipe has none: writing one by hand ends what Regenerate can
- * do. A value is a secret unless the write says `plain`, so writing over a
- * plain one without it makes the key secret again. A regenerate, or a plain
- * value written over the one its writer revealed, says the version each
- * key's value `replaces`, by its id, and is refused if that is not its
- * current version.
+ * value with who sees it, the key's value as it is made stricter, or a
+ * reference to another secret by path. A value written without a recipe
+ * has none: writing one by hand ends what Regenerate can do. A value that
+ * says no `sensitivity` is a secret, or sensitive where the key is now:
+ * writing over a plain one makes the key secret again, and writing over a
+ * sensitive one keeps it sensitive. `{ plain: true }` is 0.9's way to say
+ * `sensitivity: 'plain'`. `{ sensitivity }` with no value makes the key's
+ * current value stricter, as a new version of it, and never looser: that
+ * takes the value written again. A regenerate, or a plain value written
+ * over the one its writer revealed, says the version each key's value
+ * `replaces`, by its id, and is refused if that is not its current version.
  */
 export type SecretValue =
   | string
-  | { value: string; generated: Generation; replaces?: string }
+  | { value: string; generated: Generation; replaces?: string; sensitivity?: 'secret' | 'sensitive' }
   | { value: string; plain: true; replaces?: string }
+  | { value: string; sensitivity: Sensitivity; replaces?: string }
+  | { sensitivity: Sensitivity }
   | { ref: string };
+
+/** What a write says of who sees each key's value, where it says it. */
+function askedSensitivity(value: SecretValue | null): Sensitivity | undefined {
+  if (value === null || typeof value !== 'object' || 'ref' in value) return undefined;
+  if ('plain' in value) return 'plain';
+  return 'sensitivity' in value ? value.sensitivity : undefined;
+}
+
+/** Whether a patch's value only makes the key's current value stricter, writing no value. */
+function isMark(value: SecretValue | null): value is { sensitivity: Sensitivity } {
+  return value !== null && typeof value === 'object' && !('value' in value) && 'sensitivity' in value;
+}
 
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
 
@@ -251,6 +302,7 @@ export async function listSecrets(
     updatedBy: row.current?.createdBy ?? null,
     generated: generated.get(row.id) ?? null,
     value: row.current?.plaintext ?? null,
+    sensitivity: row.current == null ? null : sensitivityOf(row.current),
   });
   const reads = (from: { id: string; slug: string }) =>
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
@@ -276,10 +328,10 @@ export async function listSecrets(
     const shown = !removed && reads(held.from);
     keys.push({
       ...view(held.row),
-      ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null }),
+      ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null }),
       ...(shown && live(held.from) ? {} : { value: null }),
       // A removed key resolves to nothing here, and has nothing to regenerate.
-      ...(removed ? { generated: null, value: null } : {}),
+      ...(removed ? { generated: null, value: null, sensitivity: null } : {}),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
@@ -289,7 +341,7 @@ export async function listSecrets(
     const from = inherited.cut.get(key);
     if (from === undefined || own.has(key)) continue;
     keys.push({
-      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null,
+      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null,
       parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
     });
   }
@@ -404,9 +456,10 @@ async function appendVersion(
   createdBy: string,
   recipe: VersionRecipe | null,
   plaintext: string | null,
+  sensitive: boolean,
 ): Promise<void> {
   const id = randomUUID();
-  await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy, ...recipeRow(recipe), plaintext });
+  await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy, ...recipeRow(recipe), plaintext, sensitive });
   await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: new Date() });
 }
 
@@ -532,13 +585,18 @@ export async function setSecrets(
   const problem = generationProblem(patch);
   if (problem !== null) throw badRequest(problem);
   const recipes = recipesOf(patch);
-  // A plain value is no secret, and a personal config holds only its owner's secrets (R8): none is plain there.
-  const plainWrites = new Set(Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'plain' in value ? [key] : [])));
-  if (plainWrites.size > 0 && place.environment!.owner !== null) {
-    throw badRequest(`${place.project.slug}/${personalName(place)} is a personal config: its values are its owner's alone, never plain`);
+  const asked = new Map(Object.entries(patch).flatMap(([key, value]) => {
+    const sensitivity = askedSensitivity(value);
+    return sensitivity === undefined ? [] : [[key, sensitivity] as const];
+  }));
+  // A personal config holds only its owner's secrets (R8), which they read: none is plain there, nor sensitive.
+  const unlike = [...asked.values()].find((sensitivity) => sensitivity !== 'secret');
+  if (unlike !== undefined && place.environment!.owner !== null) {
+    throw badRequest(`${place.project.slug}/${personalName(place)} is a personal config: its values are its owner's alone, which they read, never ${unlike}`);
   }
   const writes = Object.entries(patch).flatMap(([key, value]): [string, string][] =>
     typeof value === 'string' ? [[key, value]] : value !== null && 'value' in value ? [[key, value.value]] : []);
+  const marks = Object.entries(patch).flatMap(([key, value]) => (isMark(value) ? [{ key, to: value.sensitivity }] : []));
   const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'ref' in value ? [{ key, ref: value.ref }] : []));
   const archives = keysIn.filter((key) => patch[key] === null);
   const result = await optimistic(ctx, async () => {
@@ -552,6 +610,17 @@ export async function setSecrets(
     // again. One the parent lacks is archived as anywhere, and unarchiving it takes more than a write.
     const inherited = await inheritedOf(ctx.db, place);
     const resettable = new Set(inherited?.held.keys());
+    // Who sees each key's value now: its own live one's, or in a fork the one it inherits.
+    const levelNow = (key: string): Sensitivity | null => {
+      const row = prepared.get(key);
+      if (row !== undefined && row.archivedAt === null) return row.current === null ? null : sensitivityOf(row.current);
+      const passedDown = inherited?.removed.has(key) ? undefined : inherited?.held.get(key)?.row.current;
+      return passedDown == null ? null : sensitivityOf(passedDown);
+    };
+    // A write that says nothing is a secret, and sensitive where the key is: never looser than it was, but for plain, said each time.
+    // A personal config's own value is a secret over a sensitive one it configures too: its owner reads what they wrote (R8).
+    const personal = place.environment!.owner !== null;
+    const levelOf = (key: string): Sensitivity => asked.get(key) ?? (!personal && levelNow(key) === 'sensitive' ? 'sensitive' : 'secret');
     const refuseArchived = (key: string, row: { id: string }) => new Refusal(
       conflict(`${key} is archived; unarchive it before writing a new version`),
       denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
@@ -571,8 +640,9 @@ export async function setSecrets(
       archived(key);
       const row = prepared.get(key);
       const secret = { id: row?.id ?? randomUUID(), key };
-      return { key, secret: secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), value };
+      return { key, secret: { ...secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), sensitive: levelOf(key) === 'sensitive' }, value };
     });
+    const tightened = await tightening(ctx, place, environment, marks, prepared, levelNow, operationId);
     const references = (await referenceTargets(ctx, place, environment, refs, prepared, currently, operationId)).filter((item) => {
       archived(item.key);
       return !item.unchanged;
@@ -587,6 +657,8 @@ export async function setSecrets(
     // IDs and versions are provisional until the transaction checks them.
     const sealed = await sealValues(ctx.vault, asking(ctx, operationId), items);
     if (!sealed.ok) throw vaultRefusal(ctx, sealed.refusal, 'secret.write', { ...environment, operationId });
+    const rewrapped = await rewrapValues(ctx.vault, asking(ctx, operationId), tightened.map(({ secret, from }) => ({ secret, from })));
+    if (!rewrapped.ok) throw vaultRefusal(ctx, rewrapped.refusal, 'secret.write', { ...environment, operationId });
     // Vault calls only for what there is: most writes make and end no reference.
     const made = references.length === 0 ? { ok: true as const, seqs: [] } : await ctx.vault.reference({
       ...asking(ctx, operationId),
@@ -632,6 +704,7 @@ export async function setSecrets(
       const created = new Map([
         ...items.map((item) => [item.key, item.secret.secretId] as const),
         ...references.map((item) => [item.key, item.holder.secretId] as const),
+        ...tightened.map((item) => [item.key, item.secret.secretId] as const),
       ]);
       for (const key of keysIn) {
         const before = prepared.get(key);
@@ -668,18 +741,35 @@ export async function setSecrets(
         await update(tx, secrets, { id: row.id }, { archivedAt: null });
         log.push(allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }));
       }
-      const versions = items.map(({ key, secret, value }, i) => {
-        const recipe = recipes.get(key) ?? null;
-        log.push(allowed(ctx, 'secret.write', {
-          ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
-          metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...(plainWrites.has(key) ? { plain: true } : {}) },
-        }));
-        keys[key] = { version: secret.version };
-        return {
-          id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i],
-          createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: plainWrites.has(key) ? value : null,
-        };
-      });
+      const versions = [
+        ...items.map(({ key, secret, value }, i) => {
+          const recipe = recipes.get(key) ?? null;
+          const level = levelOf(key);
+          const was = levelNow(key);
+          log.push(allowed(ctx, 'secret.write', {
+            ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
+            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, was) },
+          }));
+          keys[key] = { version: secret.version };
+          return {
+            id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i],
+            createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: level === 'plain' ? value : null, sensitive: level === 'sensitive',
+          };
+        }),
+        // The value as it is, made stricter: its ciphertext and how it was made, its key wrapped again as the new level.
+        ...tightened.map(({ key, secret, from, to, was, recipe }, i) => {
+          log.push(allowed(ctx, 'secret.write', {
+            ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
+            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(to, was), kept: from.version },
+          }));
+          keys[key] = { version: secret.version };
+          return {
+            id: randomUUID(), secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
+            createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: null, sensitive: to === 'sensitive',
+          };
+        }),
+      ];
+      for (const { key, version } of unchangedMarks(marks, prepared, levelNow)) keys[key] = { version };
       await insert(tx, secretVersions, versions);
       const now = new Date();
       for (const { id, secretId, version } of versions) {
@@ -726,6 +816,84 @@ export async function setSecrets(
     });
   });
   return result;
+}
+
+/** What a `secret.write` entry says of who sees the value: as 0.9 said plain, and what it was when that changed. */
+function sensitivityDetail(level: Sensitivity, was: Sensitivity | null): Record<string, unknown> {
+  return {
+    ...(level === 'plain' ? { plain: true } : level === 'sensitive' ? { sensitive: true } : {}),
+    ...(was !== null && was !== level ? { was } : {}),
+  };
+}
+
+/** A key's current value made stricter, as a new version: its key wrapped again as `to`, the rest of it kept. */
+type Tightened = {
+  key: string;
+  secret: SecretRef;
+  from: { id: string; version: number; envelope: Envelope };
+  to: Sensitivity;
+  was: Sensitivity;
+  recipe: VersionRecipe | null;
+};
+
+/**
+ * The marks of a patch that make a key stricter, each its current value's
+ * version and the new one it becomes. One already as strict is left as it
+ * is. One looser is refused: that takes the value written again, so nobody
+ * ever shows a value by flipping it. A key with no value of its own here,
+ * a reference or one a fork inherits, has nothing to make stricter.
+ */
+async function tightening(
+  ctx: ApiContext,
+  place: ResolvedPath,
+  environment: Environment,
+  marks: readonly { key: string; to: Sensitivity }[],
+  prepared: ReadonlyMap<string, { id: string; key: string; currentVersion: number; currentVersionId: string | null; archivedAt: Date | null }>,
+  levelNow: (key: string) => Sensitivity | null,
+  operationId: string,
+): Promise<Tightened[]> {
+  const refused = (key: string, message: string, reason: string, metadata: Record<string, unknown> = {}) =>
+    new Refusal(conflict(message), denied(ctx, 'secret.write', reason, { ...environment, operationId, metadata: { key, ...metadata } }));
+  const stricterOnes = marks.filter(({ key, to }) => {
+    const row = prepared.get(key);
+    if (row?.archivedAt != null) throw refused(key, `${key} is archived; unarchive it before marking it`, 'secret_archived');
+    const was = levelNow(key);
+    if (row === undefined || row.currentVersionId === null) {
+      throw was === null
+        ? refused(key, `${key} has no value of its own to mark ${to}: write one`, 'no_value')
+        : refused(key, `${key} is inherited: mark it where it is held, or write a value of ${place.project.slug}/${place.environment!.slug}'s own`, 'inherited');
+    }
+    if (was === to) return false;
+    if (stricter(was!, to)) {
+      throw refused(key, `${key} is ${was}: making it ${to} takes its value written again, never a flip of the one stored`, 'looser', { sensitivity: to, was });
+    }
+    return true;
+  });
+  if (stricterOnes.length === 0) return [];
+  const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
+  return stricterOnes.map(({ key, to }) => {
+    const head = prepared.get(key)!;
+    const current = rows.get(key)?.current;
+    // Written meanwhile: the version the write prepared is no longer the one it would keep.
+    if (current == null || current.id !== head.currentVersionId) throw new PrepareAgain();
+    return {
+      key,
+      secret: { ...secretRef(place, environment, head, head.currentVersion + 1), sensitive: to === 'sensitive' },
+      from: { id: current.id, version: current.version, envelope: current.envelope },
+      to,
+      was: levelNow(key)!,
+      recipe: current.recipe,
+    };
+  });
+}
+
+/** The marks that leave a key as it is, already that strict: each answers its current version. */
+function unchangedMarks(
+  marks: readonly { key: string; to: Sensitivity }[],
+  prepared: ReadonlyMap<string, { currentVersion: number }>,
+  levelNow: (key: string) => Sensitivity | null,
+): { key: string; version: number }[] {
+  return marks.filter(({ key, to }) => levelNow(key) === to).map(({ key }) => ({ key, version: prepared.get(key)!.currentVersion }));
 }
 
 /**
@@ -876,17 +1044,28 @@ export async function dryRunSecrets(
       }
       // A reference, or a value over a reference: what it is now is not a value to compare.
       // A generated value is new by making, and opens nothing to say so. A value is unchanged
-      // only as it was, plain or secret: a plain one compares with no read, being no secret.
+      // only as it was held, plain, secret or sensitive: a plain one compares with no read, being no
+      // secret, and a sensitive one never with a person's guess, which nobody is told is right.
       const { current } = secret;
-      if (current === null || (typeof value === 'object' && !('plain' in value))) {
+      const now = current === null ? null : sensitivityOf(current);
+      if (isMark(value)) {
+        if (now === null) throw conflict(`${key} has no value of its own to mark ${value.sensitivity}: write one`);
+        if (stricter(now, value.sensitivity)) throw conflict(`${key} is ${now}: making it ${value.sensitivity} takes its value written again, never a flip of the one stored`);
+        keys[key] = now === value.sensitivity ? 'unchanged' : 'changed';
+        continue;
+      }
+      const level = askedSensitivity(value) ?? (now === 'sensitive' ? 'sensitive' : 'secret');
+      if (current === null || level !== now || (typeof value === 'object' && ('generated' in value || 'ref' in value))
+        || (now === 'sensitive' && ctx.caller.principal.type === 'user')) {
         keys[key] = 'changed';
         continue;
       }
-      if (typeof value === 'object' || current.plaintext !== null) {
-        keys[key] = typeof value === 'object' && current.plaintext === value.value ? 'unchanged' : 'changed';
+      const written = typeof value === 'string' ? value : value.value;
+      if (now === 'plain') {
+        keys[key] = current.plaintext === written ? 'unchanged' : 'changed';
         continue;
       }
-      comparing.push({ key, value, secretVersionId: current.id, secret: secretRef(place, environment, secret, current.version), envelope: current.envelope });
+      comparing.push({ key, value: written, secretVersionId: current.id, secret: secretRef(place, environment, secret, current.version), envelope: current.envelope });
     }
     const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: 'compare' }, comparing);
     if (!opened.ok) throw vaultRefused(opened.refusal);
@@ -1142,6 +1321,7 @@ export async function listVersions(
       kek: `${row.envelope.kekProvider}:${row.envelope.kekId}`,
       recipe: row.recipe?.recipe ?? null,
       plain: row.plaintext !== null,
+      sensitivity: sensitivityOf(row),
     })),
   };
 }
@@ -1177,7 +1357,9 @@ export async function restoreVersion(
     }
     const fromVersion = prepared.currentVersion;
     const version = fromVersion + 1;
-    const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), secretRef(place, environment, prepared, version), target);
+    // The old value comes back as it was held, plain or a secret, and sensitive while the key is: never looser than that.
+    const level = prepared.current?.sensitive === true ? 'sensitive' : sensitivityOf(target);
+    const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
     if (!rewrapped.ok) {
       throw vaultRefusal(ctx, rewrapped.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });
     }
@@ -1196,9 +1378,9 @@ export async function restoreVersion(
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
       // The old value comes back with how it was made, and plain if it was. A key pair's half comes
       // back with its pair's id, which pairs it again only beside the other half of the same pair.
-      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, target.plaintext);
+      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, level === 'plain' ? target.plaintext : null, level === 'sensitive');
       log.push(allowed(ctx, 'secret.restore', {
-        ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion },
+        ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion, ...sensitivityDetail(level, prepared.current === null ? null : sensitivityOf(prepared.current)) },
       }));
       await endRemovals(ctx, tx, log, place, environment, [prepared.key], operationId);
       return { key: prepared.key, version };
@@ -1210,7 +1392,8 @@ export async function restoreVersion(
 /**
  * The keys the credential proxy opens, chosen from what the read resolved:
  * the environment it resolved to, and each key it holds, whether a
- * parent's and which (`from`, its slug), whether plain, no secret; and, to
+ * parent's and which (`from`, its slug), whether plain, no secret, or
+ * sensitive, and whether the caller reads where it is held; and, to
  * whoever reads where it is held, the version it resolves to and the
  * recipe that made it, when a client generated one value by one (a key
  * pair's half has none here). Chosen once, from the rows that are then
@@ -1218,7 +1401,7 @@ export async function restoreVersion(
  */
 export type PickKeys = (
   environment: { path: string; personal: boolean },
-  held: { key: string; inherited: boolean; from: string | null; plain: boolean; versionId: string | null; recipe: string | null }[],
+  held: { key: string; inherited: boolean; from: string | null; plain: boolean; sensitive: boolean; reads: boolean; versionId: string | null; recipe: string | null }[],
 ) => readonly string[];
 
 /**
@@ -1228,6 +1411,11 @@ export type PickKeys = (
  * useless, "they read these nine keys at these versions" is what an
  * investigation needs. Refusals are logged too, by whichever of the app and
  * the vault refused.
+ *
+ * A person's read of a whole environment leaves its sensitive values out,
+ * naming them in `sensitive`: nobody is handed one, and the vault refuses
+ * any read that asks it to. A read of one sensitive key is refused whole,
+ * as the vault's own refusal. A service account reads them all.
  */
 export async function reveal(
   ctx: ApiContext,
@@ -1240,7 +1428,7 @@ export async function reveal(
    * left out, not refused: the proxy says which it needs.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
+): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1272,11 +1460,16 @@ export async function reveal(
       inherited: item.parent !== undefined,
       from: item.parent?.slug ?? null,
       plain: plain(item) && told(item),
+      sensitive: item.secret.sensitive === true,
+      reads: told(item),
       versionId: told(item) ? item.secretVersionId : null,
       recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
     }))) : use.keys;
     const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
-    const rows = read.items.filter(wanted);
+    // What a person's read of a whole environment leaves out: its sensitive values, which nobody is handed.
+    const withheld = (item: Readable) => use === undefined && path.key === undefined && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
+    const rows = read.items.filter((item) => wanted(item) && !withheld(item));
+    const sensitive = read.items.filter(withheld).map((item) => item.key);
     const unreadable = read.unreadable.filter(wanted);
     // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
     if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
@@ -1318,14 +1511,14 @@ export async function reveal(
     if (use !== undefined) {
       // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
       log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
-      return { operationId, values: { ...values }, plain: plainKeys, version: null, environment: named, keys: read.items.map((item) => item.key) };
+      return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: null, environment: named, keys: read.items.map((item) => item.key) };
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, plain: plainKeys, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
+    return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
 }
 
@@ -1352,7 +1545,9 @@ export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): 
       denied(ctx, 'secret.version', 'parent_unreadable', { ...environment, metadata: { parents: [...unread.keys()] } }),
     ));
   }
-  return { version: versionOf(read) };
+  // Of what a read by the caller would open: a person's leaves the sensitive values out.
+  const person = ctx.caller.principal.type === 'user';
+  return { version: versionOf({ ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) }) };
 }
 
 /**

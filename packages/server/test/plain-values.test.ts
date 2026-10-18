@@ -1,10 +1,11 @@
 // Plain values (docs/design/credential-proxy.md, section 2): a key marked
 // not secret, an account's id, lists as it is to whoever reads its
 // environment, reads with no `secret.read` and no vault call, and reaches a
-// person's app as it is under placeholders. A value is a secret unless its
-// write says otherwise, so writing over a plain one without saying so makes
-// it a secret again. Making a stored secret plain is a reveal of it, which
-// placeholders refuse a person, then a plain write of what it showed.
+// person's app as it is, a credential's key included. A value is a secret
+// unless its write says otherwise, so writing over a plain one without saying
+// so makes it a secret again. Making a stored secret plain is a reveal of it,
+// which a sensitive value refuses a person, then a plain write of what it
+// showed.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
@@ -48,7 +49,7 @@ useMcp(
       credentials: {
         twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
         account: { upstream: `${upstreamUrl}/account`, inject: header('x-account', '{ACCOUNT_ID}') },
-        legacy: { upstream: `${upstreamUrl}/legacy`, inject: basic('{LEGACY_USER}', '{LEGACY_PASSWORD}'), identifiers: ['LEGACY_USER'] },
+        legacy: { upstream: `${upstreamUrl}/legacy`, inject: basic('{LEGACY_USER}', '{LEGACY_PASSWORD}') },
         s3: { upstream: `${upstreamUrl}/s3`, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
       },
       insecureUpstreams: true,
@@ -59,19 +60,18 @@ useMcp(
     await root.members.add('token:ci');
     await root.projects.create('market');
     await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { TWILIO_SID: { value: SID, plain: true }, TWILIO_TOKEN: TOKEN, REGION: { value: 'eu-west-3', plain: true } });
+    await root.secrets.set('market/dev', { TWILIO_SID: { value: SID, plain: true }, TWILIO_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, REGION: { value: 'eu-west-3', plain: true } });
     await root.environments.create('market/other');
     await root.secrets.set('market/other', {
       ACCOUNT_ID: { value: 'acct_public_42', plain: true },
       AWS_ACCESS_KEY_ID: { value: 'AKIAPLAINBUTNEEDED', plain: true },
       AWS_SECRET_ACCESS_KEY: 'aws_secret_0123456789',
-      LEGACY_USER: 'legacy_user_0123',
+      LEGACY_USER: { value: 'legacy_user_0123', plain: true },
       LEGACY_PASSWORD: { value: 'legacy_password_marked_plain', plain: true },
     });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
     await root.access.set('token:ci', { 'market/dev': 'viewer' });
   },
-  { people: 'stand-ins' },
 );
 
 function bearer(token: string): CoffreClient {
@@ -90,16 +90,18 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
 
 const valuesIn = async (client: CoffreClient, path: string) => Object.fromEntries((await client.secrets.list(path)).keys.map((entry) => [entry.key, entry.value]));
 
-test('a plain value lists as it is, and reads with no secret read, for a person under placeholders too', async () => {
+test('a plain value lists as it is, and reads with no secret read, beside a sensitive one no person reads', async () => {
   assert.deepEqual(await valuesIn(root, 'market/dev'), { REGION: 'eu-west-3', TWILIO_SID: SID, TWILIO_TOKEN: null });
   const dev = clientFor(deps, DEV);
   const reads = (await entries('secret.read')).length;
   assert.deepEqual((await dev.secrets.reveal('market/dev/TWILIO_SID')).values, { TWILIO_SID: SID });
   // No vault call, so no secret.read of it, and none refused.
   assert.equal((await entries('secret.read')).length, reads);
-  // A secret beside it is still refused, the whole read with it.
-  assert.equal((await refusal(dev.secrets.reveal('market/dev/TWILIO_TOKEN'))).reason, 'stand_ins');
-  assert.equal((await refusal(dev.secrets.reveal('market/dev'))).reason, 'stand_ins');
+  // The sensitive value beside it is refused alone, and left out of the whole environment's read, by name.
+  assert.equal((await refusal(dev.secrets.reveal('market/dev/TWILIO_TOKEN'))).reason, 'sensitive');
+  const whole = await dev.secrets.reveal('market/dev');
+  assert.deepEqual(whole.values, { REGION: 'eu-west-3', TWILIO_SID: SID });
+  assert.deepEqual(whole.sensitive, ['TWILIO_TOKEN']);
   // A service account reads both, as before.
   assert.deepEqual((await clientFor(deps, 'ci', 'service').secrets.reveal('market/dev')).values, { REGION: 'eu-west-3', TWILIO_SID: SID, TWILIO_TOKEN: TOKEN });
 });
@@ -109,16 +111,19 @@ test('a write says it is plain, in its version and in the log; written again wit
   assert.equal(made!.metadata.plain, true);
   await root.secrets.set('market/dev', { TWILIO_SID: 'AC_secret_now_0123' });
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_SID, null);
-  assert.deepEqual((await root.secrets.history('market/dev/TWILIO_SID')).versions.map(({ version, plain }) => [version, plain]), [[2, false], [1, true]]);
-  assert.equal((await refusal(clientFor(deps, DEV).secrets.reveal('market/dev/TWILIO_SID'))).reason, 'stand_ins');
+  assert.deepEqual((await root.secrets.history('market/dev/TWILIO_SID')).versions.map(({ version, plain, sensitivity }) => [version, plain, sensitivity]), [[2, false, 'secret'], [1, true, 'plain']]);
+  // A secret now: its reader opens it through the vault, a secret.read logged.
+  const reads = (await entries('secret.read')).length;
+  assert.deepEqual((await clientFor(deps, DEV).secrets.reveal('market/dev/TWILIO_SID')).values, { TWILIO_SID: 'AC_secret_now_0123' });
+  assert.ok((await entries('secret.read')).length > reads);
   // Rolled back to the plain version, it is plain again: that value was shown already.
   await root.secrets.restore('market/dev/TWILIO_SID', 1);
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_SID, SID);
 });
 
-test('making a stored secret plain is a reveal first, which placeholders refuse a person; a stale one is refused', async () => {
-  // The client reveals the value, then writes it plain: a person has no reveal here, so no way to publish one.
-  assert.equal((await refusal(root.secrets.reveal('market/dev/TWILIO_TOKEN'))).reason, 'stand_ins');
+test('making a sensitive value plain is a reveal first, which no person has; a stale one is refused', async () => {
+  // The client reveals the value, then writes it plain: no person reveals a sensitive one, an Owner included, so none publishes it.
+  assert.equal((await refusal(root.secrets.reveal('market/dev/TWILIO_TOKEN'))).reason, 'sensitive');
   // A service account may, saying the version it revealed; one written meanwhile stops it.
   const ci = clientFor(deps, 'ci', 'service');
   await root.access.set('token:ci', { 'market/dev': 'developer' });
@@ -186,7 +191,7 @@ test('deleting an environment erases its plain values too', async () => {
 test("the proxy hands a credential's plain key to the app as it is, and leaves it in the answer", async () => {
   const handle = (await bearer(await sessionFor(DEV)).handles.create({ label: 'coffre run market/dev', paths: ['market/dev'] })).token;
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; left: string[] };
-  // The account's id as it is, the token a placeholder: what `identifiers` said in configuration, said in the data.
+  // The account's id as it is, the token a placeholder: said in the data, for every environment alike.
   assert.equal(plan.env.TWILIO_SID, SID);
   assert.equal(plan.env.TWILIO_TOKEN, handle);
   assert.equal(plan.env.REGION, 'eu-west-3');
@@ -209,7 +214,7 @@ test("a credential's plain key stays a placeholder where the handle would go now
   assert.equal(plan.env.AWS_ACCESS_KEY_ID, handle);
   assert.equal(plan.env.AWS_SECRET_ACCESS_KEY, handle);
   assert.equal(plan.env.ACCOUNT_ID, handle);
-  // An identifier counts as given: with its password plain too, Basic would carry no handle, so both stay placeholders.
+  // With Basic's user and password both plain, it would carry no handle, so both stay placeholders.
   assert.equal(plan.env.LEGACY_USER, handle);
   assert.equal(plan.env.LEGACY_PASSWORD, handle);
   assert.deepEqual(plan.left, []);

@@ -77,8 +77,10 @@ export async function forkEnvironment(
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const patch: Record<string, SecretValue> = Object.create(null);
-    // A plain value stays plain in the copy: its forker read it as anyone who lists its environment does.
-    copies.forEach((item, i) => (patch[item.key] = plain(item) ? { value: opened.values[i]!, plain: true } : opened.values[i]!));
+    // A copy is held as its value was: a plain one stays plain, its forker having read it as anyone who lists its
+    // environment does, and a sensitive one sensitive, its forker never handed it.
+    copies.forEach((item, i) => (patch[item.key] = plain(item) ? { value: opened.values[i]!, plain: true }
+      : item.secret.sensitive === true ? { value: opened.values[i]!, sensitivity: 'sensitive' } : opened.values[i]!));
     for (const [key, path] of plan) patch[key] = { ref: path };
     const forked = { from, keys: readable.items.length, references: plan.size, copied: input.references ? copies.map((item) => item.key) : [], inherits: false };
     if (readable.items.length === 0) return { environment, created, forked };

@@ -182,6 +182,11 @@ export const secretVersions = sqliteTable(
     // the vault. Null for a secret. Its ciphertext is kept as any version's,
     // for what opens values through the vault (a reference, a fork's copy).
     plaintext: text(),
+    // A sensitive value: never handed back to a person, Owners included, only
+    // used for them through the credential proxy, or read by a service
+    // account. Its data key's wrap binds it, so the vault opens a version
+    // flipped back as nothing. Never plain too.
+    sensitive: flag('sensitive').notNull().default(false),
   },
   (table) => [
     unique('secret_versions_secret_id_version_key').on(table.secretId, table.version),

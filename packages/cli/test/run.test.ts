@@ -363,7 +363,7 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
     if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/dev': 'viewer' } });
     if (req.url === '/use/market/dev') {
       const at = `http://${req.headers.host}/use/market/dev/schumann`;
-      // A placeholder shaped as its client checks it, a JWT here, is no exposed value.
+      // A placeholder shaped as its client checks it, a JWT here, is no value given as it is.
       return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle, WEBHOOK_SECRET: 'whsec_local', DFNS_AUTH_TOKEN: `e30.e30.${handle}` }, credentials: { schumann: at }, left: ['DATABASE_URL'] });
     }
     send(404, { error: 'not_found', message: `no route for ${req.url}` });
@@ -392,8 +392,8 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
     COFFRE_CREDENTIALS: JSON.stringify({ schumann: at }),
   });
   assert.match(stderr, /placeholders for market\/dev: schumann/);
-  assert.match(stderr, /exposed as they are, by the deployment: WEBHOOK_SECRET$/m);
-  assert.match(stderr, /left out, neither proxied nor exposed: DATABASE_URL/);
+  assert.match(stderr, /values as they are, which you may read: WEBHOOK_SECRET$/m);
+  assert.match(stderr, /left out, sensitive and not proxied: DATABASE_URL/);
   // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle.
   assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
   assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);

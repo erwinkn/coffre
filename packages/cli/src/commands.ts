@@ -110,6 +110,24 @@ export const SECTIONS = [
       },
       {
         command: 'set',
+        usage: [`set       ${P}/<KEY> --sensitive`],
+        about: [
+          'a value shown to nobody, Owners included: people\'s apps use it',
+          'through the credential proxy, and service accounts read it;',
+          'written again, it stays sensitive unless --secret says otherwise',
+        ],
+      },
+      {
+        command: 'mark',
+        usage: [`mark      ${P}[/<KEY>] <plain|secret|sensitive>`],
+        about: [
+          'a key, or every key of the environment, made stricter, its value',
+          'kept: plain to secret, secret to sensitive; looser takes the value',
+          'written again, coffre set … --secret',
+        ],
+      },
+      {
+        command: 'set',
         usage: [`set       ${P}/<KEY> --ref <project>/<environment>/<KEY>`],
         about: ['a reference: whoever reads its environment reads that', "secret's current value through it; you need read on it"],
       },
@@ -426,7 +444,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'PATCH /projects/:project/:environment': { commands: ['environments rename', 'environments archive', 'environments unarchive'] },
   'DELETE /projects/:project/:environment': { commands: ['environments delete'] },
   'GET /secrets/:project/:environment': { commands: ['list'] },
-  'PATCH /secrets/:project/:environment': { commands: ['set', 'regenerate', 'import'] },
+  'PATCH /secrets/:project/:environment': { commands: ['set', 'mark', 'regenerate', 'import'] },
   'DELETE /secrets/:project/:environment/:key/reference': { commands: ['references break'] },
   'PATCH /folders/:folder': { commands: ['folders rename'] },
   'DELETE /folders/:folder': { commands: ['folders remove'] },

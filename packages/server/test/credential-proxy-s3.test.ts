@@ -144,10 +144,9 @@ useMcp(
     await root.members.add(`user:${DEV}`);
     await root.projects.create('market');
     await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY: SECRET });
+    await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY: { value: SECRET, sensitivity: 'sensitive' } });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
   },
-  { people: 'stand-ins' },
 );
 
 /** The app's S3 client, its keys from what `coffre run` gave it and its endpoint the proxy's stable URL, as an app configures one for MinIO. */

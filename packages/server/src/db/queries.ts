@@ -1349,17 +1349,21 @@ export async function findDeviceAuthorizations(
 
 /** The committed state to compare after the vault prepares a write or restore. */
 export async function secretHeads(db: Queryable, environmentId: string, by: { keys: string[] } | { id: string }) {
-  const { secrets } = tablesOf(db);
-  return db.select({
+  const { secrets, secretVersions } = tablesOf(db);
+  const rows = await db.select({
     id: secrets.id,
     key: secrets.key,
     currentVersion: secrets.currentVersion,
     currentVersionId: secrets.currentVersionId,
     archivedAt: secrets.archivedAt,
-  }).from(secrets).where(and(
+    // How its current value is held, which a write that says nothing keeps the strictness of (`Sensitivity`).
+    plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`,
+    sensitive: secretVersions.sensitive,
+  }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)).where(and(
     eq(secrets.environmentId, environmentId),
     'id' in by ? eq(secrets.id, by.id) : inArray(secrets.key, by.keys),
   ));
+  return rows.map(({ plain, sensitive, ...row }) => ({ ...row, current: row.currentVersionId === null ? null : { plain: Boolean(plain), sensitive: sensitive === true } }));
 }
 
 const envelopeColumns = (secretVersions: Tables['secretVersions']) => ({
@@ -1427,6 +1431,8 @@ export type SecretRow = {
     recipe: VersionRecipe | null;
     /** The value itself, for a plain one: no secret, and opened without the vault. Null for a secret. */
     plaintext: string | null;
+    /** Whether it is sensitive: never handed back to a person, which the vault's wrap of its key binds. */
+    sensitive: boolean;
   } | null;
 };
 
@@ -1454,6 +1460,7 @@ export async function environmentSecrets(
       ...envelopeColumns(secretVersions),
       ...recipeColumns(secretVersions),
       plaintext: secretVersions.plaintext,
+      sensitive: secretVersions.sensitive,
     })
     .from(secrets)
     .innerJoin(projects, eq(projects.id, secrets.projectId))
@@ -1482,6 +1489,7 @@ export async function environmentSecrets(
             envelope: envelopeOf(row as Envelope),
             recipe: recipeOf(row),
             plaintext: row.plaintext,
+            sensitive: row.sensitive === true,
           },
   }));
 }
@@ -1490,7 +1498,7 @@ export async function environmentSecrets(
 export async function secretHistory(
   db: Queryable,
   secretId: string,
-): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope; recipe: VersionRecipe | null; plaintext: string | null }[]> {
+): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope; recipe: VersionRecipe | null; plaintext: string | null; sensitive: boolean }[]> {
   const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({
@@ -1501,6 +1509,7 @@ export async function secretHistory(
       ...envelopeColumns(secretVersions),
       ...recipeColumns(secretVersions),
       plaintext: secretVersions.plaintext,
+      sensitive: secretVersions.sensitive,
     })
     .from(secretVersions)
     .where(eq(secretVersions.secretId, secretId))
@@ -1513,6 +1522,7 @@ export async function secretHistory(
     envelope: envelopeOf(row),
     recipe: recipeOf(row),
     plaintext: row.plaintext,
+    sensitive: row.sensitive,
   }));
 }
 
@@ -1772,14 +1782,14 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
 }
 
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
-export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope }>> {
+export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean }>> {
   if (ids.length === 0) return new Map();
   const { secretVersions } = tablesOf(db);
   const rows = await db
-    .select({ id: secretVersions.id, version: secretVersions.version, ...envelopeColumns(secretVersions) })
+    .select({ id: secretVersions.id, version: secretVersions.version, sensitive: secretVersions.sensitive, ...envelopeColumns(secretVersions) })
     .from(secretVersions)
     .where(inArray(secretVersions.id, [...new Set(ids)]));
-  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row) }]));
+  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row), sensitive: row.sensitive === true }]));
 }
 
 // --- the audit log ------------------------------------------------------------

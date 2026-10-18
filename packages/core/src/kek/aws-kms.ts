@@ -220,6 +220,8 @@ function encryptionContext(ctx: SecretContext): Record<string, string> {
     'coffre:secret': ctx.secretId,
     // A personal config's owner, hashed: KMS refuses to decrypt under any other.
     ...(ctx.owner === undefined ? {} : { 'coffre:owner': ctx.owner }),
+    // A sensitive value's: KMS refuses to decrypt it as anything else.
+    ...(ctx.sensitive === true ? { 'coffre:sensitive': 'true' } : {}),
   };
 }
 

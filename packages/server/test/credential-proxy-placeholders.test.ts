@@ -94,10 +94,9 @@ useMcp(
     await root.members.add(`user:${DEV}`);
     await root.projects.create('market');
     await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { DFNS_AUTH_TOKEN: TOKEN, STRIPE_SECRET_KEY: STRIPE });
+    await root.secrets.set('market/dev', { DFNS_AUTH_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, STRIPE_SECRET_KEY: { value: STRIPE, sensitivity: 'sensitive' } });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
   },
-  { people: 'stand-ins' },
 );
 
 async function handleFor(): Promise<{ token: string; expiresAt: string }> {
@@ -204,7 +203,7 @@ test('a shaped placeholder is for a header or query rule that carries one key: a
   const upstream = 'https://api.example.com';
   assert.throws(make({ upstream, inject: basic('{ID}', '{SECRET}'), placeholder: prefix('sk_') }), /a's placeholder shapes the one key a header or query rule carries.*not a basic\(\) rule/);
   assert.throws(make({ upstream, inject: sigv4({ accessKeyId: '{A}', secretAccessKey: '{B}', region: 'eu-west-3', service: 's3' }), placeholder: jwt() }), /not a sigv4\(\) rule/);
-  assert.throws(make({ upstream, inject: header('authorization', '{ID}:{TOKEN}'), identifiers: ['ID'], placeholder: jwt() }), /several keys/);
+  assert.throws(make({ upstream, inject: header('authorization', '{ID}:{TOKEN}'), placeholder: jwt() }), /several keys/);
   assert.throws(make({ upstream, inject: header('x', '{K}{K}'), placeholder: prefix('a') }), /several keys, or one twice/);
   assert.throws(make({ upstream, inject: header('x', '{K}'), placeholder: prefix('has space') }), /prefix\(\) is up to 64/);
   assert.throws(make({ upstream, inject: header('x', '{K}'), placeholder: jwt({ claims: ['exp'] }) }), /exp is the handle's end/);

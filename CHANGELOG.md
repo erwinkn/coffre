@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- **Breaking: each key says who sees its value, and `people` and
+  `expose` are gone.** One setting per key, three levels:
+  - `plain`: anyone who lists the environment, as 0.9's plain values.
+  - `secret`, the default: people whose role reads secrets.
+  - `sensitive`: no person, Owners included. Their apps get a
+    placeholder and use it through the credential proxy; service
+    accounts (CI tokens, GitHub and Kubernetes OIDC) read the value.
+
+  `coffre set market/prod/STRIPE_SECRET_KEY --sensitive` writes one;
+  `coffre mark market/prod/DATABASE_URL sensitive` makes a key stricter,
+  its value kept, and `coffre mark market/prod sensitive` every key of the
+  environment. Making a key looser takes its value written again (`coffre
+  set … --secret`), never a flip. A write that says nothing keeps a
+  sensitive key sensitive. The vault decides it: a sensitive version's
+  data key is wrapped as sensitive, so a person's reveal, `coffre get`,
+  MCP or Vault KV read of it is refused (`sensitive`), whatever their
+  role, and a person's read of a whole environment leaves its sensitive
+  values out, naming them. The page has one control per key; the API
+  takes `{ "value": "…", "sensitivity": "sensitive" }` and `{
+  "sensitivity": "sensitive" }`. The vault's `people` option, the
+  proxy's `expose` and a credential's `identifiers` are removed: a
+  deployment that still sets one fails at startup, saying what to do.
+  Migration `0012_sensitive_values` adds `secret_versions.sensitive`. To
+  move a deployment that ran `people: 'stand-ins'`, delete `people` from
+  its vault and `expose` from its `credentialProxy`, deploy, then mark
+  sensitive what no person should read, leaving secret what they read
+  (what `expose` listed):
+
+  ```sh
+  coffre mark backend/prod sensitive        # every key of prod, its values kept
+  coffre mark backend/staging sensitive
+  coffre mark backend/local/LEMONWAY_API_KEY sensitive   # the real keys a local environment holds
+  coffre mark backend/local/YOUSIGN_API_KEY sensitive
+  ```
+
+  Between the deploy and the marks, a person reads what their role
+  reads, as 0.9 did without `people`: mark right after deploying, as an
+  Owner. See docs/design/credential-proxy.md, section 2.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output

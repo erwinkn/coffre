@@ -29,6 +29,7 @@ import {
   refileSecrets,
   reveal,
   restoreVersion,
+  SENSITIVITIES,
   setSecrets,
   type DryRunResult,
   type SetResult,
@@ -114,6 +115,8 @@ const generatedValue = z.object({
   }).strict(),
   // A regenerate's: the id of the version it replaces, as listed, or the write is refused (409).
   replaces: z.string().max(64).optional(),
+  // Who sees it: a secret, or sensitive where the key is, unless it says.
+  sensitivity: z.enum(['secret', 'sensitive']).optional(),
 }).strict();
 
 /**
@@ -126,6 +129,22 @@ const plainValue = z.object({
   plain: z.literal(true),
   replaces: z.string().max(64).optional(),
 }).strict();
+
+/** Who sees a key's value (`Sensitivity`): plain, secret or sensitive. */
+const sensitivity = z.enum(SENSITIVITIES);
+
+/**
+ * A value and who sees it. `plain` is the plain value above, said this
+ * way; a looser value than the key's needs only this, a new value.
+ */
+const sensitiveValue = z.object({
+  value: secretValue,
+  sensitivity,
+  replaces: z.string().max(64).optional(),
+}).strict();
+
+/** The key's current value, kept, made stricter: as strict already is no change, and looser is refused (409). */
+const marked = z.object({ sensitivity }).strict();
 
 const role = z.enum(ROLE_NAMES);
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
@@ -314,9 +333,10 @@ export const routes = {
   }),
   ...route('PATCH /secrets/:project/:environment', {
     // A string is a value; `{ "value", "generated": { "recipe": "bytes:32:hex" } }` one a client
-    // generated; `{ "value", "plain": true }` a plain one, no secret; `{ "ref": "market/prod/KEY" }`
-    // makes the key a reference to that secret.
-    input: z.record(secretKey, z.union([secretValue, generatedValue, plainValue, z.object({ ref: z.string().max(400) }).strict()]).nullable())
+    // generated; `{ "value", "sensitivity": "sensitive" }` one and who sees it (`{ "value", "plain": true }`,
+    // as 0.9 said plain); `{ "sensitivity": "sensitive" }` the key's value as it is, made stricter;
+    // `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
+    input: z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())
       .superRefine((patch, issues) => {
         const problem = generationProblem(patch);
         if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
@@ -397,8 +417,9 @@ export const routes = {
   ...route('POST /reveals', {
     input: z.object({ path: z.string().max(400) }),
     run: async (ctx, { input }) => {
-      const { operationId, values, version } = await reveal(ctx, parsePath(input.path, [2, 3]));
-      return { operationId, values, version };
+      // A person's read of a whole environment names the sensitive values it left out.
+      const { operationId, values, sensitive, version } = await reveal(ctx, parsePath(input.path, [2, 3]));
+      return { operationId, values, sensitive, version };
     },
   }),
 

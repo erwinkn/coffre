@@ -1,6 +1,8 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
 import type { Purpose, Refusal, SecretRef, Through, Vault, Via, WrappedKey } from '@coffre/core/vault';
 
+import { ApiError } from './errors.ts';
+
 /**
  * The app's half of envelope encryption. It encrypts and decrypts values
  * with data keys, but never holds a key that wraps them: the vault wraps
@@ -41,10 +43,22 @@ export async function sealValues(
       items: items.map(({ secret }, i) => ({ secret, key: deks[i].toString('base64') })),
     });
     if (!result.ok) return result;
+    boundAsAsked(items, result);
     return { ok: true, values: sealed.map((parts, i) => withWrapped(parts, result.wrapped[i])), seqs: result.seqs };
   } finally {
     for (const dek of deks) dek.fill(0);
   }
+}
+
+/**
+ * Throw unless the vault bound each key sensitive exactly where the write
+ * asked: a vault older than 0.10 binds none, and answers no `sensitive`,
+ * and a version stored sensitive over a key it wrapped as a secret would
+ * open for nobody.
+ */
+function boundAsAsked(items: readonly { secret: SecretRef }[], result: { sensitive?: readonly boolean[] }): void {
+  if (items.every(({ secret }, i) => (secret.sensitive === true) === (result.sensitive?.[i] === true))) return;
+  throw new ApiError('unavailable', 'the vault binds no sensitive value: it is older than this app, so deploy it first, then write again', 'vault_outdated');
 }
 
 /**
@@ -100,10 +114,21 @@ export async function rewrapValue(
   secret: SecretRef,
   from: { id: string; envelope: Envelope },
 ): Promise<Wrapped> {
+  return rewrapValues(vault, asking, [{ secret, from }]);
+}
+
+/** `rewrapValue` for several, all or none: a key made stricter, or an old value brought back. */
+export async function rewrapValues(
+  vault: Vault,
+  asking: Asking,
+  items: readonly { secret: SecretRef; from: { id: string; envelope: Envelope } }[],
+): Promise<Wrapped> {
+  if (items.length === 0) return { ok: true, values: [], seqs: [] };
   const result = await vault.rewrap({
     ...asking,
-    items: [{ secret, secretVersionId: from.id }],
+    items: items.map(({ secret, from }) => ({ secret, secretVersionId: from.id })),
   });
   if (!result.ok) return result;
-  return { ok: true, values: [withWrapped(from.envelope, result.wrapped[0])], seqs: result.seqs };
+  boundAsAsked(items, result);
+  return { ok: true, values: items.map(({ from }, i) => withWrapped(from.envelope, result.wrapped[i]!)), seqs: result.seqs };
 }

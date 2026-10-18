@@ -1,8 +1,9 @@
 // Values of a person's own (docs/design/credential-proxy.md, section 2): in
 // an environment the deployment lists under `generate`, a person's use reads
 // their personal config of it, and the plan names each key their app would
-// go without that a recipe made, for `coffre run` to make a value of their
-// own by it, once, in that personal config. Each write replaces the version
+// go without, a sensitive one no credential uses, that a recipe made, for
+// `coffre run` to make a value of their own by it, once, in that personal
+// config. Each write replaces the version
 // the plan read, so of two runs at once one writes and the other is refused.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -42,9 +43,8 @@ useMcp(
     runtime.plugins = checkPlugins([credentialProxy({
       credentials: {
         api: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{API_KEY}') },
-        twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'] },
+        twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}') },
       },
-      expose: { 'market/local': ['TESTNET_KEY'] },
       generate: { 'market/local': 'all', 'market/listed': ['SEAL_KEY'], 'market/kid': 'all' },
       insecureUpstreams: true,
     })]);
@@ -54,13 +54,13 @@ useMcp(
     for (const environment of ['local', 'listed', 'dev']) {
       await root.environments.create(`market/${environment}`);
       await root.secrets.set(`market/${environment}`, {
-        SEAL_KEY: { value: 'shared-seal-key-0123456789', generated: { recipe: 'bytes:32:hex' } },
-        WEBHOOK_SECRET: { value: 'shared-webhook-0123456789', generated: { recipe: 'bytes:24' } },
-        TYPED: 'typed-by-hand-0123456789',
+        SEAL_KEY: { value: 'shared-seal-key-0123456789', generated: { recipe: 'bytes:32:hex' }, sensitivity: 'sensitive' },
+        WEBHOOK_SECRET: { value: 'shared-webhook-0123456789', generated: { recipe: 'bytes:24' }, sensitivity: 'sensitive' },
+        TYPED: { value: 'typed-by-hand-0123456789', sensitivity: 'sensitive' },
         TESTNET_KEY: 'testnet-key-0123456789',
         REGION: { value: 'eu-west-3', plain: true },
         API_KEY,
-        TWILIO_SID: 'AC0123456789',
+        TWILIO_SID: { value: 'AC0123456789', plain: true },
         TWILIO_TOKEN: 'twilio_token_0123456789',
       });
     }
@@ -70,7 +70,6 @@ useMcp(
     await root.access.set(`user:${KID_ONLY}`, { 'market/kid': 'developer' });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
   },
-  { people: 'stand-ins' },
 );
 
 function bearer(token: string): CoffreClient {
@@ -92,7 +91,7 @@ test('the plan names what a recipe made and the app would go without; a run writ
   const handle = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;
   const ids = await versionIds('market/local');
   const first = await planFor('market/local', handle);
-  // Neither a typed key, nor one exposed, plain or a credential's: those reach the app, or have no recipe.
+  // Neither a typed key, nor one its person reads, plain or a credential's: those reach the app, or have no recipe.
   assert.deepEqual(first.generate, {
     SEAL_KEY: { recipe: 'bytes:32:hex', replaces: ids.SEAL_KEY },
     WEBHOOK_SECRET: { recipe: 'bytes:24:base62', replaces: ids.WEBHOOK_SECRET },
@@ -113,7 +112,8 @@ test('the plan names what a recipe made and the app would go without; a run writ
   assert.deepEqual(second.generate, {});
   assert.equal(second.env.SEAL_KEY, won.repeat(64));
   assert.equal(second.env.WEBHOOK_SECRET, 'devs-own-webhook-0123');
-  // What the environment exposes reaches the app through its personal config as it does through itself.
+  // A secret its person reads reaches the app through their personal config as it does through the environment; their own
+  // values, generated over sensitive ones, are secrets they read.
   assert.equal(second.env.TESTNET_KEY, 'testnet-key-0123456789');
   assert.equal(second.env.REGION, 'eu-west-3');
   assert.deepEqual(second.left, ['TYPED']);
@@ -154,12 +154,12 @@ test("a parent's version and recipe are told only to its readers: nothing is gen
   const handle = (await kid.handles.create({ label: 'coffre run market/kid', paths: ['market/kid'] })).token;
   const plan = await planFor('market/kid', handle);
   assert.deepEqual(plan.generate, {});
-  // Its own key a recipe made is generated, as anywhere.
-  await root.secrets.set('market/kid', { OWN_KEY: { value: 'kid-own-0123456789', generated: { recipe: 'bytes:16:hex' } } });
+  // Its own sensitive key a recipe made is generated, as anywhere.
+  await root.secrets.set('market/kid', { OWN_KEY: { value: 'kid-own-0123456789', generated: { recipe: 'bytes:16:hex' }, sensitivity: 'sensitive' } });
   assert.deepEqual(Object.keys((await planFor('market/kid', handle)).generate ?? {}), ['OWN_KEY']);
 });
 
-test("an identifier stays the environment's own value through its personal config, once one is made", async () => {
+test('a plain value reaches the app as it is through a personal config of its environment, once one is made', async () => {
   const dev = bearer(await sessionFor(DEV));
   const handle = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;
   assert.equal((await planFor('market/local', handle)).env.TWILIO_SID, 'AC0123456789');

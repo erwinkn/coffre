@@ -1,4 +1,6 @@
 import type { Generation } from '@coffre/core/recipe';
+import type { Sensitivity } from '../shared/models.ts';
+import { stricter } from './sensitivity.ts';
 
 /**
  * A second secret a row writes with its own value, in the same patch: a
@@ -14,8 +16,8 @@ export type SecretDraft = {
   companion?: Companion;
   /** The recipe a generated value was made by, saved with it; typing over the value drops it. */
   recipe?: string;
-  /** Written plain: no secret, shown to whoever lists the environment. */
-  plain?: boolean;
+  /** Who sees it (`lib/sensitivity.ts`). */
+  sensitivity: Sensitivity;
 };
 
 export type SecretChange = {
@@ -26,39 +28,51 @@ export type SecretChange = {
   companion?: Companion;
   /** Only beside a generated value. */
   recipe?: string;
-  /** Only beside a new value: whether it is written plain, no secret. A value is a secret unless it says so. */
-  plain?: boolean;
   /**
-   * The version the edit started from, by id (`valueEdit`): a plain write
-   * replaces it, or is refused, so that making a stored secret plain never
-   * publishes a value someone has written over since.
+   * Who sees the key's value once saved: beside a new value, that value's
+   * level; alone, a mark, the current value made stricter and kept (`valueEdit`).
    */
-  replaces?: string;
+  sensitivity?: Sensitivity;
 };
 
 /**
- * What a value edit makes of a row's change: `value`, written `plain` or
- * not, from where the edit started (`from.start`, the row's plain value or
- * the secret it revealed, `from.plain`, whether the row is plain, and
- * `from.startedAt`, that version's id). Back where it started, it is no
- * change. The version it started from stays with the change from its first
- * edit on, so a remount of the row (a rename refused, then retried) never
- * loses it.
+ * What an edit of a row's value, and of who sees it, makes of its change,
+ * from where it started: `from.start`, the value the editor opened on (''
+ * when it could not be read), and `from.level`, who sees the row's value
+ * now (null for none of its own: a secret is written). A value left as it
+ * opened writes nothing; its level changed alone is then a mark. Looser
+ * than the row, the field opens empty, as that takes the value typed again:
+ * a stored value is never made more visible by a flip. Back where it
+ * started, it is no change.
+ *
+ *   secret 'sk_1', opened on 'sk_1': Sensitive  -> { value: null, sensitivity: 'sensitive' }, a mark
+ *   secret 'sk_1', opened on 'sk_1': Plain      -> { value: null, sensitivity: 'plain' }, waiting for a value
+ *                  then 'sk_2' typed            -> { value: 'sk_2', sensitivity: 'plain' }
  */
-export function valueEdit(change: SecretChange, from: { start: string; plain: boolean; startedAt: string | undefined }, value: string, plain: boolean): Partial<SecretChange> {
-  const replaces = change.replaces ?? from.startedAt;
-  if (value === from.start && plain === from.plain) return { value: null, plain: undefined, replaces };
-  return { value, plain, replaces, companion: undefined, recipe: undefined };
+export function valueEdit(
+  from: { start: string; level: Sensitivity | null },
+  next: { value: string | null; sensitivity: Sensitivity },
+): Pick<SecretChange, 'value' | 'sensitivity'> {
+  const level = from.level ?? 'secret';
+  const opened = stricter(level, next.sensitivity) ? '' : from.start;
+  const value = next.value === opened ? null : next.value;
+  return { value, sensitivity: value === null && next.sensitivity === level ? undefined : next.sensitivity };
 }
 
 type ActiveSecret = { key: string };
 
 /**
- * A merge patch: a string sets a key, adding it if it is new; a value with
- * how it was generated sets it with its recipe; a plain one, no secret,
- * says so; `null` archives it.
+ * A merge patch: a value sets a key with who sees it, adding it if it is
+ * new; a value with how it was generated sets it with its recipe; a level
+ * alone makes the key's value stricter, kept; `null` archives it.
  */
-export type SecretPatch = Record<string, string | { value: string; generated: Generation } | { value: string; plain: true; replaces?: string } | null>;
+export type SecretPatch = Record<
+  string,
+  | { value: string; sensitivity: Sensitivity }
+  | { value: string; generated: Generation; sensitivity: 'secret' | 'sensitive' }
+  | { sensitivity: Sensitivity }
+  | null
+>;
 
 /**
  * How a row's generated value was made, as its write says it: its recipe,
@@ -71,11 +85,24 @@ function generationOf(key: string, edit: { recipe?: string; companion?: Companio
     : { recipe: edit.recipe, pair: { private: key, public: edit.companion.key.trim() } };
 }
 
-/** What a row writes under each key: its value, and its companion's beside it. */
-function rowPatch(key: string, value: string, edit: { recipe?: string; companion?: Companion; plain?: boolean; replaces?: string }): SecretPatch {
+type ValueEdit = { recipe?: string; companion?: Companion; sensitivity?: Sensitivity };
+
+/** Who sees the value a row writes: a secret unless it says, and a generated one never plain. */
+function levelOf(edit: ValueEdit): 'secret' | 'sensitive' | 'plain' {
+  return edit.sensitivity === 'sensitive' || (edit.sensitivity === 'plain' && edit.recipe === undefined) ? edit.sensitivity : 'secret';
+}
+
+/**
+ * What a row writes under each key: its value, and its companion's beside
+ * it, each saying who sees it, as every write does: over a sensitive key,
+ * one that said nothing would stay sensitive.
+ */
+function rowPatch(key: string, value: string, edit: ValueEdit): SecretPatch {
   const generated = generationOf(key, edit);
-  const plain = (each: string) => (edit.replaces === undefined ? { value: each, plain: true as const } : { value: each, plain: true as const, replaces: edit.replaces });
-  const entry = (each: string) => (generated !== undefined ? { value: each, generated } : edit.plain === true ? plain(each) : each);
+  const sensitivity = levelOf(edit);
+  const entry = (each: string) => (generated === undefined || sensitivity === 'plain'
+    ? { value: each, sensitivity }
+    : { value: each, generated, sensitivity });
   const patch: SecretPatch = Object.create(null);
   patch[key] = entry(value);
   if (edit.companion !== undefined) patch[edit.companion.key.trim()] = entry(edit.companion.value);
@@ -107,19 +134,24 @@ export function generationsOf(
 }
 
 /**
- * The value each key a save writes plain will show, by its name after the
- * save: what the list shows of it until it is read back.
+ * Who sees each value a save writes, and a plain one's value, by its key's
+ * name after the save: what the list shows of it until it is read back.
  */
-export function plainValuesOf(
+export function levelsOf(
   active: readonly ActiveSecret[],
   drafts: readonly SecretDraft[],
   changes: Readonly<Record<string, SecretChange>>,
-): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const draft of drafts) if (draft.plain === true && draft.recipe === undefined) out.set(draft.key.trim(), draft.value);
+): Map<string, { sensitivity: Sensitivity; value: string | null }> {
+  const out = new Map<string, { sensitivity: Sensitivity; value: string | null }>();
+  const add = (key: string, value: string, edit: ValueEdit) => {
+    const sensitivity = levelOf(edit);
+    out.set(key, { sensitivity, value: sensitivity === 'plain' ? value : null });
+    if (edit.companion !== undefined) out.set(edit.companion.key.trim(), { sensitivity, value: sensitivity === 'plain' ? edit.companion.value : null });
+  };
+  for (const draft of drafts) add(draft.key.trim(), draft.value, draft);
   for (const entry of active) {
     const change = secretChangeFor(changes, entry.key);
-    if (change !== undefined && !change.archived && change.value !== null && change.plain === true && change.recipe === undefined) out.set(change.key.trim(), change.value);
+    if (change !== undefined && !change.archived && change.value !== null) add(change.key.trim(), change.value, change);
   }
   return out;
 }
@@ -185,7 +217,7 @@ export function hasSecretEditConflict(
   const valueEditTargets = new Set(
     active.flatMap((entry) => {
       const change = secretChangeFor(changes, entry.key);
-      return change !== undefined && !change.archived && change.value !== null
+      return change !== undefined && !change.archived && (change.value !== null || change.sensitivity !== undefined)
         ? [change.key.trim()]
         : [];
     }),
@@ -241,9 +273,10 @@ export async function applySecretEditBatch({
         await operations.rename(sourceKey, key);
         delete remainingChanges[sourceKey];
         applied += 1;
-        if (change.value !== null) remainingChanges[key] = { ...change, key };
+        if (change.value !== null || change.sensitivity !== undefined) remainingChanges[key] = { ...change, key };
       }
       if (change.value !== null) Object.assign(patch, rowPatch(key, change.value, change));
+      else if (change.sensitivity !== undefined) patch[key] = { sensitivity: change.sensitivity };
     }
     for (const draft of drafts) Object.assign(patch, rowPatch(draft.key.trim(), draft.value, draft));
 
