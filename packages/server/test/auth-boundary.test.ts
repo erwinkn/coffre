@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
-import { EVERYWHERE } from '@coffre/core/access';
+import { DEFAULT_POLICY, EVERYWHERE } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
 import { answer } from './start-fixture.ts';
@@ -254,6 +254,8 @@ test('an unregistered identity is marked for the closed-door boundary', async ()
       scope: EVERYWHERE,
       grants: [],
       credentialScope: null,
+      policy: DEFAULT_POLICY,
+      service: false,
     },
     requestId: 'unregistered-request',
     sourceIp: null,
@@ -316,6 +318,8 @@ test('an active registered identity receives an auditable request context', asyn
         scope: EVERYWHERE,
         grants: [],
         credentialScope: null,
+        policy: DEFAULT_POLICY,
+        service: true,
       },
       requestId: 'registered-request',
       sourceIp: null,

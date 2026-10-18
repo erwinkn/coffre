@@ -1,5 +1,5 @@
 import type { AccessFault } from './access-fault.ts';
-import type { CredentialScope, GrantPlace, InstanceRole, Role, Scope, ServiceSetting } from './access.ts';
+import type { CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -94,6 +94,27 @@ export interface Vault {
   settings(): Promise<Settings>;
   /** Change the instance's settings: those who run it, never anyone else. */
   setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>>;
+
+  /**
+   * The instance's access policy (`Policy` in @coffre/core/access): its
+   * roles, as an Owner edited and made them, and its protected
+   * environments, as the vault's newest `policy.change` says, by its MAC.
+   * As it ships, before any. A vault older than 0.10 has none, and the app
+   * decides as it ships.
+   */
+  policy(): Promise<Policy>;
+  /**
+   * Change the policy by one change, its own `policy.change` entry, which
+   * names it and what it was (docs/design/roles.md):
+   * - a project or instance role defined, or put back as it ships (null),
+   *   or, one an Owner made, deleted while no grant names it: an Owner of
+   *   the whole instance, and never the Owner role, nor the instance's
+   *   Member;
+   * - environments of one project protected, by whoever manages its
+   *   environments, before their rows exist too (a fork's); or
+   *   unprotected, by an Owner of the whole instance.
+   */
+  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy }>>;
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
@@ -377,6 +398,8 @@ export type Access = {
   /** When the status last changed, and who changed it; null for strangers. */
   since: string | null;
   by: string | null;
+  /** The instance's policy, which every decision about them reads: absent from a vault older than 0.10, which decides as it ships. */
+  policy?: Policy;
 };
 
 /**
@@ -436,6 +459,17 @@ export type Settings = {
 export type SetSettingsInput = Correlation & Through & {
   actor: string;
   settings: Settings;
+};
+
+/** One change to the policy (`changePolicy`). */
+export type PolicyChange =
+  | { kind: 'role'; role: Role; definition: RoleDefinition | null }
+  | { kind: 'instance-role'; role: InstanceRole; definition: RoleDefinition | null }
+  | { kind: 'protect'; projectId: string; environmentIds: string[]; protected: boolean };
+
+export type ChangePolicyInput = Correlation & Through & {
+  actor: string;
+  change: PolicyChange;
 };
 
 /**

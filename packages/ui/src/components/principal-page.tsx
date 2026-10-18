@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, Outlet } from '@tanstack/react-router';
-import { INSTANCE_ROLES, ROLE_NAMES, ROLES, scopeInWords, unscoped, type Role } from '@coffre/core/access';
+import { scopeInWords, unscoped, type Role } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
@@ -13,6 +13,8 @@ import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
 import { accessRows, projectAccessLabel, type ProjectAccess } from '../lib/project-access';
 import { givable, serviceProjects } from '../lib/service-setup';
+import { roleNameOf } from '../lib/roles';
+import { useRoles } from '../lib/use-roles';
 import {
   accessChanges,
   accessPatch,
@@ -63,15 +65,19 @@ function useMemberAccess(principalType: PrincipalType, principalId: string): {
   offers: Offers;
 } {
   const shell = useShell();
+  const { roles } = useRoles();
   const { data } = useSuspenseQuery(queries.memberAccess(useCoffre(), memberRef(principalType, principalId), listsAccess(shell)));
   const error = data !== null && !data.ok ? data.error : null;
   const access = data?.ok === true ? data : null;
   const yours = principalType === 'service' && access?.managed === true;
-  const listed = yours ? serviceProjects(shell) : managedProjects(shell.projects);
+  const holder = { ...shell, roles };
+  const listed = yours ? serviceProjects(holder) : managedProjects(shell.projects);
   return {
     access,
     error,
-    offers: yours ? (project, environment) => givable(shell, project, environment) : () => ROLE_NAMES,
+    offers: yours
+      ? (project, environment) => givable(holder, project, environment)
+      : (_project, environment) => roles.filter((role) => environment === null || role.assignableToEnvironment).map((role) => role.id),
     projects: listed.map((project) => ({
       project,
       grants: (access?.grants ?? []).filter((grant) => grant.project === project.slug).map((grant) => ({
@@ -343,8 +349,9 @@ function MemberPersonalTokens({ member, tokens }: { member: string; tokens: Toke
 
 /** What a person's instance role gives them, above the grants that add to it: nothing for a Member. */
 function InstanceRoleNote({ access }: { access: MemberAccess }) {
+  const { instanceRoles } = useRoles();
   if (access.instanceRole === 'member') return null;
-  const { name } = INSTANCE_ROLES[access.instanceRole];
+  const name = roleNameOf(instanceRoles, access.instanceRole);
   return (
     <div className="report-notice">
       <Notice tone="info">
@@ -402,7 +409,10 @@ function EditAccess({
   const [open, setOpen] = useState(false);
   const [edits, setEdits] = useState<Record<string, AccessPlan>>({});
   const { pending, error, setError, run } = useAction();
+  const { roles } = useRoles();
   const kind = KIND[principalType];
+  const nameOf = (role: Role) => roleNameOf(roles, role);
+  const assignable = (role: Role) => roles.some((each) => each.id === role && each.assignableToEnvironment);
 
   const rows = access.map(({ project, grants }) => {
     const environments = project.environments
@@ -497,23 +507,27 @@ function EditAccess({
                   <select
                     id={id}
                     className="select select-sm"
-                    value={plan.level}
-                    onChange={(event) =>
+                    value={plan.level === 'project' ? `role:${plan.role}` : plan.level}
+                    onChange={(event) => {
+                      const value = event.target.value;
                       edit(
-                        withLevel(plan, event.target.value as AccessPlan['level'], environments),
-                      )
-                    }
+                        value.startsWith('role:')
+                          ? withLevel(plan, 'project', environments, { role: value.slice('role:'.length), assignable })
+                          : withLevel(plan, value as AccessPlan['level'], environments, { assignable }),
+                      );
+                    }}
                   >
                     {held.level === 'custom' && <option value="custom">Keep as is</option>}
                     <option value="none">No access</option>
-                    {whole.includes('owner') && <option value="owner">{ROLES.owner.name}</option>}
-                    {whole.includes('viewer') && <option value="viewer">{ROLES.viewer.name}: all</option>}
-                    {whole.includes('developer') && <option value="developer">{ROLES.developer.name}: all</option>}
+                    {/* What you may give on the whole project, and what they hold there already, given or not. */}
+                    {[...new Set([...whole, ...(plan.level === 'project' && plan.role !== null ? [plan.role] : [])])].map((role) => (
+                      <option key={role} value={`role:${role}`}>
+                        {role === 'owner' ? nameOf(role) : `${nameOf(role)}: all`}
+                      </option>
+                    ))}
                     {environments.some((slug) => each[slug]!.length > 0) && <option value="env">Per environment…</option>}
                   </select>
-                  {(plan.level === 'owner' ||
-                    plan.level === 'viewer' ||
-                    plan.level === 'developer') && (
+                  {plan.level === 'project' && (
                     <ExpiryField
                       label={`${project.slug} expires`}
                       expiresAt={plan.expiresAt}
@@ -540,16 +554,17 @@ function EditAccess({
                                   withEnvironment(
                                     plan,
                                     slug,
-                                    role === 'viewer' || role === 'developer'
-                                      ? { role, expiresAt: current?.expiresAt ?? null }
-                                      : null,
+                                    role === '' ? null : { role, expiresAt: current?.expiresAt ?? null },
                                   ),
                                 );
                               }}
                             >
                               <option value="">No access</option>
-                              {each[slug]!.includes('viewer') && <option value="viewer">{ROLES.viewer.name}</option>}
-                              {each[slug]!.includes('developer') && <option value="developer">{ROLES.developer.name}</option>}
+                              {[...new Set([...each[slug]!, ...(current === null ? [] : [current.role])])].map((role) => (
+                                <option key={role} value={role}>
+                                  {nameOf(role)}
+                                </option>
+                              ))}
                             </select>
                             {current !== null && (
                               <ExpiryField
@@ -576,7 +591,7 @@ function EditAccess({
                               : change.grant.id
                           }
                         >
-                          <AccessChangeTag change={change} />
+                          <AccessChangeTag change={change} roleName={nameOf} />
                         </li>
                       ))}
                     </ul>
@@ -607,7 +622,7 @@ function EditAccess({
   );
 }
 
-function AccessChangeTag({ change }: { change: AccessChange }) {
+function AccessChangeTag({ change, roleName }: { change: AccessChange; roleName: (role: Role) => string }) {
   const until = (expiresAt: string | null) =>
     expiresAt === null ? '' : ` until ${dateFromExpiry(expiresAt)}`;
   switch (change.kind) {
@@ -616,7 +631,7 @@ function AccessChangeTag({ change }: { change: AccessChange }) {
         <span className="tag tag-green">
           <span aria-hidden="true">+</span>
           <span className="visually-hidden">Adds</span>
-          {projectAccessLabel({ ...change, roleName: change.role })}
+          {projectAccessLabel({ ...change, roleName: roleName(change.role) })}
           {until(change.expiresAt)}
         </span>
       );

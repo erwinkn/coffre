@@ -9,6 +9,7 @@ import {
   type Conversion,
   type ConversionInput,
   type InstanceRole,
+  type BuiltinRole,
   type Role,
   type Scope,
 } from '@coffre/core/access';
@@ -129,10 +130,10 @@ export function everyProjectConversion(
     role: person ? role : 'member',
     everyProject: live
       .filter((grant) => grant.projectId === null && grant.environmentId === null)
-      .map((grant) => ({ environmentSlug: grant.environmentSlug, role: grant.role as Role, expiresAt: grant.expiresAt })),
+      .map((grant) => ({ environmentSlug: grant.environmentSlug, role: grant.role as BuiltinRole, expiresAt: grant.expiresAt })),
     grants: live
       .filter((grant) => grant.projectId !== null)
-      .map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role as Role, expiresAt: grant.expiresAt })),
+      .map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role as BuiltinRole, expiresAt: grant.expiresAt })),
     projects,
   });
 }

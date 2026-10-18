@@ -26,10 +26,11 @@ function held(
 }
 
 function perEnvironment(
-  access: Record<string, 'viewer' | 'developer' | [role: 'viewer' | 'developer', expiresAt: string]>,
+  access: Record<string, string | [role: string, expiresAt: string]>,
 ): AccessPlan {
   return {
     level: 'env',
+    role: null,
     expiresAt: null,
     environments: Object.fromEntries(
       Object.entries(access).map(([slug, value]) =>
@@ -41,33 +42,36 @@ function perEnvironment(
   };
 }
 
-test('owner, read and write everywhere read back as one level, with their expiry', () => {
+const project = (role: string, expiresAt: string | null = null): AccessPlan => ({ level: 'project', role, expiresAt, environments: {} });
+
+test('one role on the whole project reads back as it, with its expiry, a custom one too', () => {
   assert.deepEqual(planFromGrants([], environments), {
     level: 'none',
+    role: null,
     expiresAt: null,
     environments: {},
   });
-  assert.equal(planFromGrants([held('g1', 'owner')], environments).level, 'owner');
-  assert.equal(planFromGrants([held('g1', 'viewer')], environments).level, 'viewer');
+  assert.deepEqual(planFromGrants([held('g1', 'owner')], environments), project('owner'));
+  assert.deepEqual(planFromGrants([held('g1', 'auditor')], environments), project('auditor'));
+  assert.deepEqual(planFromGrants([held('g1', 'release-manager')], environments), project('release-manager'));
   assert.deepEqual(
     planFromGrants([held('g1', 'developer', null, '2026-12-31T23:59:59.000Z')], environments),
-    { level: 'developer', expiresAt: '2026-12-31T23:59:59.000Z', environments: {} },
+    project('developer', '2026-12-31T23:59:59.000Z'),
   );
 });
 
-test('read and write on single environments read back per environment', () => {
+test('a role on each of single environments reads back per environment, whichever roles', () => {
   assert.deepEqual(
     planFromGrants(
-      [held('g1', 'developer', 'dev'), held('g2', 'viewer', 'prod', '2026-12-31T23:59:59.000Z')],
+      [held('g1', 'developer', 'dev'), held('g2', 'viewer', 'prod', '2026-12-31T23:59:59.000Z'), held('g3', 'contributor', 'staging')],
       environments,
     ),
-    perEnvironment({ dev: 'developer', prod: ['viewer', '2026-12-31T23:59:59.000Z'] }),
+    perEnvironment({ dev: 'developer', prod: ['viewer', '2026-12-31T23:59:59.000Z'], staging: 'contributor' }),
   );
 });
 
 test('grants outside the editor’s shape are custom and left alone', () => {
   for (const grants of [
-    [held('g1', 'auditor')],
     [held('g1', 'viewer'), held('g2', 'developer', 'dev')],
     [held('g1', 'viewer', 'dev'), held('g2', 'developer', 'dev')],
     [held('g1', 'developer', 'retired')],
@@ -100,7 +104,7 @@ test('asking for access already held creates only what is missing', () => {
 
 test('a change of level creates the new grant before revoking the old one', () => {
   const grants = [held('g1', 'developer')];
-  assert.deepEqual(accessChanges(grants, { level: 'viewer', expiresAt: null, environments: {} }), [
+  assert.deepEqual(accessChanges(grants, project('viewer')), [
     { kind: 'create', role: 'viewer', environmentSlug: null, expiresAt: null },
     { kind: 'revoke', grant: grants[0] },
   ]);
@@ -127,11 +131,7 @@ test('each grant keeps its own expiry, and moving one is its own change', () => 
 test('the same instant spelled differently is not a change', () => {
   const grants = [held('g1', 'viewer', null, '2026-12-31T23:59:59Z')];
   assert.deepEqual(
-    accessChanges(grants, {
-      level: 'viewer',
-      expiresAt: '2026-12-31T23:59:59.000Z',
-      environments: {},
-    }),
+    accessChanges(grants, project('viewer', '2026-12-31T23:59:59.000Z')),
     [],
   );
 });
@@ -139,7 +139,7 @@ test('the same instant spelled differently is not a change', () => {
 test('no access revokes everything, including grants the editor cannot express', () => {
   const grants = [held('g1', 'auditor'), held('g2', 'developer', 'dev')];
   assert.deepEqual(
-    accessChanges(grants, { level: 'none', expiresAt: null, environments: {} }).map(
+    accessChanges(grants, { level: 'none', role: null, expiresAt: null, environments: {} }).map(
       (change) => change.kind,
     ),
     ['revoke', 'revoke'],
@@ -148,7 +148,7 @@ test('no access revokes everything, including grants the editor cannot express',
 
 test('switching from everywhere to per environment starts from the same access', () => {
   const expiresAt = '2026-12-31T23:59:59.000Z';
-  const plan = withLevel({ level: 'viewer', expiresAt, environments: {} }, 'env', environments);
+  const plan = withLevel(project('viewer', expiresAt), 'env', environments);
   assert.deepEqual(
     plan.environments,
     perEnvironment({
@@ -161,6 +161,22 @@ test('switching from everywhere to per environment starts from the same access',
     accessChanges([held('g1', 'viewer', null, expiresAt)], plan).map((change) => change.kind),
     ['create', 'create', 'create', 'revoke'],
   );
+});
+
+test('a role an environment does not take starts per environment from nothing; picking one sets the role', () => {
+  // Owner holds what only a project holds, so no environment takes it.
+  assert.deepEqual(withLevel(project('owner'), 'env', environments), { level: 'env', role: null, expiresAt: null, environments: {} });
+  // A custom role, as the instance's policy says it may be granted on an environment.
+  assert.deepEqual(
+    Object.keys(withLevel(project('release-manager'), 'env', environments, { assignable: (role) => role === 'release-manager' }).environments),
+    environments,
+  );
+  assert.deepEqual(withLevel(perEnvironment({ dev: 'viewer' }), 'project', environments, { role: 'maintainer' }), {
+    level: 'project',
+    role: 'maintainer',
+    expiresAt: null,
+    environments: { dev: { role: 'viewer', expiresAt: null } },
+  });
 });
 
 test('environments are set and taken away one at a time', () => {
@@ -195,7 +211,7 @@ test('the changes become one patch: a new level replaces the old at the same pla
     'market/staging': 'viewer',
   });
   assert.deepEqual(
-    accessPatch('market', accessChanges([held('g1', 'viewer', null)], { level: 'developer', expiresAt: null, environments: {} })),
+    accessPatch('market', accessChanges([held('g1', 'viewer', null)], project('developer'))),
     { market: 'developer' },
   );
 });

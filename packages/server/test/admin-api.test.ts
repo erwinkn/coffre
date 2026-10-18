@@ -100,7 +100,7 @@ test('creating a project or environment that exists changes nothing and logs not
     created: false,
   });
   assert.deepEqual(await root.environments.create('market/prod', { name: 'Again' }), {
-    environment: { slug: 'prod', name: 'Production', archivedAt: null },
+    environment: { slug: 'prod', name: 'Production', archivedAt: null, protected: false },
     created: false,
     forked: null,
   });
@@ -164,7 +164,7 @@ test("no environment takes the name of a project's page: not made, forked or ren
 test('project owners create environments; environment-scoped grants do not', async () => {
   await seedProject();
   assert.deepEqual(await lead.environments.create('market/staging', { name: 'Staging' }), {
-    environment: { slug: 'staging', name: 'Staging', archivedAt: null },
+    environment: { slug: 'staging', name: 'Staging', archivedAt: null, protected: false },
     created: true,
     forked: null,
   });
@@ -316,6 +316,7 @@ test('environment grants expose only the listed names of inaccessible siblings',
     accessible: true,
     parent: null,
     personal: false,
+    protected: false,
     details: { archivedAt: null, secretCount: 1 },
   });
   assert.deepEqual(prod, {
@@ -324,6 +325,7 @@ test('environment grants expose only the listed names of inaccessible siblings',
     accessible: false,
     parent: null,
     personal: false,
+    protected: false,
     details: null,
   });
 });

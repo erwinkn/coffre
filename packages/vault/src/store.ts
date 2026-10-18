@@ -451,6 +451,13 @@ export async function endedReferences(db: Queryable, seqs: readonly bigint[]): P
 }
 
 /** The project each environment is in: a holder's ids, checked against each other. */
+/** Whether a project of this id is there, and not deleted. */
+export async function projectLive(db: Queryable, id: string): Promise<boolean> {
+  const { projects } = tablesOf(db);
+  const rows = await db.select({ deleted: truth(tombstone(projects.slug)) }).from(projects).where(eq(projects.id, id));
+  return rows.length > 0 && !rows[0]!.deleted;
+}
+
 export async function projectsOfEnvironments(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
   const { environments } = tablesOf(db);
@@ -544,6 +551,16 @@ export async function newestSensitive(db: Queryable, secretIds: readonly string[
       sql`${secretVersions.version} = (SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
     ));
   return new Set(rows.map((row) => row.secretId));
+}
+
+/** How many grants name `role`: all of them, or those on environments. */
+export async function grantsNaming(db: Queryable, role: string, filter: { onEnvironments?: boolean } = {}): Promise<number> {
+  const { vaultGrants } = tablesOf(db);
+  const rows = await db
+    .select({ count: sql<number | string>`count(*)` })
+    .from(vaultGrants)
+    .where(and(eq(vaultGrants.role, role), filter.onEnvironments === true ? or(isNotNull(vaultGrants.environmentId), isNotNull(vaultGrants.environmentSlug)) : undefined));
+  return Number(rows[0]?.count ?? 0);
 }
 
 /**

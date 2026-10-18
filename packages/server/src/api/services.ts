@@ -1,20 +1,27 @@
 import {
   allows,
   assignableToEnvironment,
+  DEFAULT_POLICY,
+  definitionOf,
   delegable,
-  DELEGABLE_ROLES,
+  delegableRoles,
+  holds,
   isCredentialScope,
+  issuedGrant,
   issuesCredential,
   managesService,
   NOTHING,
-  ROLES,
+  PERMISSIONS,
   runsInstance,
+  scopeDefinition,
   setsUpServices,
   type CredentialScope,
   type Holdings,
   type Place,
   type Permission,
+  type Policy,
   type Role,
+  type ScopeGrant,
   type ServiceAccount,
   type ServiceSetting,
 } from '@coffre/core/access';
@@ -113,14 +120,34 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
 /** A credential's scope as the API names it: each place by its path, `market` or `market/dev`, and the role there. */
 export type ScopeByPath = Record<string, Role>;
 
-/** A scope as a token's or binding's row stores it, under its MAC: its grants as JSON, by place. */
+/**
+ * A scope as a token's or binding's row stores it, under its MAC: its
+ * grants as JSON, by place, each with what its role held when it was
+ * issued (`issuedGrant`), so that a role widened later widens no credential.
+ */
 export function storedScope(scope: CredentialScope): string {
   const key = (grant: CredentialScope[number]) => `${grant.projectId}/${grant.environmentId ?? ''}`;
   return JSON.stringify(
     [...scope]
       .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
-      .map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role })),
+      .map(({ projectId, environmentId, role, permissions }) => ({
+        projectId,
+        environmentId,
+        role,
+        ...(permissions === undefined ? {} : { permissions: { normal: [...permissions.normal], protected: [...permissions.protected] } }),
+      })),
   );
+}
+
+/**
+ * A grant of a scope as it holds now and as it was issued, whichever is
+ * narrower, column by column: what a credential that inherits another's
+ * scope carries, so trusting a workload again never widens it.
+ */
+function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
+  const was = scopeDefinition(before);
+  const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
+  return { ...now, permissions: { normal: both(now.permissions?.normal ?? [], was?.permissions ?? []), protected: both(now.permissions?.protected ?? [], was?.protected ?? []) } };
 }
 
 /**
@@ -155,10 +182,11 @@ export function scopeByPath(scope: CredentialScope | null, known: readonly Place
  * database: each path a project or an environment, and each role one its
  * place takes.
  */
-export function parseScope(wanted: ScopeByPath): { path: ReturnType<typeof parsePath>; role: Role }[] {
+export function parseScope(wanted: ScopeByPath, policy: Policy): { path: ReturnType<typeof parsePath>; role: Role }[] {
   return Object.entries(wanted).map(([raw, role]) => {
     const path = parsePath(raw, [1, 2]);
-    if (path.environment !== undefined && !assignableToEnvironment(role)) {
+    if (definitionOf(policy, role) === undefined) throw badRequest(`no role "${role}": Settings › Roles, or \`coffre roles\`, lists the instance's`);
+    if (path.environment !== undefined && !assignableToEnvironment(role, policy)) {
       throw badRequest(`${role} includes permissions that only make sense on a whole project; name "${path.project}"`);
     }
     return { path, role };
@@ -185,15 +213,16 @@ export async function issuedScope(
   inherited?: CredentialScope,
 ): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
   const known = await places(db);
+  const { policy } = ctx.caller;
   const account = accountOf(standing.grants, standing.by, known);
   let scope: ServiceAccount['grants'];
   if (wanted !== undefined) {
-    scope = placedScope(wanted, known);
+    scope = placedScope(wanted, known, policy);
   } else if (inherited !== undefined) {
     // What the replaced bindings reached and the account still holds: a place deleted, or a role it lost, drops out.
-    const held: Holdings = { ...NOTHING, grants: account.grants.map(asGrant) };
+    const held: Holdings = { ...NOTHING, policy, service: true, grants: account.grants.map(asGrant) };
     scope = accountOf(inherited, null, known).grants
-      .filter(({ role, place }) => ROLES[role].permissions.every((permission) => allows(held, permission, place)));
+      .filter(({ role, place }) => definitionOf(policy, role)?.permissions.every((permission) => allows(held, permission, place)) === true);
     if (scope.length === 0) throw badRequest('the bindings it replaces reach nothing the account still holds: say what it reaches');
   } else {
     scope = account.grants;
@@ -210,7 +239,13 @@ export async function issuedScope(
       denied(ctx, refused.action, 'beyond_account', { metadata: { ...refused.metadata, path } }),
     );
   }
-  const issued = scope.map(asGrant);
+  // Each with what its role holds now, kept; one inherited, no more than it held before either.
+  const before = new Map((inherited ?? []).map((grant) => [`${grant.projectId}/${grant.environmentId ?? ''}`, grant]));
+  const issued = scope.map((grant) => {
+    const now = issuedGrant(asGrant(grant), policy);
+    const was = before.get(`${now.projectId}/${now.environmentId ?? ''}`);
+    return was === undefined ? now : narrowest(now, was);
+  });
   return { scope: issued, byPath: scopeByPath(issued, known)! };
 }
 
@@ -218,8 +253,8 @@ export async function issuedScope(
  * A scope asked by path, each place found as it is now: one that is not
  * there is not found. Each place once.
  */
-function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[]): ServiceAccount['grants'] {
-  const scope = parseScope(wanted).map(({ path, role }) => {
+function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[], policy: Policy): ServiceAccount['grants'] {
+  const scope = parseScope(wanted, policy).map(({ path, role }) => {
     const project = known.find((candidate) => candidate.slug === path.project);
     if (project === undefined) throw notFound(`no project "${path.project}"`);
     if (path.environment === undefined) return { role, place: placeOf(project, null) };
@@ -235,9 +270,11 @@ function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[]): ServiceAc
  * The scope a personal token is made with, as its person asked for it, by
  * path: each role one that manages no access (`delegable`), and one they
  * hold all of at its place now, by their instance role or a grant
- * (`holder`, as the vault answers them, with no credential's scope). One
- * that reaches nothing is refused: a token reaches what it names, and
- * nothing its person is given later.
+ * (`holder`, as the vault answers them, with no credential's scope): all
+ * the role gives them there, its protected column in a protected
+ * environment. One that reaches nothing is refused: a token reaches what
+ * it names, and nothing its person is given later. Each grant keeps what
+ * its role holds in `policy` now (`issuedGrant`), the holder's unless told.
  */
 export async function personalScope(
   db: Queryable,
@@ -245,23 +282,29 @@ export async function personalScope(
   holder: Holdings,
   wanted: ScopeByPath,
   metadata: Record<string, unknown>,
-  /**
-   * What the holder must hold at a place for its role: every permission of
-   * it, unless told. A handle's, only what the proxy exercises: it writes
-   * nothing, whatever its scope says, the API refusing it.
-   */
-  needs: (role: Role) => readonly Permission[] = (role) => ROLES[role].permissions,
+  {
+    policy = holder.policy ?? DEFAULT_POLICY,
+    needs = (role, place) => PERMISSIONS.filter((permission) => holds(definitionOf(policy, role), permission, place, holder)),
+  }: {
+    policy?: Policy;
+    /**
+     * What the holder must hold at a place for its role: all it gives them
+     * there, unless told. A handle's, only what the proxy exercises: it
+     * writes nothing, whatever its scope says, the API refusing it.
+     */
+    needs?: (role: Role, place: Place) => readonly Permission[];
+  } = {},
 ): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
   const known = await places(db);
-  const scope = placedScope(wanted, known);
+  const scope = placedScope(wanted, known, policy);
   if (scope.length === 0) throw badRequest('say what the token reaches: a role on a project or an environment, as --scope market/dev=viewer');
-  const issued = scope.map(asGrant);
+  const issued = scope.map((grant) => issuedGrant(asGrant(grant), policy));
   const named = (grant: ServiceAccount['grants'][number]) => Object.keys(scopeByPath([asGrant(grant)], known)!)[0]!;
-  const managing = scope.find(({ role }) => !delegable(role));
+  const managing = scope.find(({ role }) => !delegable(role, policy));
   if (managing !== undefined) {
-    throw badRequest(`a personal token never manages access: name ${DELEGABLE_ROLES.join(', ')} on ${named(managing)}, not ${managing.role}`);
+    throw badRequest(`a personal token never manages access: name ${delegableRoles(policy).join(', ')} on ${named(managing)}, not ${managing.role}`);
   }
-  const beyond = scope.find(({ role, place }) => !needs(role).every((permission) => allows(holder, permission, place)));
+  const beyond = scope.find(({ role, place }) => !needs(role, place).every((permission) => allows(holder, permission, place)));
   if (beyond !== undefined) {
     const path = named(beyond);
     throw new Refusal(
@@ -327,7 +370,8 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
  * MAC as read, so two at once seal a row once. Returns how many it sealed.
  */
 export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, rows: readonly Unsealed[]): Promise<number> {
-  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role })));
+  // Each with what its role holds now, kept, as one issued now.
+  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, access.policy ?? DEFAULT_POLICY)));
   return audited({ db, chainKey }, async (tx, log) => {
     const done = { tokens: [] as string[], bindings: [] as string[] };
     for (const row of rows) {

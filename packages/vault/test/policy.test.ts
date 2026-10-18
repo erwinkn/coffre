@@ -1,0 +1,171 @@
+// The access policy (docs/design/roles.md): roles in two columns, as an
+// Owner of the whole instance edits and makes them, and the protected
+// environments, which whoever manages a project's environments protects and
+// only an Owner unprotects. The vault keeps it in its newest `policy.change`
+// entry, by its MAC, and decides every read with it: a person holds a role's
+// protected column in a protected environment, a service account never.
+import test, { after, before, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes, randomUUID } from 'node:crypto';
+
+import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
+import { ROLES, type RoleDefinition } from '@coffre/core/access';
+import type { SecretRef } from '@coffre/core/vault';
+import { entryHash } from '@coffre/core/audit';
+import { tablesOf } from '@coffre/db';
+
+import type { ResolvedVaultConfig } from '../src/config.ts';
+import { openLocalVault, type LocalVault } from '../src/local.ts';
+import { emptyDatabase, openTestDatabase, places, storedVersions, type TestDatabase } from './database.ts';
+
+const ROOT = 'user:root@acme.example';
+const ADA = 'user:ada@acme.example';
+const CI = 'token:ci';
+
+let db: TestDatabase;
+before(async () => {
+  db = await openTestDatabase();
+});
+after(() => db.close());
+beforeEach(() => emptyDatabase(db.owner));
+
+function configure(): ResolvedVaultConfig {
+  return {
+    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
+    owners: ['root@acme.example'],
+    signingKeys: [randomBytes(32)],
+    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+  };
+}
+
+async function world() {
+  const vault = await openLocalVault(db.vault, configure());
+  assert.equal((await vault.access(ROOT)).role, 'owner');
+  const where = await places(db.owner);
+  const grant = async (principal: string, environmentId: string | null, role: string) => {
+    assert.equal((await vault.admit({ actor: ROOT, principal })).ok, true);
+    const set = await vault.setAccess({ actor: ROOT, principal, changes: [{ projectId: where.project, environmentId, role, expiresAt: null }] });
+    assert.equal(set.ok, true, JSON.stringify(set));
+  };
+  /** A secret of `environmentId` with a value stored: what a read names. */
+  const stored = async (environmentId: string) => {
+    const secret: SecretRef = await where.secret(environmentId);
+    const wrap = await vault.wrap({ principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] });
+    assert.ok(wrap.ok);
+    return storedVersions(db.owner, [{ secret, wrapped: wrap.wrapped[0]! }]);
+  };
+  return { vault, ...where, grant, stored };
+}
+
+const protect = (vault: LocalVault, actor: string, projectId: string, environmentIds: string[], on = true) =>
+  vault.changePolicy({ actor, change: { kind: 'protect', projectId, environmentIds, protected: on } });
+
+test('a protected environment gives a person the protected column of their role, and a service account its other one', async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'developer');
+  await w.grant(CI, w.prod, 'viewer');
+  const prod = await w.stored(w.prod);
+  const dev = await w.stored(w.dev);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod })).ok, true, 'before it is protected');
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  const refused = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod });
+  assert.equal(!refused.ok && refused.refusal.code, 'no_grant');
+  // She still uses it, through the proxy, and reads dev as before; CI reads prod as it always did.
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'use', items: prod })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: CI, purpose: 'run', items: prod })).ok, true);
+  // The app is told the policy with every member's access.
+  assert.deepEqual((await w.vault.access(ADA)).policy?.protected, [w.prod]);
+});
+
+test('whoever manages a project\'s environments protects one, before its row exists too; only an Owner of the whole instance unprotects', async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'maintainer');
+  const fork = randomUUID();
+  assert.ok((await protect(w.vault, ADA, w.project, [w.prod, fork])).ok);
+  assert.deepEqual((await w.vault.policy()).protected, [w.prod, fork].sort());
+  const refused = await protect(w.vault, ADA, w.project, [w.prod], false);
+  assert.equal(!refused.ok && refused.refusal.code, 'not_allowed');
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod], false)).ok);
+  assert.deepEqual((await w.vault.policy()).protected, [fork]);
+  // A fork's alone, as the app protects it before writing its row: its entry names the project, and no environment yet.
+  const next = randomUUID();
+  assert.ok((await protect(w.vault, ADA, w.project, [next])).ok);
+  const [entry] = (await db.owner.select().from(tablesOf(db.owner).auditLog)).filter((row) => row.action === 'policy.change' && row.metadata.includes(next));
+  assert.deepEqual([entry?.projectId, entry?.environmentId], [w.project, null]);
+  // Nor in a project that is not there.
+  const nowhere = await protect(w.vault, ROOT, randomUUID(), [randomUUID()]);
+  assert.equal(!nowhere.ok && nowhere.refusal.code, 'invalid');
+  // A developer protects nothing: they do not manage the project's environments.
+  await w.grant('user:bo@acme.example', null, 'developer');
+  const bo = await protect(w.vault, 'user:bo@acme.example', w.project, [w.dev]);
+  assert.equal(!bo.ok && bo.refusal.code, 'not_allowed');
+});
+
+test('an Owner of the whole instance edits a role, resets it, makes one, and deletes it once no grant names it; nobody edits Owner', async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'developer');
+  const reads: RoleDefinition = { ...ROLES.developer, protected: ['secret.read', 'secret.use', 'secret.write'] };
+  const notOwner = await w.vault.changePolicy({ actor: ADA, change: { kind: 'role', role: 'developer', definition: reads } });
+  assert.equal(!notOwner.ok && notOwner.refusal.code, 'not_allowed');
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'developer', definition: reads } })).ok);
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await w.stored(w.prod) })).ok, true, 'Developer as edited reads in prod');
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'developer', definition: null } })).ok);
+  assert.deepEqual((await w.vault.policy()).roles.developer, ROLES.developer, 'reset: as it ships');
+
+  const owner = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'owner', definition: { ...ROLES.viewer } } });
+  assert.equal(!owner.ok && owner.refusal.code, 'invalid');
+  const member = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'instance-role', role: 'member', definition: { ...ROLES.viewer } } });
+  assert.equal(!member.ok && member.refusal.code, 'invalid');
+
+  const releaser: RoleDefinition = { name: 'Release manager', description: 'Writes prod, reads nothing.', permissions: ['secret.use', 'secret.write'], protected: ['secret.use', 'secret.write'] };
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'release-manager', definition: releaser } })).ok);
+  await w.grant('user:bo@acme.example', w.prod, 'release-manager');
+  const held = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'release-manager', definition: null } });
+  assert.equal(!held.ok && held.refusal.code, 'invalid');
+  assert.match(!held.ok ? held.refusal.message : '', /1 grant names release-manager/);
+});
+
+test('a role holds no more in a protected environment than elsewhere, reads only where it uses, and nothing project-wide in its protected column', async () => {
+  const w = await world();
+  const bad: RoleDefinition[] = [
+    { ...ROLES.viewer, protected: ['secret.read', 'secret.use', 'secret.write'] },
+    { ...ROLES.viewer, permissions: ['secret.read'], protected: [] },
+    { ...ROLES.maintainer, protected: ['secret.use', 'environment.manage'] },
+  ];
+  for (const definition of bad) {
+    const refused = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'viewer', definition } });
+    assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(definition));
+  }
+});
+
+/** An entry in the vault's name that no key of its sealed: what an owner of the database inserts by hand. */
+async function forge(metadata: unknown): Promise<void> {
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  const [head] = await db.owner.select().from(auditChainHead);
+  const mac = Buffer.alloc(32, 7);
+  const fields = {
+    seq: head!.nextSeq, author: 'vault' as const, keyId: 'forged', occurredAt: Date.now(), actor: ROOT, action: 'policy.change', decision: 'allow',
+    code: null, subjectPrincipal: null, projectId: null, environmentId: null, secretId: null, secretVersionId: null,
+    operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: JSON.stringify(metadata),
+  };
+  const hash = entryHash(head!.headHash, fields, mac);
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head!.headHash, mac, hash });
+  await db.owner.update(auditChainHead).set({ nextSeq: head!.nextSeq + 1n, headHash: hash });
+}
+
+test("a policy entry forged in the vault's name is passed over; with none of its own within reach, every environment is protected", async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'developer');
+  const prod = await w.stored(w.prod);
+  const dev = await w.stored(w.dev);
+  // Forged alone, it closes: Ada, a person, holds the protected column everywhere.
+  await forge({ policy: { roles: {}, instanceRoles: {}, protected: [] } });
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, false);
+  // The vault's own, after it, decides; a forged one after that, unprotecting prod, is passed over.
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  await forge({ policy: { roles: {}, instanceRoles: {}, protected: [] } });
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod })).ok, false);
+});

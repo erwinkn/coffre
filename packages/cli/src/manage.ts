@@ -8,7 +8,7 @@ import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
-import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion } from '@coffre/client';
+import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
 
 import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
 
@@ -103,7 +103,8 @@ export async function projects(connect: () => CoffreClient, args: string[], io: 
         // Environments the caller may only know by name come without details.
         if (environment.details?.archivedAt) continue;
         const count = environment.details?.secretCount;
-        io.out.write(`${indent}  ${environment.slug.padEnd(16)} ${count === null || count === undefined ? '' : `${count} secrets`}\n`);
+        const guarded = environment.protected === true ? '  protected' : '';
+        io.out.write(`${indent}  ${environment.slug.padEnd(16)} ${count === null || count === undefined ? '' : `${count} secrets`}${guarded}\n`);
       }
     }
   }
@@ -668,6 +669,164 @@ export async function revoke(connect: () => CoffreClient, args: string[], io: Io
   const api = connect();
   const { changes } = await api.access.set(who, { [scope]: null });
   io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${scope}\n` : `${shownMember(who)} held no grant on ${scope}: nothing changed\n`);
+}
+
+// --- roles and protected environments ----------------------------------------
+
+type RoleShown = RoleView;
+
+/** What sets a role apart in a list: one an Owner made, or edited, or nobody edits. */
+function marks(role: RoleShown): string {
+  const said = [role.fixed ? 'fixed' : role.builtin ? (role.edited ? 'edited' : '') : 'custom'].filter((mark) => mark !== '');
+  return said.length === 0 ? '' : `  [${said.join(', ')}]`;
+}
+
+/** A column of permissions, `read, use`: a secret's without its prefix, the rest whole. */
+function column(permissions: readonly string[]): string {
+  return permissions.length === 0 ? 'nothing' : permissions.map((permission) => permission.replace(/^secret\./, '')).join(', ');
+}
+
+/**
+ * `coffre roles`: every role, as the instance defines it, in its two
+ * columns: what it holds where nothing is protected, and in a protected
+ * environment, where a person holds the second (docs/design/roles.md).
+ * `coffre roles developer` says one, permission by permission.
+ */
+export async function roles(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { ...json, instance: { type: 'boolean', default: false } }, ['<role>'], 1);
+  const listed = await connect().roles.list();
+  if (values.json) return asJson(io, positionals[0] === undefined ? listed : roleNamed(listed, positionals[0], values.instance));
+  if (positionals[0] !== undefined) {
+    const role = roleNamed(listed, positionals[0], values.instance);
+    io.out.write(`${role.id}  ${role.name}${marks(role)}${role.description === '' ? '' : `  ${role.description}`}\n`);
+    const width = Math.max(...role.permissions.map((permission) => permission.length), 0) + 2;
+    for (const permission of role.permissions) {
+      const wide = ['environment.manage', 'grant.manage', 'project.manage'].includes(permission);
+      io.out.write(`  ${permission.padEnd(width)}yes${wide ? '   on the project' : `   protected: ${role.protected.includes(permission) ? 'yes' : 'no'}`}\n`);
+    }
+    if (role.permissions.length === 0) io.out.write('  nothing\n');
+    return;
+  }
+  const line = (role: RoleShown, project: boolean) => {
+    const where = project ? (role.assignableToEnvironment ? 'project or env' : 'project only') : '';
+    return `  ${role.id.padEnd(16)} ${(project ? `[${where}]` : '').padEnd(project ? 17 : 0)}${column(role.permissions).padEnd(34)} protected: ${column(role.protected)}${marks(role)}\n`;
+  };
+  io.out.write('Instance roles, a person\'s across every project in their scope (coffre admit --role):\n');
+  for (const role of listed.instanceRoles) io.out.write(line(role, false));
+  io.out.write('\nProject roles, a grant on a project or an environment (coffre grant --role):\n');
+  for (const role of listed.roles) io.out.write(line(role, true));
+  io.out.write('\nIn a protected environment a person holds the protected column; a service account, the other.\n');
+  if (listed.editable) io.out.write('You edit them: coffre roles set <role> …, coffre roles reset <role>.\n');
+}
+
+function roleNamed(listed: { roles: RoleShown[]; instanceRoles: RoleShown[] }, id: string, instance: boolean): RoleShown {
+  const found = (instance ? listed.instanceRoles : listed.roles).find((role) => role.id === id);
+  if (found === undefined) throw new UsageError(`no ${instance ? 'instance ' : ''}role "${id}": \`coffre roles\` lists them`);
+  return found;
+}
+
+/** `read,use`, or `none`: permissions as a flag takes them, a secret's by its short name too. */
+function permissionsFrom(text: string, flag: string): string[] {
+  if (text.trim() === '' || text.trim() === 'none') return [];
+  return [...new Set(text.split(',').map((word) => word.trim()).filter((word) => word !== '').map((word) => (word.includes('.') ? word : `secret.${word}`)))].map((permission) => {
+    if (!/^[a-z]+\.[a-z]+$/.test(permission)) throw new UsageError(`${flag} takes permissions, as secret.read,secret.use or read,use; not "${permission}"`);
+    return permission;
+  });
+}
+
+const roleFlags = {
+  name: { type: 'string' },
+  description: { type: 'string' },
+  permissions: { type: 'string' },
+  protected: { type: 'string' },
+  instance: { type: 'boolean', default: false },
+  apply: { type: 'boolean', default: false },
+} as const;
+
+/**
+ * `coffre roles set developer --protected use,write,read`: a role defined,
+ * a built-in one edited or one an Owner makes, by an Owner of the whole
+ * instance. What the flags leave out stays as it is; a new role holds
+ * nothing it is not given. Says what it would do to everyone it reaches
+ * first, and with --apply does it.
+ */
+export async function rolesSet(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, roleFlags, ['<role>']);
+  const id = positionals[0]!;
+  if (values.name === undefined && values.description === undefined && values.permissions === undefined && values.protected === undefined) {
+    throw new UsageError('say what changes: --name, --description, --permissions or --protected');
+  }
+  const api = connect();
+  const listed = await api.roles.list();
+  const current = (values.instance ? listed.instanceRoles : listed.roles).find((role) => role.id === id);
+  if (current === undefined && values.instance) throw new UsageError(`no instance role "${id}": an Owner makes project roles`);
+  const definition = {
+    name: values.name ?? current?.name ?? id,
+    description: values.description ?? current?.description ?? '',
+    permissions: (values.permissions === undefined ? current?.permissions ?? [] : permissionsFrom(values.permissions, '--permissions')) as Permissions,
+    protected: (values.protected === undefined ? current?.protected ?? [] : permissionsFrom(values.protected, '--protected')) as Permissions,
+  };
+  const which = { instance: values.instance };
+  const { sentence } = await api.roles.preview(id, definition, which);
+  const what = `${current === undefined ? 'a new role' : id}: ${column(definition.permissions)}, protected: ${column(definition.protected)}`;
+  if (!values.apply) {
+    io.out.write(`${what}\n  ${sentence}\nNothing changed. Re-run with --apply to save it.\n`);
+    return;
+  }
+  await api.roles.set(id, definition, which);
+  io.out.write(`saved ${what}\n  ${sentence}\n`);
+}
+
+type Permissions = RouteInput<'PUT /roles/:role'>['permissions'];
+
+/**
+ * `coffre roles reset developer`: a built-in role back as it ships, what
+ * that does shown first, and with --apply done. `coffre roles remove`
+ * deletes one an Owner made.
+ */
+export async function rolesReset(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { instance: roleFlags.instance, apply: roleFlags.apply }, ['<role>']);
+  const id = positionals[0]!;
+  const api = connect();
+  const listed = await api.roles.list();
+  const role = roleNamed(listed, id, values.instance);
+  if (!role.builtin) throw new UsageError(`${id} is one an Owner made: \`coffre roles remove ${id}\` deletes it`);
+  if (!role.edited) return void io.out.write(`${id} is as it ships: nothing to reset\n`);
+  const which = { instance: values.instance };
+  const { sentence } = await api.roles.previewReset(id, which);
+  if (!values.apply) {
+    io.out.write(`${id} back as it ships: ${column(role.default?.permissions ?? [])}, protected: ${column(role.default?.protected ?? [])}\n  ${sentence}\nNothing changed. Re-run with --apply to reset it.\n`);
+    return;
+  }
+  await api.roles.reset(id, which);
+  io.out.write(`reset ${id}, as it ships\n  ${sentence}\n`);
+}
+
+/** `coffre roles remove release-manager`: a role an Owner made, deleted, once no grant names it. */
+export async function rolesRemove(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { positionals } = parse(args, {}, ['<role>']);
+  const id = positionals[0]!;
+  const api = connect();
+  const role = roleNamed(await api.roles.list(), id, false);
+  if (role.builtin) throw new UsageError(`${id} ships with coffre, and stays: \`coffre roles reset ${id}\` puts it back as it ships`);
+  await api.roles.reset(id);
+  io.out.write(`removed ${id}\n`);
+}
+
+/**
+ * `coffre environments protect market/prod`: a person holds their role's
+ * protected column there (docs/design/roles.md); whoever manages the
+ * project's environments protects one, and only an Owner of the whole
+ * instance unprotects it.
+ */
+export async function environmentsProtect(connect: () => CoffreClient, args: string[], on: boolean, io: Io = STDIO): Promise<void> {
+  const { positionals } = parse(args, {}, ['<project>/<environment>']);
+  const { project, environment } = place(positionals[0]!, true);
+  const path = `${project}/${environment}`;
+  const { environment: now } = await connect().environments.protect(path, on);
+  io.out.write(now.protected
+    ? `${path} is protected: each role holds there what its protected column says, for people; service accounts as before\n`
+    : `${path} is not protected: each role holds there what it holds anywhere\n`);
 }
 
 // --- bearer tokens and personal tokens ---------------------------------------

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   administers,
   allows,
+  definitionOf,
   EVERYWHERE,
   grantKind,
   INSTANCE_ROLES,
@@ -11,12 +12,12 @@ import {
   mayManageAccess,
   normalScope,
   ownsInstance,
-  ROLES,
   runsInstance,
   type Filter,
   type InstanceRole,
   type Permission,
   type Place,
+  type Policy,
   type Role,
   type Scope,
 } from '@coffre/core/access';
@@ -230,13 +231,23 @@ export function scopeView(scope: Scope, known: PlaceRow[]): Scope {
  * environment of it: what a project's access list shows them for, beside
  * the grants it lists.
  */
-function roleReaches(role: InstanceRole, scope: Scope, project: PlaceRow, environment: string | undefined): boolean {
-  if (INSTANCE_ROLES[role].permissions.length === 0) return false;
+function roleReaches(policy: Policy, role: InstanceRole, scope: Scope, project: PlaceRow, environment: string | undefined): boolean {
+  if ((policy.instanceRoles[role] ?? INSTANCE_ROLES.member).permissions.length === 0) return false;
   const places = [
     ...(environment === undefined ? [placeOf(project, null)] : []),
     ...project.environments.filter((candidate) => environment === undefined || candidate.slug === environment).map((candidate) => placeOf(project, candidate)),
   ];
   return places.some((place) => inScope(scope, place));
+}
+
+/**
+ * A grant's role as a list names it, from the instance's policy: its name,
+ * and what it holds where nothing is protected. One the policy no longer
+ * defines goes by its id, and holds nothing.
+ */
+function roleShown(policy: Policy, role: Role): { roleName: string; permissions: Permission[] } {
+  const definition = definitionOf(policy, role);
+  return { roleName: definition?.name ?? role, permissions: [...(definition?.permissions ?? [])] };
 }
 
 /** Someone in the directory, as the rows and the vault's findings say. */
@@ -345,7 +356,7 @@ export async function listMembers(
       .sort(byPlace);
     const role = instanceRole(listed);
     const scope = scopeOf(listed);
-    const byRole = target !== undefined && managesPath && roleReaches(role, scope, target, path?.environment);
+    const byRole = target !== undefined && managesPath && roleReaches(caller.policy, role, scope, target, path?.environment);
     if (!everyone && visible.length === 0 && !byRole && !(managed && path === undefined)) continue;
     const ref = listed.member;
     const member = formatMember(ref);
@@ -364,8 +375,7 @@ export async function listMembers(
         project: grant.project,
         environment: grant.environment,
         role: grant.role,
-        roleName: ROLES[grant.role].name,
-        permissions: [...ROLES[grant.role].permissions],
+        ...roleShown(caller.policy, grant.role),
         expiresAt: grant.expiresAt,
       })),
     });
@@ -610,8 +620,7 @@ export async function memberAccess(ctx: ApiContext, member: MemberRef): Promise<
         project: grant.projectSlug,
         environment: grant.environmentSlug,
         role: held,
-        roleName: ROLES[held].name,
-        permissions: [...ROLES[held].permissions],
+        ...roleShown(caller.policy, held),
         expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
       };
     })

@@ -3,25 +3,37 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   allows,
   assignableToEnvironment,
+  DEFAULT_POLICY,
+  definitionProblem,
+  EVERY_ENVIRONMENT,
   EVERYWHERE,
+  FIXED_ROLES,
   givesService,
   grantKind,
+  INSTANCE_ROLES,
+  isBuiltinRole,
   isCredentialScope,
   isInstanceRole,
   isRole,
   isScope,
   managesService,
   mayManageAccess,
+  normalDefinition,
   normalScope,
   NOTHING,
   ownsInstance,
+  PROJECT_ONLY_PERMISSIONS,
+  ROLE_ID,
+  ROLES,
   runsInstance,
   setsUpServices,
   type Holdings,
   type InstanceRole,
   type Permission,
   type Place,
+  type Policy,
   type Role,
+  type RoleDefinition,
   type Scope,
   type ServiceAccount,
   withinCredential,
@@ -51,6 +63,7 @@ import {
   type AccessChange,
   type AccessFault,
   type AdmitInput,
+  type ChangePolicyInput,
   type Admitted,
   type Checkpoint,
   type CheckpointKey,
@@ -61,6 +74,7 @@ import {
   type LogHead,
   type LogVerification,
   type Outcome,
+  type PolicyChange,
   type Purpose,
   type ReferenceInput,
   type Refusal,
@@ -217,6 +231,21 @@ const SETTINGS = 'settings.change';
 
 /** The settings before anyone changed them: people set up service accounts anywhere they hold access. */
 const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
+
+/** The action of the vault's entry that holds the instance's access policy, and changes it (`policy`). */
+const POLICY = 'policy.change';
+
+/**
+ * What a `policy.change` entry keeps: the roles an Owner edited or made,
+ * each whole, and the protected environments. A role as it ships is kept by
+ * none, so a release that changes a default changes it where nobody edited it.
+ */
+type PolicyEdits = { roles: Record<string, RoleDefinition>; instanceRoles: Partial<Record<InstanceRole, RoleDefinition>>; protected: string[] };
+
+const NO_EDITS: PolicyEdits = { roles: {}, instanceRoles: {}, protected: [] };
+
+/** The policy when the log has some, but none the vault wrote within reach: every environment protected, every role as it ships. */
+const CLOSED_POLICY: Policy = { ...DEFAULT_POLICY, protected: [EVERY_ENVIRONMENT] };
 
 /** The settings when the log has some, but none the vault wrote within reach: people set up no service accounts. */
 const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, environments: 'all' } };
@@ -1502,17 +1531,20 @@ class VaultService implements Vault {
     if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
     const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
     const { role, scope } = roleOf(principal, row);
+    // Every decision about them reads the policy: their roles as an Owner edited them, and which environments are protected.
+    const { policy } = await this.#policyAt(db, reports);
+    const service = !principal.startsWith('user:');
     return {
       principal,
       status: 'active',
-      live: { role, scope, grants: held.filter((grant) => live(grant, at)) },
-      all: { role, scope, grants: held },
+      live: { role, scope, grants: held.filter((grant) => live(grant, at)), policy, service },
+      all: { role, scope, grants: held, policy, service },
       fault,
       stored: grants,
     };
   }
 
-  #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean): Access {
+  #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean, policy: Policy): Access {
     const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
     return {
       principal,
@@ -1522,6 +1554,7 @@ class VaultService implements Vault {
       grants: active ? held.filter((grant) => live(grant, at) && grantKind(grant) !== null).map(view) : [],
       since: row ? iso(row.statusChangedAt) : null,
       by: row?.statusChangedBy ?? null,
+      policy,
     };
   }
 
@@ -1549,7 +1582,8 @@ class VaultService implements Vault {
     const read = async (db: Queryable, reports: NewEntry[]) => {
       const [row, held, at] = await Promise.all([store.member(db, principal), store.grants(db, principal), this.#now(db)]);
       const fault = await this.#integrity(db, principal, row, held, reports);
-      return this.#access(principal, row, held, at, fault !== null);
+      const { policy } = await this.#policyAt(db, reports);
+      return this.#access(principal, row, held, at, fault !== null, policy);
     };
     const found: NewEntry[] = [];
     const quick = await read(this.#db, found).catch((error: unknown) => {
@@ -1608,6 +1642,8 @@ class VaultService implements Vault {
       validateCorrelation(input);
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
       const places = new Set<string>();
+      // The roles as the policy defines them now: a role an Owner made is granted as one that ships.
+      const { policy } = await this.#policyAt(d.tx, d.reports);
       for (const change of changes) {
         if (grantKind(change) === null) {
           throw refused('invalid', change.projectId === null && change.environmentId === null
@@ -1617,8 +1653,8 @@ class VaultService implements Vault {
         const key = placeKey(change);
         if (places.has(key)) throw refused('invalid', 'each place may be changed once per call');
         places.add(key);
-        if (change.role !== null && !isRole(change.role)) throw refused('invalid', `no such role: ${change.role}`);
-        if (change.role !== null && change.environmentId !== null && !assignableToEnvironment(change.role)) {
+        if (change.role !== null && (typeof change.role !== 'string' || !isRole(change.role, policy))) throw refused('invalid', `no such role: ${change.role}`);
+        if (change.role !== null && change.environmentId !== null && !assignableToEnvironment(change.role, policy)) {
           throw refused('invalid', `${change.role} can only be granted on a project`);
         }
         const expiresAt = change.expiresAt === null ? null : Date.parse(change.expiresAt);
@@ -1958,6 +1994,119 @@ class VaultService implements Vault {
     if (typeof entry === 'string') return CLOSED_SETTINGS;
     const { serviceAccounts } = JSON.parse(entry.metadata) as { serviceAccounts?: unknown };
     return isScope(serviceAccounts) ? { serviceAccounts } : CLOSED_SETTINGS;
+  }
+
+  // --- the instance's access policy -------------------------------------------
+
+  async policy(): Promise<Policy> {
+    await this.#settled();
+    const reports: NewEntry[] = [];
+    const { policy } = await this.#policyAt(this.#db, reports);
+    await this.#record(reports);
+    return policy;
+  }
+
+  /**
+   * The policy the vault's newest `policy.change` says, by its MAC, and its
+   * edits: one in its name it did not write is passed over, and reported.
+   * With such entries and none of its own within reach, every environment
+   * is protected: otherwise whoever can insert rows could unprotect them.
+   */
+  async #policyAt(db: Queryable, reports: NewEntry[]): Promise<{ policy: Policy; edits: PolicyEdits }> {
+    const entry = await newestAuthentic(
+      (before) => store.newestVaultEntries(db, POLICY, LOOK_BACK.page, before),
+      this.#check(reports, null),
+    );
+    if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS };
+    if (typeof entry === 'string') return { policy: CLOSED_POLICY, edits: NO_EDITS };
+    const edits = readEdits(JSON.parse(entry.metadata) as { policy?: unknown });
+    return edits === null ? { policy: CLOSED_POLICY, edits: NO_EDITS } : { policy: policyOf(edits), edits };
+  }
+
+  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy }>> {
+    const { actor, change } = input;
+    // Where a protection is, once its rows are found: its project, and its one environment if that has a row yet. A fork's,
+    // protected before its row is written, is named by the change alone, as the log's columns name only rows.
+    const at: { projectId?: string; environmentId?: string } = {};
+    const entry = (decision: 'allow' | 'deny', detail: Record<string, unknown>, code: RefusalCode | null = null): NewEntry => ({
+      actor,
+      action: POLICY,
+      decision,
+      code,
+      operationId: input.operationId ?? null,
+      requestId: input.requestId ?? null,
+      ...at,
+      metadata: JSON.stringify({ ...detail, ...traced(input) }),
+    });
+    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+      new Refused(refusal(code, message), [entry('deny', { change: describeChange(change) }, code)]);
+    return this.#decide([actor], async (d) => {
+      validateCorrelation(input);
+      const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
+      if (acting.status === 'tampered') throw refused('tampered');
+      if (acting.status !== 'active') throw refused(acting.status === 'removed' ? 'removed' : 'not_a_member');
+      // Under the log's head, so two changes at once each start from the one before.
+      await lockLogHead(d.tx);
+      const { policy: before, edits } = await this.#policyAt(d.tx, d.reports);
+      const next: PolicyEdits = { roles: { ...edits.roles }, instanceRoles: { ...edits.instanceRoles }, protected: [...edits.protected] };
+      const owner = acting.live.credentialScope == null && ownsInstance(acting.live);
+      if (change?.kind === 'role' || change?.kind === 'instance-role') {
+        // Roles are the whole instance's: an Owner of all of it alone changes them (R1, R15), never through a scoped credential.
+        if (!owner) throw refused('not_allowed', 'only an Owner of the whole instance edits roles');
+        const instance = change.kind === 'instance-role';
+        const fixed = instance ? FIXED_ROLES.instanceRoles.includes(change.role as InstanceRole) : FIXED_ROLES.roles.includes(change.role);
+        if (typeof change.role !== 'string' || fixed) throw refused('invalid', `${change.role} is not edited: it holds ${change.role === 'member' ? 'nothing' : 'everything'}, always`);
+        if (instance && !isInstanceRole(change.role)) throw refused('invalid', `no instance role ${change.role}: an Owner makes project roles`);
+        if (!instance && !isBuiltinRole(change.role) && !ROLE_ID.test(change.role)) throw refused('invalid', 'a role is named by lowercase letters, digits and dashes, 2 to 32, starting with a letter');
+        const table = instance ? next.instanceRoles as Record<string, RoleDefinition> : next.roles;
+        if (change.definition === null) {
+          // Put back as it ships, or, one an Owner made, gone: while no grant names it.
+          if (!instance && !isBuiltinRole(change.role)) {
+            if (table[change.role] === undefined) throw refused('invalid', `no role ${change.role}`);
+            const held = await store.grantsNaming(d.tx, change.role);
+            if (held > 0) throw refused('invalid', `${held === 1 ? '1 grant names' : `${held} grants name`} ${change.role}: revoke ${held === 1 ? 'it' : 'them'} first`);
+          }
+          delete table[change.role];
+        } else {
+          const problem = definitionProblem(change.definition);
+          if (problem !== null) throw refused('invalid', problem);
+          const definition = normalDefinition(change.definition);
+          // A project role granted on an environment keeps no project-wide permission while any grant there names it.
+          if (!instance && definition.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission)) && (await store.grantsNaming(d.tx, change.role, { onEnvironments: true })) > 0) {
+            throw refused('invalid', `${change.role} is granted on environments: a project-wide permission would make those grants incoherent`);
+          }
+          const shipped = instance ? INSTANCE_ROLES[change.role as InstanceRole] : isBuiltinRole(change.role) ? ROLES[change.role] : undefined;
+          if (shipped !== undefined && JSON.stringify(normalDefinition(shipped)) === JSON.stringify(definition)) delete table[change.role];
+          else table[change.role] = definition;
+        }
+      } else if (change?.kind === 'protect') {
+        if (typeof change.projectId !== 'string' || !UUID.test(change.projectId) || !Array.isArray(change.environmentIds) || change.environmentIds.length === 0
+          || change.environmentIds.some((id) => typeof id !== 'string' || !UUID.test(id)) || typeof change.protected !== 'boolean') {
+          throw refused('invalid', 'protection names a project and some of its environments, by id, and whether they are protected');
+        }
+        if (!(await store.projectLive(d.tx, change.projectId))) throw refused('invalid', 'no such project');
+        at.projectId = change.projectId;
+        // Each a live environment of the project, or none yet: a fork's id, protected before its row is written.
+        const found = await store.environmentsById(d.tx, change.environmentIds);
+        if ([...found.values()].some((environment) => environment.projectId !== change.projectId)) throw refused('invalid', 'each environment is one of the project\'s');
+        if (change.environmentIds.length === 1 && found.has(change.environmentIds[0]!)) at.environmentId = change.environmentIds[0];
+        if (change.protected) {
+          if (!allows(acting.live, 'environment.manage', { projectId: change.projectId })) throw refused('not_allowed', 'protecting an environment takes managing its project\'s environments');
+          next.protected = [...new Set([...next.protected, ...change.environmentIds])].sort();
+        } else {
+          // Unprotecting widens what people hold there: an Owner of the whole instance's to do (R15).
+          if (!owner) throw refused('not_allowed', 'only an Owner of the whole instance unprotects an environment');
+          next.protected = next.protected.filter((id) => !change.environmentIds.includes(id));
+        }
+      } else {
+        throw refused('invalid', 'a change is to a role, an instance role, or protection');
+      }
+      const policy = policyOf(next);
+      if (JSON.stringify(next) !== JSON.stringify(edits)) {
+        d.log.push(entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) }));
+      }
+      return { policy };
+    });
   }
 
   setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>> {
@@ -2812,6 +2961,41 @@ function view(grant: GrantRow): Grant {
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
+}
+
+/** A policy entry's edits, checked as the vault wrote them, or null for any that does not hold. */
+function readEdits(stored: { policy?: unknown }): PolicyEdits | null {
+  const edits = stored.policy as Partial<PolicyEdits> | undefined;
+  if (typeof edits !== 'object' || edits === null) return null;
+  const { roles, instanceRoles, protected: protectedIds } = edits;
+  if (typeof roles !== 'object' || roles === null || typeof instanceRoles !== 'object' || instanceRoles === null || !Array.isArray(protectedIds)) return null;
+  const defined = (table: object) => Object.values(table).every((definition) => definitionProblem(definition as RoleDefinition) === null);
+  if (!defined(roles) || !defined(instanceRoles) || Object.keys(instanceRoles).some((role) => !isInstanceRole(role))) return null;
+  if (protectedIds.some((id) => typeof id !== 'string' || !UUID.test(id))) return null;
+  return { roles: roles as Record<string, RoleDefinition>, instanceRoles: instanceRoles as PolicyEdits['instanceRoles'], protected: protectedIds as string[] };
+}
+
+/** The policy edits make of the roles as they ship: each edited role replaced, each made one added. */
+function policyOf(edits: PolicyEdits): Policy {
+  return {
+    roles: { ...ROLES, ...edits.roles },
+    instanceRoles: { ...INSTANCE_ROLES, ...edits.instanceRoles },
+    protected: edits.protected,
+  };
+}
+
+/** A change, as its entry names it. */
+function describeChange(change: PolicyChange | undefined): Record<string, unknown> | null {
+  if (change === undefined || change === null || typeof change !== 'object') return null;
+  if (change.kind === 'protect') return { kind: 'protect', projectId: change.projectId, environmentIds: change.environmentIds, protected: change.protected };
+  return { kind: change.kind, role: change.role, definition: change.definition };
+}
+
+/** What a change changed, as it was: the role's definition, or which environments were protected. */
+function describeBefore(change: PolicyChange, before: Policy): Record<string, unknown> {
+  if (change.kind === 'protect') return { protected: change.environmentIds.filter((id) => before.protected.includes(id)) };
+  const table = change.kind === 'instance-role' ? before.instanceRoles as Record<string, RoleDefinition> : before.roles;
+  return { definition: Object.hasOwn(table, change.role) ? table[change.role] : null };
 }
 
 /** A secret's binding context: its ids, a personal config's owner, hashed, as the decision read it, and whether it is sensitive. */

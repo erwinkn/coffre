@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
+import { ROLES } from '@coffre/core/access';
 import { defineSignin, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { unsealedCredentials } from '@coffre/db/grants';
 import { and, asc, eq, inArray } from 'drizzle-orm';
@@ -260,7 +261,9 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
     .from(auditLog)
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow')));
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
-  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer' }]);
+  // With what viewer held when it was issued, both columns: a role widened later widens no credential.
+  const viewer = { normal: [...ROLES.viewer.permissions], protected: [...ROLES.viewer.protected] };
+  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: viewer }]);
 });
 
 test("a scope changed or cleared around the app fails the row's MAC, and the token is refused", async () => {

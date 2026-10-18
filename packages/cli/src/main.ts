@@ -70,7 +70,7 @@ import {
   Unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { assignableToEnvironment, credentialScopeInWords, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
+import { credentialScopeInWords, ROLE_ID } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 import { regenerateWrite, type GeneratedWrite } from '@coffre/core/recipe';
 
@@ -1472,7 +1472,8 @@ async function grantAccess(args: string[]): Promise<void> {
   manage.onAProject(project);
 
   const role = values.role;
-  if (!isRole(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
+  // Which roles the instance defines, it says: one an Owner made is granted as one that ships.
+  if (!ROLE_ID.test(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
   const scope = values.env ? `${project}/${values.env}` : project;
   const who = memberOf(principalId, values.service);
   // A member is admitted before they hold anything: grant does not make one.
@@ -1715,19 +1716,6 @@ async function offboard(args: string[]): Promise<void> {
   }
 }
 
-function roles(args: string[]): void {
-  parse(args, {}, []);
-  process.stdout.write('Instance roles, a person\'s across every project in their scope (coffre admit --role):\n');
-  for (const [slug, role] of Object.entries(INSTANCE_ROLES)) {
-    process.stdout.write(`  ${slug.padEnd(16)} ${role.permissions.length === 0 ? 'nothing: only what grants give' : role.permissions.join(', ')}\n`);
-  }
-  process.stdout.write('\nProject roles, a grant on a project or an environment (coffre grant --role):\n');
-  for (const [slug, role] of Object.entries(ROLES)) {
-    const scope = assignableToEnvironment(slug as Role) ? 'project or env' : 'project only';
-    process.stdout.write(`  ${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
-  }
-}
-
 async function audit(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -1900,7 +1888,12 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'environments archive': (args) => manage.environmentsArchive(connect, args, true),
   'environments unarchive': (args) => manage.environmentsArchive(connect, args, false),
   'environments delete': (args) => manage.placeDelete(connect, args, true),
-  roles,
+  'environments protect': (args) => manage.environmentsProtect(connect, args, true),
+  'environments unprotect': (args) => manage.environmentsProtect(connect, args, false),
+  roles: (args) => manage.roles(connect, args),
+  'roles set': (args) => manage.rolesSet(connect, args),
+  'roles reset': (args) => manage.rolesReset(connect, args),
+  'roles remove': (args) => manage.rolesRemove(connect, args),
   access: whoHasAccess,
   admit: (args) => manage.admit(connect, args),
   grant: grantAccess,

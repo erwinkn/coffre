@@ -55,6 +55,7 @@ import {
   Tip,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
+import { ProtectedTag } from '../components/protected';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
 import { RecipeMark, RegenerateSecret } from '../components/regenerate';
@@ -153,6 +154,7 @@ export function EnvironmentPage() {
       keys={result.keys}
       parents={result.parents ?? []}
       personal={result.personal != null}
+      guarded={result.protected}
       rotateAfterDays={result.rotateAfterDays}
     />
   );
@@ -167,6 +169,7 @@ function EnvironmentLedger({
   keys,
   parents,
   personal,
+  guarded,
   rotateAfterDays,
 }: {
   project: string;
@@ -177,6 +180,8 @@ function EnvironmentLedger({
   parents: string[];
   /** Your personal config, `dev@me`: its values yours alone. */
   personal: boolean;
+  /** Protected (docs/design/roles.md): you hold your role's protected column here, a personal config as its parent. */
+  guarded: boolean;
   /** Days a value may go unchanged before it is flagged for rotation; null for no flag. */
   rotateAfterDays: number | null;
 }) {
@@ -535,6 +540,7 @@ function EnvironmentLedger({
       <PageHeader
         tile={project}
         title={environment}
+        aside={guarded && <ProtectedTag />}
         actions={personal ? (
           <DeletePersonal project={project} environment={environment} of={parents[0]!} />
         ) : principal?.type === 'user' && canList && (

@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **Protected environments, and roles an Owner edits.** Each role now
+  holds permissions in two columns: in an environment that is not
+  protected, and in one that is. A person in a protected environment
+  holds the second; a service account holds the first everywhere, so CI
+  reads what it read. As they ship, Viewer, Developer and Maintainer
+  drop read in a protected environment, and keep use and write:
+
+  ```sh
+  coffre environments protect market/prod   # whoever manages market's environments
+  coffre roles developer                     # secret.read  yes  protected: no
+  ```
+
+  Ada, a Developer of `market`, reads `market/dev` as before; in
+  `market/prod` her reveal is refused and `coffre run` gives her app
+  placeholders. No environment is protected until someone says so, so
+  nobody's access changes on upgrade. Only an Owner of the whole
+  instance unprotects one, and a fork of a protected environment, a copy
+  or one that inherits, is protected before its row exists. Settings ›
+  Roles, or `coffre roles set` and `reset`, lets an Owner of the whole
+  instance edit any role but Owner and the instance's Member, and make
+  custom ones (`release-manager`), granted as any is and deleted once no
+  grant names one; each change is previewed in words first ("Widens
+  secret.read for 6 people on 4 protected environments") and logged as
+  `policy.change`. The vault keeps roles and protection in its newest
+  `policy.change` entry, under its MAC, and decides on them. A token, a
+  service token or a trust binding keeps what its roles held when it was
+  issued, so a role widened later widens no credential, and one narrowed
+  narrows each at once; one issued before 0.10 holds its role as it
+  shipped. The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
+  and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and
+  `PATCH /api/projects/<p>/<e>` with `{ "protected": true }`. Migration
+  `0014_custom_roles` widens the grants' role check. See
+  docs/design/roles.md.
 - **Breaking: each key says who sees its value, and `people` and
   `expose` are gone.** One setting per key, three levels:
   - `plain`: anyone who lists the environment, as 0.9's plain values.

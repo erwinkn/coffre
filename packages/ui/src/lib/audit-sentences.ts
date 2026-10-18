@@ -8,7 +8,7 @@
  * and places in it links. `plain` flattens it, for tests and titles.
  */
 import { shownMember, type AuditEntryView } from '@coffre/client';
-import { INSTANCE_ROLES, isInstanceRole, isScope, scopeInWords, type Scope } from '@coffre/core/access';
+import { INSTANCE_ROLES, isBuiltinRole, isInstanceRole, isScope, ROLES, scopeInWords, type Scope } from '@coffre/core/access';
 
 /** What a sentence is made from: an entry of the log, as `GET /api/audit` gives it. */
 export type AuditEntry = Pick<
@@ -400,6 +400,12 @@ const TEMPLATES: Record<string, Template> = {
       return setting(previous).map((words) => `, was ${words}`);
     },
   },
+  // The roles an Owner edits and which environments are protected (docs/design/roles.md), the vault's to change.
+  'policy.change': {
+    did: ({ entry }) => POLICY_VERBS[policyOf(entry).verb][0],
+    tried: ({ entry }) => POLICY_VERBS[policyOf(entry).verb][1],
+    what: ({ entry }) => policyOf(entry).what,
+  },
   // A binding trusts CI runs to sign in as a service; removing one is its tombstone.
   'token.bind': {
     did: 'trusted CI runs to sign in as',
@@ -518,6 +524,56 @@ function intoFolder(entry: AuditEntry): Part[] {
 /** An instance role's name, from its slug; null for none it knows. */
 function roleName(role: string): string | null {
   return isInstanceRole(role) ? INSTANCE_ROLES[role].name : null;
+}
+
+/** What a policy change did, and what it did it to, as `did` and `tried` say it. */
+const POLICY_VERBS = {
+  protect: ['protected', 'protect'],
+  unprotect: ['unprotected', 'unprotect'],
+  edit: ['edited', 'edit'],
+  reset: ['reset', 'reset'],
+  make: ['made', 'make'],
+  delete: ['deleted', 'delete'],
+} as const;
+
+/**
+ * A `policy.change` entry, from what it names: its `change`, an
+ * environment's protection or a role's definition, and the role `before`
+ * it. A built-in role's definition dropped is a reset; one an Owner made, a
+ * deletion; one that was not there, made. A refusal the app wrote names the
+ * role alone.
+ *
+ *   protected market/prod             edited the Developer role
+ *   made the Release manager role     reset the Auditor instance role
+ */
+function policyOf(entry: AuditEntry): { verb: keyof typeof POLICY_VERBS; what: Part[] } {
+  const change = record(entry.metadata.change);
+  if (change.kind === 'protect') {
+    const count = Array.isArray(change.environmentIds) ? change.environmentIds.length : 1;
+    // A fork's, protected before its row is written, names its project alone.
+    const what: Part[] = entry.environment !== null
+      ? place({ ...entry, key: null })
+      : entry.project === null
+        ? [count === 1 ? 'an environment' : plural(count, 'environment')]
+        : [count === 1 ? 'a new environment of ' : `${plural(count, 'environment')} of `, { place: entry.project }];
+    return { verb: change.protected === false ? 'unprotect' : 'protect', what };
+  }
+  const instance = (change.kind ?? entry.metadata.kind) === 'instance-role';
+  const id = text(change.role) ?? text(entry.metadata.role);
+  const shipped = id !== null && (instance ? isInstanceRole(id) : isBuiltinRole(id));
+  const definition = change.definition === null ? null : record(change.definition);
+  const before = record(entry.metadata.before);
+  const name = text(definition?.name) ?? text(record(before.definition).name)
+    ?? (id === null ? null : shipped ? (instance ? INSTANCE_ROLES[id as keyof typeof INSTANCE_ROLES] : ROLES[id as keyof typeof ROLES]).name : id);
+  const verb = change.definition === null || entry.reason === 'role_granted'
+    ? (shipped ? 'reset' : 'delete')
+    : before.definition === null ? 'make' : 'edit';
+  return { verb, what: [name === null ? 'a role' : `the ${name} ${instance ? 'instance role' : 'role'}`] };
+}
+
+/** An object of the metadata's, or an empty one for anything else. */
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function article(name: string): string {
@@ -642,6 +698,7 @@ const REASONS: Record<string, string> = {
   disconnected: 'the app was disconnected',
   personal_token: 'only its person can, signed in as themselves',
   beyond_holder: 'more than they hold',
+  role_granted: 'grants still name it',
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

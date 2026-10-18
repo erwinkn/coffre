@@ -20,7 +20,7 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
-import { instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
@@ -317,7 +317,8 @@ function archiving(archived: boolean): Tool {
   });
 }
 
-const role = z.enum(ROLE_NAMES);
+/** A role by id: one that ships, or one an Owner made, which the API checks against the instance's policy. */
+const role = roleId;
 /**
  * What a token or a binding will reach, as the server would make it now,
  * as the page says it, and its basis: Approve reads it again and is refused
@@ -592,7 +593,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         changes: z
           .record(z.string().min(1).max(200), accessChange)
           .refine((changes) => Object.keys(changes).length > 0 && Object.keys(changes).length <= 50, 'name from 1 to 50 places')
-          .describe(`Each place, a project or project/environment, with the role to hold there (${ROLE_NAMES.join(', ')}; { role, until } for one that ends), or null to revoke it`),
+          .describe(`Each place, a project or project/environment, with the role to hold there (${ROLE_NAMES.join(', ')}, or one the instance's Owners made; { role, until } for one that ends), or null to revoke it`),
       })
       .strict(),
     names: ({ member, changes }) => [apiMember(member), ...Object.keys(changes)],
@@ -638,7 +639,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         .record(z.string().min(1).max(200), accessChange)
         .refine((access) => Object.keys(access).length > 0 && Object.keys(access).length <= 50, 'name from 1 to 50 places')
         .optional()
-        .describe(`A service account's first grants, as set_access takes them: each place, a project or project/environment, with its role (${ROLE_NAMES.join(', ')}; { role, until } for one that ends)`),
+        .describe(`A service account's first grants, as set_access takes them: each place, a project or project/environment, with its role (${ROLE_NAMES.join(', ')}, or one the instance's Owners made; { role, until } for one that ends)`),
     }).strict(),
     names: ({ member, access }) => [apiMember(member), ...Object.keys(access ?? {})],
     change: {

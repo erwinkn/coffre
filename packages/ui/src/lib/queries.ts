@@ -64,6 +64,7 @@ export const keys = {
   audit: ['audit'],
   auditKeys: ['audit', 'keys'],
   settings: ['settings'],
+  roles: ['roles'],
 } satisfies Record<string, QueryKey | ((...args: never[]) => QueryKey)>;
 
 /** Members' grants, as rows, and a row for each one whose instance role reaches the place listed. */
@@ -291,6 +292,14 @@ export const queries = {
       queryFn: () => (allowed ? uiResult(() => client.settings.get()) : Promise.resolve(null)),
     }),
 
+  /**
+   * The instance's roles and instance roles, as an Owner edited and made
+   * them (docs/design/roles.md), and whether the caller edits them. Any
+   * member reads them: they are what every grant picker offers.
+   */
+  roles: (client: CoffreClient) =>
+    queryOptions({ queryKey: keys.roles, queryFn: () => uiResult(() => client.roles.list()) }),
+
   /** A page of the log, as filtered: always read fresh. */
   auditEntries: (client: CoffreClient, search: AuditSearch) =>
     queryOptions({
@@ -494,6 +503,7 @@ export async function loadSettings(queryClient: QueryClient, client: CoffreClien
     loadDirectory(queryClient, client),
     queryClient.fetchQuery(queries.settings(client, shell.capabilities.runsInstance)),
     queryClient.fetchQuery(queries.auditKeys(client, shell.capabilities.runsInstance)),
+    queryClient.fetchQuery(queries.roles(client)),
   ]);
 }
 
@@ -674,6 +684,12 @@ export const affects = {
    * may do, which the directory and `/me` say.
    */
   settings: (): QueryKey[] => [keys.settings, keys.me, keys.directory],
+  /**
+   * A role edited, made, reset or deleted, or an environment protected:
+   * what everyone holds may change, so the roles, what you hold, and every
+   * grant and environment read with what it holds.
+   */
+  roles: (): QueryKey[] => [keys.roles, keys.me, keys.projects, ['grants'], ['member-access'], ['secrets']],
   credentials: (member: string): QueryKey[] => [keys.credentials(member)],
   bindings: (member: string): QueryKey[] => [keys.bindings(member)],
   /** Unlinking an account also ends the sessions it signed in. */

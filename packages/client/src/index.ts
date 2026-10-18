@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, InheritResult, KeysPlan, SetResult, TokenPlan } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, InheritResult, KeysPlan, RoleImpact, SetResult, TokenPlan } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -29,7 +29,9 @@ export type {
   DismissedKey,
   DryRunOutcome,
   DryRunResult,
+  EnvironmentView,
   IdentityRow,
+  ImpactLine,
   InheritResult,
   KeysPlan,
   ListedReference,
@@ -42,6 +44,9 @@ export type {
   ProjectSummary,
   ReferenceView,
   RemovedMember,
+  RoleImpact,
+  RolesView,
+  RoleView,
   SecretKey,
   SecretVersion,
   SessionRow,
@@ -196,6 +201,12 @@ export function createClient(options: ClientOptions) {
         call('PUT /projects/:project/:environment', place(path), input),
       update: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment'>) =>
         call('PATCH /projects/:project/:environment', place(path), patch),
+      /**
+       * Protected, a person holds their role's protected column there
+       * (docs/design/roles.md); whoever manages the project's environments
+       * protects one, and only an Owner of the whole instance unprotects it.
+       */
+      protect: (path: string, on = true) => call('PATCH /projects/:project/:environment', place(path), { protected: on }),
       /** What deleting an archived environment would erase and revoke; changes nothing. */
       previewDelete: (path: string) => {
         const [method, route] = address('DELETE /projects/:project/:environment', place(path));
@@ -393,6 +404,32 @@ export function createClient(options: ClientOptions) {
     apps: {
       list: () => call('GET /apps', {}),
       disconnect: (id: string) => call('DELETE /apps/:id', { id }),
+    },
+
+    /**
+     * The instance's roles, in two columns, an environment's that is not
+     * protected and one's that is (docs/design/roles.md). Any member lists
+     * them; an Owner of the whole instance edits them. `instance` is about
+     * instance roles, a person's across every project in their scope.
+     */
+    roles: {
+      list: () => call('GET /roles', {}),
+      /** What defining the role so would do to everyone it reaches; changes nothing. */
+      preview: (role: string, definition: RouteInput<'PUT /roles/:role'>, { instance = false } = {}) => {
+        const [method, route] = instance ? address('PUT /instance-roles/:role', { role }) : address('PUT /roles/:role', { role });
+        return send(method, `${route}?dryRun=1`, definition) as Promise<RoleImpact>;
+      },
+      /** A built-in role edited, or one an Owner makes. */
+      set: (role: string, definition: RouteInput<'PUT /roles/:role'>, { instance = false } = {}) =>
+        (instance ? call('PUT /instance-roles/:role', { role }, definition) : call('PUT /roles/:role', { role }, definition)) as Promise<{ role: RouteOutput<'GET /roles'>['roles'][number] | null }>,
+      /** What putting it back as it ships, or deleting one an Owner made, would do; changes nothing. */
+      previewReset: (role: string, { instance = false } = {}) => {
+        const [method, route] = instance ? address('DELETE /instance-roles/:role', { role }) : address('DELETE /roles/:role', { role });
+        return send(method, `${route}?dryRun=1`, undefined) as Promise<RoleImpact>;
+      },
+      /** A built-in role back as it ships; one an Owner made, deleted, while no grant names it. */
+      reset: (role: string, { instance = false } = {}) =>
+        (instance ? call('DELETE /instance-roles/:role', { role }) : call('DELETE /roles/:role', { role })) as Promise<{ role: RouteOutput<'GET /roles'>['roles'][number] | null }>,
     },
 
     /** The instance's settings, for those who run it: where people set up service accounts themselves. */

@@ -27,6 +27,7 @@ import {
   GitHub,
   Key,
   Ledger,
+  Lock,
   Mark,
   Menu as MenuIcon,
   PanelLeft,
@@ -506,6 +507,9 @@ function EnvironmentCrumb({
   slug: string;
   environments: ProjectSummary['environments'];
 }) {
+  // Protected, it says so where you are and in the list.
+  const guarded = environments.some((environment) => environment.slug === slug && environment.protected);
+  const lock = <Lock size={12} className="crumb-lock" label="protected" />;
   if (environments.length === 0) {
     return (
       <span className="crumb-link" aria-current="page">
@@ -517,10 +521,11 @@ function EnvironmentCrumb({
     <Menu.Root>
       <Menu.Trigger
         className="crumb-link crumb-switch"
-        aria-label={`${slug}, switch environment`}
+        aria-label={`${slug}${guarded ? ', protected' : ''}, switch environment`}
         aria-current="page"
       >
         <span className="crumb-name">{slug}</span>
+        {guarded && <Lock size={12} className="crumb-lock" />}
         <ChevronsUpDown size={14} className="crumb-chevron" />
       </Menu.Trigger>
       <MenuPopup align="start">
@@ -541,6 +546,7 @@ function EnvironmentCrumb({
               }
             >
               <span className="mono">{environment.slug}</span>
+              {environment.protected && lock}
               <span className="menu-hint">
                 {environment.details?.secretCount ?? 0} secret
                 {environment.details?.secretCount === 1 ? '' : 's'}

@@ -1,0 +1,269 @@
+// Protected environments, and roles an Owner edits (docs/design/roles.md),
+// through the API: whoever manages a project's environments protects one,
+// and a person there holds their role's protected column, a service account
+// its other one; only an Owner of the whole instance unprotects one, and
+// edits or makes roles, each change weighed first. A credential keeps what
+// its roles held when it was issued: a role widened later widens none, and
+// one narrowed narrows each at once, through its holder.
+import test, { after, before, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createClient, type CoffreClient, type RoleView } from '@coffre/client';
+import { ROLES } from '@coffre/core/access';
+import { defineSignin, github } from '@coffre/core/identity';
+import { asc, eq } from 'drizzle-orm';
+
+import { SigninService } from '../src/api/signin.ts';
+import { fetchApi } from '../src/fetch-api.ts';
+import type { CoffreRuntime } from '../src/runtime.ts';
+import { auditLog } from './db/tables.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+
+const ORIGIN = 'https://secrets.acme.example';
+const ROOT = 'admin@acme.example';
+const ADA = 'user:ada@acme.example';
+const BOB = 'user:bob@acme.example';
+const MAYA = 'user:maya@acme.example';
+const VIC = 'user:vic@acme.example';
+const CI = 'token:ci';
+const SIGNIN = defineSignin({ publicUrl: ORIGIN, providers: [github({ clientId: 'a', clientSecret: 'b' })] });
+
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
+let deps: FixtureDeps;
+let runtime: CoffreRuntime;
+let root: CoffreClient;
+/** A Developer of market. */
+let ada: CoffreClient;
+/** A Maintainer of market, who manages its environments. */
+let maya: CoffreClient;
+/** A Viewer of market. */
+let vic: CoffreClient;
+/** A service account, a Viewer of market/prod. */
+let ci: CoffreClient;
+
+before(async () => {
+  db = await openTestDatabase();
+});
+
+after(async () => {
+  await db.close();
+});
+
+beforeEach(async () => {
+  await resetDatabase(db.owner);
+  deps = testDeps(db.runtime, [ROOT]);
+  const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
+  deps.signin = signin;
+  runtime = {
+    db: deps.db,
+    vault: deps.vault,
+    chainKey: deps.chainKey,
+    signin,
+    workloads: null,
+    mcp: null,
+    auth: { mode: 'signin', signin: SIGNIN },
+    publicUrl: ORIGIN,
+    verifier: signin,
+    waitUntil,
+    schema: { migrated: true },
+    rotateAfterDays: 365,
+    plugins: [],
+  } as CoffreRuntime;
+  root = clientFor(deps, ROOT);
+  ada = clientFor(deps, 'ada@acme.example');
+  maya = clientFor(deps, 'maya@acme.example');
+  vic = clientFor(deps, 'vic@acme.example');
+  ci = clientFor(deps, 'ci', 'service');
+  await root.projects.create('market');
+  for (const environment of ['dev', 'prod']) {
+    await root.environments.create(`market/${environment}`);
+    await root.secrets.set(`market/${environment}`, { API_KEY: `${environment}-key` });
+  }
+  for (const [member, access] of [[ADA, { market: 'developer' }], [MAYA, { market: 'maintainer' }], [VIC, { market: 'viewer' }], [CI, { 'market/prod': 'viewer' }]] as const) {
+    await root.members.add(member);
+    await root.access.set(member, access);
+  }
+});
+
+/** The API as a request with this bearer token sees it, through the app's front door. */
+function bearer(token: string): CoffreClient {
+  return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => fetchApi(request, runtime, { sourceIp: null }) });
+}
+
+/** The status a call answers with, or 200. */
+async function status(call: Promise<unknown>): Promise<number> {
+  try {
+    await call;
+    return 200;
+  } catch (error) {
+    return (error as { status: number }).status;
+  }
+}
+
+async function actions(): Promise<string[]> {
+  const rows = await db.owner.select({ action: auditLog.action, decision: auditLog.decision }).from(auditLog).orderBy(asc(auditLog.seq));
+  return rows.map((row) => `${row.action} ${row.decision}`);
+}
+
+const protectedOf = async (client: CoffreClient, path: string) => {
+  const [project, environment] = path.split('/');
+  const listed = (await client.projects.list()).projects.find((each) => each.slug === project)!;
+  return listed.environments.find((each) => each.slug === environment)!.protected;
+};
+
+test('protecting prod narrows a Developer there to use and write, while a service account Viewer still reads it', async () => {
+  assert.equal(await status(ada.secrets.reveal('market/prod')), 200, 'before it is protected');
+  // A Maintainer manages market's environments, and protects one.
+  assert.equal((await maya.environments.protect('market/prod')).environment.protected, true);
+  assert.equal(await protectedOf(ada, 'market/prod'), true);
+  assert.equal(await protectedOf(ada, 'market/dev'), false);
+  const listed = await ada.secrets.list('market/prod');
+  assert.equal(listed.protected, true);
+  assert.deepEqual(listed.permissions, ['secret.use', 'secret.write']);
+  assert.equal(await status(ada.secrets.reveal('market/prod')), 403);
+  assert.equal(await status(ada.secrets.reveal('market/dev')), 200, 'dev reads as before');
+  assert.equal(await status(ada.secrets.set('market/prod', { API_KEY: 'rotated' })), 200, 'she sets values she does not read');
+  // CI, a Viewer of prod, reads it as it always did: the protected column is a person's.
+  assert.deepEqual((await ci.secrets.reveal('market/prod')).values, { API_KEY: 'rotated' });
+  const entry = (await db.owner.select().from(auditLog).where(eq(auditLog.action, 'policy.change')))[0]!;
+  assert.equal(entry.author, 'vault');
+  assert.equal(entry.actor, MAYA);
+  // The log lists it, beside what people did, not as a technical detail.
+  const page = await root.audit.list({ limit: 20 });
+  assert.ok(page.entries.some((listed) => listed.action === 'policy.change' && !listed.detail && listed.environment === 'prod'));
+});
+
+test('only an Owner of the whole instance unprotects an environment, or edits a role', async () => {
+  await maya.environments.protect('market/prod');
+  // A Developer manages no environment; a Maintainer protects but never unprotects.
+  assert.equal(await status(ada.environments.protect('market/dev')), 403);
+  assert.equal(await status(maya.environments.protect('market/prod', false)), 403);
+  assert.equal(await protectedOf(root, 'market/prod'), true);
+  assert.equal((await root.environments.protect('market/prod', false)).environment.protected, false);
+  assert.equal(await status(ada.secrets.reveal('market/prod')), 200);
+
+  const definition = { ...ROLES.developer, permissions: [...ROLES.developer.permissions], protected: ['secret.read', 'secret.use', 'secret.write'] as ('secret.read' | 'secret.use' | 'secret.write')[] };
+  assert.equal(await status(maya.roles.set('developer', definition)), 403);
+  assert.equal(await status(maya.roles.preview('developer', definition)), 403, 'nor weighs a change: it names everyone it reaches');
+  assert.equal(await status(root.roles.set('owner', { ...ROLES.owner, permissions: [], protected: [] })), 400, 'Owner holds everything, always');
+  assert.equal(await status(root.roles.set('member', { ...ROLES.viewer, permissions: [...ROLES.viewer.permissions], protected: [] }, { instance: true })), 400);
+  assert.equal(await status(root.roles.set('developer', { ...definition, protected: ['secret.read'] })), 400, 'reading takes using');
+  assert.equal((await root.roles.set('developer', definition)).role?.edited, true);
+});
+
+test('a fork of a protected environment is protected from its first moment, a copy or one that inherits', async () => {
+  await root.environments.protect('market/prod');
+  const copy = await root.environments.create('market/prod-copy', { from: 'prod' });
+  const inherits = await root.environments.create('market/prod-next', { from: 'prod', inherit: true });
+  assert.equal(copy.environment.protected, true);
+  assert.equal(inherits.environment.protected, true);
+  for (const fork of ['market/prod-copy', 'market/prod-next']) {
+    assert.equal(await protectedOf(ada, fork), true, fork);
+    // A Developer of the fork uses its values, and reads none.
+    assert.equal(await status(ada.secrets.reveal(fork)), 403, fork);
+  }
+  // The vault protected each id before its row was written.
+  const log = (await actions()).filter((action) => action.startsWith('policy.change') || action.startsWith('environment.create'));
+  assert.deepEqual(log.slice(-4), ['policy.change allow', 'environment.create allow', 'policy.change allow', 'environment.create allow']);
+  // A fork of dev, which nothing protects, is not.
+  assert.equal((await root.environments.create('market/dev-copy', { from: 'dev' })).environment.protected, false);
+});
+
+test('a custom role is made, granted and used, and not deleted while a grant names it', async () => {
+  const made = await root.roles.set('release-manager', {
+    name: 'Release manager',
+    description: 'Ships releases: sets values, and runs on them.',
+    permissions: ['secret.use', 'secret.write'],
+    protected: ['secret.use'],
+  });
+  assert.deepEqual(made.role && { builtin: made.role.builtin, edited: made.role.edited, assignable: made.role.assignableToEnvironment }, { builtin: false, edited: false, assignable: true });
+  await root.members.add(BOB);
+  await root.access.set(BOB, { 'market/dev': 'release-manager' });
+  const bob = clientFor(deps, 'bob@acme.example');
+  assert.equal(await status(bob.secrets.set('market/dev', { RELEASE: '1.2.3' })), 200);
+  assert.equal(await status(bob.secrets.reveal('market/dev')), 403);
+  const [listed] = (await root.members.list('market/dev')).members.filter((member) => member.member === BOB);
+  assert.deepEqual(listed!.grants.map((grant) => [grant.role, grant.roleName, grant.permissions]), [['release-manager', 'Release manager', ['secret.use', 'secret.write']]]);
+  // A role the instance does not define is refused, by name.
+  const unknown = await root.access.set(BOB, { 'market/prod': 'release-captain' }).catch((error: unknown) => error as { status: number; message: string });
+  assert.equal((unknown as { status: number }).status, 400);
+  assert.match((unknown as { message: string }).message, /no role "release-captain"/);
+
+  assert.equal(await status(root.roles.reset('release-manager')), 409);
+  assert.ok((await root.roles.list()).roles.some((role) => role.id === 'release-manager' && role.grants === 1));
+  await root.access.set(BOB, { 'market/dev': null });
+  assert.deepEqual(await root.roles.reset('release-manager'), { role: null });
+  assert.ok(!(await root.roles.list()).roles.some((role) => role.id === 'release-manager'));
+});
+
+test('a preview of a change says whom it widens and narrows, where, and changes nothing', async () => {
+  await root.environments.protect('market/prod');
+  await root.members.add(BOB);
+  await root.access.set(BOB, { 'market/dev': 'developer' });
+  // Developer reads prod too, and writes nowhere.
+  const definition = { name: 'Developer', description: 'Read and use secrets.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] } as const;
+  const before = await actions();
+  const { impact, sentence } = await root.roles.preview('developer', { ...definition, permissions: [...definition.permissions], protected: [...definition.protected] });
+  assert.deepEqual(impact.map(({ change, permission, protected: guarded, people, environments }) => [change, permission, guarded, people, environments]), [
+    ['widens', 'secret.read', true, 1, 1],
+    ['narrows', 'secret.write', false, 2, 1],
+    ['narrows', 'secret.write', true, 1, 1],
+  ]);
+  assert.deepEqual(impact[0]!.examples, ['ada@acme.example on market/prod']);
+  assert.equal(sentence, 'Widens secret.read for 1 person on market/prod, protected; narrows secret.write for 2 people on market/dev; narrows secret.write for 1 person on market/prod, protected');
+  assert.deepEqual(await actions(), before, 'a preview writes nothing');
+  assert.equal(await status(ada.secrets.set('market/dev', { API_KEY: 'still-hers' })), 200);
+  // Reset weighs the same way: a role as it ships changes nobody.
+  assert.equal((await root.roles.previewReset('developer')).sentence, 'Changes what nobody holds');
+});
+
+test('a token issued before its role was widened does not grow, and one narrowed is cut at once', async () => {
+  // Vic's personal token, and CI's service token, each holding viewer as it shipped.
+  const personal = await vic.tokens.issue(VIC, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  const service = await root.tokens.issue(CI, { label: 'deploy', expiresInDays: 30 });
+  const viewer = (permissions: string[], guarded: string[]) => ({ name: 'Viewer', description: 'Read and use secret values.', permissions, protected: guarded }) as Parameters<CoffreClient['roles']['set']>[1];
+  await root.roles.set('viewer', viewer(['secret.read', 'secret.use', 'secret.write'], ['secret.use']));
+  // Vic writes now, on a session; neither token does.
+  assert.equal(await status(vic.secrets.set('market/dev', { API_KEY: 'vic-wrote' })), 200);
+  assert.equal(await status(bearer(personal.token).secrets.set('market/dev', { API_KEY: 'token-wrote' })), 403);
+  assert.equal(await status(bearer(service.token).secrets.set('market/prod', { API_KEY: 'ci-wrote' })), 403);
+  assert.equal(await status(bearer(personal.token).secrets.reveal('market/dev')), 200);
+  assert.equal(await status(bearer(service.token).secrets.reveal('market/prod')), 200);
+  // Viewer narrowed to using: each token is cut through its holder, at once.
+  await root.roles.set('viewer', viewer(['secret.use'], ['secret.use']));
+  assert.equal(await status(bearer(personal.token).secrets.reveal('market/dev')), 403);
+  assert.equal(await status(bearer(service.token).secrets.reveal('market/prod')), 403);
+  // A token issued now holds the role as it is now.
+  const later = await vic.tokens.issue(VIC, { label: 'later', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  assert.equal(await status(bearer(later.token).secrets.list('market/dev')), 200);
+  assert.equal(await status(bearer(later.token).secrets.reveal('market/dev')), 403);
+});
+
+test('GET /roles lists every role in both columns, as it ships or as an Owner edited it, and who may edit them', async () => {
+  const listed = await ada.roles.list();
+  assert.equal(listed.editable, false);
+  assert.equal((await root.roles.list()).editable, true);
+  const developer = listed.roles.find((role) => role.id === 'developer')!;
+  const shipped = { name: 'Developer', description: ROLES.developer.description, permissions: [...ROLES.developer.permissions], protected: [...ROLES.developer.protected] };
+  assert.deepEqual(developer, {
+    id: 'developer',
+    ...shipped,
+    builtin: true,
+    edited: false,
+    fixed: false,
+    default: shipped,
+    assignableToEnvironment: true,
+    grants: 1,
+  } satisfies RoleView);
+  assert.deepEqual(listed.roles.map((role) => role.id), Object.keys(ROLES));
+  assert.deepEqual(listed.roles.filter((role) => role.fixed).map((role) => role.id), ['owner']);
+  assert.deepEqual(listed.instanceRoles.filter((role) => role.fixed).map((role) => role.id), ['member', 'owner']);
+  assert.equal(listed.roles.find((role) => role.id === 'maintainer')!.assignableToEnvironment, false);
+  assert.equal(listed.instanceRoles.find((role) => role.id === 'owner')!.grants, 1, 'the instance has one Owner');
+
+  await root.roles.set('auditor', { name: 'Log reader', description: 'Reads the log.', permissions: ['audit.read'], protected: ['audit.read'] }, { instance: true });
+  const edited = (await ada.roles.list()).instanceRoles.find((role) => role.id === 'auditor')!;
+  assert.deepEqual([edited.name, edited.edited, edited.default?.name], ['Log reader', true, 'Auditor']);
+  await root.roles.reset('auditor', { instance: true });
+  assert.equal((await ada.roles.list()).instanceRoles.find((role) => role.id === 'auditor')!.edited, false);
+});

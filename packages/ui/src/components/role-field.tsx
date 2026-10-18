@@ -1,7 +1,8 @@
 import { useId, useState } from 'react';
-import { INSTANCE_ROLE_NAMES, INSTANCE_ROLES, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
+import { INSTANCE_ROLE_NAMES, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { RoleVars } from '../lib/changes';
 import { useShell } from '../lib/use-shell';
+import { useRoles } from '../lib/use-roles';
 import { slugProblem } from '../lib/validation';
 import { X } from './icons';
 
@@ -15,6 +16,9 @@ import { X } from './icons';
 export function RoleField({ value, onChange }: { value: RoleVars; onChange: (value: RoleVars) => void }) {
   const { role, scope } = value;
   const owners = useShell().capabilities.ownsInstance;
+  // As the instance defines them: an Owner may have renamed or redescribed one.
+  const { instanceRoles } = useRoles();
+  const shown = (name: InstanceRole) => instanceRoles.find((each) => each.id === name);
   return (
     <>
       <label className="field">
@@ -26,12 +30,12 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
         >
           {INSTANCE_ROLE_NAMES.filter((name) => owners || name !== 'owner').map((name) => (
             <option key={name} value={name}>
-              {INSTANCE_ROLES[name].name}
+              {shown(name)?.name ?? name}
             </option>
           ))}
         </select>
         <span className="hint">
-          Default permissions: {INSTANCE_ROLES[role].description} Project grants add more.
+          Default permissions: {shown(role)?.description} Project grants add more.
           {!owners && ' Only an Owner makes someone an Owner.'}
         </span>
       </label>

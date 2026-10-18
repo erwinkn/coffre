@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { allows, MAX_PERSONAL_TOKEN_MINUTES, ROLES, runsInstance, type CredentialScope, type Holdings } from '@coffre/core/access';
+import { allows, DEFAULT_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -961,7 +961,11 @@ export class SigninService {
       // `viewer` where its person reads; `contributor` where they only use, which the proxy needs, and no more: a handle writes nothing.
       const wanted = Object.fromEntries(reached.map(({ path, reads }) => [path, reads ? 'viewer' as const : 'contributor' as const]));
       // Use is what a handle exercises: a token that only uses a place, its grant since narrowed, still makes one there.
-      const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details, (role) => (role === 'contributor' ? ['secret.use'] : ROLES[role].permissions));
+      // Its roles as they ship, whatever an Owner made of them: a handle means reading, or using, and no more.
+      const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details, {
+        policy: DEFAULT_POLICY,
+        needs: (role, place) => (role === 'contributor' ? ['secret.use'] : PERMISSIONS.filter((permission) => holds(ROLES.viewer, permission, place, holder))),
+      });
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       return audited(this.#deps, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { INSTANCE_ROLE_NAMES, type InstanceRole } from './access.ts';
+import { INSTANCE_ROLE_NAMES, ROLE_ID, type InstanceRole } from './access.ts';
 import { PROJECT_PAGES } from './pages.ts';
 
 export const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
@@ -59,6 +59,9 @@ export function shownMember(member: string): string {
 export const principalType = z.enum(['user', 'service']);
 export const principalId = z.string().trim().min(1).max(320);
 export const instanceRole = z.enum(INSTANCE_ROLE_NAMES as [InstanceRole, ...InstanceRole[]]);
+
+/** A project role's id: one coffre ships, or one an Owner made (`ROLE_ID`). Which the instance defines, its policy says. */
+export const roleId = z.string().regex(ROLE_ID, 'a role is named by lowercase letters, digits and dashes, 2 to 32, starting with a letter');
 
 /** Which projects or environments a scope takes in, by slug: `all`, `{ only: [...] }` or `{ except: [...] }`. */
 export const scopeFilter = z.union([

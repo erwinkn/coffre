@@ -55,6 +55,12 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /workloads/repositories': false,
   'DELETE /members/:member/bindings/:id': false,
   'PATCH /access/:member': false,
+  // What a role holds is no secret within the instance: a token's person reads it, to know what their scope gives.
+  'GET /roles': true,
+  'PUT /roles/:role': false,
+  'DELETE /roles/:role': false,
+  'PUT /instance-roles/:role': false,
+  'DELETE /instance-roles/:role': false,
   'GET /settings': false,
   'PUT /settings': false,
   // The person's own sign-in, connecting apps and deciding their changes.

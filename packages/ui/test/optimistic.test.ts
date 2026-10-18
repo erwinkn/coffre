@@ -119,7 +119,7 @@ test('an optimistic add shows at once as saving, then as confirmed', async () =>
     kind: 'saving',
     words: { pending: 'Saving…', done: 'saved', failed: 'Not saved.' },
   });
-  assert.equal(announcements().polite?.text, 'Viewer for dev@acme.example: Saving…');
+  assert.equal(announcements().polite?.text, 'Viewer: prod for dev@acme.example: Saving…');
 
   grants.push({ ...lead, id: 'g-dev', principalId: dev.principalId, role: 'viewer', roleName: 'Viewer', environmentSlug: 'prod', scope: 'environment' });
   held[0]!.resolve({ changes: { 'market/prod': 'granted' } });
@@ -128,7 +128,7 @@ test('an optimistic add shows at once as saving, then as confirmed', async () =>
   assert.deepEqual(itemStatus(changes(queryClient), grantId(dev)), { state: 'idle' });
   // Read back from the server, with the id it gave.
   assert.equal(listed(queryClient).find((grant) => grantId(grant) === grantId(dev))?.id, 'g-dev');
-  assert.equal(announcements().polite?.text, 'Viewer for dev@acme.example saved');
+  assert.equal(announcements().polite?.text, 'Viewer: prod for dev@acme.example saved');
   stop();
 });
 

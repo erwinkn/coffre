@@ -572,6 +572,49 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
 }
 
 /**
+ * Who holds each role, as stored: how many grants name each project role,
+ * lapsed ones too, as the vault counts them before deleting a role; and how
+ * many active people hold each instance role.
+ */
+export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, number>; instanceRoles: Map<InstanceRole, number> }> {
+  const { vaultGrants, vaultMembers } = tablesOf(db);
+  const [granted, people] = await Promise.all([
+    db.select({ role: vaultGrants.role, count: count() }).from(vaultGrants).groupBy(vaultGrants.role),
+    db.select({ owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
+      .from(vaultMembers)
+      .where(and(eq(vaultMembers.status, 'active'), like(vaultMembers.principal, 'user:%'))),
+  ]);
+  const instanceRoles = new Map<InstanceRole, number>();
+  for (const row of people) {
+    const { role } = storedRole(row);
+    instanceRoles.set(role, (instanceRoles.get(role) ?? 0) + 1);
+  }
+  return { roles: new Map(granted.map((row) => [row.role, Number(row.count)])), instanceRoles };
+}
+
+/**
+ * Every active person, with their instance role, its scope and their live
+ * grants, as stored: what weighing a change to the roles reads
+ * (`roleImpact`). The vault checks these rows whenever they are used; a
+ * display reads them as the database has them.
+ */
+export async function peopleHoldings(db: Queryable, now: Date): Promise<{ principal: string; role: InstanceRole; scope: Scope; grants: StoredGrant[] }[]> {
+  const { vaultMembers } = tablesOf(db);
+  const [rows, granted] = await Promise.all([
+    db.select({ principal: vaultMembers.principal, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
+      .from(vaultMembers)
+      .where(and(eq(vaultMembers.status, 'active'), like(vaultMembers.principal, 'user:%')))
+      .orderBy(asc(vaultMembers.principal)),
+    readGrants(db, { liveAt: now.getTime() }),
+  ]);
+  const byPrincipal = new Map<string, StoredGrant[]>();
+  for (const { principal, projectId, environmentId, role, expiresAt } of granted) {
+    byPrincipal.set(principal, [...(byPrincipal.get(principal) ?? []), { projectId, environmentId, role, expiresAt }]);
+  }
+  return rows.map((row) => ({ principal: row.principal, ...storedRole(row), grants: byPrincipal.get(row.principal) ?? [] }));
+}
+
+/**
  * A grant as `vault_grants` holds it: on a project, or one of its
  * environments (with its project). A grant on every project of 0.4, which
  * names neither until the vault replaces it, reaches nothing (`grantKind`).

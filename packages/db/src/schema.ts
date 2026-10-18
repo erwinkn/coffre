@@ -1,4 +1,3 @@
-import { assignableToEnvironment, ROLE_NAMES } from '@coffre/core/access';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -224,10 +223,6 @@ export const dismissedKeys = pgTable(
   ],
 );
 
-/** The role catalogue, as SQL: every role, and those an environment may be granted. */
-const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
-const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));
-
 /**
  * The vault's member directory: everyone it has admitted, written by the
  * vault alone, read by both. A principal with no row is no member.
@@ -299,11 +294,9 @@ export const vaultGrants = pgTable(
       sql`((${table.projectId} IS NULL) <> (${table.environmentId} IS NULL) AND ${table.environmentSlug} IS NULL) OR (${table.projectId} IS NULL AND ${table.environmentId} IS NULL)`,
     ),
     check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR ${table.environmentSlug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
-    check('vault_grants_role_check', sql`${table.role} IN (${ROLES})`),
-    check(
-      'vault_grants_environment_role_check',
-      sql`(${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL) OR ${table.role} IN (${ENVIRONMENT_ROLES})`,
-    ),
+    // A role's id, one that ships or one an Owner made (`ROLE_ID`): which the instance's policy defines, and which of them an
+    // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md).
+    check('vault_grants_role_check', sql`${table.role} ~ '^[a-z][a-z0-9-]{1,31}$'`),
     unique('vault_grants_on_project').on(table.principal, table.projectId),
     unique('vault_grants_on_environment').on(table.principal, table.environmentId),
     unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),

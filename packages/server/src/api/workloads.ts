@@ -272,7 +272,7 @@ export class WorkloadService {
       throw error;
     }
     // Its scope's shape too, before the issuer is asked anything: what it names is checked once the bindings it replaces are known.
-    if (input.scope !== undefined) parseScope(input.scope);
+    if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
       const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { useShell } from '../lib/use-shell';
 import { useCoffre } from '../lib/coffre';
@@ -12,7 +12,8 @@ import { GrantRowView, GrantsTable, RefusedGrants, useRefusedGrants } from '../c
 import { KIND } from '../components/directory';
 import { PrincipalLink } from '../components/principal';
 import { PrincipalPicker } from '../components/principal-picker';
-import { parseProjectAccess, projectAccessOptions } from '../lib/project-access';
+import { roleNameOf } from '../lib/roles';
+import { useRoles } from '../lib/use-roles';
 import { Key, Plus, User } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
 import { useProject } from '../lib/project-page';
@@ -121,10 +122,18 @@ function NewGrant({
   const [principalId, setPrincipalId] = useState('');
   // A new service account, named in the picker: the grant makes it.
   const [admit, setAdmit] = useState(false);
-  const [permission, setPermission] = useState('viewer:');
+  const [role, setRole] = useState('viewer');
+  // '' for the whole project, else an environment's slug.
+  const [where, setWhere] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
   const grant = useChange(grantAccess(useCoffre(), project));
-  const permissionOptions = projectAccessOptions(environments);
+  const { roles } = useRoles();
+  const hint = useId();
+  const chosen = roles.find((each) => each.id === role);
+  // Live environments only: an archived one serves nothing to grant.
+  const live = environments.filter((environment) => environment.details !== null && environment.details.archivedAt === null);
+  // A role that holds something project-wide is granted on the project alone.
+  const onProjectOnly = chosen !== undefined && !chosen.assignableToEnvironment;
   const kind = KIND[principalType];
   const service = principalType === 'service';
 
@@ -134,7 +143,8 @@ function NewGrant({
     setPrincipalId('');
     setAdmit(false);
     setExpiresAt('');
-    setPermission('viewer:');
+    setRole('viewer');
+    setWhere('');
   }
 
   return (
@@ -153,20 +163,19 @@ function NewGrant({
           </>
         }
         wide
-        description="Owners manage the whole project and its access. Read and write can cover every environment, or one."
+        description="A role on the whole project, or on one of its environments. Owners manage the whole project and its access."
       >
         <form
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
-            const access = parseProjectAccess(permission);
             // Shown in the list at once, marked as saving; the list says if the server refuses.
             grant({
               principalType,
               principalId: principalId.trim(),
-              role: access.role,
-              roleName: permissionOptions.find((option) => option.value === permission)?.label ?? access.role,
-              environmentSlug: access.environmentSlug,
+              role,
+              roleName: roleNameOf(roles, role),
+              environmentSlug: onProjectOnly || where === '' ? null : where,
               expiresAt: expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
               admit,
             });
@@ -187,21 +196,35 @@ function NewGrant({
           />
 
           <div className="form-row">
-            <label className="field" style={{ flexGrow: 2 }}>
-              <span className="label">Permissions</span>
-              <select
-                className="select"
-                value={permission}
-                onChange={(event) => setPermission(event.target.value)}
-              >
-                {permissionOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
+            <label className="field">
+              <span className="label">Role</span>
+              <select className="select" value={role} onChange={(event) => setRole(event.target.value)}>
+                {roles.map((each) => (
+                  <option key={each.id} value={each.id}>
+                    {each.name}
                   </option>
                 ))}
               </select>
             </label>
 
+            <label className="field">
+              <span className="label">On</span>
+              <select
+                className="select"
+                value={onProjectOnly ? '' : where}
+                disabled={onProjectOnly}
+                aria-describedby={hint}
+                onChange={(event) => setWhere(event.target.value)}
+              >
+                <option value="">The whole project</option>
+                {live.map((environment) => (
+                  <option key={environment.slug} value={environment.slug}>
+                    {environment.slug}
+                    {environment.protected ? ' (protected)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="field">
               <span className="label">
                 Expires <span className="hint">(optional)</span>
@@ -215,11 +238,18 @@ function NewGrant({
             </label>
           </div>
 
+          {chosen !== undefined && (
+            <p className="hint" id={hint}>
+              {chosen.description}
+              {onProjectOnly && ' It holds something project-wide, so it is granted on the whole project.'}
+            </p>
+          )}
+
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
             </button>
-            <button className="btn btn-primary" type="submit" disabled={principalId.trim() === ''}>
+            <button className="btn btn-primary" type="submit" disabled={principalId.trim() === '' || chosen === undefined}>
               {admit ? 'Create and grant access' : 'Grant access'}
             </button>
           </div>

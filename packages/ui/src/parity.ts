@@ -16,8 +16,12 @@ export type ClientCall = {
     : `${N}.${keyof CoffreClient[N] & string}`;
 }[keyof CoffreClient & string];
 
-/** Where a person does it: the control, in words, its file under `src/`, and the call it makes. */
-export type Affordance = { readonly does: string; readonly in: string; readonly call: ClientCall };
+/**
+ * Where a person does it: the control, in words, its file under `src/`, and
+ * the call it makes; with `args`, what the test calls it with, where the
+ * stand-ins it uses for every other call would send another route.
+ */
+export type Affordance = { readonly does: string; readonly in: string; readonly call: ClientCall; readonly args?: readonly unknown[] };
 
 export type Reach =
   | { readonly ui: readonly Affordance[] }
@@ -46,7 +50,10 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [{ does: 'a project › Environments › Add environment, empty, inheriting, a copy or references', in: 'pages/project-environments.tsx', call: 'environments.create' }],
   },
   'PATCH /projects/:project/:environment': {
-    ui: [{ does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project-environments.tsx', call: 'environments.update' }],
+    ui: [
+      { does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project-environments.tsx', call: 'environments.update' },
+      { does: "an environment's card › ⋯ › Protect…, and for an Owner of the whole instance Unprotect…", in: 'pages/project-environments.tsx', call: 'environments.protect' },
+    ],
   },
   'DELETE /projects/:project/:environment': {
     ui: [
@@ -178,6 +185,35 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'GET /audit/verification': { ui: [{ does: "Audit: the log's seal, verified on every visit", in: 'pages/audit.tsx', call: 'audit.verify' }] },
+  'GET /roles': {
+    ui: [
+      { does: 'Settings › Roles and Instance roles; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },
+    ],
+  },
+  'PUT /roles/:role': {
+    ui: [
+      { does: 'Settings › Roles › Edit… › Save, or New role › Save, once the change is confirmed', in: 'components/role-editor.tsx', call: 'roles.set' },
+      { does: 'the same dialog: what saving would do to everyone it reaches, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.preview' },
+    ],
+  },
+  'DELETE /roles/:role': {
+    ui: [
+      { does: 'Settings › Roles › Edit… › Reset to default, or a custom role’s Delete…', in: 'components/role-editor.tsx', call: 'roles.reset' },
+      { does: 'the same: what it would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.previewReset' },
+    ],
+  },
+  'PUT /instance-roles/:role': {
+    ui: [
+      { does: 'Settings › Instance roles › Edit… › Save', in: 'components/role-editor.tsx', call: 'roles.set', args: ['developer', {}, { instance: true }] },
+      { does: 'the same dialog: what saving would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.preview', args: ['developer', {}, { instance: true }] },
+    ],
+  },
+  'DELETE /instance-roles/:role': {
+    ui: [
+      { does: 'Settings › Instance roles › Edit… › Reset to default', in: 'components/role-editor.tsx', call: 'roles.reset', args: ['developer', { instance: true }] },
+      { does: 'the same: what it would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.previewReset', args: ['developer', { instance: true }] },
+    ],
+  },
   'GET /settings': { ui: [{ does: 'Settings › Service accounts: where people set them up', in: 'pages/settings.tsx', call: 'settings.get' }] },
   'PUT /settings': { ui: [{ does: 'Settings › Service accounts › Edit', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },

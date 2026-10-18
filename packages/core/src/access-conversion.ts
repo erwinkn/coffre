@@ -11,7 +11,7 @@ import {
   type GrantPlace,
   type InstanceRole,
   type Place,
-  type Role,
+  type BuiltinRole as Role,
   type Scope,
 } from './access.ts';
 

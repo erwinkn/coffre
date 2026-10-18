@@ -143,7 +143,7 @@ export function GrantRowView({
 export function RefusedGrants({ refused }: { refused: RefusedGrant[] }) {
   return refused.map(({ mutationId, vars, status, dismiss }) => (
     <RowFailure key={mutationId} status={status} columns={5} onDismiss={dismiss}>
-      {vars.principalId} was not given {vars.roleName.toLowerCase()}.
+      {vars.principalId} was not given {projectAccessLabel(vars)}.
     </RowFailure>
   ));
 }

@@ -16,7 +16,7 @@ import {
   type Holdings,
   type Permission,
   type Place,
-  type Role,
+  type BuiltinRole as Role,
 } from '../src/access.ts';
 import { propertySettings } from './properties.ts';
 

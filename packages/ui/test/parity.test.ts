@@ -31,9 +31,10 @@ function matches(route: string, method: string, path: string): boolean {
 
 /**
  * The requests one client call sends, made with stand-in arguments: a path
- * that is a project, an environment and a key at once, an id, a body.
+ * that is a project, an environment and a key at once, an id, a body; or
+ * those its entry names (`args`).
  */
-async function requestsOf(call: ClientCall): Promise<string[]> {
+async function requestsOf(call: ClientCall, args: readonly unknown[] = ['acme/prod/KEY', 'id', {}]): Promise<string[]> {
   const sent: string[] = [];
   const client = createClient({
     url: 'https://coffre.test',
@@ -48,7 +49,7 @@ async function requestsOf(call: ClientCall): Promise<string[]> {
     ...args: unknown[]
   ) => Promise<unknown>;
   // What the call makes of the answer does not matter here, only what it asked.
-  await target('acme/prod/KEY', 'id', {}).catch(() => undefined);
+  await target(...args).catch(() => undefined);
   return sent;
 }
 
@@ -67,12 +68,12 @@ test('every route of the API is done somewhere in the pages, or says why not', a
       continue;
     }
     assert.ok(reach.ui.length > 0, `${route} names where it is done`);
-    for (const { does, in: file, call } of reach.ui) {
+    for (const { does, in: file, call, args } of reach.ui) {
       assert.ok(existsSync(join(SRC, file)), `${route}: ${does}: no src/${file}`);
       // `coffre.secrets.history(`, or split over lines as formatting leaves it.
       const called = new RegExp(`\\.${call.split('.').join('\\s*\\.')}\\(`);
       assert.ok(called.test(code), `${route}: ${does}: the pages never call ${call}`);
-      const sent = await requestsOf(call);
+      const sent = await requestsOf(call, args);
       assert.ok(
         sent.some((request) => matches(route, ...(request.split(' ') as [string, string]))),
         `${route}: ${call} sends ${sent.join(', ') || 'nothing'}`,

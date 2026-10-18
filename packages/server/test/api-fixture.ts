@@ -102,6 +102,8 @@ export function testVault(
     remove: call('remove'),
     settings: call('settings'),
     setSettings: call('setSettings'),
+    policy: call('policy'),
+    changePolicy: call('changePolicy'),
     checkpoint: call('checkpoint'),
     about: call('about'),
     keyChecks: call('keyChecks'),

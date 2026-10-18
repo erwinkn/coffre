@@ -5,7 +5,8 @@ import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
-import { putEnvironment, type PlaceView } from './projects.ts';
+import { putEnvironment, type EnvironmentView } from './projects.ts';
+import { protectedFor, protectIds } from './roles.ts';
 import { readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
@@ -39,7 +40,7 @@ export async function forkEnvironment(
   place: ResolvedPath,
   slug: string,
   input: { name?: string; from: string; references: boolean; inherit: boolean },
-): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
+): Promise<{ environment: EnvironmentView; created: boolean; forked: Forked }> {
   const { project } = place;
   const { from } = input;
   return withRefusals(ctx, async () => {
@@ -71,7 +72,7 @@ export async function forkEnvironment(
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
-    const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
+    const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from, ...await protectedFork(ctx, place, source) });
     const copies = readable.items.filter((item) => !plan.has(item.key));
     // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
     const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
@@ -128,15 +129,28 @@ async function inheritFrom(
   slug: string,
   parent: ResolvedPath,
   name: string | undefined,
-): Promise<{ environment: PlaceView; created: boolean; forked: Forked }> {
+): Promise<{ environment: EnvironmentView; created: boolean; forked: Forked }> {
   const from = parent.environment!.slug;
   if (place.environment !== null) throw conflict(`${place.project.slug}/${slug} already exists: a fork that inherits is a new environment`);
   const above = await parentsOf(ctx.db, parent.environment!.id);
   if (above === null || above.length >= MAX_PARENTS) {
     throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);
   }
-  const { environment, created } = await putEnvironment(ctx, place, slug, { name }, { from, parentId: parent.environment!.id });
+  const { environment, created } = await putEnvironment(ctx, place, slug, { name }, { from, parentId: parent.environment!.id, ...await protectedFork(ctx, place, parent) });
   return { environment, created, forked: { from, keys: 0, references: 0, copied: [], inherits: true } };
+}
+
+/**
+ * A fork of a protected environment is protected from its first moment
+ * (docs/design/roles.md): the vault protects its id, made here for one not
+ * there yet, before its row is written or a value copied into it. A
+ * refusal stops the fork with nothing made. Its id, and whether it is.
+ */
+async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ id?: string; guarded?: boolean }> {
+  if (!protectedFor(ctx.caller, source.environment!)) return {};
+  const id = place.environment?.id ?? randomUUID();
+  await protectIds(ctx, place.project.id, [id]);
+  return { id, guarded: true };
 }
 
 /**

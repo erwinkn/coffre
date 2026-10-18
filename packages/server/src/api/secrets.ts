@@ -35,6 +35,7 @@ import {
   secretFolderOf,
 } from '../db/queries.ts';
 import { can, lists, permissionsAt, placeOf } from './caller.ts';
+import { protectedFor } from './roles.ts';
 import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -268,7 +269,7 @@ export async function currentEnvelopes(
 export async function listSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
-): Promise<{ permissions: Permission[]; keys: SecretKey[]; parents: string[]; personal: PersonalView | null; rotateAfterDays: number | null }> {
+): Promise<{ permissions: Permission[]; keys: SecretKey[]; parents: string[]; personal: PersonalView | null; protected: boolean; rotateAfterDays: number | null }> {
   const environment = requireLive(place);
   const fork = place.environment!.parentId !== null;
   const read = async (db: Queryable) => {
@@ -384,6 +385,8 @@ export async function listSecrets(
     keys,
     parents: inherited.parents.map((parent) => parent.slug),
     personal: place.personal === undefined ? null : { of: place.personal.of.slug, fallback: place.personal.fallback === true },
+    // A person holds their role's protected column here (docs/design/roles.md); a personal config, as its parent is.
+    protected: protectedFor(ctx.caller, place.environment!),
     rotateAfterDays: ctx.rotateAfterDays,
   };
 }

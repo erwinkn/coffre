@@ -93,14 +93,16 @@ EXCEPTION
 END
 $$;
 
+-- Which roles an environment takes is the vault's to decide, by the policy (docs/design/roles.md): the table holds a
+-- grant to a role named by an id, one that ships or one an Owner made, and nothing else.
 DO $$
 BEGIN
     INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'owner', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a project role was granted on an environment';
+    VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'Not a role', 0, 'user:admin@acme.example');
+    RAISE EXCEPTION 'FAIL: a grant named no role id';
 EXCEPTION
     WHEN check_violation THEN
-        RAISE NOTICE 'PASS: a project role cannot be granted on an environment';
+        RAISE NOTICE 'PASS: a grant names a role by its id';
 END
 $$;
 
@@ -116,16 +118,7 @@ EXCEPTION
 END
 $$;
 
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, environment_slug, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', 'dev', 'maintainer', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a project role was granted on an environment slug';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: a project role cannot be granted on an environment slug';
-END
-$$;
+
 
 DO $$
 BEGIN
