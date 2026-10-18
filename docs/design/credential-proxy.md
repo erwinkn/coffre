@@ -385,10 +385,11 @@ the user and database are the real URL's. Measured locally: a query adds
 54 ms against 6 ms direct: the handle's check, the read, the WebSocket and
 SCRAM. A pool pays that once per connection.
 
-**Revocation mid-session.** Every `recheckSeconds` (60 unless set), the
-open sessions of a handle ask whether they may go on. The answer comes from
-opening the database's URL again, as the vault decides it, once per handle
-and tunnel for all their sessions, and logged as a use. So a revoked handle
+**Revocation mid-session.** The open sessions of one handle, environment
+and tunnel are one group, with one timer: every `recheckSeconds` (60 unless
+set) it opens the database's URL again, as the vault decides it, for all of
+them at once, logged as a use. Ten pooled connections cost one read a
+minute, not ten. The group lives as long as its sessions. So a revoked handle
 and a person's lost grant each end the sessions, within the minute: the
 first check that fails ends every session of that handle and tunnel at
 once, both sockets of each close, and the app's driver sees its

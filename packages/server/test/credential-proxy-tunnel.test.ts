@@ -396,6 +396,24 @@ test('a refused upgrade leaves no socket behind, though the peer keeps its side 
   socket.destroy();
 });
 
+test("a group of sessions is checked once an interval, however many it holds, and a revocation just after a check ends them within one", postgresOnly, async () => {
+  const clients = Array.from({ length: 10 }, () => appClient());
+  for (const client of clients) client.on('error', () => undefined);
+  await Promise.all(clients.map((client) => client.connect()));
+  const rechecks = async () => (await entries('credential.use')).filter((entry) => entry.metadata.recheck === true).length;
+  // Two and a half intervals: two checks, for all ten.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.ok((await rechecks()) <= 3, `${await rechecks()} checks`);
+  // Revoked right after a check: the next one, an interval on, ends all ten.
+  const before = await rechecks();
+  for (let waited = 0; (await rechecks()) === before && waited < 500; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+  const ended = clients.map((client) => new Promise<number>((resolve) => client.once('end', () => resolve(Date.now()))));
+  const revoked = Date.now();
+  await revoke();
+  const times = await Promise.all(ended);
+  assert.ok(Math.max(...times) - revoked < 350, `${Math.max(...times) - revoked} ms`);
+});
+
 /** Revoke the suite's handle, as its person would. */
 async function revoke(): Promise<void> {
   const session = await sessionFor(DEV);

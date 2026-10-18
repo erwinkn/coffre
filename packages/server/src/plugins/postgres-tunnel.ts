@@ -163,15 +163,10 @@ export type TunnelSession = {
   handle: string;
   /** The real database. */
   database: Database;
-  /**
-   * Whether the session may go on: asked every `recheckMs`, and `now`,
-   * the handle itself checked afresh, just before the login. The session
-   * ends when it may not.
-   */
-  stands(now?: boolean): Promise<boolean>;
-  /** Told how to end this session, so that a check another session of its handle makes, and fails, ends it too. Returns its undoing. */
+  /** Whether the session may log in, asked just before it does; afterwards, `watch`'s checks decide. */
+  stands(): Promise<boolean>;
+  /** Told how to end this session, which the checks of its handle's sessions end when they fail. Returns its undoing. */
   watch(end: () => void): () => void;
-  recheckMs: number;
   connect: Connect;
 };
 
@@ -213,7 +208,6 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
     ended = true;
     unwatch();
     dialing.abort();
-    clearInterval(timer);
     if (key !== null) cancels.delete(key);
     for (const pipe of [client, upstream]) {
       try {
@@ -221,12 +215,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
       } catch {}
     }
   };
-  // From the first byte: the handle checked every recheckMs, the app gone, or the login too slow, and the session ends.
-  const timer = setInterval(() => {
-    void session.stands().then((stands) => {
-      if (!stands) end();
-    }, () => end());
-  }, session.recheckMs);
+  // From the first byte: its handle's checks failing, the app gone, or the login too slow, and the session ends.
   const deadline = setTimeout(end, STARTUP_MS);
   const unwatch = session.watch(end);
   void client.closed.then(end, end);
@@ -267,7 +256,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
       return;
     }
     // Asked again now, whatever the last check said: a connection held at the prompt logs in only while its handle stands.
-    if (!(await step(session.stands(true)))) {
+    if (!(await step(session.stands()))) {
       await to.write(errorResponse('28P01', 'coffre: the handle ended: run the app with `coffre run` again'));
       return;
     }
