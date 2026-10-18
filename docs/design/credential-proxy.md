@@ -172,6 +172,46 @@ TWILIO_TOKEN	v1	admin@acme.example	today
   a plain write there is refused. A plain value of the environment it
   overrides reaches its owner as any reader of that environment.
 
+**Values of a person's own (0.9).** A backend that refuses to boot without
+its own keys (a key that seals its local data, its webhooks' HMAC secret,
+the key that encrypts its local database) needs *a* value, not the one
+in `backend/local`. Under stand-ins nobody reads that one, so each person
+gets one of their own, made once, kept in their personal config:
+
+```ts
+credentialProxy({ credentials: { … }, generate: { 'backend/local': 'all' } })   // or a list of keys
+```
+
+```sh
+$ coffre set backend/local/ROOT_ENCRYPTION_KEY --generate bytes:32:hex   # the recipe, once, by an Owner
+$ coffre run backend/local -- pnpm dev                                    # Ada, the first time
+coffre: made your own ROOT_ENCRYPTION_KEY, POLICY_SEAL_KEY in backend/local@me, each by its recipe: your next runs use them
+```
+
+- **What it reads.** For an environment under `generate`, a person's use
+  of it, the plan and every request through the proxy alike, reads their
+  personal config of it (`backend/local@me`), or the environment while
+  they have none. So each person's app holds their own values, and a
+  personal override of a credential's key is the one sent.
+- **What gets one.** A key the app would go without (none of the
+  credentials', plain or exposed), whose current value a recipe made
+  (`coffre set … --generate`, one value: a key pair's half has none
+  here), in the environment's list. The plan names each,
+  `generate: { ROOT_ENCRYPTION_KEY: { recipe, replaces } }`, with the
+  version it read. `coffre run` and `coffre export` make each value by its
+  recipe, as `coffre regenerate` does, and write them to the personal
+  config with the person's session, an ordinary audited write, then ask for the
+  plan again, which now exposes them as that config's own.
+- **Once, and once only at a time.** The write replaces the version the
+  plan read, or is refused (409). Of two runs at once, one writes, and
+  the other, refused, reads the plan again and finds the winner's. The
+  next run finds the person's own values and makes nothing. Stable across
+  runs, so a key that encrypts the local database keeps opening it.
+- **Who.** People only: the plan is for people, and a service account
+  reads the environment's values as before. The deployment opts each
+  environment in, a local one (decision 19), so production never grows
+  personal values by itself.
+
 **What replaces `expose`, by what the value is.** Equisafe's
 `backend/local` listed 17 keys under `expose` in 0.8. 0.9 replaces each
 kind:
@@ -195,7 +235,7 @@ applies to the exact environment a read resolves to, never to its parents:
 |---|---|
 | `market/dev` | Real value |
 | `market/dev-eu`, a fork of dev that inherits the key | Not exposed: list `market/dev-eu` itself |
-| `market/dev@me`, with a personal config | Not exposed: a personal config is never listed. Its *own* values, which only its owner writes, are its owner's app's, so `DATABASE_URL=postgres://localhost/ada` there reaches Ada's app |
+| `market/dev@me`, with a personal config | Real value, as `market/dev` lists it (0.9): its owner gets it through `market/dev` anyway. A personal config is never listed itself. Its *own* values, which only its owner writes, are its owner's app's, so `DATABASE_URL=postgres://localhost/ada` there reaches Ada's app |
 | `market/dev@me`, with none | Real value: the read is of `market/dev` |
 
 **The recommended use of `expose` is a local environment of fakes.** A
@@ -825,8 +865,11 @@ is reversible.
 8. **`expose` is configuration, by exact environment, never inherited.**
    A fork is listed by its own path, or not exposed. A personal config is
    never listed; its own values, written by its owner alone (R8), reach
-   its owner's app, and its inherited ones do not. Otherwise a personal
-   config, made for local overrides, would serve no app.
+   its owner's app. Otherwise a personal config, made for local
+   overrides, would serve no app. What it inherits follows the
+   environment it is a config of (0.9): its owner reads that environment,
+   so exposing it there too gives them nothing new, and a deployment that
+   generates values in personal configs (below) keeps what it exposes.
 9. **No DNS pinning yet.** Literal private addresses are refused. A name
    that resolves to one is the operator's DNS.
 10. **Redaction of values 8 characters or longer**, in headers and text
@@ -874,6 +917,15 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
     lets a listing show it and a read skip the vault. The ciphertext keeps
     the paths that open through the vault (references, KEK rotation)
     unchanged.
+19. **Personal values are opted into by environment, in the proxy's
+    configuration (`generate`)**, not by key in the data nor everywhere a
+    recipe is. A value made for a person protects only their own local
+    data, which suits `backend/local` and nothing deployed; listing the
+    environment in configuration keeps that choice with the deployment's
+    code, beside `expose`. The client makes each value, as for `coffre set
+    --generate`: the server never makes one. *Alternative:* the server
+    generates in the plan, which would let any client of the proxy have
+    them, at the cost of the server making values.
 
 ## 9. Plan
 
@@ -888,3 +940,4 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
 | 5 | `sign`/`presign`/`verify` helpers, SDK credential files |
 | 0.9 C | Shaped stand-ins, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
 | 0.9 A | Plain values (`0011_plain_values`, `coffre set --plain`, the page's Plain toggle), which deprecate `identifiers`. Built |
+| 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |

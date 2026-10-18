@@ -72,6 +72,7 @@ import {
 } from '@coffre/client';
 import { assignableToEnvironment, credentialScopeInWords, INSTANCE_ROLES, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
+import { regenerateWrite, type GeneratedWrite } from '@coffre/core/recipe';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
 const PINS_PATH = join(homedir(), '.coffre', 'directories.json');
@@ -1037,8 +1038,15 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
   );
 }
 
-/** What a person's app gets through the credential proxy (`standIns`): its environment, and what the proxy left out. */
-type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string };
+/**
+ * What a person's app gets through the credential proxy (`standIns`): its
+ * environment, what the proxy left out, and what this run made of the
+ * person's own, by personal config.
+ */
+type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
+
+/** A plan, `GET /use/<project>/<env>`: what the app gets, and what this run is to make of the person's own. */
+type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string }> };
 
 /**
  * Stand-ins for the environments named, where the instance has the
@@ -1054,12 +1062,35 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
   // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   const handle = await client(to).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
-  const plans: [string, { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[] }][] = [];
-  for (const path of paths) {
+  const planOf = async (path: string): Promise<Plan> => {
     const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });
     const body = (await response.json().catch(() => ({}))) as { message?: string };
     if (!response.ok) fail(`${path}: ${body.message ?? `the credential proxy answered ${response.status}`}`);
-    plans.push([path, body as (typeof plans)[number][1]]);
+    return body as Plan;
+  };
+  const plans: [string, Plan][] = [];
+  const made: [string, string[]][] = [];
+  for (const path of paths) {
+    let plan = await planOf(path);
+    // Where the deployment generates (its `generate`): each key a recipe made that the app would go without gets
+    // a value of the person's own, made here by that recipe, in their personal config, which the plan reads from
+    // then on. Each write replaces the version the plan read, so of two runs at once, one writes and the other,
+    // refused, reads the plan again and finds it.
+    for (let attempt = 1; Object.keys(plan.generate ?? {}).length > 0; attempt++) {
+      if (attempt > 3) fail(`${path}: its keys kept changing while coffre made your own; run again`);
+      const mine = `${path.replace(/@me$/, '')}@me`;
+      const patch = Object.assign(Object.create(null) as GeneratedWrite, ...await Promise.all(Object.entries(plan.generate!).map(([key, { recipe, replaces }]) =>
+        regenerateWrite(key, { recipe }, () => replaces))));
+      const wrote = await client(to, undefined, [409]).secrets.set(mine, { ...patch }).then(() => true, (error: unknown) => {
+        // Another run wrote first: its value is the one to read. Any other refusal (`too_deep`) is said as it is.
+        if (error instanceof CoffreError && error.status === 409 && error.reason === 'stale') return false;
+        if (error instanceof CoffreError) fail(`${mine}: ${error.message}`);
+        throw error;
+      });
+      if (wrote) made.push([mine, Object.keys(patch).sort()]);
+      plan = await planOf(path);
+    }
+    plans.push([path, plan]);
   }
   const tunnelsOf = (plan: (typeof plans)[number][1]) => Object.values(plan.tunnels ?? {});
   const shared = clash(plans.map(([path, plan]) => [path, [...Object.keys(plan.env), ...tunnelsOf(plan).map((tunnel) => tunnel.key), ...plan.left]]));
@@ -1077,6 +1108,7 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
     expiresAt: handle.expiresAt,
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
     handle: handle.token,
+    made,
   };
 }
 
@@ -1094,6 +1126,7 @@ async function proxied(to: Target): Promise<boolean> {
 function sayStandIns(stood: StandIns, paths: readonly string[], to: Target): void {
   const lines = [
     `coffre: stand-ins for ${listOf(paths)}: ${stood.credentials.length === 0 ? 'no credential the proxy covers' : `${stood.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(stood.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
+    ...stood.made.map(([mine, keys]) => `coffre: made your own ${keys.join(', ')} in ${mine}, each by its recipe: your next runs use them`),
     ...(stood.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${stood.exposed.join(', ')}`]),
     ...(stood.tunnels.length === 0 ? [] : [`coffre: ${stood.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
     ...(stood.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${stood.left.join(', ')}`]),

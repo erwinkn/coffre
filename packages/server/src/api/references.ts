@@ -19,6 +19,7 @@ import {
   type ReferenceRow,
   type ResolvedPath,
   type SecretPlaceRow,
+  type VersionRecipe,
 } from '../db/queries.ts';
 import { can } from './caller.ts';
 import { asking, denied, Refusal, type ApiContext } from './context.ts';
@@ -265,6 +266,8 @@ export type Readable = {
   envelope: Envelope;
   /** Its value, when it is a plain one: read without the vault (`openValues`). A reference's is always opened through it. */
   plaintext?: string | null;
+  /** How its value was made, when a client generated it; a reference's is its source's business, and has none here. */
+  recipe?: VersionRecipe | null;
   via?: Via;
   through?: string;
   parent?: { environmentId: string; slug: string };
@@ -376,6 +379,7 @@ async function valuesIn(
         },
         envelope: row.current.envelope,
         plaintext: row.current.plaintext,
+        recipe: row.current.recipe,
       });
       continue;
     }

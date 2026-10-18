@@ -146,7 +146,9 @@ export const SECTIONS = [
           'of them stops it before anything is read; --keep-existing lets',
           'a variable already set in your shell, empty ones too, win',
           "over coffre's value for it; <environment>@me reads your",
-          'personal config of it, or it while you have none',
+          'personal config of it, or it while you have none; where the',
+          'deployment generates, your own value of each key a recipe made,',
+          'made once, in your personal config',
         ],
       },
       {

@@ -36,7 +36,7 @@ import {
 import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
-import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
 import { openValues, plain, rewrapValue, sealValues } from './keys.ts';
@@ -560,7 +560,8 @@ export async function setSecrets(
     // renamed, archived or written meanwhile, here or in a parent, is not the one it regenerates.
     // Checked again under the head, below, where nothing can move.
     const stale = regenerated(patch, prepared, inherited);
-    if (stale !== null) throw conflict(stale);
+    // Its own reason, `stale`, for a client that read the version it replaces to tell from any other conflict.
+    if (stale !== null) throw new ApiError('conflict', stale, 'stale');
     const archived = (key: string) => {
       const row = prepared.get(key);
       if (row?.archivedAt == null || resettable.has(key)) return;
@@ -1209,10 +1210,16 @@ export async function restoreVersion(
 /**
  * The keys the credential proxy opens, chosen from what the read resolved:
  * the environment it resolved to, and each key it holds, whether a
- * parent's, and whether plain, no secret. Chosen once, from the rows that
- * are then opened.
+ * parent's and which (`from`, its slug), whether plain, no secret; and, to
+ * whoever reads where it is held, the version it resolves to and the
+ * recipe that made it, when a client generated one value by one (a key
+ * pair's half has none here). Chosen once, from the rows that are then
+ * opened.
  */
-export type PickKeys = (environment: { path: string; personal: boolean }, held: { key: string; inherited: boolean; plain: boolean }[]) => readonly string[];
+export type PickKeys = (
+  environment: { path: string; personal: boolean },
+  held: { key: string; inherited: boolean; from: string | null; plain: boolean; versionId: string | null; recipe: string | null }[],
+) => readonly string[];
 
 /**
  * The only way to decrypt, and a POST so nothing can trigger it by
@@ -1256,12 +1263,18 @@ export async function reveal(
     const read = await readableValues(ctx.db, place, environment, path.key);
     const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
-    // A parent's plain value is plain to its readers alone, as the listing shows it (R8): to anyone else, a key like any other.
+    // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
+    // else, its key is a key like any other.
     const told = (item: Readable) => item.parent === undefined
       || can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: item.parent.environmentId, environmentSlug: item.parent.slug });
-    const chosen = use === undefined ? null : typeof use.keys === 'function'
-      ? use.keys(named, read.items.map((item) => ({ key: item.key, inherited: item.parent !== undefined, plain: plain(item) && told(item) })))
-      : use.keys;
+    const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
+      key: item.key,
+      inherited: item.parent !== undefined,
+      from: item.parent?.slug ?? null,
+      plain: plain(item) && told(item),
+      versionId: told(item) ? item.secretVersionId : null,
+      recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
+    }))) : use.keys;
     const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
     const rows = read.items.filter(wanted);
     const unreadable = read.unreadable.filter(wanted);
