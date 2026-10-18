@@ -134,8 +134,8 @@ Narrowing a role narrows every token at once, through its holder. Each
 place keeps both columns as they were at issue, and no more than its
 issuer held there then (section 8, rule 3): neither the role nor the
 issuer, widened later, widens the token. A scope issued before 0.10,
-which kept its role's name alone, is no scope: its token reaches
-nothing, and is issued again (R17). A binding that takes another's place holds the narrower of the
+which kept its role's name alone, holds that role as it ships, a constant
+no edit changes, so it never widens either. A binding that takes another's place holds the narrower of the
 two: replacing a Viewer's binding keeps what the Viewer held.
 
 ## 6. Decisions
@@ -170,10 +170,11 @@ two: replacing a Viewer's binding keeps what the Viewer held.
    fence call site by call site. Cost: a write that races a policy
    change answers 409 once, and a read that hands back a plain value
    opens one short transaction; one of sealed values opens none.
-9. **A scope kept by its role's name alone, before 0.10, is no scope**:
-   its credential reaches nothing (R17: nobody runs Coffre in production
-   yet, and an upgrade carries no old security settings over).
-   *Alternative:* read it as the role ships, which no edit changes.
+9. **A scope kept by its role's name alone, before 0.10, holds the role
+   as it ships**, a constant no edit changes: it never widens, and the
+   credentials CI already holds keep working. *Alternative:* none at all,
+   each issued again, which R17 would allow but which narrows nothing a
+   constant does not already hold.
 
 ## 7. The API
 
@@ -290,8 +291,8 @@ is capped by its role alone: issuing one takes the account, and the
 issuer unless they manage access there, holding all of the role's normal
 column wherever it reaches, protected environments included
 (`issuesCredential`), and a service holds no other column. A scope kept
-by its role's name alone, before 0.10, is no scope (`isCredentialScope`):
-its credential reaches nothing. MCP's connected apps carry feature scopes (`read`,
+by its role's name alone, before 0.10, holds its built-in role as it ships
+(`scopeDefinition`), and a name no built-in role has holds nothing. MCP's connected apps carry feature scopes (`read`,
 `write`, `reveal`, `manage-access`), not roles: nothing to keep.
 
 ```
@@ -302,11 +303,10 @@ prod protected, then Developer widened to read there
 Ada reads prod; her token still only uses it
 ```
 
-Neither release reads the other's scopes: a 0.9 replica reads one with
-columns as no scope, so a credential 0.10 issues reaches nothing there
-until a rolling deploy finishes, and 0.10 reads one 0.9 issued as none.
-Acceptable under R17: nobody runs Coffre in production yet, and no shim
-carries them across.
+A 0.9 replica reads a scope with columns as no scope, so a credential
+0.10 issues reaches nothing there until a rolling deploy finishes:
+acceptable under R17, nobody running Coffre in production yet. 0.10 reads
+one 0.9 issued as its roles ship.
 
 Tests (packages/server/test/roles.test.ts): "rule 3: a personal token
 holds no more…", "rule 3: a service token issued under a narrowed

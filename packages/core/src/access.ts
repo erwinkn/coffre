@@ -422,11 +422,12 @@ export type Columns = { normal: readonly Permission[]; protected: readonly Permi
 
 /**
  * One place of a credential's scope: a role there, and what it held when
- * the credential was issued (`issuedGrant`). A scope kept by a release
- * before 0.10, its role's name alone, is no scope: the credential reaches
- * nothing, and is issued again (R17).
+ * the credential was issued (`issuedGrant`). One kept by a release before
+ * 0.10, its role's name alone, holds that role as it ships, a constant no
+ * edit changes, so it never widens either: a built-in role's, or nothing
+ * for any other name.
  */
-export type ScopeGrant = GrantPlace & { role: Role; permissions: Columns };
+export type ScopeGrant = GrantPlace & { role: Role; permissions?: Columns };
 
 /**
  * A grant of a scope with what its role holds now in `policy`, kept: what a
@@ -481,7 +482,9 @@ export function protectedWithin(policy: Policy, place: Place): Place[] {
 
 /** What a scope's grant holds, as it was issued, as a role holds it: whatever the role is now, which no edit changes. */
 export function scopeDefinition(grant: ScopeGrant): RoleDefinition {
-  return { name: grant.role, description: '', permissions: grant.permissions.normal, protected: grant.permissions.protected };
+  if (grant.permissions !== undefined) return { name: grant.role, description: '', permissions: grant.permissions.normal, protected: grant.permissions.protected };
+  // Kept before 0.10: the role as it ships, whatever an Owner made of it since.
+  return isBuiltinRole(grant.role) ? ROLES[grant.role] : { name: grant.role, description: '', permissions: [], protected: [] };
 }
 
 /** The most places a scope asked for names: far more than any credential needs, and a bound on what a request makes the app check. */
@@ -532,10 +535,15 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
     if (typeof grant !== 'object' || grant === null || Array.isArray(grant)) return false;
     const { projectId, environmentId, role, permissions, ...rest } = grant as Record<string, unknown>;
     if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string') return false;
-    // As issued, both columns: a role's name alone, as a release before 0.10 kept it, is none.
-    if (!ROLE_ID.test(role) || typeof permissions !== 'object' || permissions === null || Array.isArray(permissions)) return false;
-    const { normal, protected: guarded, ...more } = permissions as Record<string, unknown>;
-    if (Object.keys(more).length > 0 || !column(normal) || !column(guarded)) return false;
+    // As issued, both columns; or, kept before 0.10, a built-in role's name alone, which holds it as it ships.
+    if (!ROLE_ID.test(role)) return false;
+    if (permissions === undefined) {
+      if (!isBuiltinRole(role)) return false;
+    } else {
+      if (typeof permissions !== 'object' || permissions === null || Array.isArray(permissions)) return false;
+      const { normal, protected: guarded, ...more } = permissions as Record<string, unknown>;
+      if (Object.keys(more).length > 0 || !column(normal) || !column(guarded)) return false;
+    }
     const definition = scopeDefinition(grant as ScopeGrant);
     if (environmentId !== null && (typeof environmentId !== 'string' || definition.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission)))) return false;
     const place = `${projectId}/${environmentId ?? ''}`;

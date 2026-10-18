@@ -15,6 +15,7 @@ import {
   PERMISSIONS,
   protectedWithin,
   runsInstance,
+  scopeDefinition,
   setsUpServices,
   type CredentialScope,
   type GrantPlace,
@@ -132,12 +133,10 @@ export function storedScope(scope: CredentialScope): string {
   return JSON.stringify(
     [...scope]
       .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
-      .map(({ projectId, environmentId, role, permissions }) => ({
-        projectId,
-        environmentId,
-        role,
-        permissions: { normal: [...permissions.normal], protected: [...permissions.protected] },
-      })),
+      .map((grant) => {
+        const { permissions, protected: guarded } = scopeDefinition(grant);
+        return { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role, permissions: { normal: [...permissions], protected: [...guarded] } };
+      }),
   );
 }
 
@@ -148,7 +147,8 @@ export function storedScope(scope: CredentialScope): string {
  */
 function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
   const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
-  return { ...now, permissions: { normal: both(now.permissions.normal, before.permissions.normal), protected: both(now.permissions.protected, before.permissions.protected) } };
+  const [a, b] = [scopeDefinition(now), scopeDefinition(before)];
+  return { ...now, permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) } };
 }
 
 /**
