@@ -2050,7 +2050,7 @@ class VaultService implements Vault {
     if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS };
     if (typeof entry === 'string') return { policy: CLOSED_POLICY, edits: NO_EDITS };
     const edits = readEdits(JSON.parse(entry.metadata) as { policy?: unknown });
-    return edits === null ? { policy: CLOSED_POLICY, edits: NO_EDITS } : { policy: policyOf(edits), edits };
+    return edits === null ? { policy: CLOSED_POLICY, edits: NO_EDITS } : { policy: await livePolicy(db, edits), edits };
   }
 
   changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy }>> {
@@ -2138,7 +2138,7 @@ class VaultService implements Vault {
       } else {
         throw refused('invalid', 'a change is to a role, an instance role, or protection');
       }
-      const policy = policyOf(next);
+      const policy = await livePolicy(d.tx, next);
       if (JSON.stringify(next) !== JSON.stringify(edits)) {
         d.log.push(entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) }));
       }
@@ -3013,6 +3013,18 @@ function readEdits(stored: { policy?: unknown }): PolicyEdits | null {
 }
 
 /** The policy edits make of the roles as they ship: each edited role replaced, each made one added. */
+/**
+ * The policy `edits` say, but for the protected environments deleted
+ * since, the project around one's included: a deleted prod protects
+ * nothing, and holds nobody back from giving a service account a role on
+ * all of its project (`givesService`). A fork's id with no row yet stays,
+ * protected before it is written. The edits keep them: no write is needed.
+ */
+async function livePolicy(db: Queryable, edits: PolicyEdits): Promise<Policy> {
+  const rows = await store.environmentsById(db, edits.protected.map((place) => place.environmentId));
+  return policyOf({ ...edits, protected: edits.protected.filter((place) => rows.get(place.environmentId)?.deleted !== true) });
+}
+
 function policyOf(edits: PolicyEdits): Policy {
   return {
     roles: { ...ROLES, ...edits.roles },

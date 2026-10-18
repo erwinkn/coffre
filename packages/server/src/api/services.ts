@@ -9,6 +9,7 @@ import {
   isCredentialScope,
   issuedGrant,
   issuesCredential,
+  keptGrant,
   managesService,
   NOTHING,
   PERMISSIONS,
@@ -141,13 +142,15 @@ export function storedScope(scope: CredentialScope): string {
 
 /**
  * A grant of a scope as it holds now and as it was issued, whichever is
- * narrower, column by column: what a credential that inherits another's
- * scope carries, so trusting a workload again never widens it.
+ * narrower, column by column, each read as `scopeDefinition` reads it (a
+ * role as it ships kept by its name alone) and kept so again
+ * (`keptGrant`): what a credential that inherits another's scope carries,
+ * so trusting a workload again never widens it.
  */
 function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
-  const was = scopeDefinition(before);
-  const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
-  return { ...now, permissions: { normal: both(now.permissions?.normal ?? [], was?.permissions ?? []), protected: both(now.permissions?.protected ?? [], was?.protected ?? []) } };
+  const [is, was] = [scopeDefinition(now), scopeDefinition(before)];
+  const both = (a: readonly Permission[] = [], b: readonly Permission[] = []) => a.filter((permission) => b.includes(permission));
+  return keptGrant(now, { normal: both(is?.permissions, was?.permissions), protected: both(is?.protected, was?.protected) });
 }
 
 /**

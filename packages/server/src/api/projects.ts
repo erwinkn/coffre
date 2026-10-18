@@ -29,7 +29,7 @@ import {
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, seesProject, type Caller } from './caller.ts';
-import { allowed, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, missing, policyStill, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
@@ -454,6 +454,8 @@ export async function putEnvironment(
         denied(ctx, 'environment.create', 'parent_archived', { projectId: project.id, metadata: { environmentSlug: slug, from } }),
       );
     }
+    // A fork left unprotected was decided from the policy as the caller was loaded with it: still so (`protectedFork`).
+    if (from !== undefined && !guarded) await policyStill(ctx, tx);
     try {
       await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
     } catch (error) {

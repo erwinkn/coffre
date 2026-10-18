@@ -40,6 +40,19 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   nothing. Each change is its own entry, naming what changed. Every read
   is decided again under the log's head, which each change takes, so one
   in flight when prod is protected is refused as prod is when it commits.
+  A deleted environment, or one in a deleted project, protects nothing:
+  the vault leaves it out of the policy it answers, and keeps it in the
+  entry.
+- **The app's decisions are fenced the same way.** A request reads the
+  number of the newest `policy.change` before it asks the vault who is
+  calling, so the policy it decides from is that one or newer. A
+  transaction that commits a decision made from it (a fork left
+  unprotected, a token, a trust binding or a handle with its scope)
+  reads that number again under the head and answers 409, "try again",
+  if it moved: a change appends under the same head, so one that passes
+  was not overtaken. A Developer's service token weighed before prod was
+  protected, and issued after, is refused; asked again, it is weighed as
+  prod is now.
 - **When the vault cannot read its own policy**, only entries forged in
   its name within reach, no role holds anything, a service account's
   neither, but Owner, which holds everything and so writes the policy
@@ -76,6 +89,10 @@ The instance's roles have the same two columns (Developer as above).
   project's protected environments too, where the service would hold its
   normal column: a Developer of a protected prod gives no Viewer of all of
   `market`, which would read prod.
+- **Reading the whole log** takes `audit.read` in both columns of the
+  instance role, with nothing narrowing its scope: an Auditor edited to
+  read no protected environment's log reads every other place's, as
+  anyone who reads places does, and does not verify the whole.
 - **The defaults** make protecting mean something at once. No environment
   is protected until someone says so, so 0.10 changes nobody's access.
 
@@ -118,6 +135,9 @@ issued before 0.10 holds the role as its default was, never as edited. A
 role as it ships is kept by its name alone, which reads the same, so a
 scope written while an older release still serves reads there too: only
 an edited or a made role, which no older release knows, keeps its columns.
+A binding that takes another's place holds the narrower of the two, each
+read the same way, and keeps the result by its name alone where that is
+the role as it ships: replacing a Viewer's binding keeps a Viewer.
 
 ## 6. Decisions
 

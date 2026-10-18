@@ -142,7 +142,7 @@ export async function contextFor(
     signin: deps.signin ?? null,
     workloads: deps.workloads ?? null,
     mcp: null,
-    caller: await loadCaller(deps.vault, { type, id }),
+    caller: await loadCaller(deps.db, deps.vault, { type, id }),
     requestId: randomUUID(),
     sourceIp: null,
     credentialId: null,

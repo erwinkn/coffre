@@ -5,8 +5,8 @@ import type { Database, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
-import { can, type Caller, type Place } from './caller.ts';
-import { ApiError, forbidden, vaultRefused } from './errors.ts';
+import { can, newestPolicySeq, type Caller, type Place } from './caller.ts';
+import { ApiError, conflict, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { PersonalToken, SigninService } from './signin.ts';
@@ -170,6 +170,23 @@ export async function audited<T>(
     if (!(error instanceof Refusal)) throw error;
     return refuse(ctx, error);
   }
+}
+
+/**
+ * Refuse, inside an audited transaction, if the instance's roles or
+ * protected environments changed since the caller was loaded: the fence
+ * for a decision made from `caller.policy` that this transaction commits,
+ * a fork left unprotected or a credential's scope. A change appends its
+ * `policy.change` under the same head this transaction holds, so one that
+ * passes here was not overtaken by any:
+ *
+ *   caller loaded, prod not protected (newest change 41)
+ *   a Maintainer protects prod                           change 57
+ *   the fork's transaction, under the head: 57, not 41   409; asked again, the fork is protected
+ */
+export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq'> }, tx: Transaction): Promise<void> {
+  if ((await newestPolicySeq(tx)) === ctx.caller.policySeq) return;
+  throw conflict("the instance's roles or protected environments changed while this ran: try again");
 }
 
 /** Collect read and vault events without a transaction; commit before returning anything. */

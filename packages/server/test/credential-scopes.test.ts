@@ -249,6 +249,20 @@ test('a binding that replaces others reaches what they reached of what the accou
   assert.deepEqual((await root.bindings.list(CI)).bindings.map((each) => each.id), [after.binding.id], 'refused, it replaced nothing');
 });
 
+test("a binding that replaces a Viewer's keeps the Viewer as it ships, by its name alone: it reads what the one before read", async () => {
+  const DEPLOY = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
+  const first = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'market/dev': 'viewer' } });
+  const again = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [first.binding.id] });
+  // Its keys moved: the binding on the new ones inherits too.
+  jwks = `${GITHUB}/.well-known/jwks-2`;
+  const moved = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY });
+  const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
+  for (const binding of [first, again, moved]) {
+    const [row] = await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.binding.id));
+    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer' }], binding.binding.id);
+  }
+});
+
 test('the scope is listed wherever tokens are, and logged by id when made', async () => {
   const issued = await ada.tokens.issue(CI, { label: 'deploy', expiresInDays: 30, scope: { 'market/dev': 'viewer' } });
   const [listed] = (await ada.tokens.list(CI)).tokens;

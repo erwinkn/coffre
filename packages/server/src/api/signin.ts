@@ -40,7 +40,7 @@ import {
   updateAuth,
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, policyStill, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
@@ -854,6 +854,8 @@ export class SigninService {
       const { standing, scope, byPath, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
       return audited(this.#deps, async (tx, log) => {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
+        // Its scope was weighed with the policy as the caller was loaded: still so (`policyStill`).
+        await policyStill(ctx, tx);
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,
           identityId: null,
@@ -910,6 +912,7 @@ export class SigninService {
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
         }
+        await policyStill(ctx, tx);
         const person = ctx.caller.principal;
         const credential = await this.#issue(tx, 'personal', person, {
           generation: standing.generation,
@@ -956,7 +959,7 @@ export class SigninService {
       }
       const access = await this.#standing(person);
       // What the person holds now, and, on a personal token, what it does: a handle never reaches past the credential that made it.
-      const holder = { ...callerFrom(person, access), credentialScope: ctx.caller.credentialScope };
+      const holder = callerFrom(person, access, ctx.caller.policySeq, ctx.caller.credentialScope);
       const { reached, madeFor } = await this.#handlePlaces(holder, input.paths);
       // `viewer` where its person reads; `contributor` where they only use, which the proxy needs, and no more: a handle writes nothing.
       const wanted = Object.fromEntries(reached.map(({ path, reads }) => [path, reads ? 'viewer' as const : 'contributor' as const]));
@@ -972,6 +975,7 @@ export class SigninService {
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
         }
+        await policyStill(ctx, tx);
         const credential = await this.#issue(tx, 'handle', person, {
           generation: standing.generation,
           identityId: null,
@@ -1042,7 +1046,7 @@ export class SigninService {
       );
     }
     const access = await this.#standing(person);
-    return { access, details, ...await personalScope(this.#deps.db, ctx, callerFrom(person, access), input.scope, details) };
+    return { access, details, ...await personalScope(this.#deps.db, ctx, callerFrom(person, access, ctx.caller.policySeq), input.scope, details) };
   }
 
   /**

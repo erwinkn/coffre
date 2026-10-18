@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
+import { asking, audited, need, policyStill, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
@@ -72,7 +72,8 @@ export async function forkEnvironment(
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
-    const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from, ...await protectedFork(ctx, place, source) });
+    const guard = await protectedFork(ctx, place, source);
+    const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from, ...guard });
     const copies = readable.items.filter((item) => !plan.has(item.key));
     // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
     const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
@@ -94,6 +95,8 @@ export async function forkEnvironment(
     // retargeted or overridden since it was opened would be copied as it was, and held looser than it is. The
     // version says its level too: a mark is a new version.
     await setSecrets(ctx, target, { ...patch }, async (tx) => {
+      // One left unprotected, as its source was when the caller was loaded: still so, or the values stay where they were.
+      if (guard.guarded !== true) await policyStill(ctx, tx);
       const now = new Map((await resolveValues(tx, source, sourcePlace)).items.map((item) => [item.key, item]));
       const moved = copies.find((item) => {
         const current = now.get(item.key);
@@ -145,6 +148,9 @@ async function inheritFrom(
  * (docs/design/roles.md): the vault protects its id, made here for one not
  * there yet, before its row is written or a value copied into it. A
  * refusal stops the fork with nothing made. Its id, and whether it is.
+ * One left unprotected, as its source was for the caller, is written, and
+ * its values copied, only while no policy change came since
+ * (`policyStill`): its source protected meanwhile, the fork would not be.
  */
 async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ id?: string; guarded?: boolean }> {
   if (!protectedFor(ctx.caller, source.environment!)) return {};

@@ -19,7 +19,7 @@ import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { mcpConnections } from '@coffre/db/schema';
 
-import { callerFrom, type Caller } from '../api/caller.ts';
+import { callerFrom, newestPolicySeq, type Caller } from '../api/caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, type ApiContext } from '../api/context.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
@@ -548,6 +548,8 @@ export class McpService {
       throw error;
     }
     if (row === null || claims.expiresAt <= row.now || row.revokedAt !== null || row.expiresAt <= row.now || row.refreshHash === null) return null;
+    // Before the vault is asked: the policy it answers with is this one or newer (`policyStill`).
+    const policySeq = await newestPolicySeq(this.#deps.db);
     const access = await this.#deps.vault.access(row.principal);
     if (access.status !== 'active' || access.generation !== row.generation) return null;
     if (row.now.getTime() - (row.lastUsedAt?.getTime() ?? 0) > TOUCH_INTERVAL_MS) {
@@ -562,7 +564,7 @@ export class McpService {
       clientName: row.clientName,
       scopes: claims.scopes.filter((scope) => held.includes(scope)),
       principal,
-      caller: callerFrom(principal, access),
+      caller: callerFrom(principal, access, policySeq),
     };
   }
 

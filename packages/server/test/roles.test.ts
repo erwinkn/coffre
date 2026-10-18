@@ -313,3 +313,82 @@ test("a credential of a role as it ships keeps its name alone, as a release befo
   assert.deepEqual(Object.keys(kept!).sort(), ['environmentId', 'projectId', 'role']);
   assert.deepEqual(((await scopeOf(edited.id)) as { permissions?: unknown }[])[0]!.permissions, { normal: ['secret.use'], protected: ['secret.use'] });
 });
+
+/**
+ * Run `meanwhile` once, as the vault answers the first `method` asked of
+ * it whose input `when` picks: after the request that asked loaded its
+ * caller, and before it commits.
+ */
+function meanwhileOn(method: 'access' | 'unwrap', when: (input: unknown) => boolean, meanwhile: () => Promise<unknown>): void {
+  const vault = deps.vault;
+  let done = false;
+  deps.vault = new Proxy(vault, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target) as unknown;
+      if (typeof value !== 'function') return value;
+      if (key !== method) return value.bind(target);
+      return async (input: unknown) => {
+        const answer = await (value as (input: unknown) => Promise<unknown>).call(target, input);
+        if (!done && when(input)) {
+          done = true;
+          deps.vault = vault;
+          await meanwhile();
+        }
+        return answer;
+      };
+    },
+  });
+}
+
+test('a fork decided while its source was not protected, which commits once it is, is refused: protected, or not made', async () => {
+  // Prod protected once Maya's request has loaded her, before her fork that inherits is written: nothing is made.
+  meanwhileOn('access', (asked) => asked === MAYA, () => root.environments.protect('market/prod'));
+  assert.equal(await status(maya.environments.create('market/prod-next', { from: 'prod', inherit: true })), 409);
+  assert.equal((await root.projects.list()).projects[0]!.environments.some((each) => each.slug === 'prod-next'), false);
+  // A copy: prod protected once its values are opened, before they are written to the fork, which holds none then.
+  await root.environments.protect('market/prod', false);
+  meanwhileOn('unwrap', () => true, () => root.environments.protect('market/prod'));
+  assert.equal(await status(maya.environments.create('market/prod-copy', { from: 'prod' })), 409);
+  assert.deepEqual((await root.secrets.list('market/prod-copy')).keys, []);
+  // Maya uses prod now, and reads none of it to copy; an Owner's fork into the empty one protects it first.
+  assert.equal(await status(maya.environments.create('market/prod-copy', { from: 'prod' })), 403);
+  assert.equal((await root.environments.create('market/prod-copy', { from: 'prod' })).environment.protected, true);
+  assert.equal(await status(maya.secrets.reveal('market/prod-copy')), 403);
+});
+
+test("a service token weighed before prod was protected, issued once it is, is refused: it would read prod for a Developer who only uses it", async () => {
+  await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
+  meanwhileOn('access', (asked) => asked === ADA, () => maya.environments.protect('market/prod'));
+  assert.equal(await status(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), 409);
+  assert.deepEqual((await root.tokens.list('token:ci-all')).tokens, []);
+  // Asked again, it is decided as the policy is now: Ada no longer manages a Viewer of all of market.
+  assert.equal(await status(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), 403);
+});
+
+test("an instance Auditor whose role reads no protected environment's log reads the rest, not the whole log", async () => {
+  await root.members.add('user:audrey@acme.example', { role: 'auditor' });
+  const audrey = clientFor(deps, 'audrey@acme.example');
+  await root.roles.set('auditor', { name: 'Auditor', description: 'The log, but a protected environment\'s.', permissions: ['audit.read'], protected: [] }, { instance: true });
+  await maya.environments.protect('market/prod');
+  await root.secrets.set('market/prod', { PROD_ONLY: 'p' });
+  await root.secrets.set('market/dev', { DEV_ONLY: 'd' });
+  const seen = (await audrey.audit.list({ limit: 200 })).entries;
+  assert.ok(seen.some((entry) => entry.environment === 'dev'));
+  assert.ok(!seen.some((entry) => entry.environment === 'prod'), 'none of prod');
+  // Verifying the log is reading all of it.
+  assert.equal(await status(audrey.audit.verify()), 403);
+  await root.roles.reset('auditor', { instance: true });
+  assert.ok((await audrey.audit.list({ limit: 200 })).entries.some((entry) => entry.environment === 'prod'));
+  assert.equal((await audrey.audit.verify()).ok, true);
+});
+
+test('a protected environment deleted protects nothing: a Developer gives a service account a role on all of its project again', async () => {
+  await maya.environments.protect('market/prod');
+  assert.equal(await status(ada.members.add('token:ci-before', { access: { market: 'viewer' } })), 403);
+  await root.environments.update('market/prod', { archived: true });
+  await root.environments.delete('market/prod');
+  assert.equal(await status(ada.members.add('token:ci-after', { access: { market: 'viewer' } })), 200);
+  // One made again under its name is another environment, which nothing protects.
+  await root.environments.create('market/prod');
+  assert.equal(await protectedOf(ada, 'market/prod'), false);
+});

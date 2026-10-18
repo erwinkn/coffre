@@ -54,7 +54,7 @@ import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Asker, SigninService } from './signin.ts';
-import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, policyStill, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
   inheritedScope,
   issuedScope,
@@ -321,6 +321,8 @@ export class WorkloadService {
 
       return audited(this.#deps, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
+        // Its scope was weighed with the policy as the caller was loaded: still so (`policyStill`).
+        await policyStill(ctx, tx);
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
           throw conflict('the bindings it replaces changed while it was made: try again');
@@ -421,6 +423,8 @@ export class WorkloadService {
 
       return audited(this.#deps, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
+        // Its scope was weighed with the policy as the caller was loaded: still so (`policyStill`).
+        await policyStill(ctx, tx);
         const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
         const now = new Date();
