@@ -267,11 +267,16 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     if (inside) at = `${proxied}${to.pathname.slice(under.length)}${to.search}`;
     else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
-      return failure(502, `${target.host} redirected to ${to.origin}${to.pathname}, where ${credential.name}'s key does not go`);
+      // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
+      return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
     } else at = location;
   }
-  // What the request carried, in each form the upstream may echo it in: as it is, URL-encoded both ways, and Basic's base64.
-  const forms = Object.values(values).flatMap((value) => [value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2)]);
+  // What the request carried, in each form an honest upstream may echo it in: as it is, URL-encoded both ways, a JSON
+  // string's (and Go's, which escapes <, > and &, and the form that escapes /), and Basic's base64.
+  const forms = Object.values(values).flatMap((value) => {
+    const json = JSON.stringify(value).slice(1, -1);
+    return [value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2), json, json.replaceAll('/', '\\/'), json.replace(/[<>&]/g, (char) => `\\u00${char.charCodeAt(0).toString(16)}`)];
+  });
   if (inject.kind === 'basic') forms.push(headers.get('authorization')!.slice('Basic '.length));
   return redacted(upstream, forms, at);
 }
@@ -381,7 +386,9 @@ function redacted(upstream: Response, values: string[], location: string | null)
   const headers = new Headers();
   for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, scrub(value));
   if (location !== null) headers.set('location', scrub(location));
-  headers.set('cache-control', upstream.headers.get('cache-control') ?? 'no-store');
+  // Never kept by a cache on the way: the next caller, with another handle or none, would get it without coffre's checks.
+  for (const name of ['expires', 'pragma', 'age', 'surrogate-control', 'cdn-cache-control', 'cloudflare-cdn-cache-control']) headers.delete(name);
+  headers.set('cache-control', 'no-store');
   const type = upstream.headers.get('content-type') ?? '';
   const text = /^text\/|json|xml|javascript|x-www-form-urlencoded|event-stream/i.test(type);
   if (upstream.body === null || !text || secrets.length === 0) return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });

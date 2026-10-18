@@ -23,6 +23,8 @@ import { vaultKv } from '../src/plugins/vault-kv.ts';
 
 const KEY = 'sk_schumann_real_0123456789abcdef';
 const WEBHOOK = 'whsec_local_only_0123456789';
+/** A key a JSON echo escapes. */
+const QUOTED = 'q"uo\\te/d<&>0123';
 
 /** The fake Schumann: what it received, and an answer that echoes the key when asked to. */
 let upstream: Server;
@@ -35,13 +37,21 @@ before(async () => {
     request.on('data', (chunk: Buffer) => (body += chunk.toString()));
     request.on('end', () => {
       received.push({ method: request.method!, url: request.url!, headers: request.headers, body });
-      if (request.headers['x-api-key'] !== KEY && request.headers.authorization === undefined && !request.url!.includes('key=')) {
+      if (request.headers['x-api-key'] !== KEY && request.headers['x-api-key'] !== QUOTED && request.headers.authorization === undefined && !request.url!.includes('key=')) {
         response.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"bad key"}');
         return;
       }
       if (request.url!.includes('/echo')) {
         response.writeHead(200, { 'content-type': 'application/json', 'x-echo': String(request.headers['x-api-key']), 'set-cookie': 'upstream=1' });
         response.end(JSON.stringify({ youSent: request.headers['x-api-key'], authorization: request.headers.authorization, url: request.url }));
+        return;
+      }
+      if (request.url!.includes('/redirect-key')) {
+        response.writeHead(302, { location: `https://evil.example/${KEY}` }).end();
+        return;
+      }
+      if (request.url!.includes('/cached')) {
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600', expires: 'Thu, 01 Jan 2099 00:00:00 GMT' }).end('{}');
         return;
       }
       if (request.url!.includes('/redirect-inside')) {
@@ -75,6 +85,7 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       schumann: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
       maps: { upstream: `${upstreamUrl}/maps`, inject: query('key', '{MAPS_KEY}'), methods: ['GET'] },
       twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
+      quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
     },
     expose: { 'market/dev': ['WEBHOOK_SECRET'] },
     insecureUpstreams: true,
@@ -98,6 +109,7 @@ useMcp(
       TWILIO_SID: 'AC0123456789',
       TWILIO_TOKEN: 'twilio_real_token_0123456789',
       WEBHOOK_SECRET: WEBHOOK,
+      QUOTED_KEY: QUOTED,
       DATABASE_URL: 'postgres://dev-db/market',
     });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
@@ -261,6 +273,16 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
   assert.equal(redirect.status, 502);
   assert.equal(redirect.headers.get('location'), null);
   assert.equal(received.filter((request) => request.url.includes('steal')).length, 0);
+  const told = await call('/redirect-key');
+  assert.equal(told.status, 502);
+  assert.equal((await told.text()).includes(KEY), false, 'the refusal names no destination');
+  const cached = await call('/cached');
+  assert.equal(cached.headers.get('cache-control'), 'no-store', 'no cache on the way keeps an answer for the next caller');
+  assert.equal(cached.headers.get('expires'), null);
+  const quoted = await route('/use/market/dev/quoted/echo', { headers: { 'x-api-key': handle } });
+  const echoedJson = await quoted.text();
+  assert.equal(JSON.stringify(JSON.parse(echoedJson)).includes(JSON.stringify(QUOTED).slice(1, -1)), false, echoedJson);
+  assert.equal(JSON.parse(echoedJson).youSent, '[redacted by coffre]');
   const inside = await call('/redirect-inside');
   assert.equal(inside.status, 302);
   assert.equal(inside.headers.get('location'), `${ORIGIN}/use/market/dev/schumann/companies?page=2`);
@@ -296,7 +318,7 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
   assert.equal((await call('/companies?token=' + handle)).status, 400);
   assert.equal((await route('/use/market/dev/schumann/companies')).status, 401, 'no handle, no request');
   assert.equal((await route('/use/market/dev/nope/companies', { headers: { 'x-api-key': handle } })).status, 404);
-  assert.equal(received.every((request) => request.url.startsWith('/v1/')), true);
+  assert.equal(received.every((request) => request.url.startsWith('/v1/') || request.url.startsWith('/quoted/')), true);
 });
 
 test('query and Basic credentials, with their methods and paths', async () => {

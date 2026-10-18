@@ -212,12 +212,18 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    body), it is refused rather than leaked to a third party. The request
    goes out with `redirect: 'manual'`.
 5. **Back.** The upstream's answer, without `set-cookie` (it would land on
-   coffre's origin). A redirect stays on the proxy. A `Location` under
+   coffre's origin), and always `cache-control: no-store`, its own cache
+   headers dropped: a cache on the way would serve the next caller, with
+   another handle or none, without coffre's checks. A redirect stays on the
+   proxy. A `Location` under
    the upstream becomes the proxy's own URL for it. A redirect anywhere
-   else is a 502, so the app never follows it with the handle. Every value
-   the request carried, 8 characters or longer, is replaced by `[redacted
-   by coffre]` in each form the upstream may echo: as it is, URL-encoded
-   both ways, and Basic's base64. That covers its headers and a text body
+   else is a 502, naming no destination, so the app never follows it with
+   the handle. Every value the request carried, 8 characters or longer, is
+   replaced by `[redacted by coffre]` in each form an honest upstream may
+   echo it in: as it is, URL-encoded both ways, as a JSON string (Go's
+   escaping and escaped slashes included), and Basic's base64. This guards
+   against an echo, an error message quoting the request, not against a
+   hostile upstream, which holds the key anyway. That covers its headers and a text body
    (JSON, XML, text, event streams), streamed, holding back as much as the
    longest value so that one split across chunks is caught, and never half
    a surrogate pair. A binary body passes as it is.
