@@ -401,7 +401,8 @@ test('a refused upgrade leaves no socket behind, though the peer keeps its side 
 test("a group of sessions is checked once an interval, however many it holds, and a revocation just after a check ends them within one", postgresOnly, async () => {
   const clients = Array.from({ length: 10 }, () => appClient());
   for (const client of clients) client.on('error', () => undefined);
-  await Promise.all(clients.map((client) => client.connect()));
+  // One after another: what is counted is the group's checks, not ten first reads at once racing for the log's head.
+  for (const client of clients) await client.connect();
   const rechecks = async () => (await entries('credential.use')).filter((entry) => entry.metadata.recheck === true).length;
   // Two and a half intervals, counted from now: two checks, or three, for all ten, never one each.
   const from = await rechecks();

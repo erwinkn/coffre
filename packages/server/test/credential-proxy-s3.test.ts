@@ -19,7 +19,7 @@ import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } 
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, sigv4 } from '../src/plugins/credential-proxy.ts';
-import { signV4 } from '../src/plugins/sigv4.ts';
+import { presignV4, signV4 } from '../src/plugins/sigv4.ts';
 
 const ACCESS_KEY_ID = 'AKIAREALKEY000000001';
 const SECRET = 'real/secret+access/key0123456789ABCDEFGH';
@@ -75,7 +75,12 @@ async function verified(request: IncomingMessage, body: Buffer): Promise<boolean
 before(async () => {
   s3 = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(chunk as Buffer);
+    try {
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+    } catch {
+      // An upload the proxy stopped mid-way: S3 stores nothing of it.
+      return;
+    }
     const body = Buffer.concat(chunks);
     const ok = await verified(request, body);
     seen.push({ method: request.method!, url: request.url!, verified: ok, authorization: request.headers.authorization ?? '', hash: String(request.headers['x-amz-content-sha256']) });
@@ -84,7 +89,7 @@ before(async () => {
     const [, bucket, ...segments] = url.pathname.split('/');
     const key = segments.map(decodeURIComponent).filter((segment, i) => segment !== '' || i < segments.length - 1);
     if (request.method === 'PUT') {
-      objects.set(`${bucket}/${key.join('/')}`, body.toString());
+      objects.set(`${bucket}/${key.join('/')}`, body.length > 1024 * 1024 ? `${body.length} bytes` : body.toString());
       return response.writeHead(200, { etag: '"e"' }).end();
     }
     if (request.method === 'GET' && key.length > 0) {
@@ -240,4 +245,97 @@ test('a key no header can carry is refused, and quoted nowhere', async () => {
   assert.equal(answer.status, 409);
   assert.equal(JSON.stringify([await answer.text(), logged.map(String)]).includes('0123456789'), false);
   assert.equal(seen.length, 0);
+});
+
+test("coffre's presigned URLs are the AWS SDK's own, byte for byte", async () => {
+  const date = new Date('2026-10-18T10:00:00Z');
+  for (const [service, path, query] of [['s3', '/uploads/kyc/a%20b%2Bc.pdf', { 'response-content-disposition': 'attachment; filename="a b.pdf"' }], ['s3', '/uploads/x', {}]] as const) {
+    const url = new URL(`https://upstream.example${path}`);
+    for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+    const ours = await presignV4('GET', url, { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET, sessionToken: 'session-token' }, { region: REGION, service }, 300, date);
+    const signer = new SignatureV4({ credentials: { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET, sessionToken: 'session-token' }, region: REGION, service, sha256: Sha256, uriEscapePath: false, applyChecksum: false });
+    // As the SDK's S3 presigner asks it: the payload unsigned, said in a header it does not sign.
+    const theirs = await signer.presign({ method: 'GET', protocol: 'https:', hostname: url.hostname, path: url.pathname, query: { ...query }, headers: { host: url.host, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } }, { signingDate: date, expiresIn: 300, unsignableHeaders: new Set(['x-amz-content-sha256']), unhoistableHeaders: new Set(['x-amz-content-sha256']) });
+    assert.equal(ours.searchParams.get('X-Amz-Signature'), theirs.query!['X-Amz-Signature'], path);
+    assert.equal(ours.searchParams.get('X-Amz-Credential'), theirs.query!['X-Amz-Credential']);
+  }
+  // Another service signs the empty body a GET has, as the SDK's own presigner does with no payload hash said.
+  const api = new URL('https://abc.execute-api.eu-west-3.amazonaws.com/prod/a%20b');
+  const ours = await presignV4('GET', api, { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET }, { region: REGION, service: 'execute-api' }, 300, date);
+  const signer = new SignatureV4({ credentials: { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET }, region: REGION, service: 'execute-api', sha256: Sha256, uriEscapePath: true, applyChecksum: false });
+  const theirs = await signer.presign({ method: 'GET', protocol: 'https:', hostname: api.hostname, path: api.pathname, query: {}, headers: { host: api.host } }, { signingDate: date, expiresIn: 300 });
+  assert.equal(ours.searchParams.get('X-Amz-Signature'), theirs.query!['X-Amz-Signature'], 'execute-api');
+});
+
+test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the real key\'s id, for as long as asked, logged as a use', async () => {
+  const { handle } = await appClient();
+  const ask = (presign: Record<string, unknown>, token = handle) =>
+    route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign }) });
+  const answer = await ask({ credential: 's3', path: '/uploads/kyc/a%20b.pdf', expiresIn: 300, query: { 'response-content-disposition': 'attachment' } });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  const { url, expiresAt } = (await answer.json()) as { url: string; expiresAt: string };
+  const presigned = new URL(url);
+  assert.equal(presigned.origin, new URL(s3Url).origin, 'the upstream itself, not the proxy');
+  assert.equal(presigned.pathname, '/uploads/kyc/a%20b.pdf');
+  assert.match(presigned.searchParams.get('X-Amz-Credential')!, new RegExp(`^${ACCESS_KEY_ID}/`));
+  assert.equal(presigned.searchParams.get('X-Amz-Expires'), '300');
+  assert.equal(url.includes(SECRET) || url.includes(handle), false, 'neither the secret nor the handle');
+  assert.ok(Math.abs(Date.parse(expiresAt) - Date.now() - 300_000) < 5000);
+  const [use] = (await entries('credential.use')).filter((entry) => entry.metadata.presign !== undefined);
+  assert.deepEqual(use!.metadata.presign, { method: 'GET', path: '/uploads/kyc/a%20b.pdf', expiresIn: 300 });
+
+  // What it does not sign: an upload, a long life, a path outside, a credential that does not sign, or without the handle.
+  assert.equal((await ask({ credential: 's3', path: '/uploads/x', method: 'PUT' })).status, 400);
+  assert.equal((await ask({ credential: 's3', path: '/uploads/x', expiresIn: 86_400 })).status, 400);
+  assert.equal((await ask({ credential: 's3', path: '/uploads/%2e%2e/x' })).status, 400);
+  // A tab or a line break inside an encoded slash or backslash, which the URL would drop, joining it again.
+  for (const path of ['/uploads/..%2\tfprivate', '/uploads/..%5\ncprivate', '/uploads/a\rb']) assert.equal((await ask({ credential: 's3', path })).status, 400, JSON.stringify(path));
+  assert.equal((await ask({ credential: 's3', path: '/uploads/x?X-Amz-Expires=99' })).status, 400);
+  assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'X-Amz-Expires': '99' } })).status, 400);
+  assert.equal((await ask({ credential: 'nope', path: '/uploads/x' })).status, 404);
+  // No URL to share carries the handle, in its path or its query.
+  assert.equal((await ask({ credential: 's3', path: `/uploads/${handle}` })).status, 400);
+  assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'response-content-disposition': `attachment; filename=${handle}` } })).status, 400);
+  // Encoded, beside a byte that is no UTF-8: still the handle.
+  assert.equal((await ask({ credential: 's3', path: `/uploads/%FF/${handle.replace('_', '%5F')}` })).status, 400);
+  assert.equal((await route('/use/market/dev', { method: 'POST', body: JSON.stringify({ presign: { credential: 's3', path: '/x' } }) })).status, 401);
+});
+
+test('a streamed upload sends nothing of a handle split across chunks, and nothing past or short of its declared length', async () => {
+  const { handle } = await appClient();
+  const upload = (parts: Uint8Array[], declared: number, gap = 0) => {
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const part of parts) {
+          controller.enqueue(part);
+          if (gap > 0) await new Promise((resolve) => setTimeout(resolve, gap));
+        }
+        controller.close();
+      },
+    });
+    return route('/use/market/dev/s3/uploads/streamed', {
+      method: 'PUT',
+      headers: { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD', 'content-length': String(declared) },
+      body,
+      duplex: 'half',
+    } as RequestInit);
+  };
+  const bytes = new TextEncoder().encode(`data:${handle}:end`);
+  const cut = 5 + handle.length - 1;
+  assert.notEqual((await upload([bytes.slice(0, cut), bytes.slice(cut)], bytes.length, 20)).status, 200);
+  assert.equal(objects.has('uploads/streamed'), false, 'nothing stored');
+  const four = new TextEncoder().encode('abcd');
+  assert.notEqual((await upload([four, new TextEncoder().encode('e')], 4, 20)).status, 200, 'a byte past the length declared');
+  assert.notEqual((await upload([four], 5)).status, 200, 'short of it');
+  assert.equal(objects.has('uploads/streamed'), false);
+  assert.equal((await upload([four], 4)).status, 200, 'exactly as declared');
+  assert.equal(objects.get('uploads/streamed'), 'abcd');
+});
+
+test('an upload past what the proxy holds streams through: 20 MiB, signed again, the handle nowhere in it', async () => {
+  const { client } = await appClient();
+  const big = Buffer.alloc(20 * 1024 * 1024, 7);
+  await client.send(new PutObjectCommand({ Bucket: 'uploads', Key: 'big.bin', Body: big, ContentLength: big.length }));
+  assert.equal(objects.get('uploads/big.bin'), `${big.length} bytes`);
+  assert.ok(seen.at(-1)!.verified);
 });

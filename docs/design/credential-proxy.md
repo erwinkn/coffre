@@ -304,20 +304,51 @@ the upstream checks against the body. Refused before anything is sent:
 - `STREAMING-*` (aws-chunked) uploads, whose chunk signatures chain from
   a seed signature only the real key makes. The SDK sends them for
   flexible checksums unless told `WHEN_REQUIRED`.
-- Presigned URLs (`X-Amz-Signature` in the query): a `presign` helper
-  comes later (below).
+- Presigned URLs the app signs itself (`X-Amz-Signature` in the query),
+  since the app signs with the handle. coffre presigns instead (below).
 
-Bodies go through the proxy whole, up to its 16 MiB, so a larger upload
-needs the multipart API (each part under the limit) or, later, `presign`.
+**Uploads stream.** A request the SDK signs with its payload's hash (a
+literal SHA-256 or `UNSIGNED-PAYLOAD`) and its `Content-Length` streams
+through, never held whole, up to S3's own 5 GiB for one request. Its
+signature needs no byte of it. It is checked as it passes: a handle
+anywhere in it, a chunk boundary included, or a length other than the one
+it declared, and it stops, so the upstream stores nothing. What a handle
+could still begin, and its last bytes, are held back until that is known. Other bodies are
+read whole, up to 16 MiB. Equisafe's PutObject past 16 MiB failed on that
+limit (a 413), not on Workers' own request limit, which Cloudflare sets
+by plan (100 MB on Free and Pro, 200 MB on Business, 500 MB on
+Enterprise): past that, a Workers deployment needs multipart uploads,
+each part a request of its own. On Workers, a streamed body
+keeps its length through `FixedLengthStream`. The SDK's `Expect:
+100-continue` stays at the proxy.
+
+**Presigned GETs.** An app that hands out download links asks coffre for
+one, with its handle: `credential('s3').presign('/uploads/kyc/a%20b.pdf',
+{ expiresIn: 300 })` (`@coffre/client/credential`), which is `POST
+/use/<project>/<env>` with `{ presign: { credential, path, method,
+query, expiresIn } }`. coffre signs a GET (or HEAD) of that path under the
+credential's upstream with the real key pair, for at most an hour and never
+past the handle, and answers `{ url, expiresAt }`. The URL is the
+upstream's own (MinIO's, S3's), for a browser to use until it expires. It
+holds the access key's id and a signature, never the secret or the handle:
+a path or query that carries the handle is refused. S3's URLs leave the
+payload unsigned, as its own presigner does; any other service's sign the
+empty body a GET has.
+Each URL is one use in the log, naming the path and its lifetime, never
+served from the cache. Uploads are not presigned: they go through the proxy.
+The SDK's own `getSignedUrl` signs with the handle, so it needs replacing
+by the helper where the app presigns.
 
 Tested two ways. In the suite (`packages/server/test/credential-proxy-s3.test.ts`),
 the AWS SDK v3 puts, gets and lists through the proxy against a fake S3,
 which checks each request's signature with the SDK's own signer
-(`@smithy/signature-v4`) under the real secret, as S3 does. By hand,
-against MinIO in Docker, the same put, get and list passed. A client
-holding the handle as its keys was refused by MinIO directly, and a GET's
-median was 1.4 ms direct against 2.7 ms through the proxy, over loopback
-HTTP to coffre.
+(`@smithy/signature-v4`) under the real secret, as S3 does. It also puts
+20 MiB in one PutObject, and checks presigned URLs against the SDK's own
+presigner, byte for byte. By hand, against MinIO in Docker, the same put,
+get and list passed, a 40 MiB PutObject streamed through, and a presigned
+GET fetched straight from MinIO. A client holding the handle as its keys was
+refused by MinIO directly, and a GET's median was 1.3 ms direct against
+2.6 ms through the proxy, over loopback HTTP to coffre.
 
 **Postgres through a tunnel (PR 3, built on Node).** The deployment
 names the key that holds the database's real URL:

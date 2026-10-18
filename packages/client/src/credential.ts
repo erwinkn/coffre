@@ -16,6 +16,14 @@ export type ProxiedCredential = {
   url: string;
   /** `fetch`, at a path under the credential's upstream, with the handle the proxy takes. */
   fetch(path: string, init?: RequestInit): Promise<Response>;
+  /**
+   * A presigned GET (or HEAD) of `path` under an AWS-signed credential's
+   * upstream, `/bucket/key` with each segment encoded as in a URL: coffre
+   * signs it with the real key pair, for `expiresIn` seconds (15 minutes
+   * unless set, an hour at most), and the URL is the upstream's own, for a
+   * browser or anyone to use until then.
+   */
+  presign(path: string, options?: { method?: 'GET' | 'HEAD'; expiresIn?: number; query?: Record<string, string> }): Promise<{ url: string; expiresAt: string }>;
 };
 
 type Env = Record<string, string | undefined>;
@@ -43,6 +51,17 @@ export function credential(
       const headers = new Headers(init.headers);
       headers.set('x-coffre-handle', handle);
       return fetcher(`${url}${path.startsWith('/') ? '' : '/'}${path}`, { ...init, headers });
+    },
+    presign: async (path, options = {}) => {
+      // The environment's own URL on the proxy, which the credential's is under.
+      const answer = await fetcher(url.slice(0, url.lastIndexOf('/')), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ presign: { credential: name, path, ...options } }),
+      });
+      const body = (await answer.json()) as { url?: string; expiresAt?: string; message?: string };
+      if (!answer.ok || body.url === undefined) throw new Error(`coffre presigned nothing: ${body.message ?? answer.status}`);
+      return { url: body.url, expiresAt: body.expiresAt! };
     },
   };
 }

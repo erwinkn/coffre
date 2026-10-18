@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Postgres through the credential proxy, on Node.** `credentialProxy({
+  tunnels: { db: postgres('DATABASE_URL') } })`: `coffre run` starts a
+  local listener for the app, whose `DATABASE_URL` is that listener with
+  the handle as its password. coffre logs in to the real database with the
+  real password (SCRAM), then pipes bytes: queries, COPY, LISTEN/NOTIFY,
+  cancel requests. A revoked handle or a lost grant ends open sessions
+  within a minute. The deployment's HTTP server hands its upgrades to
+  `coffre.upgrade(…)`. The database must take the role only from coffre's
+  address (docs/design/credential-proxy.md, section 6).
+- **S3 through the proxy, further.** Uploads the SDK signs with their hash
+  and length stream through, up to 5 GiB, past the 16 MiB a proxied body
+  was held to. `credential('s3').presign(path)` gets a presigned GET that
+  coffre signs with the real key pair: the upstream's own URL, for at most
+  an hour, each logged as a use.
+
 ## 0.8.0 (2026-10-18)
 
 - **Stand-ins: people's apps use secrets without holding them.** A vault
@@ -30,15 +45,8 @@
     the handle, at the proxy's endpoint (`AWS_ENDPOINT_URL_S3`,
     `forcePathStyle`), and coffre signs again with the real key pair.
     aws-chunked uploads and presigned URLs are refused, for now.
-  - Postgres through a tunnel, on Node: `tunnels: { db: postgres('DATABASE_URL') }`.
-    `coffre run` starts a local listener, and the app's `DATABASE_URL`
-    is it, with the handle as the password. coffre logs in to the real
-    database with the real one (SCRAM), then pipes bytes: queries, COPY,
-    LISTEN/NOTIFY, cancel requests. A revoked handle ends open sessions
-    within a minute. The deployment's server hands its upgrades to
-    `coffre.upgrade(…)`.
-  - The design, its decisions and what comes next (the tunnel on Workers,
-    Redis) are in docs/design/credential-proxy.md. Migration
+  - The design, its decisions and what comes next (the Postgres tunnel)
+    are in docs/design/credential-proxy.md. Migration
     `0009_handles` widens a check, and nothing else.
 
 ## 0.7.0 (2026-10-17)
