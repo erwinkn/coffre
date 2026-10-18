@@ -146,6 +146,14 @@ test("a fork's inherited plain value shows only to a reader of the parent, and a
   assert.equal((await valuesIn(clientFor(deps, FORKER), 'market/dev-eu')).TWILIO_SID, null);
   assert.equal((await refusal(clientFor(deps, FORKER).secrets.reveal('market/dev-eu/TWILIO_SID'))).reason, 'parent_unreadable');
 
+  // Nor does its plan hand the parent's plain value to the fork reader's app: the plan stands, the key left out.
+  const handle = (await bearer(await sessionFor(FORKER)).handles.create({ label: 'coffre run market/dev-eu', paths: ['market/dev-eu'] })).token;
+  const plan = await route('/use/market/dev-eu', { headers: { authorization: `Bearer ${handle}` } });
+  assert.equal(plan.status, 200, await plan.clone().text());
+  const { env, left } = (await plan.json()) as { env: Record<string, string>; left: string[] };
+  assert.equal(env.REGION, undefined);
+  assert.ok(left.includes('REGION'));
+
   await root.environments.create('market/copy', { from: 'dev' });
   assert.deepEqual(await valuesIn(root, 'market/copy'), { REGION: 'eu-west-3', TWILIO_SID: SID, TWILIO_TOKEN: null });
 });

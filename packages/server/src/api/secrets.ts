@@ -1256,7 +1256,12 @@ export async function reveal(
     const read = await readableValues(ctx.db, place, environment, path.key);
     const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
-    const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({ key: item.key, inherited: item.parent !== undefined, plain: plain(item) }))) : use.keys;
+    // A parent's plain value is plain to its readers alone, as the listing shows it (R8): to anyone else, a key like any other.
+    const told = (item: Readable) => item.parent === undefined
+      || can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: item.parent.environmentId, environmentSlug: item.parent.slug });
+    const chosen = use === undefined ? null : typeof use.keys === 'function'
+      ? use.keys(named, read.items.map((item) => ({ key: item.key, inherited: item.parent !== undefined, plain: plain(item) && told(item) })))
+      : use.keys;
     const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
     const rows = read.items.filter(wanted);
     const unreadable = read.unreadable.filter(wanted);
