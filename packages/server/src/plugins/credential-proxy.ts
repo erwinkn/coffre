@@ -6,10 +6,11 @@
  * the real value at the edge, for the credential's own upstream only. In
  * the deployment's configuration:
  *
- *   import { credentialProxy, header } from '@coffre/server/plugins/credential-proxy';
+ *   import { credentialProxy, header, sigv4 } from '@coffre/server/plugins/credential-proxy';
  *   plugins: [credentialProxy({
  *     credentials: {
  *       schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
+ *       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }), baseUrl: 'AWS_ENDPOINT_URL_S3' },
  *     },
  *     expose: { 'market/local': 'all' },
  *   })],
@@ -31,12 +32,17 @@
 import { CoffreError } from '@coffre/client';
 
 import type { CoffrePlugin, PluginContext } from '../plugins.ts';
+import { signV4 } from './sigv4.ts';
 
-/** How a credential's values reach its upstream: in a header, a query parameter, or Basic authentication. */
+/** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
 export type Inject =
   | { kind: 'header'; name: string; template: string }
   | { kind: 'query'; name: string; template: string }
-  | { kind: 'basic'; user: string; password: string };
+  | { kind: 'basic'; user: string; password: string }
+  | ({ kind: 'sigv4' } & SigV4);
+
+/** An AWS Signature Version 4 key pair, each a template, and where it signs for. */
+export type SigV4 = { accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string; service: string };
 
 /** A header the upstream reads its key from: `header('authorization', 'Bearer {OPENAI_API_KEY}')`, each `{KEY}` the environment's value. */
 export function header(name: string, template: string): Inject {
@@ -51,6 +57,20 @@ export function query(name: string, template: string): Inject {
 /** HTTP Basic authentication: `basic('{TWILIO_SID}', '{TWILIO_TOKEN}')`. */
 export function basic(user: string, password: string): Inject {
   return { kind: 'basic', user, password };
+}
+
+/**
+ * The request signed again with an AWS key pair, for S3 and the like:
+ * `sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey:
+ * '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' })`. The
+ * app's SDK signs with the handle as its access key, and the proxy discards
+ * that signature. Its payload hash stands: a literal SHA-256, which the
+ * upstream checks against the body, or `UNSIGNED-PAYLOAD`. An aws-chunked
+ * upload (`STREAMING-…`) and a presigned URL are refused: each signs with
+ * the real key in a way the proxy cannot sign again.
+ */
+export function sigv4(keys: SigV4): Inject {
+  return { kind: 'sigv4', ...keys };
 }
 
 /** One credential: its upstream, how its keys reach it, and what of it a caller may ask. */
@@ -246,6 +266,14 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(403, `${credential.name} is not for ${relative}`);
   }
 
+  if (credential.inject.kind === 'sigv4') {
+    if (target.searchParams.has('X-Amz-Signature') || target.searchParams.has('X-Amz-Credential')) return failure(400, `a presigned URL signs with the real key: ${credential.name} takes requests the SDK signs in their headers`);
+    const hash = request.headers.get('x-amz-content-sha256') ?? '';
+    if (hash.startsWith('STREAMING-') || /aws-chunked/i.test(request.headers.get('content-encoding') ?? '')) {
+      return failure(400, `aws-chunked uploads chain their chunks' signatures from the real key: set requestChecksumCalculation: 'WHEN_REQUIRED' in the SDK, for UNSIGNED-PAYLOAD or a literal hash`);
+    }
+    if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
+  }
   const handle = handleIn(request, credential, target);
   if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${credential.name} takes its key, or as x-coffre-handle`);
   // The body first, however long it takes to come: the handle is checked, and the values opened, as the request goes out.
@@ -262,6 +290,18 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
     if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
     if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
+    if (inject.kind === 'sigv4') {
+      // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
+      for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
+      const given = request.headers.get('x-amz-content-sha256');
+      // The client's own hash, or the body's, an empty one's included, as SigV4 has it when no header says otherwise.
+      const payload = given ?? hex(await crypto.subtle.digest('SHA-256', body ?? new Uint8Array(0)));
+      await signV4(request.method, target, headers, payload, {
+        accessKeyId: render(inject.accessKeyId, values),
+        secretAccessKey: render(inject.secretAccessKey, values),
+        ...(inject.sessionToken === undefined ? {} : { sessionToken: render(inject.sessionToken, values) }),
+      }, inject);
+    }
   } catch {
     // The platform's error quotes the value it refused: neither it nor its message goes anywhere, a log included.
     return failure(409, `${credential.name}'s value is no valid ${inject.kind === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
@@ -281,7 +321,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   }
   // What the request carried: each value, and what the rule made of them, Basic's base64, as stored and as they went out
   // (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`).
-  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length) : target.searchParams.get(inject.name)!;
+  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
+    : inject.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(inject.name)!;
   const redact = redactor([...Object.values(values).flatMap((value) => [value, value.trim()]), injected].flatMap(echoed));
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
   // Redacted as the bytes it came in, before a URL encodes them again.
@@ -337,6 +378,8 @@ function binary(bytes: Uint8Array): string {
   return text;
 }
 
+const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+
 /** Whether a header's value carries a handle: as it is, or inside Basic authentication's base64. */
 function carries(value: string): boolean {
   if (HANDLE.test(value)) return true;
@@ -382,6 +425,8 @@ function handleIn(request: Request, credential: Resolved, target: URL): string |
   let slot: string | null = null;
   if (inject.kind === 'header') slot = request.headers.get(inject.name);
   if (inject.kind === 'query') slot = target.searchParams.get(inject.name);
+  // The SDK's `Credential=<access key id>/…`: the handle, as the access key it signed with.
+  if (inject.kind === 'sigv4') slot = /Credential=([^/,\s]+)\//.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
   if (inject.kind === 'basic') {
     const basic = /^Basic\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
     try {
@@ -523,8 +568,12 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
     throw new Error(`credentialProxy: ${name}'s upstream is HTTPS${insecure ? ' or HTTP' : ': plain HTTP only with insecureUpstreams, for a local fake'}`);
   }
   if (!insecure && privateHost(base.hostname)) throw new Error(`credentialProxy: ${name}'s upstream ${base.hostname} is a private address, which only insecureUpstreams, for a local fake, reaches`);
-  const templates = credential.inject.kind === 'basic' ? [credential.inject.user, credential.inject.password] : [credential.inject.template];
-  if (credential.inject.kind !== 'basic' && !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(credential.inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(credential.inject.name)}, which is no header or parameter name`);
+  const inject = credential.inject;
+  const templates = inject.kind === 'basic' ? [inject.user, inject.password]
+    : inject.kind === 'sigv4' ? [inject.accessKeyId, inject.secretAccessKey, ...(inject.sessionToken === undefined ? [] : [inject.sessionToken])]
+    : [inject.template];
+  if ((inject.kind === 'header' || inject.kind === 'query') && !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
+  if (inject.kind === 'sigv4' && (!/^[a-z0-9-]{1,32}$/.test(inject.region) || !/^[a-z0-9-]{1,32}$/.test(inject.service))) throw new Error(`credentialProxy: ${name} signs for a region and a service, eu-west-3 and s3`);
   const keys = [...new Set(templates.flatMap((template) => [...template.matchAll(PLACEHOLDER)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);
   if (credential.baseUrl !== undefined && (!KEY.test(credential.baseUrl) || keys.includes(credential.baseUrl))) throw new Error(`credentialProxy: ${name}'s baseUrl is the key the app reads its address from, and none of its rule's`);

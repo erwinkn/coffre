@@ -2,8 +2,8 @@
 
 A design for 0.8, written on 2026-10-18 (W125), from Erwin's R11 and R13.
 PR 1 is built: stand-ins for people, handles, the proxy's HTTP shapes
-(a header, a query parameter, Basic) and `coffre run`'s side of it. SigV4
-and the Postgres tunnel come next (section 9). The decisions in section 8
+(a header, a query parameter, Basic) and `coffre run`'s side of it. PR 2
+adds SigV4, for S3. The Postgres tunnel comes next (section 9). The decisions in section 8
 were taken on the recommended option while Erwin was away (R10), and each
 is his to revisit.
 
@@ -268,19 +268,56 @@ small enough to read.
 
 ## 5. The other shapes
 
-**S3 and SigV4 (PR 2).** The AWS SDK signs with the handle as its access
-key ID and any secret, at `endpoint: <base>/use/market/dev/s3`,
-`forcePathStyle: true`. `coffre run` sets `AWS_ENDPOINT_URL_S3`, which the
-SDK v3 reads unchanged. coffre finds the handle in the `Credential=` of the
-Authorization header, discards the signature and signs again with the real
-keys, for the upstream's host and path: `sigv4({ accessKeyId:
-'{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region,
-service: 's3' })`. The payload hash is the client's own
-`x-amz-content-sha256`, a literal hash or `UNSIGNED-PAYLOAD`, which the
-upstream checks against the body. `STREAMING-*` (aws-chunked) is refused,
-since its chunk signatures chain from a seed signature only the real key
-makes. Clients set `requestChecksumCalculation: 'WHEN_REQUIRED'` for that.
-Presigned URLs need a `presign` helper (below).
+**S3 and SigV4 (PR 2, built).** The credential:
+
+```ts
+s3: {
+  upstream: 'https://s3.eu-west-3.amazonaws.com',
+  inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }),
+  baseUrl: 'AWS_ENDPOINT_URL_S3',
+},
+```
+
+and the app's client, as an app configures one for MinIO:
+
+```ts
+new S3Client({
+  endpoint: process.env.AWS_ENDPOINT_URL_S3,      // https://secrets.acme.example/use/market/dev/s3
+  forcePathStyle: true,                           // the bucket in the path: the proxy has one host
+  requestChecksumCalculation: 'WHEN_REQUIRED',    // no aws-chunked uploads (below)
+  responseChecksumValidation: 'WHEN_REQUIRED',
+});
+```
+
+The SDK signs with the handle as both its access key ID and its secret.
+coffre finds the handle in the Authorization header's `Credential=`,
+discards the signature and the headers it signed, and signs again with the
+real keys for the upstream's host and path (`packages/server/src/plugins/sigv4.ts`,
+WebCrypto only, so the same on Workers). It signs as the AWS SDK does,
+which a test holds it to: a path encoded once for S3 and twice for any
+other service (`execute-api` and the like), header values with ASCII
+whitespace folded and any other kept. A value no header can carry (a
+session token with a line break) is refused, and quoted nowhere. The payload hash is the client's
+own `x-amz-content-sha256`, a literal SHA-256 or `UNSIGNED-PAYLOAD`, which
+the upstream checks against the body. Refused before anything is sent:
+
+- `STREAMING-*` (aws-chunked) uploads, whose chunk signatures chain from
+  a seed signature only the real key makes. The SDK sends them for
+  flexible checksums unless told `WHEN_REQUIRED`.
+- Presigned URLs (`X-Amz-Signature` in the query): a `presign` helper
+  comes later (below).
+
+Bodies go through the proxy whole, up to its 16 MiB, so a larger upload
+needs the multipart API (each part under the limit) or, later, `presign`.
+
+Tested two ways. In the suite (`packages/server/test/credential-proxy-s3.test.ts`),
+the AWS SDK v3 puts, gets and lists through the proxy against a fake S3,
+which checks each request's signature with the SDK's own signer
+(`@smithy/signature-v4`) under the real secret, as S3 does. By hand,
+against MinIO in Docker, the same put, get and list passed. A client
+holding the handle as its keys was refused by MinIO directly, and a GET's
+median was 1.4 ms direct against 2.7 ms through the proxy, over loopback
+HTTP to coffre.
 
 **Postgres through a tunnel (PR 3).** A local listener, which `coffre run`
 starts on 127.0.0.1 for each database credential, carries each connection
@@ -467,7 +504,7 @@ is reversible.
 | PR | What |
 |---|---|
 | 1 | Stand-ins in the vault (`people`), handles (`0009_handles`, `POST /api/handles`), the plugin's `use` capability, `credentialProxy` with header, query and Basic, the plan, `coffre run`/`export` stand-ins, `@coffre/client/credential`. Built |
-| 2 | `sigv4()`: S3 through the proxy, tested with the AWS SDK against MinIO |
+| 2 | `sigv4()`: S3 through the proxy, tested with the AWS SDK against a signature-checking fake, and by hand against MinIO. Built |
 | 3 | The Postgres tunnel: a socket capability for plugins (Node's `upgrade`, Workers' `WebSocketPair` and `connect()`), the listener in `coffre run`, SCRAM, cancel, revocation mid-session, the privileged-role warning |
 | 4 | Redis through the tunnel |
 | 5 | `sign`/`presign`/`verify` helpers, SDK credential files |
