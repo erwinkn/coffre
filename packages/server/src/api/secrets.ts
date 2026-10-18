@@ -748,7 +748,10 @@ export async function setSecrets(
       const unsaid = items.filter(({ key }) => !asked.has(key) && !personal);
       if (unsaid.length > 0) {
         const now = await levelsAt(tx, place, environment.environmentId, unsaid.map(({ key }) => key));
-        if (unsaid.some(({ key, secret }) => now.get(key) === 'sensitive' && secret.sensitive !== true)) throw new PrepareAgain();
+        const loosened = unsaid.filter(({ key, secret }) => now.get(key) === 'sensitive' && secret.sensitive !== true);
+        // Found so, it stays so: the attempt that prepares again keeps it sensitive, whatever its source is by then.
+        for (const { key } of loosened) sticky.add(key);
+        if (loosened.length > 0) throw new PrepareAgain();
       }
       const keys: Record<string, SetOutcome> = {};
       // A reset override written again serves again, a reference written again unchanged too; still one the parent holds.
@@ -1449,7 +1452,11 @@ export async function restoreVersion(
       const [current] = await lock(tx, secrets, { id: secret.id });
       if (current === undefined || current.currentVersion !== fromVersion || current.currentVersionId !== prepared.currentVersionId
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
-      if (level !== 'sensitive' && (await levelsAt(tx, place, environment.environmentId, [prepared.key])).get(prepared.key) === 'sensitive') throw new PrepareAgain();
+      if (level !== 'sensitive' && (await levelsAt(tx, place, environment.environmentId, [prepared.key])).get(prepared.key) === 'sensitive') {
+        // Found so, it stays so, as above.
+        foundSensitive = true;
+        throw new PrepareAgain();
+      }
       // The old value comes back with how it was made, and plain if it was. A key pair's half comes
       // back with its pair's id, which pairs it again only beside the other half of the same pair.
       await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, level === 'plain' ? target.plaintext : null, level === 'sensitive');
@@ -1604,14 +1611,19 @@ export async function reveal(
  * parent's, and each key that cannot be read with why; never a value or
  * its ciphertext. It hashes the read's own resolution (`readableValues`),
  * so whatever a read comes to resolve through changes it too. Inherited
- * keys need read on their parent, as a read does: their version would
- * say when the parent's value changed, which the listing tells only
- * that parent's readers.
+ * keys it counts need read on their parent, as a read does: their version
+ * would say when the parent's value changed, which the listing tells only
+ * that parent's readers. A person's leaves the sensitive keys out first,
+ * as their read does: one inherited from a parent they do not read is
+ * never theirs to read, and refuses neither.
  */
 export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): Promise<{ version: string }> {
   const environment = requireLive(place);
   const read = await readableValues(ctx.db, place, environment);
-  const unread = unreadParents(ctx, environment.projectId, read);
+  // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
+  const person = ctx.caller.principal.type === 'user';
+  const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) };
+  const unread = unreadParents(ctx, environment.projectId, opened);
   if (unread.size > 0) {
     const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
     await refuse(ctx, new Refusal(
@@ -1619,9 +1631,7 @@ export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): 
       denied(ctx, 'secret.version', 'parent_unreadable', { ...environment, metadata: { parents: [...unread.keys()] } }),
     ));
   }
-  // Of what a read by the caller would open: a person's leaves the sensitive values out.
-  const person = ctx.caller.principal.type === 'user';
-  return { version: versionOf({ ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) }) };
+  return { version: versionOf(opened) };
 }
 
 /**

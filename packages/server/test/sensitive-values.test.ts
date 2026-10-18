@@ -367,6 +367,67 @@ test("a rollback over a reference whose source is marked sensitive while it is r
   assert.equal((await refusal(root.secrets.reveal('market/prod/WEBHOOK'))).reason, 'sensitive');
 });
 
+/**
+ * Once, as the write's first attempt is told to prepare again: `then`, before the next attempt reads anything.
+ * PrepareAgain is the transaction's own, not exported, so it is told by name.
+ */
+function betweenAttempts(t: { mock: { method: typeof test.mock.method } }, then: () => Promise<unknown>): void {
+  const transaction = db.runtime.transaction.bind(db.runtime);
+  let armed = true;
+  t.mock.method(db.runtime, 'transaction', (async (work: Parameters<typeof transaction>[0]) => {
+    try {
+      return await transaction(work);
+    } catch (error) {
+      if (armed && error instanceof Error && error.constructor.name === 'PrepareAgain') {
+        armed = false;
+        await then();
+      }
+      throw error;
+    }
+  }) as typeof db.runtime.transaction);
+}
+
+test("a write over a reference found sensitive under the head stays sensitive when its source is a secret again by the next attempt", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK: { ref: 'market/dev/WEBHOOK' } });
+  const wrap = deps.vault.wrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/WEBHOOK')) {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  betweenAttempts(t, () => root.secrets.set('market/dev', { WEBHOOK: { value: 'whsec_back_0123456789', sensitivity: 'secret' } }));
+  await root.secrets.set('market/prod', { WEBHOOK: 'whsec_prod_0123456789abcdef' });
+  assert.equal((await levels('market/dev')).WEBHOOK, 'secret');
+  assert.equal((await levels('market/prod')).WEBHOOK, 'sensitive');
+  assert.equal((await refusal(root.secrets.reveal('market/prod/WEBHOOK'))).reason, 'sensitive');
+});
+
+test("a rollback over a reference found sensitive under the head stays sensitive when its source is a secret again by the next attempt", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK: 'whsec_old_0123456789abcdef' });
+  await root.secrets.set('market/prod', { WEBHOOK: { ref: 'market/dev/WEBHOOK' } });
+  const rewrap = deps.vault.rewrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'rewrap', async (input: Parameters<typeof rewrap>[0]) => {
+    const result = await rewrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/WEBHOOK')) {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  betweenAttempts(t, () => root.secrets.set('market/dev', { WEBHOOK: { value: 'whsec_back_0123456789', sensitivity: 'secret' } }));
+  await root.secrets.restore('market/prod/WEBHOOK', 1);
+  assert.equal((await levels('market/dev')).WEBHOOK, 'secret');
+  assert.equal((await levels('market/prod')).WEBHOOK, 'sensitive');
+  assert.equal((await refusal(root.secrets.reveal('market/prod/WEBHOOK'))).reason, 'sensitive');
+});
+
 test('a rollback over a reference to a sensitive source brings the old value back sensitive', async () => {
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { API_KEY: 'sk_live_old_0123456789abcdef' });
@@ -410,6 +471,26 @@ test("an environment's version is of what the caller's read opens: a sensitive v
   assert.notEqual((await ci.environments.version('market/dev')).version, service);
   await root.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' });
   assert.notEqual((await dev.environments.version('market/dev')).version, person);
+});
+
+test("a person granted only a fork reads and versions it, a sensitive key it inherits from a parent they do not read left out of both", async () => {
+  await root.environments.create('market/base');
+  await root.secrets.set('market/base', { HIDDEN: { value: 'hidden_0123456789', sensitivity: 'sensitive' } });
+  await root.environments.create('market/base-eu', { from: 'base', inherit: true });
+  await root.secrets.set('market/base-eu', { OWN: 'own_0123456789' });
+  const email = 'viewer@acme.example';
+  await root.members.add(`user:${email}`);
+  await root.access.set(`user:${email}`, { 'market/base-eu': 'viewer' });
+  const viewer = clientFor(deps, email);
+  const read = await viewer.secrets.reveal('market/base-eu');
+  assert.deepEqual([read.values, read.sensitive], [{ OWN: 'own_0123456789' }, ['HIDDEN']]);
+  const { version } = await viewer.environments.version('market/base-eu');
+  // What a watch compares: the version the read answered with.
+  assert.equal(read.version, version);
+  await root.secrets.set('market/base', { HIDDEN: 'hidden_rotated_0123456789' });
+  assert.equal((await viewer.environments.version('market/base-eu')).version, version);
+  await root.secrets.set('market/base-eu', { OWN: 'own_rotated_0123456789' });
+  assert.notEqual((await viewer.environments.version('market/base-eu')).version, version);
 });
 
 test("the plan gives a credential's sensitive key as a placeholder, filled upstream; a sensitive key no credential uses is left out, and a secret given", async () => {
