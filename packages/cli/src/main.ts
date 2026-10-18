@@ -1197,7 +1197,7 @@ function sayPlaceholders(placed: Placeholders, paths: readonly string[], to: Tar
     ...placed.made.map(([mine, keys]) => `coffre: made your own ${keys.join(', ')} in ${mine}, each by its recipe: your next runs use them`),
     ...(placed.given.length === 0 ? [] : [`coffre: values as they are, which you may read: ${placed.given.join(', ')}`]),
     ...(placed.tunnels.length === 0 ? [] : [`coffre: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
-    ...(placed.left.length === 0 ? [] : [`coffre: left out, sensitive and not proxied: ${placed.left.join(', ')}`]),
+    ...(placed.left.length === 0 ? [] : [`coffre: left out, neither proxied nor yours to read: ${placed.left.join(', ')}`]),
   ];
   process.stderr.write(`${lines.join('\n')}\n`);
 }

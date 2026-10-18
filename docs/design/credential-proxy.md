@@ -24,7 +24,7 @@ commit them. With placeholders it holds none of them:
 $ coffre run market/dev -- pnpm dev
 coffre: placeholders for market/dev: schumann, s3 through https://secrets.acme.example/use; the handle lasts 12 hours (`coffre tokens` lists it)
 coffre: values as they are, which you may read: STRIPE_WEBHOOK_SECRET
-coffre: left out, sensitive and not proxied: SIGNING_KEY
+coffre: left out, neither proxied nor yours to read: SIGNING_KEY
 ```
 
 The app's environment, as the backend sees it:

@@ -393,7 +393,7 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
   });
   assert.match(stderr, /placeholders for market\/dev: schumann/);
   assert.match(stderr, /values as they are, which you may read: WEBHOOK_SECRET$/m);
-  assert.match(stderr, /left out, sensitive and not proxied: DATABASE_URL/);
+  assert.match(stderr, /left out, neither proxied nor yours to read: DATABASE_URL/);
   // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle.
   assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
   assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);

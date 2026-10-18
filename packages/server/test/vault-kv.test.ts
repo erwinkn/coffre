@@ -108,6 +108,28 @@ test("a person's CLI session reads what they may, as they would with `coffre exp
   assert.deepEqual(data.data, STAGING);
 });
 
+test("a person's read of an environment leaves its sensitive keys out, and Vault's warnings name them, never their values", async () => {
+  const root = clientFor(deps, ROOT);
+  const hidden = `sk_hidden_${randomBytes(6).toString('hex')}`;
+  await root.secrets.set('market/staging', { OPEN: 'open', HIDDEN: { value: hidden, sensitivity: 'sensitive' } });
+  await root.access.set(`user:${DEV}`, { 'market/staging': 'viewer' });
+  const read = await vault('secret/data/market/staging', await sessionFor(DEV));
+  assert.equal(read.status, 200);
+  const text = await read.text();
+  assert.equal(text.includes(hidden), false);
+  const { data, warnings } = JSON.parse(text) as { data: { data: Record<string, string> }; warnings: string[] };
+  assert.deepEqual(data.data, { ...STAGING, OPEN: 'open' });
+  assert.deepEqual(warnings, ['left out, sensitive, which no person is handed: HIDDEN']);
+  // The key alone is refused, never 404, which ESO would read as the secret gone.
+  assert.equal((await vault('secret/data/market/staging/HIDDEN', await sessionFor(DEV))).status, 403);
+  // A service account is handed it, and nothing is left out.
+  await root.access.set('token:eso', { 'market/staging': 'viewer' });
+  const both = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'eso', { label: 'staging', expiresInDays: 1 })).token;
+  const service = await body(await vault('secret/data/market/staging', both));
+  assert.equal(service.data.data!.HIDDEN, hidden);
+  assert.equal(service.warnings, null);
+});
+
 test("a fork that inherits reads its parent's values live, as the API's reveal does, and only with read on the parent", async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/prod-eu', { from: 'prod', inherit: true });

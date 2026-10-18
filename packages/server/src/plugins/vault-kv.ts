@@ -101,8 +101,10 @@ async function serve(request: Request, coffre: PluginContext, mount: string): Pr
       // A path that names no environment is a mistake in the client's configuration: 400, which ESO does not read as the secret gone.
       const depth = place.split('/').length;
       if (depth < 2 || depth > 3) return failure(400, `name ${data}<project>/<environment>, or ${data}<project>/<environment>/<KEY> for one value`);
-      const { values, version } = await api.secrets.reveal(place);
-      return success({ data: values, metadata: metadata(version) });
+      // A person's read of an environment leaves its sensitive keys out: Vault's warnings name them, never their values.
+      const { values, sensitive, version } = await api.secrets.reveal(place);
+      const warnings = sensitive.length === 0 ? null : [`left out, sensitive, which no person is handed: ${sensitive.join(', ')}`];
+      return success({ data: values, metadata: metadata(version) }, null, warnings);
     }
     // Only a read of a place that is not there is 404, which ESO reads as the secret gone: anything else coffre does not serve is 400.
     return failure(400, `coffre's Vault API serves ${data}<project>/<environment>[/<KEY>], auth/token/lookup-self, auth/<mount>/login and auth/token/revoke-self`);
@@ -218,10 +220,10 @@ function lookupSelf(me: Me, now = Date.now()) {
   };
 }
 
-/** Vault's envelope around `data`, and a login's `auth`: no lease, nothing to renew. */
-function success(data: unknown, auth: Record<string, unknown> | null = null): Response {
+/** Vault's envelope around `data`, a login's `auth`, and what the answer leaves out: no lease, nothing to renew. */
+function success(data: unknown, auth: Record<string, unknown> | null = null, warnings: string[] | null = null): Response {
   return Response.json(
-    { request_id: crypto.randomUUID(), lease_id: '', renewable: false, lease_duration: 0, data, wrap_info: null, warnings: null, auth, mount_type: 'kv' },
+    { request_id: crypto.randomUUID(), lease_id: '', renewable: false, lease_duration: 0, data, wrap_info: null, warnings, auth, mount_type: 'kv' },
     { headers: { 'cache-control': 'no-store' } },
   );
 }
