@@ -209,7 +209,7 @@ coffre: made your own ROOT_ENCRYPTION_KEY, POLICY_SEAL_KEY in backend/local@me, 
   runs, so a key that encrypts the local database keeps opening it.
 - **Who.** People only: the plan is for people, and a service account
   reads the environment's values as before. The deployment opts each
-  environment in, a local one (decision 14), so production never grows
+  environment in, a local one (decision 19), so production never grows
   personal values by itself.
 
 **What replaces `expose`, by what the value is.** Equisafe's
@@ -917,7 +917,7 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
     lets a listing show it and a read skip the vault. The ciphertext keeps
     the paths that open through the vault (references, KEK rotation)
     unchanged.
-14. **Personal values are opted into by environment, in the proxy's
+19. **Personal values are opted into by environment, in the proxy's
     configuration (`generate`)**, not by key in the data nor everywhere a
     recipe is. A value made for a person protects only their own local
     data, which suits `backend/local` and nothing deployed; listing the

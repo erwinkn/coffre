@@ -130,6 +130,8 @@ test("a person's use of a generating environment reads their personal config: th
   // The cache holds the handle's last opening for a minute: a fresh handle reads again.
   const fresh = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;
   assert.deepEqual(await (await route('/use/market/local/api/thing', { headers: { 'x-api-key': fresh } })).json(), { shared: false });
+  // The stable URL, which the handle's environment names, reads through the personal config alike.
+  assert.deepEqual(await (await route('/use/api/thing', { headers: { 'x-api-key': fresh } })).json(), { shared: false });
   // dev generates nothing: its own values, and nobody's personal config, as before.
   await dev.secrets.set('market/dev@me', { API_KEY: 'sk_devs_own_0123456789' });
   const devHandle = (await dev.handles.create({ label: 'coffre run market/dev', paths: ['market/dev'] })).token;
