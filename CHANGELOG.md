@@ -24,8 +24,12 @@
     opening logged as a read to `use`.
   - `expose` names the few values an exact environment's apps hold as
     they are, best an environment of local-only fakes.
-  - The design, its decisions and what comes next (S3, the Postgres
-    tunnel) are in docs/design/credential-proxy.md. Migration
+  - S3 and other AWS-signed APIs through `sigv4(…)`: the SDK signs with
+    the handle, at the proxy's endpoint (`AWS_ENDPOINT_URL_S3`,
+    `forcePathStyle`), and coffre signs again with the real key pair.
+    aws-chunked uploads and presigned URLs are refused, for now.
+  - The design, its decisions and what comes next (the Postgres tunnel)
+    are in docs/design/credential-proxy.md. Migration
     `0009_handles` widens a check, and nothing else.
 
 ## 0.7.0 (2026-10-17)
