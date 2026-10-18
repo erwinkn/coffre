@@ -28,7 +28,19 @@ export type ResolvedVaultConfig = {
    */
   signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
+  /** `values` when left out. */
+  people?: People;
 };
+
+/**
+ * What a person's reads open (docs/design/credential-proxy.md): `values`,
+ * as any member's; or `stand-ins`, where a person, on any credential of
+ * theirs (a session, a personal token, an MCP connection), opens values
+ * only for coffre to use for them, never to be handed back: the credential
+ * proxy injects them, and the deployment's `expose` list names the few it
+ * may pass on. Service accounts read values either way.
+ */
+export type People = 'values' | 'stand-ins';
 
 /**
  * A key-encryption key: 32 random bytes, base64, and the id envelopes record
@@ -64,6 +76,8 @@ export type VaultConfig = {
   signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
+  /** What a person's reads open (`People`): `values` unless set. */
+  people?: People;
 } & Owners;
 
 /**
@@ -142,6 +156,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
+    people: checkPeople(config.people ?? 'values'),
   };
 }
 
@@ -167,6 +182,11 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
     );
   }
   return [signing, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);
+}
+
+function checkPeople(people: People): People {
+  if (people !== 'values' && people !== 'stand-ins') throw new Error(`people is 'values' or 'stand-ins'; got ${JSON.stringify(people)}`);
+  return people;
 }
 
 function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {

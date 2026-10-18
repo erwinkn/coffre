@@ -38,7 +38,7 @@ import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaul
 import type { AuditEntry } from '../db/audit.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
-import { resolveRead } from './personal.ts';
+import { personalName, resolveRead } from './personal.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
@@ -1184,7 +1184,15 @@ export async function restoreVersion(
 export async function reveal(
   ctx: ApiContext,
   path: Path,
-): Promise<{ operationId: string; values: Record<string, string>; version: string | null }> {
+  /**
+   * For the credential proxy, in process and never over HTTP: some keys
+   * only, opened to `use` them for the caller or to `expose` them to their
+   * app (docs/design/credential-proxy.md), with `logged` in the app's own
+   * entry of it, `credential.use`. A key the environment does not hold is
+   * left out, not refused: the proxy says which it needs.
+   */
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[]; logged: Record<string, unknown> },
+): Promise<{ operationId: string; values: Record<string, string>; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1204,7 +1212,11 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
-    const { items: rows, unreadable } = await readableValues(ctx.db, place, environment, path.key);
+    const read = await readableValues(ctx.db, place, environment, path.key);
+    // The proxy's keys, and what stops them: a parent or a reference one of them reads through, or the environment's own chain.
+    const wanted = (item: { key?: string }) => use === undefined || item.key === undefined || use.keys.includes(item.key);
+    const rows = read.items.filter(wanted);
+    const unreadable = read.unreadable.filter(wanted);
     // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
     if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
       throw new Refusal(
@@ -1235,17 +1247,23 @@ export async function reveal(
         denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: path.key === undefined ? 'run' : 'reveal' }, rows);
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: use?.purpose ?? (path.key === undefined ? 'run' : 'reveal') }, rows);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
     for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
+    const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
+    if (use !== undefined) {
+      // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
+      log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
+      return { operationId, values: { ...values }, version: null, environment: named, keys: read.items.map((item) => item.key) };
+    }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null };
+    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
 }
 

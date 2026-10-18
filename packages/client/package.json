@@ -27,6 +27,11 @@
       "types": "./dist/routes.d.ts",
       "default": "./dist/routes.js"
     },
+    "./credential": {
+      "coffre:source": "./src/credential.ts",
+      "types": "./dist/credential.d.ts",
+      "default": "./dist/credential.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

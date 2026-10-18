@@ -345,3 +345,50 @@ test('get in a terminal ends its line, so the prompt comes back on one of its ow
   // The terminal turns the newline into CR LF.
   assert.equal(output, 'visible-value\r\n');
 });
+
+test("a person's run, on an instance with the credential proxy, gets stand-ins: one handle, the plan's variables, and what it leaves out, said", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pat = `coffre_pat_${'p'.repeat(43)}`;
+  const handle = `coffre_use_${'h'.repeat(43)}`;
+  const requests: string[] = [];
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    requests.push(`${req.method} ${req.url} ${req.headers.authorization === `Bearer ${handle}` ? 'handle' : req.headers.authorization === `Bearer ${pat}` ? 'token' : 'none'}`);
+    const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/use') return send(200, { proxy: 'coffre', credentials: ['schumann'] });
+    if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/dev': 'viewer' } });
+    if (req.url === '/use/market/dev') {
+      const at = `http://${req.headers.host}/use/market/dev/schumann`;
+      return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle, SCHUMANN_BASE_URL: at, WEBHOOK_SECRET: 'whsec_local' }, credentials: { schumann: at }, left: ['DATABASE_URL'] });
+    }
+    send(404, { error: 'not_found', message: `no route for ${req.url}` });
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  signedInWithToken(home, `http://127.0.0.1:${port}`, pat);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/dev', '--', ...printing('SCHUMANN_API_KEY', 'SCHUMANN_BASE_URL', 'WEBHOOK_SECRET', 'DATABASE_URL', 'COFFRE_HANDLE', 'COFFRE_CREDENTIALS')], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stderr);
+  const at = `http://127.0.0.1:${port}/use/market/dev/schumann`;
+  assert.deepEqual(JSON.parse(stdout), {
+    SCHUMANN_API_KEY: handle,
+    SCHUMANN_BASE_URL: at,
+    WEBHOOK_SECRET: 'whsec_local',
+    DATABASE_URL: null,
+    COFFRE_HANDLE: handle,
+    COFFRE_CREDENTIALS: JSON.stringify({ schumann: at }),
+  });
+  assert.match(stderr, /stand-ins for market\/dev: schumann/);
+  assert.match(stderr, /exposed as they are, by the deployment: WEBHOOK_SECRET/);
+  assert.match(stderr, /left out, neither proxied nor exposed: DATABASE_URL/);
+  // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle.
+  assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
+});

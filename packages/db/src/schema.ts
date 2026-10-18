@@ -756,7 +756,7 @@ export const credentials = pgTable(
   },
   (table) => [
     unique('credentials_token_hash_key').on(table.tokenHash),
-    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal')`),
+    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle')`),
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
     check('credentials_kind_matches_principal', sql`(${table.kind} = 'service') = (${table.principal} LIKE 'token:%')`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),

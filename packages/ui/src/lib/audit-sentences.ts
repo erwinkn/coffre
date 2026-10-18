@@ -194,6 +194,9 @@ const READ_VERBS: Record<string, [did: string, tried: string]> = {
   run: ['ran', 'run'],
   compare: ['compared', 'compare'],
   copy: ['copied', 'copy'],
+  // The credential proxy's: a value injected into a request for its person, or one handed to their app.
+  use: ['used', 'use'],
+  expose: ['was given', 'be given'],
 };
 
 function readVerb({ entry }: Facts): [string, string] {
@@ -251,6 +254,12 @@ const TEMPLATES: Record<string, Template> = {
     what: secrets,
     then: ({ entry, batch }) =>
       batch.length > 1 || entry.version === null || entry.version === 1 ? [] : [`, now version ${entry.version}`],
+  },
+  // The credential proxy's own entry beside the vault's read: which credential the keys went into, and where.
+  'credential.use': {
+    did: ({ entry }) => (entry.metadata.purpose === 'expose' ? 'was given the values of' : 'used the credential'),
+    tried: ({ entry }) => (entry.metadata.purpose === 'expose' ? 'be given the values of' : 'use the credential'),
+    what: ({ entry }) => [text(entry.metadata.credential) ?? '', ...(text(entry.metadata.host) === null ? [] : [` on ${text(entry.metadata.host)}`])],
   },
   'secret.restore': {
     did: 'restored',
@@ -438,8 +447,8 @@ const TEMPLATES: Record<string, Template> = {
   sign_out: { did: 'signed out', tried: 'sign out', what: () => [] },
   // A personal token is its person's own, and named by its label; a bearer token is a service account's.
   'token.create': {
-    did: ({ entry }) => (personal(entry) ? 'made a personal token' : 'issued a bearer token to'),
-    tried: ({ entry }) => (personal(entry) ? 'make a personal token' : 'issue a bearer token to'),
+    did: ({ entry }) => (entry.metadata.kind === 'handle' ? 'made a handle' : personal(entry) ? 'made a personal token' : 'issued a bearer token to'),
+    tried: ({ entry }) => (entry.metadata.kind === 'handle' ? 'make a handle' : personal(entry) ? 'make a personal token' : 'issue a bearer token to'),
     what: ({ entry }) => (personal(entry) ? labelled(entry) : subject(entry)),
     then: ({ entry }) => reaching(entry),
   },
@@ -585,6 +594,7 @@ const TAMPERING: Record<string, string> = {
 const REASONS: Record<string, string> = {
   no_grant: 'no grant',
   bulk_limit: 'bulk limit',
+  stand_ins: 'people get stand-ins',
   expired: 'grant expired',
   removed: 'removed from coffre',
   not_a_member: 'not a member',

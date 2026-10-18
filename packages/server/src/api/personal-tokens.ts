@@ -46,6 +46,8 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /members/:member/tokens': false,
   'POST /members/:member/tokens': false,
   'DELETE /members/:member/tokens/:id': false,
+  // A stand-in for an agent's app, within the token's scope and never past its end: it reaches only the credential proxy.
+  'POST /handles': true,
   'GET /members/:member/bindings': false,
   'POST /members/:member/bindings': false,
   'POST /members/:member/bindings/keys': false,

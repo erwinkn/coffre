@@ -292,6 +292,15 @@ export function createClient(options: ClientOptions) {
       revoke: (member: string, id: string) => call('DELETE /members/:member/tokens/:id', { member, id }),
     },
 
+    /**
+     * Handles: stand-ins a person's app holds in place of an environment's
+     * values, which only the credential proxy (`/use`) takes. The value is
+     * in the answer, and only there; it is revoked as a token is.
+     */
+    handles: {
+      create: (input: RouteInput<'POST /handles'>) => call('POST /handles', {}, input),
+    },
+
     /** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
     bindings: {
       list: (member: string) => call('GET /members/:member/bindings', { member }),
