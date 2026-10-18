@@ -33,7 +33,7 @@ import { CoffreError } from '@coffre/client';
 
 import type { CoffrePlugin, PluginContext, SocketSession } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
-import { signV4 } from './sigv4.ts';
+import { presignV4, signV4 } from './sigv4.ts';
 
 /** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
 export type Inject =
@@ -144,13 +144,16 @@ const PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
 /** A request's body is read whole before it is sent on: an API call's, not an upload's. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
+/** An AWS-signed upload streams through, up to S3's own limit for one request; past it, a multipart upload's parts each pass. */
+const MAX_STREAM_BYTES = 5 * 1024 ** 3;
+const HANDLE_LENGTH = 'coffre_use_'.length + 43;
 /** Values shorter than this are not redacted from answers: too short to tell from the text around them. */
 const MIN_REDACTED = 8;
 const REDACTED = '[redacted by coffre]';
 /** Headers about one hop, and those that would tell the upstream about coffre's caller, its cookies or its handle. */
 const DROPPED = new Set([
   'host', 'connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade',
-  'cookie', 'content-length', 'x-coffre-handle', 'forwarded', 'x-real-ip', 'cdn-loop', 'true-client-ip',
+  'cookie', 'content-length', 'expect', 'x-coffre-handle', 'forwarded', 'x-real-ip', 'cdn-loop', 'true-client-ip',
 ]);
 const DROPPED_ANSWER = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'set-cookie', 'content-length', 'content-encoding', 'trailer']);
 
@@ -225,7 +228,8 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     return failure(400, 'the path is not valid percent-encoding');
   }
   if (raw.length === 2) {
-    if (request.method !== 'GET') return failure(405, 'GET only');
+    if (request.method === 'POST') return presign(request, coffre, proxy, `${place[0]}/${place[1]}`);
+    if (request.method !== 'GET') return failure(405, 'GET for the plan, POST to presign');
     return plan(request, coffre, proxy, `${place[0]}/${place[1]}`);
   }
   if (raw.length < 3) return failure(404, 'name /use/<project>/<environment>/<credential>/<path>');
@@ -415,6 +419,89 @@ function watch(
   };
 }
 
+/**
+ * A presigned URL, for an AWS-signed credential: `POST /use/<project>/<env>`
+ * with `{ presign: { credential, path, method?, query?, expiresIn? } }`, the
+ * handle as a bearer token. coffre signs a GET (or HEAD) of `path` under
+ * the credential's upstream with the real key pair, for at most an hour and
+ * never past the handle, and answers `{ url, expiresAt }`: a URL of the
+ * upstream's, which whoever holds it may use until then, and which holds
+ * the access key's id and a signature, never the secret. Each is one use in
+ * the log, naming the path and how long it lasts, never served from the
+ * cache.
+ */
+async function presign(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  const raw = await boundedText(request, 8192);
+  let asked: { credential?: unknown; path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown };
+  try {
+    asked = (JSON.parse(raw ?? '') as { presign?: typeof asked }).presign ?? {};
+  } catch {
+    return failure(400, 'send { presign: { credential, path, method, expiresIn } } as JSON');
+  }
+  const credential = typeof asked.credential === 'string' ? proxy.credentials.get(asked.credential) : undefined;
+  if (credential === undefined || credential.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
+  const inject = credential.inject;
+  const method = asked.method ?? 'GET';
+  if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
+  if (credential.methods !== undefined && !credential.methods.includes(method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
+  const expiresIn = asked.expiresIn ?? 900;
+  if (typeof expiresIn !== 'number' || !Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > 3600) return failure(400, 'a presigned URL lasts between a second and an hour: expiresIn, in seconds');
+  if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
+  const query = asked.query ?? {};
+  if (typeof query !== 'object' || query === null || Object.values(query).some((value) => typeof value !== 'string')) return failure(400, 'query is a map of strings, response-content-disposition and the like');
+  // The same rules as a request through it: under the upstream, its paths, no dot segment and no slash smuggled in a segment.
+  const segments = asked.path.slice(1).split('/');
+  if (segments.some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment))) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  const target = new URL(`${credential.base.href.replace(/\/$/, '')}/${segments.join('/')}`);
+  for (const [name, value] of Object.entries(query as Record<string, string>)) {
+    if (name.toLowerCase().startsWith('x-amz-')) return failure(400, 'the X-Amz- parameters are the signature\'s own');
+    target.searchParams.set(name, value);
+  }
+  const under = credential.base.pathname.replace(/\/$/, '');
+  if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
+  const relative = target.pathname.slice(under.length) || '/';
+  if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
+    return failure(403, `${credential.name} is not for ${relative}`);
+  }
+  // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
+  const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
+  if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
+  // Never past the handle's own end.
+  const lasts = Math.min(expiresIn, Math.floor((Date.parse(used.expiresAt) - Date.now()) / 1000));
+  if (lasts < 1) return failure(401, 'the handle ends now: run the app with `coffre run` again');
+  let url: URL;
+  try {
+    url = await presignV4(method, target, {
+      accessKeyId: render(inject.accessKeyId, used.values),
+      secretAccessKey: render(inject.secretAccessKey, used.values),
+      ...(inject.sessionToken === undefined ? {} : { sessionToken: render(inject.sessionToken, used.values) }),
+    }, inject, lasts);
+  } catch {
+    return failure(409, `${credential.name}'s values sign no URL`);
+  }
+  return answer({ url: url.href, expiresAt: new Date(Date.now() + lasts * 1000).toISOString() });
+}
+
+/** A small body, as text, read no further than `max` bytes: null past it. */
+async function boundedText(request: Request, max: number): Promise<string | null> {
+  if (request.body === null) return '';
+  const reader = request.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for (let part = await reader.read(); !part.done; part = await reader.read()) {
+    size += part.value.length;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    parts.push(part.value);
+  }
+  const decoder = new TextDecoder();
+  return parts.map((part) => decoder.decode(part, { stream: true })).join('') + decoder.decode();
+}
+
 /** One request through a credential: the handle checked, its values opened (or remembered), the request sent on with them. */
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
   // Nothing the app writes leaves the credential's upstream: no dot segment, no slash or backslash smuggled in a segment.
@@ -440,18 +527,25 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     }
     if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
   }
+  const inject = credential.inject;
   const handle = handleIn(request, credential, target);
   if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${credential.name} takes its key, or as x-coffre-handle`);
-  // The body first, however long it takes to come: the handle is checked, and the values opened, as the request goes out.
-  const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await boundedBody(request);
-  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB`);
+  // An AWS-signed upload that says its payload's hash and length streams through, never held whole: an S3 object may be
+  // gigabytes, and its signature needs no byte of it. Anything else is read whole first, however long it takes to come,
+  // so the handle is checked, and the values opened, as the request goes out.
+  const declared = request.headers.get('content-length') ?? '';
+  const streamed = inject.kind === 'sigv4' && request.body !== null && request.headers.has('x-amz-content-sha256') && /^\d+$/.test(declared);
+  if (streamed && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
+  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
+  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB, unless it is AWS-signed with its payload's hash and length, which streams`);
   const values = await valuesFor(coffre, proxy, handle, path, credential, target.host);
 
   const headers = new Headers();
   for (const [name, value] of request.headers) {
     if (!DROPPED.has(name) && !name.startsWith('cf-') && !name.startsWith('x-forwarded-')) headers.set(name, value);
   }
-  const inject = credential.inject;
+  // A streamed body says its length itself, which S3 requires of a PutObject.
+  if (streamed) headers.set('content-length', declared);
   try {
     if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
     if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
@@ -481,7 +575,13 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
 
   let upstream: Response;
   try {
-    upstream = await fetch(target, { method: request.method, headers, body, redirect: 'manual' });
+    upstream = await fetch(target, {
+      method: request.method,
+      headers,
+      body: streamed ? scanned(request.body!, Number(declared)) : body,
+      redirect: 'manual',
+      ...(streamed ? { duplex: 'half' } : {}),
+    } as RequestInit);
   } catch (error) {
     return failure(502, `${target.host} did not answer: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -545,6 +645,33 @@ function binary(bytes: Uint8Array): string {
 }
 
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+
+/**
+ * A streamed upload, as it passes: a handle anywhere in it, a chunk
+ * boundary included, or a byte past the length it declared, and it stops,
+ * so the upstream gets a broken request and stores nothing. On Workers,
+ * its declared length goes with it (`FixedLengthStream`); Node's fetch
+ * sends the header as given.
+ */
+function scanned(body: ReadableStream<Uint8Array>, length: number): ReadableStream<Uint8Array> {
+  let tail = '';
+  let seen = 0;
+  const checked = body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, out) {
+        seen += chunk.length;
+        if (seen > length) throw new Error('the upload ran past the length it declared');
+        const text = tail + binary(chunk);
+        if (HANDLE.test(text)) throw new Error('the handle is in the upload');
+        // As much as a handle's length less one: the start of one the next chunk would finish.
+        tail = text.slice(-(HANDLE_LENGTH - 1));
+        out.enqueue(chunk);
+      },
+    }),
+  );
+  const Fixed = (globalThis as { FixedLengthStream?: new (length: number) => TransformStream<Uint8Array, Uint8Array> }).FixedLengthStream;
+  return Fixed === undefined ? checked : checked.pipeThrough(new Fixed(length));
+}
 
 /** Whether a header's value carries a handle: as it is, or inside Basic authentication's base64. */
 function carries(value: string): boolean {

@@ -96,3 +96,35 @@ export async function signV4(
   const signature = hex(await hmac(key, toSign));
   headers.set('authorization', `AWS4-HMAC-SHA256 Credential=${keys.accessKeyId}/${credentialScope}, SignedHeaders=${names.join(';')}, Signature=${signature}`);
 }
+/**
+ * A presigned URL (query-string authentication): the request's own
+ * signature in its query, for whoever holds the URL until it expires, the
+ * key itself never handed over. Only `host` signed, and the payload
+ * `UNSIGNED-PAYLOAD`, as S3's presigned URLs are.
+ */
+export async function presignV4(
+  method: string,
+  url: URL,
+  keys: AwsKeys,
+  scope: { region: string; service: string },
+  expiresInSeconds: number,
+  now: Date = new Date(),
+): Promise<URL> {
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const day = stamp.slice(0, 8);
+  const credentialScope = `${day}/${scope.region}/${scope.service}/aws4_request`;
+  const signed = new URL(url);
+  for (const name of [...signed.searchParams.keys()]) if (name.toLowerCase().startsWith('x-amz-')) signed.searchParams.delete(name);
+  signed.searchParams.set('X-Amz-Algorithm', 'AWS4-HMAC-SHA256');
+  signed.searchParams.set('X-Amz-Credential', `${keys.accessKeyId}/${credentialScope}`);
+  signed.searchParams.set('X-Amz-Date', stamp);
+  signed.searchParams.set('X-Amz-Expires', String(expiresInSeconds));
+  if (keys.sessionToken !== undefined) signed.searchParams.set('X-Amz-Security-Token', keys.sessionToken);
+  signed.searchParams.set('X-Amz-SignedHeaders', 'host');
+  const canonical = [method, canonicalPath(signed.pathname, scope.service), canonicalQuery(signed.searchParams), `host:${signed.host}`, '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const toSign = ['AWS4-HMAC-SHA256', stamp, credentialScope, hex(await crypto.subtle.digest('SHA-256', encoder.encode(canonical)))].join('\n');
+  let key = await hmac(encoder.encode(`AWS4${keys.secretAccessKey}`), day);
+  for (const part of [scope.region, scope.service, 'aws4_request']) key = await hmac(key, part);
+  signed.searchParams.set('X-Amz-Signature', hex(await hmac(key, toSign)));
+  return signed;
+}
