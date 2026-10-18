@@ -320,9 +320,10 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   const path = `${place[0]}/${place[1]}`;
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
   await coffre.handle(handle);
-  const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null);
-  // Just checked and read: the sessions' next check is a recheck's minute away.
-  proxy.standing.set(`${handle}\u0000${path}\u0000${place[2]!}`, { stands: true, at: Date.now() });
+  // Read through the vault just now, not the cache: the sessions' next check is a recheck's minute away. Never from a cached read.
+  const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null, () =>
+    proxy.standing.set(`${handle}\u0000${path}\u0000${place[2]!}`, { stands: true, at: Date.now() }),
+  );
   let db: Database;
   try {
     db = database(values[tunnel.key]!);
@@ -519,7 +520,16 @@ function safeDecode(text: string): string {
 }
 
 /** The credential's values for the handle: remembered for `cacheSeconds`, or opened now, logged as one use. */
-async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, path: string, credential: { name: string; keys: readonly string[] }, host: string | null): Promise<Record<string, string>> {
+async function valuesFor(
+  coffre: PluginContext,
+  proxy: Proxy,
+  handle: string,
+  path: string,
+  credential: { name: string; keys: readonly string[] },
+  host: string | null,
+  /** Told when the vault decided now, not the cache: what a tunnel's sessions may take as a fresh answer. */
+  decided?: () => void,
+): Promise<Record<string, string>> {
   const key = `${handle}\u0000${path}\u0000${credential.name}`;
   const now = Date.now();
   const kept = proxy.cache.get(key);
@@ -527,6 +537,7 @@ async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, pa
   const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
+  decided?.();
   if (proxy.cacheMs > 0) {
     // A handful of handles in a dev loop: past a thousand, the oldest go.
     if (proxy.cache.size >= 1000) for (const [old, entry] of proxy.cache) if (entry.until <= now || proxy.cache.size >= 1000) proxy.cache.delete(old);
@@ -707,8 +718,10 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
   if (credentials.has(name)) throw new Error(`credentialProxy: ${name} names a credential and a tunnel`);
   if (tunnel.kind !== 'postgres') throw new Error(`credentialProxy: tunnel ${name} is postgres(…), the only kind there is`);
   if (!KEY.test(tunnel.key)) throw new Error(`credentialProxy: tunnel ${name} names the key that holds its URL, DATABASE_URL`);
-  if (!insecure && tunnel.hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams reaches`);
-  return tunnel;
+  // Each as it is dialled, 127.1 as 127.0.0.1: what the URL's host is held to.
+  const hosts = tunnel.hosts?.map((host) => new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname.replace(/^\[|\]$/g, ''));
+  if (!insecure && hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams reaches`);
+  return { ...tunnel, ...(hosts === undefined ? {} : { hosts }) };
 }
 
 function checkExpose(expose: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {

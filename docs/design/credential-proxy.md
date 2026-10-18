@@ -368,7 +368,15 @@ the session ended at once when the app goes away. SCRAM-SHA-256 checks
 the server's nonce and requires its final signature: a server that says
 `AuthenticationOk` without proving it knows the password is refused. The
 password goes through SASLprep, as Postgres's own does, and falls back to
-the password as it is when that fails. A server that sends anything past
+the password as it is when that fails. Two approximations stay, both at
+the edges of Unicode: "unassigned" is the runtime's Unicode, not 3.2, and
+a right-to-left letter is a letter of the Hebrew, Arabic, Syriac, Thaana
+or N'Ko scripts, not RFC 3454's D.1 table. A password that falls between
+the two fails to log in, with the database's own error, and never reaches
+anyone. *Decision:* port Postgres's tables only if someone hits it. The
+database's host is read as Node dials it (`127.1`, `2130706433` and
+`0x7f000001` are all `127.0.0.1`) before any check, and a dial still
+under way when the session ends is given up. A server that sends anything past
 its one-byte answer to `SSLRequest`, before TLS begins, is refused.
 
 The app's own startup parameters go through (`application_name`, …), but

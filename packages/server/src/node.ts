@@ -90,6 +90,8 @@ export function createCoffre(config: NodeConfig): CoffreNode {
       };
     },
     upgrade(incoming, socket, head) {
+      // From the first moment: Node no longer handles this socket's errors, and the database may still be opening.
+      socket.on('error', () => socket.destroy());
       ready()
         .then((rt) => upgrade(rt, incoming, socket, head))
         .catch((error: unknown) => {

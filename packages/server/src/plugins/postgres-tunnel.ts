@@ -24,8 +24,10 @@ const decoder = new TextDecoder();
 export function database(url: string): Database {
   const parsed = new URL(url);
   if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') throw new Error('a Postgres URL starts postgres://');
+  // As an http URL reads it, which is how it is dialled: 127.1, 2130706433 and 0x7f000001 are all 127.0.0.1.
+  const canonical = new URL(`http://${parsed.host}`).hostname;
   return {
-    host: parsed.hostname.replace(/^\[|\]$/g, ''),
+    host: canonical.replace(/^\[|\]$/g, ''),
     port: Number(parsed.port || 5432),
     user: decodeURIComponent(parsed.username),
     password: decodeURIComponent(parsed.password),
@@ -198,6 +200,8 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   let upstream: Socket | Pipe | null = null;
   let key: string | null = null;
   let ended = false;
+  // A dial still under way when the session ends is given up, not left to the system's timeout.
+  const dialing = new AbortController();
   /** The outbound socket, owned from the moment TCP is made, through TLS: closed at once if the session ended meanwhile. */
   const own = (pipe: Pipe) => {
     upstream = pipe;
@@ -205,6 +209,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   };
   const end = () => {
     ended = true;
+    dialing.abort();
     clearInterval(timer);
     if (key !== null) cancels.delete(key);
     for (const pipe of [client, upstream]) {
@@ -241,7 +246,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
       }
       if (code === CANCEL_REQUEST) {
         if (body.length !== 12) throw new Error('not a cancel request');
-        await step(cancel(session, `${view(body).getInt32(4)}:${view(body).getInt32(8)}`, own));
+        await step(cancel(session, `${view(body).getInt32(4)}:${view(body).getInt32(8)}`, own, dialing.signal));
         return;
       }
       if (code !== PROTOCOL_3) {
@@ -265,7 +270,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
 
     // The real database, logged in to with the real password.
     const db = session.database;
-    const socket = await step(open(session, db, own));
+    const socket = await step(open(session, db, own, dialing.signal));
     const up = new Writer(socket.writable);
     const down = new Reader(socket.readable);
     // The app's own parameters (application_name, client_encoding, …), but who and where are the real database's.
@@ -316,8 +321,8 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
  * each socket as it is made, TCP's then TLS's, so that whoever ends the
  * session closes what is open, however far this got.
  */
-async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => void): Promise<Socket | Pipe> {
-  const socket = await session.connect(db.host, db.port);
+async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => void, signal: AbortSignal): Promise<Socket | Pipe> {
+  const socket = await session.connect(db.host, db.port, signal);
   own(socket);
   if (db.tls === 'disable') return socket;
   const writer = new Writer(socket.writable);
@@ -342,10 +347,10 @@ async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => v
 }
 
 /** A cancel request of the app's: the key it was given, for one of this handle's sessions; to that session's database, with its own. */
-async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) => void): Promise<void> {
+async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) => void, signal: AbortSignal): Promise<void> {
   const target = cancels.get(given);
   if (target === undefined || target.handle !== session.handle) return;
-  const socket = await open(session, target.database, own);
+  const socket = await open(session, target.database, own, signal);
   const writer = new Writer(socket.writable);
   await writer.write(concat(int32(16), int32(CANCEL_REQUEST), int32(target.processId), int32(target.secret)));
   writer.release();
@@ -457,7 +462,8 @@ export function saslprep(password: string): string {
   // Nothing left, or a character Unicode leaves unassigned: Postgres's own fallback, the password as it is.
   if (mapped === '' || prohibited.test(mapped) || /\p{Cn}/u.test(mapped)) return password;
   // Bidirectional text: right-to-left letters only, no left-to-right one, the first and the last right-to-left.
-  const rtl = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+  // Right-to-left letters (RandALCat), by script and as letters, never a digit, which is no letter's direction.
+  const rtl = /(?=[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}])\p{L}/u;
   const chars = [...mapped];
   if (chars.some((char) => rtl.test(char))) {
     if (chars.some((char) => /\p{L}/u.test(char) && !rtl.test(char)) || !rtl.test(chars[0]!) || !rtl.test(chars.at(-1)!)) return password;

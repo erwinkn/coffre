@@ -44,8 +44,8 @@ export type Pipe = { readable: ReadableStream<Uint8Array>; writable: WritableStr
 /** An outbound TCP connection, which can turn to TLS once the protocol on it says it will. */
 export type Socket = Pipe & { startTls(servername: string): Promise<Pipe> };
 
-/** TCP out, as the platform opens it. */
-export type Connect = (host: string, port: number) => Promise<Socket>;
+/** TCP out, as the platform opens it; `signal` gives up a dial still under way. */
+export type Connect = (host: string, port: number, signal?: AbortSignal) => Promise<Socket>;
 
 /** What runs a plugin's WebSocket once it is open: its bytes, and TCP out. Ends when the connection does. */
 export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;

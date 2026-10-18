@@ -84,12 +84,19 @@ function fromWebSocket(ws: WebSocket): Pipe {
 }
 
 /** TCP out, on Node: a socket, which `startTls` hands over to TLS as it stands, nothing read beyond what was asked. */
-const connect: Connect = (host, port) =>
+const connect: Connect = (host, port, signal) =>
   new Promise<Socket>((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('the session ended'));
     const socket = tcp({ host, port });
+    const abort = () => {
+      socket.destroy();
+      reject(new Error('the session ended'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     socket.once('error', reject);
     socket.once('connect', () => {
       socket.off('error', reject);
+      signal?.removeEventListener('abort', abort);
       resolve(fromNetSocket(socket));
     });
   });

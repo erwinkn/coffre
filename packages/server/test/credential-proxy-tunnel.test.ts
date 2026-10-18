@@ -22,7 +22,7 @@ import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } 
 import { upgrade } from '../src/node-sockets.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, postgres } from '../src/plugins/credential-proxy.ts';
-import { saslprep } from '../src/plugins/postgres-tunnel.ts';
+import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
 
 const postgresOnly = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false };
 // The suite's database, as the app's would name it: no TLS to a database on loopback.
@@ -248,6 +248,12 @@ test("an upgrade refused keeps the proxy's own headers", postgresOnly, async () 
   assert.match(refused.headers, /coffre-proxy: refused/);
 });
 
+test('a database URL is read as Node dials it: loopback in any numeric form is loopback', () => {
+  for (const host of ['127.1', '2130706433', '0x7f000001', '127.0.0.1']) assert.equal(database(`postgres://u:p@${host}:5432/d`).host, '127.0.0.1', host);
+  assert.equal(database('postgres://u:p@[::1]:5432/d').host, '::1');
+  assert.equal(database('postgres://u:p@DB.Acme.Example/d').host, 'db.acme.example');
+});
+
 test("SASLprep maps as Postgres does, and falls back to the password as it is", () => {
   const soft = String.fromCharCode(0xad);
   const space = String.fromCharCode(0xa0);
@@ -258,6 +264,8 @@ test("SASLprep maps as Postgres does, and falls back to the password as it is", 
   assert.equal(saslprep(control), control, 'a prohibited character: the password as it is');
   assert.equal(saslprep(`a${String.fromCharCode(0x200b)}b`), 'a b', 'a zero-width space is a space, as Postgres maps it');
   assert.equal(saslprep(soft), soft, 'nothing left: the password as it is');
+  const arabicOne = String.fromCharCode(0x661);
+  assert.equal(saslprep(`${arabicOne}${soft}a`), `${arabicOne}a`, 'a digit has no direction of a letter');
 });
 
 test('a database that ends SCRAM without its signature is no database the URL names: refused', postgresOnly, async () => {
@@ -300,7 +308,13 @@ test("a person whose grant ends loses their open sessions at the next check", po
   await client.connect();
   assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
   await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: null });
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  // New connections meanwhile, which the cache would serve: none of them stands in for the vault's answer.
+  for (let tries = 0; tries < 6; tries += 1) {
+    const another = appClient();
+    another.on('error', () => undefined);
+    await another.connect().then(() => another.end(), () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   await assert.rejects(client.query('SELECT 1'));
 });
 
@@ -373,6 +387,12 @@ test('a tunnel reaches only the hosts it names, and a private database only with
   await assert.rejects(appClient().connect());
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
   await assert.rejects(appClient().connect());
+  // Loopback written the ways Node still dials it, with TLS asked for: refused all the same.
+  for (const host of ['127.1', '2130706433', '0x7f000001']) {
+    await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@${host}:5432/d` });
+    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
+    await assert.rejects(appClient().connect(), host);
+  }
   assert.throws(() => credentialProxy({ credentials: { db: { upstream: 'https://x.example', inject: { kind: 'header', name: 'x', template: '{K}' } } }, tunnels: { db: postgres('DATABASE_URL') } }), /a credential and a tunnel/);
 });
 
