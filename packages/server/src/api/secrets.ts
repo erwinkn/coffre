@@ -363,8 +363,8 @@ export async function listSecrets(
     };
     keys.push({
       ...listed,
-      // Read where it is held, by a reader of that parent, while the chain to it is whole.
-      readable: readable(listed, live(held.from) && readsAt(held.from)),
+      // Read through here, so by a reader of here and of the parent that holds it, while the chain to it is whole.
+      readable: readable(listed, live(held.from) && readsHere && readsAt(held.from)),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });

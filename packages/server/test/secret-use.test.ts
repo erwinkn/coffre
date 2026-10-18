@@ -197,3 +197,22 @@ test("a Contributor of both ends of a reference may open its source", async () =
   const alias = (await clientFor(deps, CONTRIBUTOR).secrets.list('market/dev')).keys.find((entry) => entry.key === 'ALIAS')!;
   assert.equal(alias.reference?.canOpenSource, true);
 });
+
+test("a Viewer of base who contributes to its fork dev reads none of base's secrets through dev, and overrides them", async () => {
+  await root.environments.create('market/base');
+  await root.secrets.set('market/base', { SHARED: 'shared_0123456789', ZONE: { value: 'eu', plain: true } });
+  await root.environments.create('market/dev-base', { from: 'base', inherit: true });
+  await root.access.set(`user:${CONTRIBUTOR}`, { 'market/base': 'viewer', 'market/dev-base': 'contributor' });
+  const contributor = clientFor(deps, CONTRIBUTOR);
+  const listed = new Map((await contributor.secrets.list('market/dev-base')).keys.map((entry) => [entry.key, entry]));
+  // A read of dev-base needs read on dev-base, and on base for what it inherits: the first is missing.
+  const shared = listed.get('SHARED')!;
+  assert.deepEqual([shared.parent?.state, shared.readable], ['inherited', false]);
+  assert.equal((await refusal(contributor.secrets.reveal('market/dev-base/SHARED'))).status, 403);
+  assert.equal((await contributor.secrets.reveal('market/base/SHARED')).values.SHARED, 'shared_0123456789');
+  assert.deepEqual([listed.get('ZONE')!.value, listed.get('ZONE')!.readable], ['eu', true]);
+  // Override: a value of dev-base's own, written unread.
+  assert.deepEqual((await contributor.secrets.set('market/dev-base', { SHARED: 'shared_dev_0123456789' })).keys, { SHARED: { version: 1 } });
+  const overridden = (await contributor.secrets.list('market/dev-base')).keys.find((entry) => entry.key === 'SHARED')!;
+  assert.deepEqual([overridden.parent?.state, overridden.readable], ['overridden', false]);
+});
