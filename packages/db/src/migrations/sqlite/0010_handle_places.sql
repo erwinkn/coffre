@@ -1,0 +1,2 @@
+-- A handle's places (0.9): the environments it was made for, by id and whether as @me, which the proxy's stable URL resolves to. A nullable column the release before neither reads nor writes; the app sets it when it makes a handle, and never after (no UPDATE grant).
+ALTER TABLE `credentials` ADD `places` text;

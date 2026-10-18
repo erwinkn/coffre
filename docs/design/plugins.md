@@ -179,7 +179,8 @@ else is needed.
 
 - `use(handle, …)`: an environment's values, for a handle's person, opened
   to be used for them or exposed to their app, in process only.
-- `handle(handle)`: whether a handle still stands, opening nothing.
+- `handle(handle)`: whether a handle still stands, opening nothing, and
+  the environments it was made for, which the proxy's stable URL resolves to.
 - `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
   out, on Node through `createCoffre(…).upgrade`.
 

@@ -364,7 +364,7 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
     if (req.url === '/use/market/dev') {
       const at = `http://${req.headers.host}/use/market/dev/schumann`;
       // A stand-in shaped as its client checks it, a JWT here, is no exposed value.
-      return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle, SCHUMANN_BASE_URL: at, WEBHOOK_SECRET: 'whsec_local', DFNS_AUTH_TOKEN: `e30.e30.${handle}` }, credentials: { schumann: at }, left: ['DATABASE_URL'] });
+      return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle, WEBHOOK_SECRET: 'whsec_local', DFNS_AUTH_TOKEN: `e30.e30.${handle}` }, credentials: { schumann: at }, left: ['DATABASE_URL'] });
     }
     send(404, { error: 'not_found', message: `no route for ${req.url}` });
   });
@@ -382,9 +382,10 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
   const [code] = await once(child, 'close');
   assert.equal(code, 0, stderr);
   const at = `http://127.0.0.1:${port}/use/market/dev/schumann`;
+  // No base URL: the app's own config points at the proxy's stable URL, `/use/schumann`.
   assert.deepEqual(JSON.parse(stdout), {
     SCHUMANN_API_KEY: handle,
-    SCHUMANN_BASE_URL: at,
+    SCHUMANN_BASE_URL: null,
     WEBHOOK_SECRET: 'whsec_local',
     DATABASE_URL: null,
     COFFRE_HANDLE: handle,

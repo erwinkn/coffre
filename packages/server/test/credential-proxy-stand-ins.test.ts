@@ -76,7 +76,7 @@ after(async () => {
 function proxyOptions(): CredentialProxyOptions {
   return {
     credentials: {
-      dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: [APP_METADATA] }), baseUrl: 'DFNS_API_URL' },
+      dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: [APP_METADATA] }) },
       stripe: { upstream: `${dfnsUrl}/stripe`, inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), standIn: prefix('sk_test_') },
       broken: { upstream: dfnsUrl, inject: query('token', '{NOT_A_JWT}'), standIn: jwt() },
       // The same token in a query parameter: the same stand-in, which the app holds once.
@@ -94,7 +94,7 @@ useMcp(
     await root.members.add(`user:${DEV}`);
     await root.projects.create('market');
     await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { DFNS_AUTH_TOKEN: TOKEN, DFNS_API_URL: 'https://api.dfns.io', STRIPE_SECRET_KEY: STRIPE });
+    await root.secrets.set('market/dev', { DFNS_AUTH_TOKEN: TOKEN, STRIPE_SECRET_KEY: STRIPE });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
   },
   { people: 'stand-ins' },
@@ -122,11 +122,11 @@ test("DFNS's own SDK, its token a JWT stand-in, reads its organization from it a
   assert.deepEqual(claims[APP_METADATA], { orgId: 'or-sandbox', tenantId: 'tn-sandbox', tokenKind: 'ServiceAccount' });
   assert.equal(claims.exp, Math.floor(Date.parse(expiresAt) / 1000), "exp is the handle's end");
   assert.equal(last, handle);
-  assert.equal(env.DFNS_API_URL, `${ORIGIN}/use/market/dev/dfns`);
   assert.equal(env.STRIPE_SECRET_KEY, `sk_test_${handle}`);
 
   // The SDK as Equisafe's backend makes it, the org it expects named: it checks the token's scope before every request.
-  const sdk = new DfnsApiClient({ baseUrl: env.DFNS_API_URL!.replace(ORIGIN, coffreUrl), authToken: env.DFNS_AUTH_TOKEN!, orgId: 'or-sandbox' });
+  // Its base URL is the app's own config: the proxy's stable URL, which the test's coffre, on loopback, answers.
+  const sdk = new DfnsApiClient({ baseUrl: `${coffreUrl}/use/dfns`, authToken: env.DFNS_AUTH_TOKEN!, orgId: 'or-sandbox' });
   const wallets = await sdk.wallets.listWallets();
   assert.deepEqual(wallets.items.map((wallet) => wallet.id), ['wa-1']);
   const [sent] = received;

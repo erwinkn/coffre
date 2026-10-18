@@ -10,6 +10,7 @@ import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
 import { ApiError } from './api/errors.ts';
 import { parsePath } from './api/paths.ts';
+import { environmentPaths } from './db/queries.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
 import { fetchApi } from './fetch-api.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
@@ -87,8 +88,13 @@ export type PluginContext = {
    * refusal throws a `CoffreError`.
    */
   use(handle: string, asked: UseAsked): Promise<Used>;
-  /** Whether `handle` still stands, opening nothing and logging nothing: when it ends. A refusal throws a `CoffreError`. */
-  handle(handle: string): Promise<{ expiresAt: string }>;
+  /**
+   * Whether `handle` still stands, opening nothing and logging nothing:
+   * when it ends, and the environments it was made for, each by path as it
+   * is named now (`market/dev@me`), or null where it was deleted; null for
+   * a handle of 0.8, which kept none. A refusal throws a `CoffreError`.
+   */
+  handle(handle: string): Promise<{ expiresAt: string; paths: readonly (string | null)[] | null }>;
 };
 
 /**
@@ -160,7 +166,13 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
   };
   return {
     publicUrl: runtime.publicUrl,
-    handle: async (handle) => ({ expiresAt: (await proxyHandle(handle)).credentialExpiresAt! }),
+    handle: async (handle) => {
+      const { credentialExpiresAt, handlePlaces: places } = await proxyHandle(handle);
+      if (places === null) return { expiresAt: credentialExpiresAt!, paths: null };
+      const named = await environmentPaths(runtime.db, places.map((place) => place.environmentId));
+      const paths = places.map(({ environmentId, personal }) => (named.has(environmentId) ? `${named.get(environmentId)}${personal ? '@me' : ''}` : null));
+      return { expiresAt: credentialExpiresAt!, paths };
+    },
     exchange: async (asked) => (await answer(await exchangeWorkloadToken(request, runtime, sourceIp, asked))) as { token: string; expiresAt: string },
     signOut: async (token) => {
       await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));

@@ -8,8 +8,9 @@
  *   const companies = await (await schumann.fetch('/companies?q=acme')).json();
  *
  * `coffre run` sets `COFFRE_CREDENTIALS`, each credential's URL on the
- * proxy by name, and `COFFRE_HANDLE`, the handle that stands in for the
- * environment's values; the proxy injects the key, and the app never holds it.
+ * proxy by name, its environment's (`…/use/market/dev/schumann`), and
+ * `COFFRE_HANDLE`, the handle that stands in for the environment's values;
+ * the proxy injects the key, and the app never holds it.
  */
 export type ProxiedCredential = {
   /** The credential's URL on the proxy: `<url>/<path>` is `<upstream>/<path>`. */

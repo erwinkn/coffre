@@ -1039,8 +1039,7 @@ type StandIns = { env: Record<string, string>; left: string[]; credentials: stri
  * Stand-ins for the environments named, where the instance has the
  * credential proxy (docs/design/credential-proxy.md) and the session is a
  * person's: one handle for the run, which the proxy takes in place of each
- * credential's keys, the credentials' base URLs on the proxy, and the
- * values the deployment exposes. Null where the instance has no proxy, or
+ * credential's keys, and the values the deployment exposes. Null where the instance has no proxy, or
  * for a service account, which reads values (R13).
  */
 async function standIns(paths: readonly string[], to: Target = target()): Promise<StandIns | null> {
@@ -1069,7 +1068,7 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
     left: plans.flatMap(([, plan]) => plan.left).sort(),
     credentials: Object.keys(credentials).sort(),
     // A stand-in is the handle, or holds it in the shape its client checks (`sk_test_coffre_use_…`, a JWT's last part).
-    exposed: Object.keys(env).filter((key) => !env[key]!.includes(handle.token) && !Object.values(credentials).includes(env[key]!)).sort(),
+    exposed: Object.keys(env).filter((key) => !env[key]!.includes(handle.token)).sort(),
     expiresAt: handle.expiresAt,
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
     handle: handle.token,
