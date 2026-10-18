@@ -293,7 +293,11 @@ The SDK signs with the handle as both its access key ID and its secret.
 coffre finds the handle in the Authorization header's `Credential=`,
 discards the signature and the headers it signed, and signs again with the
 real keys for the upstream's host and path (`packages/server/src/plugins/sigv4.ts`,
-WebCrypto only, so the same on Workers). The payload hash is the client's
+WebCrypto only, so the same on Workers). It signs as the AWS SDK does,
+which a test holds it to: a path encoded once for S3 and twice for any
+other service (`execute-api` and the like), header values with ASCII
+whitespace folded and any other kept. A value no header can carry (a
+session token with a line break) is refused, and quoted nowhere. The payload hash is the client's
 own `x-amz-content-sha256`, a literal SHA-256 or `UNSIGNED-PAYLOAD`, which
 the upstream checks against the body. Refused before anything is sent:
 

@@ -1,8 +1,8 @@
 /**
  * AWS Signature Version 4 (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html),
  * for the credential proxy to sign a request again with the real keys:
- * WebCrypto only, so it runs on Workers and Node alike. S3's rules: each
- * path segment encoded once, never twice.
+ * WebCrypto only, so it runs on Workers and Node alike. A path is encoded
+ * once for S3, as its rules say, and twice for every other service.
  */
 export type AwsKeys = { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
 
@@ -19,13 +19,23 @@ function strict(text: string): string {
   return encodeURIComponent(text).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-/** Each segment of a path as S3 signs it: decoded once, then encoded strictly. */
-function canonicalPath(pathname: string): string {
+/**
+ * Each segment of a path as AWS signs it: decoded, then encoded strictly,
+ * once for S3, and twice for every other service, whose canonical path is
+ * the path as sent, encoded again.
+ */
+function canonicalPath(pathname: string, service: string): string {
   return pathname
     .split('/')
-    .map((segment) => strict(decodeURIComponent(segment)))
+    .map((segment) => {
+      const once = strict(decodeURIComponent(segment));
+      return service === 's3' ? once : strict(once);
+    })
     .join('/');
 }
+
+/** A header's value as AWS signs it: ASCII spaces and tabs trimmed and runs of them made one space; any other whitespace kept. */
+const canonicalValue = (value: string) => value.replace(/^[ \t]+|[ \t]+$/g, '').replace(/[ \t]+/g, ' ');
 
 function canonicalQuery(params: URLSearchParams): string {
   return [...params]
@@ -68,9 +78,9 @@ export async function signV4(
   const names = covered.map(([name]) => name);
   const canonical = [
     method,
-    canonicalPath(url.pathname),
+    canonicalPath(url.pathname, scope.service),
     canonicalQuery(url.searchParams),
-    ...covered.map(([name, value]) => `${name}:${value.trim().replace(/\s+/g, ' ')}`),
+    ...covered.map(([name, value]) => `${name}:${canonicalValue(value)}`),
     '',
     names.join(';'),
     payloadHash,

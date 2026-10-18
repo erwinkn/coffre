@@ -19,6 +19,7 @@ import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } 
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, sigv4 } from '../src/plugins/credential-proxy.ts';
+import { signV4 } from '../src/plugins/sigv4.ts';
 
 const ACCESS_KEY_ID = 'AKIAREALKEY000000001';
 const SECRET = 'real/secret+access/key0123456789ABCDEFGH';
@@ -191,5 +192,40 @@ test("aws-chunked uploads and presigned URLs are refused, before anything reache
   assert.match(await chunked.text(), /aws-chunked|STREAMING/);
   const presigned = await route(`/use/market/dev/s3/uploads/x?X-Amz-Credential=${handle}%2F20261018%2F${REGION}%2Fs3%2Faws4_request&X-Amz-Signature=00`);
   assert.equal(presigned.status, 400);
+  assert.equal(seen.length, 0);
+});
+
+test("coffre's signer signs as the AWS SDK's does: S3's path encoded once, another service's twice, header whitespace AWS's way", async () => {
+  const date = new Date('2026-10-18T10:00:00Z');
+  for (const [service, path] of [['s3', '/uploads/a%20b%2Bc/%C3%A9t%C3%A9.txt'], ['execute-api', '/prod/a%20b/c%2Bd']] as const) {
+    const url = new URL(`https://upstream.example${path}?b=2&a=1&empty=&a=0`);
+    const headers = new Headers({ 'content-type': 'text/plain', 'x-amz-meta-description': '  a b \t c  ', 'x-amz-user-agent': 'aws-sdk-js/3' });
+    await signV4('PUT', url, headers, 'UNSIGNED-PAYLOAD', { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET, sessionToken: 'session-token' }, { region: REGION, service }, date);
+    const signedHeaders = /SignedHeaders=([^,]+)/.exec(headers.get('authorization')!)![1]!.split(';');
+    const signer = new SignatureV4({ credentials: { accessKeyId: ACCESS_KEY_ID, secretAccessKey: SECRET, sessionToken: 'session-token' }, region: REGION, service, sha256: Sha256, uriEscapePath: service !== 's3', applyChecksum: false });
+    const query: Record<string, string | string[]> = {};
+    for (const [name, value] of url.searchParams) query[name] = name in query ? [query[name]!, value].flat() : value;
+    const sent: Record<string, string> = { host: url.host };
+    for (const name of signedHeaders) if (name !== 'host') sent[name] = headers.get(name)!;
+    const expected = await signer.sign({ method: 'PUT', protocol: 'https:', hostname: url.hostname, path: url.pathname, query, headers: sent }, { signingDate: date, signableHeaders: new Set(signedHeaders) });
+    assert.equal(headers.get('authorization'), expected.headers.authorization, service);
+  }
+});
+
+test('a key no header can carry is refused, and quoted nowhere', async () => {
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: { s3: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: '{AWS_SESSION_TOKEN}', region: REGION, service: 's3' }), baseUrl: 'AWS_ENDPOINT_URL_S3' } }, insecureUpstreams: true })]);
+  await clientFor(deps, ROOT).secrets.set('market/dev', { AWS_SESSION_TOKEN: 'token-line\nbreak-0123456789' });
+  const { handle } = await appClient();
+  const logged: unknown[] = [];
+  const error = console.error;
+  console.error = (...args: unknown[]) => void logged.push(...args);
+  let answer: Response;
+  try {
+    answer = await route('/use/market/dev/s3/uploads/x', { headers: { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
+  } finally {
+    console.error = error;
+  }
+  assert.equal(answer.status, 409);
+  assert.equal(JSON.stringify([await answer.text(), logged.map(String)]).includes('0123456789'), false);
   assert.equal(seen.length, 0);
 });
