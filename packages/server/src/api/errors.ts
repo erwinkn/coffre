@@ -74,8 +74,8 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
   if (refusal.code === 'bulk_limit') {
     return new ApiError('bulk_limit', 'too many secrets read in too short a time; try again later', refusal.code);
   }
-  // A person on an instance that gives people placeholders: not a refusal of their access, which the message says how to use.
-  if (refusal.code === 'stand_ins') return new ApiError('forbidden', refusal.message, refusal.code);
+  // A sensitive value, which no person is handed: not a refusal of their access, which the message says how to use.
+  if (refusal.code === 'sensitive') return new ApiError('forbidden', refusal.message, refusal.code);
   // Not the caller's doing: the instance is misconfigured, and stays unable to open any value until restarted.
   if (refusal.code === 'wrong_kek') return new ApiError('unavailable', refusal.message, refusal.code);
   // Valid, and refused only by who else owns the instance now: the message says what to do first.

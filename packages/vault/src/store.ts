@@ -531,6 +531,21 @@ export async function vaultEntriesOf(
   return stored(rows);
 }
 
+/** Which of these secrets' newest versions are sensitive, by the versions' own order. */
+export async function newestSensitive(db: Queryable, secretIds: readonly string[]): Promise<Set<string>> {
+  if (secretIds.length === 0) return new Set();
+  const { secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ secretId: secretVersions.secretId })
+    .from(secretVersions)
+    .where(and(
+      inArray(secretVersions.secretId, [...new Set(secretIds)]),
+      eq(secretVersions.sensitive, true),
+      sql`${secretVersions.version} = (SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
+    ));
+  return new Set(rows.map((row) => row.secretId));
+}
+
 /**
  * A version that still holds its wrapped key. A deleted place's versions are
  * erased, their keys emptied: there is nothing left to open, or to try a
@@ -546,7 +561,16 @@ function sealed(wrappedDek: SQLWrapper): SQL {
  * one, as a read through a reference needs. An erased version outside a
  * deleted place is no version.
  */
-export type SecretVersion = { id: string; secret: SecretRef; wrapped: WrappedKey; deleted: boolean; current: boolean };
+export type SecretVersion = {
+  id: string;
+  /** Its secret, `sensitive` as the version was written. */
+  secret: SecretRef;
+  wrapped: WrappedKey;
+  deleted: boolean;
+  current: boolean;
+  /** Whether its secret's newest version is sensitive: what a rewrap of it may not loosen. */
+  newestSensitive: boolean;
+};
 
 export async function versions(db: Queryable, ids: readonly string[]): Promise<SecretVersion[]> {
   if (ids.length === 0) return [];
@@ -567,8 +591,10 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       wrappedDek: secretVersions.wrappedDek,
       deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
       currentVersionId: secrets.currentVersionId,
+      sensitive: secretVersions.sensitive,
       // The newest by the versions' own order: the app may write `current_version_id`, never a version.
       newest: sql<number | string>`(SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
+      newestSensitive: sql<boolean | number>`(SELECT newest.sensitive FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId} ORDER BY newest.version DESC LIMIT 1)`,
     })
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
@@ -584,6 +610,7 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       secretId: row.secretId,
       version: row.version,
       path: `${row.project}/${row.environment}/${row.key}`,
+      sensitive: row.sensitive,
     },
     wrapped: {
       kekProvider: row.kekProvider,
@@ -592,5 +619,7 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       bytes: row.wrappedDek.toString('base64'),
     },
     current: row.currentVersionId === row.id && Number(row.newest) === row.version,
+    // SQLite answers a subquery's boolean as a number.
+    newestSensitive: Boolean(row.newestSensitive),
   }));
 }

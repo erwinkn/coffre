@@ -245,18 +245,22 @@ const TEMPLATES: Record<string, Template> = {
     what: secrets,
   },
   'secret.write': {
-    // New secrets are added, others changed; a batch of both is written.
-    did: ({ batch }) => {
+    // New secrets are added, others changed; a batch of both is written. One whose level changed is made that.
+    did: ({ entry, batch }) => {
+      if (batch.length === 1 && text(entry.metadata.was) !== null) return 'made';
       const firsts = batch.filter((entry) => entry.version === 1).length;
       return firsts === batch.length ? 'added' : firsts === 0 ? 'changed' : 'wrote';
     },
     tried: 'change',
     what: secrets,
-    // A plain value is no secret: the sentence says it was written as one.
-    then: ({ entry, batch }) => [
-      ...(batch.length > 1 || entry.version === null || entry.version === 1 ? [] : [`, now version ${entry.version}`]),
-      ...(batch.length === 1 && entry.metadata.plain === true ? [', as a plain value, no secret'] : []),
-    ],
+    // Who sees the value, where it is not a secret's or it changed: a mark keeps the value, a write gives a new one.
+    then: ({ entry, batch }) => {
+      const version = batch.length > 1 || entry.version === null || entry.version === 1 ? [] : [`, now version ${entry.version}`];
+      if (batch.length > 1) return version;
+      const level = entry.metadata.sensitive === true ? 'sensitive' : entry.metadata.plain === true ? 'plain' : 'secret';
+      if (text(entry.metadata.was) !== null) return [` ${level}`, ...(number(entry.metadata.kept) === null ? [' with a new value'] : []), ...version];
+      return [...version, ...(level === 'plain' ? [', as a plain value, no secret'] : level === 'sensitive' ? [', as a sensitive value, shown to nobody'] : [])];
+    },
   },
   // The credential proxy's own entry beside the vault's read: which credential the keys went into, and where.
   'credential.use': {
@@ -597,7 +601,11 @@ const TAMPERING: Record<string, string> = {
 const REASONS: Record<string, string> = {
   no_grant: 'no grant',
   bulk_limit: 'bulk limit',
+  // 0.9's `people: 'stand-ins'`, in entries written before 0.10.
   stand_ins: 'people get placeholders',
+  sensitive: 'the value is sensitive',
+  looser: 'making it visible takes a new value',
+  inherited: 'it is inherited',
   expired: 'grant expired',
   removed: 'removed from coffre',
   not_a_member: 'not a member',

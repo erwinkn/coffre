@@ -93,7 +93,6 @@ useMcp(
       credentialProxy({
         credentials: { dfns: { upstream: dfnsUrl, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: ['https://custom/app_metadata'] }) } },
         signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY'), 'ed-key': privateKey('ED_KEY'), 'rsa-key': privateKey('RSA_KEY'), absent: privateKey('NOT_HELD') },
-        expose: { 'market/dev': ['DFNS_CRED_ID', 'DFNS_PRIVATE_KEY'] },
         insecureUpstreams: true,
       }),
     ]);
@@ -103,10 +102,9 @@ useMcp(
     await root.members.add(`user:${DEV}`);
     await root.projects.create('market');
     await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { DFNS_AUTH_TOKEN: TOKEN, DFNS_CRED_ID: CRED_ID, DFNS_PRIVATE_KEY: keys.p256.pem.trim().replace(/\n/g, '\\n'), ED_KEY: keys.ed25519.pem, RSA_KEY: keys.rsa.pem });
+    await root.secrets.set('market/dev', { DFNS_AUTH_TOKEN: TOKEN, DFNS_CRED_ID: CRED_ID, DFNS_PRIVATE_KEY: keys.p256.pem.trim().replace(/\n/g, '\\n'), ED_KEY: { value: keys.ed25519.pem, sensitivity: 'sensitive' }, RSA_KEY: { value: keys.rsa.pem, sensitivity: 'sensitive' } });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
   },
-  { people: 'stand-ins' },
 );
 
 /** What `coffre run market/dev` gives the app: its environment, and what `credential(name)` reads, with coffre on loopback. */
@@ -142,7 +140,7 @@ class CoffreKeySigner implements CredentialSigner<KeyAssertion> {
 
 test("DFNS's SDK signs a user action through coffre: the key stays there, the signature verifies as DFNS checks it, and each is one use in the log", async () => {
   const { env, handle } = await run();
-  assert.equal(env.DFNS_PRIVATE_KEY, handle, 'the handle where the key was: a signer covers it, expose or not');
+  assert.equal(env.DFNS_PRIVATE_KEY, handle, 'the handle where the key was: a signer covers it, though its person reads it');
   assert.equal(env.DFNS_CRED_ID, CRED_ID);
   const signer = new CoffreKeySigner(env.DFNS_CRED_ID!, credential('dfns-key', env));
   const sdk = new DfnsApiClient({ baseUrl: env.DFNS_API_URL!, authToken: env.DFNS_AUTH_TOKEN!, signer });

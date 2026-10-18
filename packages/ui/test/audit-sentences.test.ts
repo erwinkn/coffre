@@ -109,6 +109,28 @@ test('a write says the version it made', () => {
   assert.equal(said(...mixed), 'wrote market/prod: 3 secrets');
 });
 
+test('a write says who sees the value where it is no secret, and a level changed as made that', () => {
+  const write = (metadata: Record<string, unknown>, version = 4) => said(entry({ action: 'secret.write', ...prod, key: 'STRIPE_KEY', version, metadata }));
+  assert.equal(write({ plain: true }, 1), 'added market/prod/STRIPE_KEY, as a plain value, no secret');
+  assert.equal(write({ sensitive: true }, 1), 'added market/prod/STRIPE_KEY, as a sensitive value, shown to nobody');
+  // A mark: the value kept, made stricter.
+  assert.equal(write({ sensitive: true, was: 'secret', kept: 3 }), 'made market/prod/STRIPE_KEY sensitive, now version 4');
+  assert.equal(write({ was: 'plain', kept: 3 }), 'made market/prod/STRIPE_KEY secret, now version 4');
+  // More visible, which only a new value makes it.
+  assert.equal(write({ plain: true, was: 'secret' }), 'made market/prod/STRIPE_KEY plain with a new value, now version 4');
+  assert.equal(write({ was: 'sensitive' }), 'made market/prod/STRIPE_KEY secret with a new value, now version 4');
+});
+
+test('a refusal says the value is sensitive, and an entry from 0.9 still says why', () => {
+  const refused = (reason: string) => said(entry({ action: 'secret.read', author: 'vault', ...prod, key: 'STRIPE_KEY', decision: 'deny', reason }));
+  assert.equal(refused('sensitive'), 'tried to reveal market/prod/STRIPE_KEY: the value is sensitive');
+  assert.equal(refused('stand_ins'), 'tried to reveal market/prod/STRIPE_KEY: people get placeholders');
+  assert.equal(
+    said(entry({ action: 'secret.write', ...prod, key: 'STRIPE_KEY', decision: 'deny', reason: 'looser', metadata: { sensitivity: 'plain', was: 'secret' } })),
+    'tried to change market/prod/STRIPE_KEY: making it visible takes a new value',
+  );
+});
+
 test("a grant on every project of 0.4 names its place in words, and what the vault replaced it by", () => {
   const grant = entry({
     action: 'access.grant',

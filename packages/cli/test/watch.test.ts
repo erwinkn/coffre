@@ -110,12 +110,12 @@ test('a first round that fails ends the watch, as an export would: there is no f
   );
 });
 
-test('coffre export --watch writes the file, then runs the hook; --output-file alone writes it once', async (t) => {
+test('coffre export --watch writes the file, then runs the hook; --output-file alone writes it once; each says what it left out', async (t) => {
   const dir = scratch(t);
   const asked: string[] = [];
   const server = createServer((request, response) => {
     asked.push(`${request.method} ${request.url}`);
-    const body = request.url === '/api/projects/market/prod/version' ? { version: 'v1' } : { operationId: 'op', values: { B: 'two', A: 'one' }, version: 'v1' };
+    const body = request.url === '/api/projects/market/prod/version' ? { version: 'v1' } : { operationId: 'op', values: { B: 'two', A: 'one' }, sensitive: ['PRIVATE'], version: 'v1' };
     response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(body));
   });
   t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
@@ -130,8 +130,12 @@ test('coffre export --watch writes the file, then runs the hook; --output-file a
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-  const [code] = await once(coffre(['--output-file', 'once.env']), 'close');
+  const exporting = coffre(['--output-file', 'once.env']);
+  let said = '';
+  exporting.stderr.setEncoding('utf8').on('data', (data: string) => (said += data));
+  const [code] = await once(exporting, 'close');
   assert.equal(code, 0);
+  assert.match(said, /^coffre: left out, sensitive, which nobody is handed: PRIVATE /);
   assert.equal(readFileSync(join(dir, 'once.env'), 'utf8'), 'A=one\nB=two\n');
   assert.equal(statSync(join(dir, 'once.env')).mode & 0o777, 0o600);
   assert.deepEqual(asked.splice(0), ['POST /api/reveals']);
@@ -147,7 +151,7 @@ test('coffre export --watch writes the file, then runs the hook; --output-file a
   assert.equal(readFileSync(join(dir, '.env'), 'utf8'), 'A=one\nB=two\n');
   assert.equal(statSync(join(dir, '.env')).mode & 0o777, 0o600);
   assert.deepEqual(asked, ['GET /api/projects/market/prod/version', 'POST /api/reveals']);
-  assert.match(stderr, /^coffre: keeping \.env current with market\/prod; each read is in the audit log under your name, and asking whether to read is not\ncoffre: wrote \.env\n/);
+  assert.match(stderr, /^coffre: keeping \.env current with market\/prod; each read is in the audit log under your name, and asking whether to read is not\ncoffre: left out, sensitive, which nobody is handed: PRIVATE .*\ncoffre: wrote \.env\n/);
   assert.ok(!stderr.includes('one') && !stderr.includes('two'));
 });
 

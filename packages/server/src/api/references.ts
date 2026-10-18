@@ -297,7 +297,8 @@ export async function readableValues(
   return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
 }
 
-async function resolveValues(
+/** `readableValues` in a transaction of the caller's, as it is under that transaction: a fork's copy, under the log's head. */
+export async function resolveValues(
   tx: Queryable,
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
@@ -376,6 +377,7 @@ async function valuesIn(
           secretId: row.id,
           version: row.current.version,
           path: `${project}/${environment.slug}/${row.key}`,
+          sensitive: row.current.sensitive,
         },
         envelope: row.current.envelope,
         plaintext: row.current.plaintext,
@@ -396,7 +398,7 @@ async function valuesIn(
       folder: row.folder,
       secretVersionId: source.currentVersionId!,
       // Opened as the source it is: its value is bound to the source's ids.
-      secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source) },
+      secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source), sensitive: opened.sensitive },
       envelope: opened.envelope,
       via: { reference: reference.row.id, seq: Number(reference.row.createdSeq) },
     });

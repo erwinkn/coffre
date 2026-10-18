@@ -42,13 +42,14 @@ export function freshDek(): Buffer {
 }
 
 /**
- * Encrypt a secret value under `dek`, bound to `ctx`. Whoever holds the key
- * encryption key wraps `dek` separately: the vault, in coffre.
+ * Encrypt a secret value under `dek`, bound to `ctx`'s ids. Whoever holds
+ * the key encryption key wraps `dek` separately: the vault, in coffre, whose
+ * wrap binds the owner and sensitivity too.
  */
-export function encrypt(plaintext: Buffer, ctx: SecretContext, dek: Buffer): Sealed {
+export function encrypt(plaintext: Buffer, ctx: SecretIds, dek: Buffer): Sealed {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
-  cipher.setAAD(encodeAad(ctx));
+  cipher.setAAD(valueAad(ctx));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return { envelopeVersion: ENVELOPE_VERSION, iv, authTag: cipher.getAuthTag(), ciphertext };
 }
@@ -59,7 +60,7 @@ export function encrypt(plaintext: Buffer, ctx: SecretContext, dek: Buffer): Sea
  * the AAD will not match. This is the property that makes relocating a
  * ciphertext across environments fail closed.
  */
-export function decrypt(envelope: Sealed, ctx: SecretContext, dek: Buffer): Buffer {
+export function decrypt(envelope: Sealed, ctx: SecretIds, dek: Buffer): Buffer {
   if (envelope.envelopeVersion !== ENVELOPE_VERSION) {
     throw new Error(`unsupported envelope version: ${envelope.envelopeVersion}`);
   }
@@ -70,9 +71,16 @@ export function decrypt(envelope: Sealed, ctx: SecretContext, dek: Buffer): Buff
     throw new Error('envelope auth tag has the wrong length');
   }
   const decipher = createDecipheriv('aes-256-gcm', dek, envelope.iv);
-  decipher.setAAD(encodeAad(ctx));
+  decipher.setAAD(valueAad(ctx));
   decipher.setAuthTag(envelope.authTag);
   return Buffer.concat([decipher.update(envelope.ciphertext), decipher.final()]);
+}
+
+/** What a value's own ciphertext binds: the secret's ids, never its owner or sensitivity, which only the wrap of its key does. */
+export type SecretIds = Pick<SecretContext, 'projectId' | 'environmentId' | 'secretId'>;
+
+function valueAad(ctx: SecretIds): Buffer {
+  return encodeAad({ projectId: ctx.projectId, environmentId: ctx.environmentId, secretId: ctx.secretId });
 }
 
 /**

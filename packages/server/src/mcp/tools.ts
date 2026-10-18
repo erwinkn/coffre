@@ -185,13 +185,15 @@ const REVEAL_VALUES = tool({
   idempotent: true,
   destructive: false,
   input: z.object({ path: z.string().min(1).max(300).describe('An environment, market/prod, or one secret, market/prod/STRIPE_KEY') }).strict(),
-  output: object({ path: { type: 'string' }, values: { type: 'object' } }),
+  output: object({ path: { type: 'string' }, values: { type: 'object' }, sensitive: list }),
   names: ({ path }) => [path],
   run: async ({ api }, { path }) => {
-    const { values } = await api.secrets.reveal(path);
+    // A whole environment's sensitive values are left out, by name: nobody is handed one.
+    const { values, sensitive } = await api.secrets.reveal(path);
+    const left = sensitive.length === 0 ? '' : `\n\nLeft out, sensitive, which nobody sees and apps use through the credential proxy: ${sensitive.join(', ')}`;
     return {
-      structured: { path, values },
-      text: `These values are now part of this conversation and its history.\n\n${JSON.stringify(values, null, 2)}`,
+      structured: { path, values, sensitive },
+      text: `These values are now part of this conversation and its history.\n\n${JSON.stringify(values, null, 2)}${left}`,
     };
   },
 });

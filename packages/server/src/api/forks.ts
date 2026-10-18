@@ -6,7 +6,7 @@ import { asking, audited, need, withRefusals, type ApiContext } from './context.
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type PlaceView } from './projects.ts';
-import { readableValues, unreadParents, type Readable } from './references.ts';
+import { readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -73,19 +73,34 @@ export async function forkEnvironment(
 
     const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from });
     const copies = readable.items.filter((item) => !plan.has(item.key));
-    const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy' }, copies);
+    // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
+    const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const patch: Record<string, SecretValue> = Object.create(null);
-    // A plain value stays plain in the copy: its forker read it as anyone who lists its environment does.
-    copies.forEach((item, i) => (patch[item.key] = plain(item) ? { value: opened.values[i]!, plain: true } : opened.values[i]!));
+    // A copy is held as its value was: a plain one stays plain, its forker having read it as anyone who lists its
+    // environment does, and a sensitive one sensitive, its forker never handed it.
+    copies.forEach((item, i) => (patch[item.key] = plain(item) ? { value: opened.values[i]!, plain: true }
+      : item.secret.sensitive === true ? { value: opened.values[i]!, sensitivity: 'sensitive' } : opened.values[i]!));
     for (const [key, path] of plan) patch[key] = { ref: path };
     const forked = { from, keys: readable.items.length, references: plan.size, copied: input.references ? copies.map((item) => item.key) : [], inherits: false };
     if (readable.items.length === 0) return { environment, created, forked };
 
     const target = await resolvePath(ctx.db, { project: project.slug, environment: slug });
     if (target?.environment == null) throw notFound(`${project.slug}/${slug} went away while it was being forked`);
-    await setSecrets(ctx, target, { ...patch });
+    // Each copied key still reads what was opened, `from` resolved again under the head the copy is written under:
+    // the same version, through the same reference, held in the same environment. A key written, marked sensitive,
+    // retargeted or overridden since it was opened would be copied as it was, and held looser than it is. The
+    // version says its level too: a mark is a new version.
+    await setSecrets(ctx, target, { ...patch }, async (tx) => {
+      const now = new Map((await resolveValues(tx, source, sourcePlace)).items.map((item) => [item.key, item]));
+      const moved = copies.find((item) => {
+        const current = now.get(item.key);
+        return current?.secretVersionId !== item.secretVersionId || current.via?.reference !== item.via?.reference
+          || current.parent?.environmentId !== item.parent?.environmentId;
+      });
+      if (moved !== undefined) throw conflict(`${project.slug}/${from}/${moved.key} changed while it was forked: fork again, into the same environment`);
+    });
 
     // Each key keeps its folder, where it is held: an inherited key, its parent's.
     const filed = readable.items.flatMap(({ key, folder }) => (folder === null || !(key in patch) ? [] : [{ key, folder }]));

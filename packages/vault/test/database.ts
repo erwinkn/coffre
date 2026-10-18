@@ -156,7 +156,7 @@ export async function storedVersions(owner: Database, items: { secret: SecretRef
       id: randomUUID(), secretId: secret.secretId, version: secret.version, envelopeVersion: 1,
       ciphertext: Buffer.from('fixture'), iv: Buffer.alloc(12), authTag: Buffer.alloc(16),
       wrappedDek: Buffer.from(wrapped.bytes, 'base64'), kekProvider: wrapped.kekProvider,
-      kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: 'user:root@acme.example',
+      kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: 'user:root@acme.example', sensitive: secret.sensitive === true,
     }).onConflictDoNothing({ target: [secretVersions.secretId, secretVersions.version] });
     const [row] = await owner.select().from(secretVersions).where(and(eq(secretVersions.secretId, secret.secretId), eq(secretVersions.version, secret.version)));
     assert.equal(row.wrappedDek.toString('base64'), wrapped.bytes, 'fixture version already has another wrapped key');

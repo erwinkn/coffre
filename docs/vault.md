@@ -88,6 +88,10 @@ the next token before this one runs out. To end one early:
 A person can use the `vault` CLI as themselves. Their CLI session works, and
 so does a personal token, which is the better choice for a script:
 `coffre tokens issue --label vault-cli --scope market/staging=viewer`.
+A person's read of an environment leaves its sensitive keys out, as
+`coffre export` does, and the answer's `warnings` names them:
+`left out, sensitive, which no person is handed: SIGNING_KEY`. A read of
+one sensitive key is refused with 403. A service account reads them all.
 
 ## External Secrets Operator
 

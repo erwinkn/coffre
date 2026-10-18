@@ -13,13 +13,12 @@
  *       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
  *     },
  *     signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY') },
- *     expose: { 'market/local': 'all' },
  *   })],
  *
  * and its app's route, `routes/use.$.ts`, `createFileRoute('/use/$')({ ...plugin })`.
  * Then, for a person's `coffre run market/dev`:
  *
- *   GET /use/market/dev                     what the app's environment holds: placeholders and exposed values
+ *   GET /use/market/dev                     what the app's environment holds: placeholders, and the values its person reads
  *   ANY /use/schumann/<path>                the request, sent to https://api.schumann.example/v1/<path> with market/dev's key
  *   ANY /use/market/dev/schumann/<path>     the same, naming the environment
  *   POST /use/market/dev                    a presigned URL, or a signature by a signer's key, made with the values and never them
@@ -34,8 +33,9 @@
  * HTTPS, its redirects never followed, and a value the upstream echoes is
  * redacted from its answer. A handle opens values for its person as a read
  * does, by their grants and its scope, logged once per credential a minute
- * (`cacheSeconds`), never handed back. `expose` names the few values an
- * environment's apps may hold as they are, by its exact path.
+ * (`cacheSeconds`), never handed back. The app holds as they are the
+ * values its person may read, plain and secret ones, never a sensitive one
+ * (docs/design/credential-proxy.md, section 2).
  */
 import { CoffreError } from '@coffre/client';
 
@@ -124,17 +124,11 @@ export type Credential = {
   /** @deprecated Called `placeholder` in 0.10, and refused: rename it. */
   standIn?: 'called placeholder in 0.10: rename it';
   /**
-   * Deprecated: mark the key plain instead (`coffre set … --plain`), which
-   * says it in the data, for every environment and fork alike. Keys the rule
-   * reads that are no secret, and that the app needs as they are: an
-   * account's id it puts in its URLs, Twilio's `TWILIO_SID` in
-   * `/Accounts/{sid}/Messages.json`. `coffre run` gives the app their
-   * values, each opened to `expose`, and the handle stands in for the rest.
-   * Held to `expose`'s limits: configuration only, and only an
-   * environment's own value, never one a fork inherits or a personal
-   * config's, which get the handle like the rest.
+   * @deprecated Gone in 0.10, and refused: mark each key plain instead
+   * (`coffre set <env>/TWILIO_SID <sid> --plain`), which says it in the data,
+   * for every environment and fork alike.
    */
-  identifiers?: readonly string[];
+  identifiers?: 'gone in 0.10: mark each key plain instead, coffre set <env>/<KEY> <value> --plain';
   /** The shape of what the app holds for its key, `jwt(…)` or `prefix(…)`, where a header or query rule carries that one key: the handle as it is, unless set. */
   placeholder?: Placeholder;
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. */
@@ -180,13 +174,11 @@ export type CredentialProxyOptions = {
   /** How often an open tunnel checks its handle still stands, ending when it does not: 60 seconds unless set. */
   recheckSeconds?: number;
   /**
-   * The values an environment's apps may hold as they are, by the exact
-   * path of the environment a read resolves to: `{ 'market/local': 'all',
-   * 'market/dev': ['CHAIN_SIGNER_KEY'] }`. Never a fork's parent, nor a
-   * personal config, unless named itself. Only what cannot be used through
-   * the proxy belongs here, and better a local-only value than a real one.
+   * @deprecated Gone in 0.10, and refused: each key says who sees it now. A
+   * person's app holds as they are the values they may read; mark sensitive
+   * those it must use only through the proxy (`coffre mark <env> sensitive`).
    */
-  expose?: Record<string, 'all' | readonly string[]>;
+  expose?: 'gone in 0.10: a person\'s app holds the values they may read; mark the rest sensitive, coffre mark <env> sensitive';
   /**
    * The environments whose keys each person gets a value of their own for,
    * by exact path, and which keys: `{ 'backend/local': 'all' }`. A person's
@@ -244,7 +236,9 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
     const other = [...credentials.values()].find((two) => two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.placeholder) !== JSON.stringify(one.placeholder));
     if (other !== undefined) throw new Error(`credentialProxy: ${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different placeholders, and the app holds one value for it`);
   }
-  const expose = checkListed('expose', options.expose ?? {});
+  if (options.expose !== undefined) {
+    throw new Error("credentialProxy: expose is gone in 0.10, as each key says who sees it: a person's app holds as they are the values they may read. Remove expose, and mark sensitive the keys no person may read (coffre mark <env> sensitive)");
+  }
   const generate = checkListed('generate', options.generate ?? {});
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
   const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels)]));
@@ -262,7 +256,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
+          return await serve(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -270,7 +264,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, expose, generate, cacheMs, cache, handles });
+          return await open(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -294,7 +288,6 @@ type Proxy = {
   signers: Map<string, Signer>;
   insecure: boolean;
   recheckMs: number;
-  expose: Map<string, 'all' | readonly string[]>;
   generate: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
   cache: Map<string, Opened & { until: number }>;
@@ -372,51 +365,41 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
 
 /**
  * What `coffre run` gives the app for an environment: each credential whose
- * keys it holds, its keys as the handle; its plain values, no secrets,
- * and the values `expose` lets it hold, as they are; and what the app
- * reads for `credential(name)`. Each key the environment holds that none of
- * these covers is named in `left`, for `coffre run` to say.
+ * keys it holds, its keys as the handle; the values its person may read,
+ * plain ones and secrets, as they are, never a sensitive one; and what the
+ * app reads for `credential(name)`. Each key the environment holds that none
+ * of these covers, a sensitive one the proxy does not use, is named in
+ * `left`, for `coffre run` to say.
  */
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
   const handle = bearer(request);
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  // The credentials the environment holds every key of: their keys are placeholders, never exposed.
+  // The credentials the environment holds every key of: their keys are placeholders, whoever may read them.
   const covering = (keys: readonly string[]) => [...proxy.credentials.values()].filter((credential) => credential.keys.every((key) => keys.includes(key)));
   // What the read resolved, for what `coffre run` generates below.
   let resolved: Parameters<PickKeys>[1] = [];
-  // One read, which opens what the exact environment exposes, never through a parent; and a personal config's own
-  // values, which only its owner writes, so they hand back nothing they did not write, and those it inherits as
-  // the environment it is a config of exposes them, which its owner reads anyway. Chosen from the rows it opens.
+  // One read, which opens what the app holds as it is, chosen from the rows it opens: a sensitive value is never one,
+  // and the vault refuses the read if it were.
   const held = await coffre.use(handle, {
     path: readOf(proxy, path),
     purpose: 'expose',
     logged: { plan: true },
-    keys: (environment, rows) => {
+    keys: (_environment, rows) => {
       resolved = rows;
       const using = covering(rows.map((row) => row.key));
-      const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key), ...[...proxy.signers.values()].map((signer) => signer.key)]);
-      const listed = proxy.expose.get(environment.personal ? environment.path.replace(/@me$/, '') : environment.path);
-      const exposed = (row: { key: string; inherited: boolean }) => (environment.personal && !row.inherited) || listed === 'all' || (listed?.includes(row.key) ?? false);
-      // The environment's own value: held there, or, read through a personal config of it, held by the environment it configures.
-      const configured = environment.path.replace(/@me$/, '').split('/')[1];
-      const own = (row: { inherited: boolean; from: string | null }) => (environment.personal ? row.from === configured : !row.inherited);
-      // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's own.
-      const identified = (row: { key: string; inherited: boolean; from: string | null }) => identifiers.has(row.key) && own(row);
       // What the proxy fills in itself, a tunnel's URL or a signer's handle, never the value the environment holds; and a
-      // credential's plain keys and identifiers where giving them would leave the handle nowhere the proxy finds it:
-      // S3's access key id, which the SDK sends as `Credential=`, or every key of a header's. Those stay placeholders,
-      // as secrets do.
-      const asTheyAre = new Set(rows.filter((row) => row.plain || identified(row)).map((row) => row.key));
+      // credential's plain keys where giving them would leave the handle nowhere the proxy finds it: S3's access key id,
+      // which the SDK sends as `Credential=`, or every key of a header's. Those stay placeholders, as secrets do.
+      const asTheyAre = new Set(rows.filter((row) => row.plain).map((row) => row.key));
       const filled = new Set([
         ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
         ...[...proxy.signers.values()].map((signer) => signer.key),
         ...using.filter((credential) => !carriesHandle(credential.inject, asTheyAre)).flatMap((credential) => credential.keys),
       ]);
       return rows
-        // A plain value is no secret, wherever it is held.
-        .filter((row) => ((row.plain || identified(row)) && !filled.has(row.key))
-          || (!covered.has(row.key) && exposed(row)))
+        // A plain value is no secret, wherever it is held; a secret the proxy does not use, its person reads where it is held.
+        .filter((row) => (row.plain && !filled.has(row.key)) || (!covered.has(row.key) && !row.sensitive && row.reads))
         .map((row) => row.key);
     },
   });
@@ -426,7 +409,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const credential of covering(held.keys)) {
     // The environment's URL, which a run of several environments tells apart, and which `presign()` derives the environment's from.
     credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
-    // Every key the placeholder, and a plain value or an identifier given as it is below.
+    // Every key the placeholder, and a plain value given as it is below.
     const placeholder = credential.placeholder === undefined ? handle : await shaped(coffre, credential, handle, readOf(proxy, path));
     for (const key of credential.keys) {
       env[key] = placeholder;
@@ -1169,8 +1152,9 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
     throw new Error(`credentialProxy: ${name}'s baseUrl is gone in 0.9, and \`coffre run\` no longer sets ${String(credential.baseUrl)}: point the app's own config at the proxy's stable URL for ${name}, <publicUrl>/use/${name}, the same for every environment`);
   }
   if (credential.standIn !== undefined) throw new Error(`credentialProxy: ${name}'s standIn is called placeholder in 0.10: rename it`);
-  if (credential.identifiers?.some((key) => !keys.includes(key))) throw new Error(`credentialProxy: ${name}'s identifiers are keys its rule reads`);
-  if (credential.identifiers !== undefined && keys.every((key) => credential.identifiers!.includes(key))) throw new Error(`credentialProxy: ${name}'s rule needs a key that is no identifier, for the handle to stand in for`);
+  if (credential.identifiers !== undefined) {
+    throw new Error(`credentialProxy: ${name}'s identifiers are gone in 0.10: mark each key plain instead, coffre set <env>/<KEY> <value> --plain, and remove identifiers`);
+  }
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
   const shape = credential.placeholder === undefined ? undefined : placeholderShape(name, credential.placeholder, inject);
@@ -1221,7 +1205,7 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
   return signer;
 }
 
-function checkListed(option: 'expose' | 'generate', listed: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {
+function checkListed(option: 'generate', listed: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {
   for (const [path, keys] of Object.entries(listed)) {
     if (!/^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(path)) throw new Error(`credentialProxy: ${option} names environments by path, market/local; got ${JSON.stringify(path)}`);
     if (keys !== 'all' && (!Array.isArray(keys) || keys.some((key) => !KEY.test(key)))) throw new Error(`credentialProxy: ${option}['${path}'] is 'all' or a list of keys`);

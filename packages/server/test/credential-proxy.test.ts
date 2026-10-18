@@ -1,7 +1,8 @@
-// Placeholders (docs/design/credential-proxy.md, R13): where the vault gives
-// people placeholders, a person opens no value to be handed back, on any
-// credential of theirs, while a service account reads values as before. A
-// person's app holds handles instead, which only the credential proxy takes:
+// Placeholders (docs/design/credential-proxy.md, R13): a sensitive value is
+// handed back to no person, on any credential of theirs, while a service
+// account reads it as any other. A person's app holds handles for what the
+// proxy covers, and the values its person reads as they are; only the
+// credential proxy takes a handle:
 // it opens the credential's values for them and injects them into the
 // request, for the credential's upstream alone. Here Schumann's client, as
 // Equisafe's backend has it, reaches a fake Schumann through the proxy with
@@ -36,6 +37,8 @@ const P_USER = 'acct_one';
 const P_PASS = 'acct_one_unknownabcdefgh0123456789';
 /** A key a JSON echo escapes. */
 const QUOTED = 'q"uo\\te/d<&>0123';
+/** A reader of a fork of dev, and never of dev. */
+const FORKER = 'fork@acme.example';
 
 /** The fake Schumann: what it received, and an answer that echoes the key when asked to. */
 let upstream: Server;
@@ -165,7 +168,7 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
     credentials: {
       schumann: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
       maps: { upstream: `${upstreamUrl}/maps`, inject: query('key', '{MAPS_KEY}'), methods: ['GET'] },
-      twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'], paths: ['/Accounts'] },
+      twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
       padded: { upstream: `${upstreamUrl}/padded`, inject: header('x-api-key', '{PADDED_KEY}') },
       quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
       prefixed: { upstream: `${upstreamUrl}/prefixed`, inject: basic('{P_USER}', '{P_PASS}') },
@@ -173,7 +176,6 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       broken: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{BROKEN_KEY}') },
       token: { upstream: `${upstreamUrl}/token`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
     },
-    expose: { 'market/dev': ['WEBHOOK_SECRET'] },
     insecureUpstreams: true,
     ...overrides,
   };
@@ -189,9 +191,9 @@ useMcp(
     await root.projects.create('market');
     await root.environments.create('market/dev');
     await root.secrets.set('market/dev', {
-      SCHUMANN_API_KEY: KEY,
+      SCHUMANN_API_KEY: { value: KEY, sensitivity: 'sensitive' },
       MAPS_KEY: 'maps+real/key=0123456789',
-      TWILIO_SID: 'AC0123456789',
+      TWILIO_SID: { value: 'AC0123456789', plain: true },
       TWILIO_TOKEN: 'twilio_real_token_0??0123456789',
       WEBHOOK_SECRET: WEBHOOK,
       QUOTED_KEY: QUOTED,
@@ -200,13 +202,12 @@ useMcp(
       P_USER,
       P_PASS,
       ACCENT_KEY,
-      U_PASS,
-      DATABASE_URL: 'postgres://dev-db/market',
+      U_PASS: { value: U_PASS, sensitivity: 'sensitive' },
+      DATABASE_URL: { value: 'postgres://dev-db/market', sensitivity: 'sensitive' },
     });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
     await root.access.set('token:ci', { 'market/dev': 'viewer' });
   },
-  { people: 'stand-ins' },
 );
 
 /** The API as whoever `token` is, over coffre's own routes. */
@@ -249,25 +250,36 @@ function fetchThrough(input: string | URL | Request, init?: RequestInit): Promis
   return coffreRoute(request, runtime, '203.0.113.7').then((response) => response!);
 }
 
-test('where people get placeholders, a person opens no value on any credential of theirs, nor through MCP; a service account reads them', async () => {
+test('a sensitive value opens for no person, on any credential of theirs nor through MCP; a service account reads it', async () => {
   const session = await sessionFor(DEV);
-  assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev')), { status: 403, reason: 'stand_ins' });
-  assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 403, reason: 'stand_ins' });
+  const sensitive = ['DATABASE_URL', 'SCHUMANN_API_KEY', 'U_PASS'];
+  // A whole environment's read leaves them out, by name; a read of one is refused.
+  const whole = await bearer(session).secrets.reveal('market/dev');
+  assert.deepEqual([...whole.sensitive].sort(), sensitive);
+  assert.equal(whole.values.SCHUMANN_API_KEY, undefined);
+  assert.equal(whole.values.WEBHOOK_SECRET, WEBHOOK);
+  assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 403, reason: 'sensitive' });
   const pat = await bearer(session).tokens.issue(`user:${DEV}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  assert.deepEqual(await refusal(bearer(pat.token).secrets.reveal('market/dev')), { status: 403, reason: 'stand_ins' });
+  assert.deepEqual([...(await bearer(pat.token).secrets.reveal('market/dev')).sensitive].sort(), sensitive);
+  assert.deepEqual(await refusal(bearer(pat.token).secrets.reveal('market/dev/U_PASS')), { status: 403, reason: 'sensitive' });
   // The Owner too: no person's credential is an exception.
-  assert.deepEqual(await refusal(bearer(await sessionFor(ROOT)).secrets.reveal('market/dev')), { status: 403, reason: 'stand_ins' });
-  // Nor a dry run, whose `changed` or `unchanged` says whether a guess was right.
-  assert.deepEqual(await refusal(bearer(session).secrets.dryRun('market/dev', { SCHUMANN_API_KEY: 'guess' })), { status: 403, reason: 'stand_ins' });
+  assert.deepEqual(await refusal(bearer(await sessionFor(ROOT)).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 403, reason: 'sensitive' });
+  // Nor does a dry run say whether a guess was right: the right one is `changed` too.
+  assert.deepEqual({ ...(await bearer(session).secrets.dryRun('market/dev', { SCHUMANN_API_KEY: KEY })).keys }, { SCHUMANN_API_KEY: 'changed' });
   const mcp = await connect(DEV, 'read reveal');
   const revealed = await callRaw(mcp, 'reveal_secret_values', { path: 'market/dev' });
-  assert.equal(JSON.stringify(revealed.body).includes(KEY), false);
-  assert.match(JSON.stringify(revealed.body), /placeholders/);
+  const { values, sensitive: left } = revealed.body.result!.structuredContent! as { values: Record<string, string>; sensitive: string[] };
+  assert.equal(values.SCHUMANN_API_KEY, undefined);
+  assert.deepEqual([...left].sort(), sensitive);
+  const one = await callRaw(mcp, 'reveal_secret_values', { path: 'market/dev/SCHUMANN_API_KEY' });
+  assert.equal(one.body.result!.isError, true);
+  assert.equal(JSON.stringify(one.body).includes(KEY), false);
+  assert.match(JSON.stringify(one.body), /sensitive/);
 
-  // The vault refused each, and logged it: the app's API holds no rule of its own for this.
+  // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this.
   const refused = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author === 'vault');
-  assert.ok(refused.length >= 5);
-  assert.ok(refused.every((entry) => entry.code === 'stand_ins'));
+  assert.ok(refused.length >= 4);
+  assert.ok(refused.every((entry) => entry.code === 'sensitive'));
 
   // A service account's reads are values, as in CI.
   const ci = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'ci', { label: 'ci', expiresInDays: 1 })).token;
@@ -439,7 +451,7 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
 });
 
 test('query and Basic credentials, with their methods and paths', async () => {
-  // A Basic password past Latin-1, here only: its rule reads TWILIO_SID as a key, not an identifier.
+  // A Basic password past Latin-1, here only, its user Twilio's plain account id.
   const options = proxyOptions();
   runtime.plugins = checkPlugins([credentialProxy({ ...options, credentials: { ...options.credentials, ubasic: { upstream: `${upstreamUrl}/ubasic`, inject: basic('{TWILIO_SID}', '{U_PASS}') } } })]);
   const handle = await handleFor();
@@ -450,7 +462,7 @@ test('query and Basic credentials, with their methods and paths', async () => {
 
   // Twilio as its client calls it, from the plan: the account's id in the path and as the user, the handle as the token.
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string> };
-  assert.equal(plan.env.TWILIO_SID, 'AC0123456789', 'an identifier, as it is');
+  assert.equal(plan.env.TWILIO_SID, 'AC0123456789', 'plain, as it is');
   assert.equal(plan.env.TWILIO_TOKEN, handle);
   const basicAuth = `Basic ${btoa(`${plan.env.TWILIO_SID}:${plan.env.TWILIO_TOKEN}`)}`;
   const twilio = await route(`/use/market/dev/twilio/Accounts/${plan.env.TWILIO_SID}/Messages.json`, { method: 'POST', headers: { authorization: basicAuth, 'content-type': 'application/x-www-form-urlencoded' }, body: 'To=%2B33600000000&Body=hi' });
@@ -556,7 +568,7 @@ test('a handle for a fork reads what it inherits, and one for dev@me stands in f
   assert.deepEqual(mine.scope, { 'market/dev': 'viewer' });
   const plan = (await (await route('/use/market/dev@me', { headers: { authorization: `Bearer ${mine.token}` } })).json()) as { env: Record<string, string> };
   assert.equal(plan.env.DATABASE_URL, 'postgres://localhost/dev', "the personal config's own value, not dev's");
-  assert.equal(plan.env.WEBHOOK_SECRET, WEBHOOK, 'what dev exposes, which its owner reads through dev anyway');
+  assert.equal(plan.env.WEBHOOK_SECRET, WEBHOOK, "dev's secret, which its owner reads through dev anyway");
 });
 
 test("the stable URL, /use/<credential>, is the handle's environment's: a fork's, a personal config's, or a refusal that names the environment's", async () => {
@@ -668,43 +680,48 @@ test("a handle keeps the environments it was made for under its row's MAC; one o
   assert.match(((await refused.json()) as { message: string }).message, /before coffre 0\.9.*coffre run/);
 });
 
-test('the plan: placeholders for what the proxy covers, values only for what the exact environment exposes, never a fork of it', async () => {
+test('the plan: placeholders for what the proxy covers, and as they are the values its person reads where they are held, never a sensitive one', async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  await root.members.add(`user:${FORKER}`);
+  await root.access.set(`user:${FORKER}`, { 'market/dev-eu': 'viewer' });
   await root.secrets.set('market/dev@me', { EXTRA: 'mine' }).catch(() => undefined);
   await clientFor(deps, DEV).secrets.set('market/dev@me', { LOCAL_ONLY: 'x' });
-  const plan = async (path: string, paths = [path.replace('@me', '')]) => {
-    const handle = (await bearer(await sessionFor(DEV)).handles.create({ label: 'run', paths: [path.includes('@me') ? 'market/dev' : paths[0]!] })).token;
+  const plan = async (path: string, paths = [path.replace('@me', '')], who = DEV) => {
+    const handle = (await bearer(await sessionFor(who)).handles.create({ label: 'run', paths: [path.includes('@me') ? 'market/dev' : paths[0]!] })).token;
     const response = await route(`/use/${path}`, { headers: { authorization: `Bearer ${handle}` } });
     assert.equal(response.status, 200, await response.clone().text());
     return (await response.json()) as { environment: string; env: Record<string, string>; left: string[] };
   };
 
   const dev = await plan('market/dev');
-  assert.equal(dev.env.WEBHOOK_SECRET, WEBHOOK, 'exposed by its exact path');
-  assert.equal(dev.env.MAPS_KEY?.startsWith('coffre_use_'), true);
-  assert.equal(dev.env.TWILIO_SID, 'AC0123456789', 'an identifier its credential names');
+  assert.equal(dev.env.WEBHOOK_SECRET, WEBHOOK, 'a secret its person reads, and no credential');
+  assert.equal(dev.env.MAPS_KEY?.startsWith('coffre_use_'), true, "a credential's secret is a placeholder");
+  assert.equal(dev.env.SCHUMANN_API_KEY?.startsWith('coffre_use_'), true, "and a credential's sensitive one");
+  assert.equal(dev.env.TWILIO_SID, 'AC0123456789', 'a plain value its credential names');
   assert.equal(dev.env.TWILIO_TOKEN?.startsWith('coffre_use_'), true);
-  assert.deepEqual(dev.left, ['DATABASE_URL', 'U_PASS'], 'neither proxied nor exposed: the app does without');
+  assert.deepEqual(dev.left, ['DATABASE_URL', 'U_PASS'], 'sensitive, and no credential: the app does without');
   assert.equal(JSON.stringify(dev).includes(KEY), false);
 
+  // A fork's inherited values reach the app of whoever reads them where they are held: dev's reader, not the fork's alone.
   const fork = await plan('market/dev-eu');
-  assert.equal(fork.env.WEBHOOK_SECRET, undefined, "a fork inherits dev's value, not its exposure");
-  assert.ok(fork.left.includes('WEBHOOK_SECRET'));
+  assert.equal(fork.env.WEBHOOK_SECRET, WEBHOOK);
   assert.equal(fork.env.SCHUMANN_API_KEY?.startsWith('coffre_use_'), true, 'its inherited keys are still placeholders');
-  assert.equal(fork.env.TWILIO_SID?.startsWith('coffre_use_'), true, "nor is an inherited identifier given: it is dev's, not the fork's");
+  assert.deepEqual(fork.left, ['DATABASE_URL', 'U_PASS']);
+  const forker = await plan('market/dev-eu', ['market/dev-eu'], FORKER);
+  assert.equal(forker.env.WEBHOOK_SECRET, undefined, 'a reader of the fork alone, never of dev');
+  assert.ok(forker.left.includes('WEBHOOK_SECRET'));
 
   const mine = await plan('market/dev@me');
   assert.equal(mine.environment, 'market/dev@me');
-  assert.equal(mine.env.WEBHOOK_SECRET, WEBHOOK, "a personal config of it does, as dev's own: its owner gets it through dev anyway");
-  assert.equal(mine.env.LOCAL_ONLY, 'x', "but its own values, which only its owner wrote, are its owner's app's");
-  assert.equal(mine.env.TWILIO_SID, 'AC0123456789', "dev's own identifier, which its owner gets through dev anyway");
+  assert.equal(mine.env.WEBHOOK_SECRET, WEBHOOK, "dev's, which its owner reads through dev");
+  assert.equal(mine.env.LOCAL_ONLY, 'x', "and its own values, which only its owner wrote");
+  assert.equal(mine.env.TWILIO_SID, 'AC0123456789', "dev's plain value");
+  assert.deepEqual(mine.left, ['DATABASE_URL', 'U_PASS']);
 
-  // Each exposure is logged as the vault's read to expose, one entry per environment it opens in: dev's webhook secret and
-  // Twilio's account id; the personal config's own value; and dev's webhook secret, through the personal config. The fork
-  // exposes nothing.
+  // Each value given is logged as the vault's read to expose, one entry per environment it opens in.
   const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
-  assert.equal(exposed.length, 3);
+  assert.equal(exposed.length, 4);
 });
 
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {
@@ -715,7 +732,7 @@ test("a key named as an object's own property is still missing when the environm
   assert.equal(received.length, 0);
 });
 
-test('the configuration is checked: HTTPS upstreams, no private address, rules that name keys, expose by exact path', () => {
+test("the configuration is checked: HTTPS upstreams, no private address, rules that name keys, and 0.9's expose and identifiers refused", () => {
   const make = (credentials: CredentialProxyOptions['credentials'], more: Partial<CredentialProxyOptions> = {}) => () => credentialProxy({ credentials, ...more });
   assert.throws(make({ a: { upstream: 'http://api.example.com', inject: header('x', '{K}') } }), /HTTPS/);
   assert.throws(make({ a: { upstream: 'https://10.0.0.8', inject: header('x', '{K}') } }), /private address/);
@@ -724,7 +741,11 @@ test('the configuration is checked: HTTPS upstreams, no private address, rules t
   assert.throws(make({ a: { upstream: 'https://localhost', inject: header('x', '{K}') } }), /private address/);
   assert.throws(make({ a: { upstream: 'https://api.example.com', inject: header('x', 'static') } }), /names no key/);
   assert.throws(make({ A: { upstream: 'https://api.example.com', inject: header('x', '{K}') } }), /lowercase/);
-  assert.throws(make({}, { expose: { 'market/*': 'all' } }), /exact|by path/);
+  // `expose` and a credential's `identifiers` are gone in 0.10: refused at typecheck and at startup, saying what to do instead.
+  // @ts-expect-error -- the type says each key says who sees it now
+  assert.throws(make({}, { expose: { 'market/dev': ['WEBHOOK_SECRET'] } }), /expose is gone in 0\.10.*mark sensitive the keys no person may read/);
+  // @ts-expect-error -- the type says to mark the key plain
+  assert.throws(make({ twilio: { upstream: 'https://api.twilio.com', inject: basic('{SID}', '{TOKEN}'), identifiers: ['SID'] } }), /twilio's identifiers are gone in 0\.10: mark each key plain/);
   // `baseUrl` is gone in 0.9: refused at typecheck and at startup, naming the URL the app's config points at instead.
   // @ts-expect-error -- the type says where the URL goes now
   assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), baseUrl: 'SCHUMANN_BASE_URL' } }), /schumann's baseUrl is gone in 0\.9.*SCHUMANN_BASE_URL.*<publicUrl>\/use\/schumann/);

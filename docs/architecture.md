@@ -678,6 +678,11 @@ chain, but left out of `GET /api/audit` unless `detail=1`.
   the environment; someone with `market/dev` asks for
   `market/prod/DATABASE_URL`. The app lets it through, and the vault refuses:
   the grant covers `dev`.
+- **A sensitive value shown to a person.** A key marked sensitive is
+  never handed back to anyone signed in as a person, Owners included:
+  its data key is wrapped as sensitive, so a page, a CLI read or a plugin
+  that asks for it is refused, and a row flipped back around coffre opens
+  for nobody ([design](design/credential-proxy.md#2-the-model)).
 - **Someone removed getting back in.** An offboarding bug leaves a session
   alive; the vault refuses the principal, which only it can restore.
 - **A copy of the database.** It holds no vault key.

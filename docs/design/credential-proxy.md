@@ -8,7 +8,9 @@ adds SigV4, for S3. PR 3 adds the Postgres tunnel, on Node (section 9).
 `baseUrl` (section 4). The decisions in section 8
 were taken on the recommended option while Erwin was away (R10), and each
 is his to revisit. 0.9 closes the gaps that kept keys on `expose`
-(section 2, "What replaces `expose`").
+(section 2, "What replaces `expose`"). 0.10 (W128) replaces the
+deployment-wide `people` switch and `expose` with one setting per key, its
+sensitivity (section 2).
 
 ## 1. What it is for
 
@@ -21,15 +23,15 @@ commit them. With placeholders it holds none of them:
 ```sh
 $ coffre run market/dev -- pnpm dev
 coffre: placeholders for market/dev: schumann, s3 through https://secrets.acme.example/use; the handle lasts 12 hours (`coffre tokens` lists it)
-coffre: exposed as they are, by the deployment: STRIPE_WEBHOOK_SECRET
-coffre: left out, neither proxied nor exposed: SENTRY_DSN
+coffre: values as they are, which you may read: STRIPE_WEBHOOK_SECRET
+coffre: left out, neither proxied nor yours to read: SIGNING_KEY
 ```
 
 The app's environment, as the backend sees it:
 
 ```sh
 SCHUMANN_API_KEY=coffre_use_Qm9Y…            # the handle, where the key was
-STRIPE_WEBHOOK_SECRET=whsec_local_…          # exposed: a local-only value
+STRIPE_WEBHOOK_SECRET=whsec_local_…          # a secret its person reads: given as it is
 COFFRE_CREDENTIALS={"schumann":"https://secrets.acme.example/use/market/dev/schumann"}
 COFFRE_HANDLE=coffre_use_Qm9Y…
 ```
@@ -52,12 +54,38 @@ the machine.
 
 ## 2. The model
 
-**Two delivery modes (R13).** Who asks decides what a read hands back:
+**Sensitivity (0.10).** Each key says who sees its value, one setting
+with three levels, loosest first:
 
-| Who | What a read opens | How |
+| Level | Who sees the value | The page's hint |
 |---|---|---|
-| A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection | **Placeholders.** Values are opened only for coffre to use for them | The vault refuses `reveal`, `run` and `compare` reads to any `user:` principal (`stand_ins`), and allows `use`, `expose` and a fork's `copy` |
-| A service account: a service token, a CI run's or a cluster's ID token | **Values**, as before | Unchanged: CI and production read their environment once, at full speed |
+| `plain` | Anyone who can list the environment | Visible to anyone who can see this environment |
+| `secret`, the default | People whose role can read secrets | Visible to people whose role can read secrets |
+| `sensitive` | No person, Owners included. Their apps get a placeholder and use it through the proxy; service accounts read it | Never shown to anyone, Owners included. Used through the proxy or by services |
+
+```sh
+$ coffre set market/prod/STRIPE_SECRET_KEY --sensitive   # a new value, shown to nobody from here on
+$ coffre mark market/prod/DATABASE_URL sensitive         # the value as it is, made stricter
+$ coffre mark market/prod sensitive                      # every value of market/prod's own that is looser now
+$ coffre list market/prod
+DATABASE_URL	v4	admin@acme.example	today  sensitive
+STRIPE_SECRET_KEY	v2	admin@acme.example	today  sensitive
+TWILIO_SID	v1	admin@acme.example	today  plain: AC0123456789
+```
+
+A reference reads its source's level, and a fork's inherited key its
+parent's, so `mark` of an environment leaves them as they are, naming
+each one looser than asked and where to mark it: `coffre: left as they
+are: API_KEY, a reference to market/shared/API_KEY: mark it there`. The
+listing says each key's level, those included.
+
+**Two delivery modes (R13), by key.** Who asks, and the key's level,
+decide what a read hands back:
+
+| Who | A `secret` key | A `sensitive` key |
+|---|---|---|
+| A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection, a handle | The value, where their role reads it | **A placeholder.** The value is opened only for coffre to use for them: the vault refuses a read that would hand it back (`sensitive`), and allows the proxy's `use` and a fork's `copy` |
+| A service account: a service token, a CI run's or a cluster's ID token | The value | The value: CI and production read their environment once, at full speed |
 
 The rule is in the vault, the one place every read goes through, not in
 the CLI or the API's routes. `coffre get`, the UI's reveal, `POST
@@ -65,9 +93,58 @@ the CLI or the API's routes. `coffre get`, the UI's reveal, `POST
 `show_secret_value` all reach the vault's `unwrap`, so all are refused the
 same way, and each refusal is in the vault's log. So is an import's dry
 run (`compare`): its `changed` or `unchanged` tells whoever sent a guess
-whether it was right. A fork's `copy` hands nothing back, and stays. A deployment turns it on in its vault's
-configuration (`people: 'stand-ins'`). Left out, it is `values`, as in
-0.7 (decision 1).
+whether it was right, so a sensitive value is compared with no person's
+guess (`changed`). A fork's `copy` hands nothing back, and stays. Every
+purpose but `use` and `copy` counts as handing back, one a later app
+might name included.
+
+- **Bound by the vault.** A sensitive version says so in its row
+  (`secret_versions.sensitive`, migration `0012_sensitive_values`), and the
+  vault's wrap of its data key binds it, as it binds a personal config's
+  owner: AAD `|sensitive`, or `coffre:sensitive` in KMS's encryption
+  context. A row flipped back to secret around coffre opens for nobody
+  (`bad_claim`), rather than for people. The value's own ciphertext binds
+  the secret's ids alone, so a key made sensitive keeps it. A fork's
+  `copy` opens one only for an app that says it keeps it sensitive
+  (`keepsSensitive`), which an app of 0.9, mid-deploy, never says; and
+  `wrap` answers what it bound, so this app stores no sensitive version a
+  vault of 0.9 wrapped as a secret.
+- **A person's read of a whole environment** (`coffre run` and `export`
+  without the proxy, the page's Reveal all, `POST /api/reveals` of
+  `market/prod`) leaves its sensitive values out and names them
+  (`sensitive`), rather than refuse the run: `coffre: left out, sensitive,
+  which nobody is handed: STRIPE_SECRET_KEY`. A read of one sensitive key
+  is refused whole, 403 `sensitive`. `coffre version` answers, for a
+  person, the version of what their read would open.
+- **Stricter at any time, looser only by a new value.** Making a key
+  stricter keeps its value: `{ "sensitivity": "sensitive" }`, with no
+  value, in `PATCH /secrets/…`, is a new version of the same ciphertext,
+  its data key wrapped again as the new level (the vault's `rewrap`), which
+  takes write and opens nothing. Making one looser takes the value written
+  again (`coffre set … --secret`), so nobody ever shows a value they could
+  not read by flipping it (decision 17's rule, for every level). The vault
+  holds rewraps to it: a new version is never less sensitive than the one
+  it is made from, nor than its secret's newest (`invalid`). A rollback
+  brings the old value back as it was held, plain or secret, and sensitive
+  while the key is.
+- **A write that says nothing keeps the key as strict.** It is a secret,
+  or sensitive where the key is sensitive now: rotating a sensitive key
+  with `coffre set` leaves it sensitive. Plain is still said by each write
+  (decision 18). A fork's override of a sensitive key it inherits is
+  sensitive unless it says otherwise.
+- **Logged.** A write's `secret.write` says `sensitive: true` (or `plain:
+  true`), and `was`, the level before, when it changed one; a mark also
+  says the version whose value it `kept`.
+- **Personal tokens count as people**, as does a handle. A personal
+  config's values stay readable by their owner (R8): none is sensitive, or
+  plain, there.
+- **A fork's copy keeps each value's level**, as it keeps plain.
+
+0.8 and 0.9 had one switch for the whole deployment, `people:
+'stand-ins'`, which refused every value to every person, and `expose`,
+configuration that let some through again by environment. 0.10 removes
+both: a deployment that still sets either fails at startup, saying what
+to do (decision 20).
 
 **A handle** (`coffre_use_…`, 32 random bytes) is what a person's app
 holds in place of a value. It is a credential row of its own kind
@@ -110,7 +187,6 @@ credentialProxy({
     // The account's id is in Twilio's paths, /Accounts/{sid}/Messages.json: TWILIO_SID is plain, and the app holds it as it is.
     twilio: { upstream: 'https://api.twilio.com/2010-04-01', inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
   },
-  expose: { 'market/local': 'all', 'market/dev': ['STRIPE_WEBHOOK_SECRET'] },
 })
 ```
 
@@ -126,9 +202,10 @@ credentialProxy({
 - A key the rule reads that is no secret, an account's id in its URLs, is
   marked plain (below), and the app holds it as it is; the handle stands in
   for the rest. `identifiers: ['TWILIO_SID']`, which said the same in
-  configuration, still works in 0.9 and is deprecated: it held only an
-  environment's own value, so a fork that inherited `TWILIO_SID` got the
-  handle for it. It goes in a later release.
+  configuration, was deprecated in 0.9 and is refused at startup in 0.10.
+- A credential's keys are placeholders in a person's app whatever their
+  level: its configuration points at the proxy for them. A secret one its
+  person may still read with `coffre get`.
 
 **Plain values (0.9).** A key can be marked not secret: an account's id, a
 region, a public address. It is a property of what is written, as a
@@ -149,7 +226,7 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 - **Reading it is no secret read.** A plain version keeps its value in
   the clear beside its ciphertext (`secret_versions.plaintext`, migration
   `0011_plain_values`), and a read serves that, with no vault call
-  (`openValues`). So a person gets it under placeholders (`coffre get`, a
+  (`openValues`). So any person who lists the environment gets it (`coffre get`, a
   reveal, `coffre run` and `export` through the plan), it is in no
   `secret.read` entry, and it counts towards no bulk limit. The proxy
   leaves it unredacted in an upstream's answer: Twilio quotes the account
@@ -165,9 +242,9 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 - **Making a stored secret plain discloses it**, so it is a reveal and a
   write: the client reads the value (an audited `secret.read`), then writes
   it plain with the version it `replaces`, refused if someone wrote since.
-  Under placeholders a person has no reveal, so a person never publishes a
-  value they cannot read: they type it again, plain (decision 17). A
-  service account may.
+  A person may only publish a value they can read, and never a
+  sensitive one, which nobody reads: they type it again, plain (decision
+  17). A service account may.
 - **Never in a personal config.** Its values are its owner's alone (R8):
   a plain write there is refused. A plain value of the environment it
   overrides reaches its owner as any reader of that environment.
@@ -175,7 +252,7 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 **Values of a person's own (0.9).** A backend that refuses to boot without
 its own keys (a key that seals its local data, its webhooks' HMAC secret,
 the key that encrypts its local database) needs *a* value, not the one
-in `backend/local`. Under placeholders nobody reads that one, so each person
+in `backend/local`. Where that one is sensitive, nobody reads it, so each person
 gets one of their own, made once, kept in their personal config:
 
 ```ts
@@ -194,14 +271,14 @@ coffre: made your own ROOT_ENCRYPTION_KEY, POLICY_SEAL_KEY in backend/local@me, 
   they have none. So each person's app holds their own values, and a
   personal override of a credential's key is the one sent.
 - **What gets one.** A key the app would go without (none of the
-  credentials', plain or exposed), whose current value a recipe made
+  credentials', and no value it is given: a sensitive one), whose current value a recipe made
   (`coffre set … --generate`, one value: a key pair's half has none
   here), in the environment's list. The plan names each,
   `generate: { ROOT_ENCRYPTION_KEY: { recipe, replaces } }`, with the
   version it read. `coffre run` and `coffre export` make each value by its
   recipe, as `coffre regenerate` does, and write them to the personal
   config with the person's session, an ordinary audited write, then ask for the
-  plan again, which now exposes them as that config's own.
+  plan again, which now gives them as that config's own.
 - **Once, and once only at a time.** The write replaces the version the
   plan read, or is refused (409). Of two runs at once, one writes, and
   the other, refused, reads the plan again and finds the winner's. The
@@ -212,9 +289,9 @@ coffre: made your own ROOT_ENCRYPTION_KEY, POLICY_SEAL_KEY in backend/local@me, 
   environment in, a local one (decision 19), so production never grows
   personal values by itself.
 
-**What replaces `expose`, by what the value is.** Equisafe's
-`backend/local` listed 17 keys under `expose` in 0.8. 0.9 replaces each
-kind:
+**What replaced `expose`, by what the value is.** Equisafe's
+`backend/local` listed 17 keys under `expose` in 0.8. 0.9 replaced each
+kind, and 0.10 the last row, as a secret its people read:
 
 | The value is | 0.9 | Equisafe's keys |
 |---|---|---|
@@ -223,30 +300,32 @@ kind:
 | A key whose host is in the app's code | A credential, the app pointing at its proxy URL | `LEMONWAY_API_KEY`, `YOUSIGN_API_KEY`, and `backend/tests`' `TEST_LEMONWAY_SANDBOX_API_KEY` |
 | A token the SDK decodes (a JWT) | A shaped placeholder | `DFNS_AUTH_TOKEN` |
 | A key the app signs with | `credential(name).sign()` | `DFNS_PRIVATE_KEY` |
-| A key no proxy can use yet (a STARK-curve key) | `expose`, still | `STARKNET_TESTNET_PRIVATE_KEY` |
+| A key no proxy can use yet (a STARK-curve key) | A secret its people read (0.10), `expose` in 0.9 | `STARKNET_TESTNET_PRIVATE_KEY` |
 
-**`expose`** names the few secret values an environment's apps may hold as they
-are, because they cannot be used through a proxy: a webhook's HMAC secret
-the backend verifies a signature with, a local encryption key, a testnet
-signing key. It is configuration only, with no API and no page. It
-applies to the exact environment a read resolves to, never to its parents:
+**What a person's app holds as it is (0.10).** The plan gives the app
+every value its person may read, as `coffre get` would: plain ones, and
+secrets their role reads where the value is held. A sensitive one it never
+gives: the app uses it through the proxy, as a credential's, a signer's or
+a tunnel's, or does without it, or, under `generate`, gets one of the
+person's own. A value the app must hold as it is, a webhook's HMAC secret
+the backend verifies a signature with, a testnet signing key, is a secret
+its people read; the agent can read it too, so better a local-only value
+than a real one:
 
-| `coffre run …` | With `expose: { 'market/dev': ['STRIPE_WEBHOOK_SECRET'] }` |
-|---|---|
-| `market/dev` | Real value |
-| `market/dev-eu`, a fork of dev that inherits the key | Not exposed: list `market/dev-eu` itself |
-| `market/dev@me`, with a personal config | Real value, as `market/dev` lists it (0.9): its owner gets it through `market/dev` anyway. A personal config is never listed itself. Its *own* values, which only its owner writes, are its owner's app's, so `DATABASE_URL=postgres://localhost/ada` there reaches Ada's app |
-| `market/dev@me`, with none | Real value: the read is of `market/dev` |
+| `coffre run …` | `STRIPE_WEBHOOK_SECRET` secret | sensitive |
+|---|---|---|
+| `market/dev` | Real value | Left out |
+| `market/dev-eu`, a fork of dev that inherits the key | Real value, to a reader of dev | Left out |
+| `market/dev@me`, with a personal config | Real value: its owner reads dev. Its *own* values, which only its owner writes, are its owner's app's, so `DATABASE_URL=postgres://localhost/ada` there reaches Ada's app | Left out, or a value of Ada's own under `generate` |
 
-**The recommended use of `expose` is a local environment of fakes.** A
-backend that verifies Stripe's webhooks locally needs *a* webhook secret,
-not Stripe's. Make `market/local` (or `backend/local`), fill it with
-local-only values (`coffre set market/local STRIPE_WEBHOOK_SECRET
---generate`, a fresh local encryption key, a testnet key with no funds),
-and expose it whole: `expose: { 'market/local': 'all' }`. Tests that sign
-their own webhooks use the same fake. Keep `expose` on a real environment
-for a value that genuinely has to be real and cannot be proxied, and know
-that such a value is no longer protected from the agent.
+**The recommended layout is a local environment of fakes.** A backend that
+verifies Stripe's webhooks locally needs *a* webhook secret, not Stripe's.
+Make `market/local` (or `backend/local`), fill it with local-only values
+(`coffre set market/local/STRIPE_WEBHOOK_SECRET --generate`, a fresh local
+encryption key, a testnet key with no funds), and leave them secret, which
+its people read. Mark real keys sensitive in the environments that hold
+them, `market/dev` and `market/prod`, and their apps use those through the
+proxy.
 
 **Break-glass.** A person who must see a value (an Owner pasting a key
 into a provider's dashboard) has no path to it as themselves. The escape
@@ -266,7 +345,7 @@ later (decision 3).
 ```ts
 // app/src/coffre.ts
 import { basic, credentialProxy, header, query } from '@coffre/server/plugins/credential-proxy';
-plugins: [credentialProxy({ credentials: { … }, expose: { … } })],
+plugins: [credentialProxy({ credentials: { … } })],
 ```
 
 ```ts
@@ -277,14 +356,11 @@ import { plugin } from '@coffre/server/routes';
 export const Route = createFileRoute('/use/$')({ ...plugin });
 ```
 
-```ts
-// vault/src/index.ts
-export default vault((env: Env) => ({ …, people: 'stand-ins' }));
-```
-
-The proxy without `people: 'stand-ins'` works too: people's `coffre run`
-gets placeholders wherever the instance has the proxy. Their other reads
-still open values, though, so nothing stops the agent from asking for them.
+The vault needs nothing more: which values no person reads is each key's
+own setting (section 2), `coffre mark market/prod sensitive` for a whole
+environment's own values. A person's `coffre run` gets the plan wherever the instance
+has the proxy: placeholders for the credentials' keys, whatever their
+level, and the values they may read as they are.
 
 ## 4. The proxy, request by request
 
@@ -292,10 +368,11 @@ still open values, though, so nothing stops the agent from asking for them.
 `coffre run` asks it first. It holds no secret.
 
 `GET /use/<project>/<env>`, with the handle as a bearer token, is the
-**plan**: one read of what the environment holds, which opens only its
-plain values and the keys it exposes, chosen from the very rows it opens
-(`PickKeys`, each row saying whether it is plain), so an override reset
-between two reads cannot swap a parent's value in. It answers:
+**plan**: one read of what the environment holds, which opens only the
+values the app is given as they are, chosen from the very rows it opens
+(`PickKeys`, each row saying whether it is plain or sensitive, and
+whether the person reads where it is held), so an override reset between
+two reads cannot swap a parent's value in. It answers:
 
 ```json
 {
@@ -718,7 +795,7 @@ credentialProxy({ credentials: { … }, signers: { 'dfns-key': privateKey('DFNS_
 A signer is no credential with an upstream: it reaches no host, and has
 no rule to fill in. So it is a map of its own beside `credentials` and
 `tunnels`, its names shared with theirs. The plan gives the app the handle
-where the key was, never the key, whatever `expose` says, and names the
+where the key was, never the key, whatever its level, and names the
 signer among `credentials`, for `credential(name)` to find. The app signs
 with `credential('dfns-key').sign(message)` (`@coffre/client/credential`),
 which is `POST /use/<project>/<env>` with `{ sign: { credential, message } }`,
@@ -868,10 +945,10 @@ cache's minute (`cacheSeconds: 0` turns both off).
 
 **What `coffre run` makes a placeholder, and what it leaves out.** A person
 on an instance with the proxy gets the plan (section 4): placeholders for each
-credential's keys, the exposed values as they are, and nothing else. It
+credential's keys, the values they may read as they are, and nothing else. It
 sets no base URL: the app's configuration names the stable URL. A service account gets values, as before.
-An instance without the proxy gets the old read, which the vault refuses
-to people with `people: 'stand-ins'`. `coffre export` writes the same
+An instance without the proxy gets the old read, which leaves a person's
+sensitive values out (section 2). `coffre export` writes the same
 placeholders (a `.env` for Docker Compose holds handles, not keys).
 `export --watch` is refused for people: nothing it would watch changes.
 
@@ -902,13 +979,13 @@ proxy, need coffre's sign-in for now (decision 7).
 Each was taken on 2026-10-18 under R10 and R13, for Erwin to review. Each
 is reversible.
 
-1. **`people: 'stand-ins'` is a vault option, default `values`.** It is
+1. *(Superseded in 0.10 by decision 20.)* **`people: 'stand-ins'` is a vault option, default `values`.** It is
    off by default so that 0.7 deployments, which have no proxy and no
    credentials declared, keep working, and the conformance suite and every
    test that reads as a person stay as they are. *Recommendation: make it
    the default once the proxy covers the common shapes (after PR 3), with
    a release note.*
-2. **No new permission or role.** A person's `secret.read` is the use
+2. *(Revisited in 0.10: sensitivity, and `secret.use` after it.)* **No new permission or role.** A person's `secret.read` is the use
    right: with placeholders, it opens values to be used, never handed back.
    `use` and `expose` are purposes of the same read, checked by the same
    grants. A `consumer` role (use without read) adds nothing while people
@@ -928,7 +1005,7 @@ is reversible.
    has no handles. *Later:* keep handles in coffre's own table whatever the
    sign-in, minted by an Access-authenticated person, with `/use/*`
    bypassed in Access.
-8. **`expose` is configuration, by exact environment, never inherited.**
+8. *(Superseded in 0.10 by decision 20.)* **`expose` is configuration, by exact environment, never inherited.**
    A fork is listed by its own path, or not exposed. A personal config is
    never listed; its own values, written by its owner alone (R8), reach
    its owner's app. Otherwise a personal config, made for local
@@ -972,8 +1049,8 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
     never to see it (decision 2), and a plain value is shown to everyone
     who lists the environment: a person, or their agent with a personal
     token, could publish any key they may use. So the flip is the client's
-    reveal, which the vault refuses a person under placeholders (R13), and a
-    plain write of what it showed. Without placeholders, that is exactly
+    reveal, which the vault refuses a person where the value is sensitive (R13; 0.10), and a
+    plain write of what it showed. Of a secret they read, that is exactly
     `secret.read` and an audited read and write. A person types a value
     they know again, plain. *Alternative:* a flip the server does, allowed
     to people, if publishing what one may use is wanted.
@@ -988,10 +1065,40 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
     recipe is. A value made for a person protects only their own local
     data, which suits `backend/local` and nothing deployed; listing the
     environment in configuration keeps that choice with the deployment's
-    code, beside `expose`. The client makes each value, as for `coffre set
+    code. The client makes each value, as for `coffre set
     --generate`: the server never makes one. *Alternative:* the server
     generates in the plan, which would let any client of the proxy have
     them, at the cost of the server making values.
+
+Taken in 0.10 (W128), each for Erwin to review, each reversible:
+
+20. **Sensitivity is per key, and `people` and `expose` are removed, not
+    deprecated.** Erwin's design (2026-10-18). A deployment that still sets
+    `people` or `expose` fails at startup, and by its type, naming what to
+    do, as `baseUrl` did in 0.9 (decision 16): the old switch refused every
+    value to every person, and keeping it beside a per-key setting would
+    leave two answers to one question. `identifiers`, which plain values
+    cover, goes the same way.
+21. **Sensitivity is held by each version, bound by the vault's wrap.** As
+    plain is (decision 18), and as a personal config's owner is bound: the
+    key's level is its current version's. *Alternative:* a column of the
+    key's own, which the vault would have to trust as the app wrote it.
+22. **A write that says nothing is a secret, or sensitive where the key
+    is.** The brief's default is `secret`; keeping a sensitive key
+    sensitive when its value is rotated (`coffre set`, the page's edit,
+    Regenerate) avoids the one surprise that would undo it. Plain stays
+    said by each write. *Alternative:* `secret` always.
+23. **A person's read of a whole environment leaves sensitive values out,
+    and says which, rather than refuse.** A run of `market/prod` without
+    the proxy then starts, without them. The vault still refuses any read
+    that names one. *Alternative:* refuse the whole read, as 0.9's
+    `people: 'stand-ins'` did.
+24. **A dry run compares no person's guess with a sensitive value**: it
+    answers `changed`, so an import is never an oracle for one.
+25. **A credential's keys are placeholders whatever their level.** The
+    app's configuration points at the proxy for them (R14), where the real
+    key would be refused as no handle. A person who reads one still gets it
+    with `coffre get`.
 
 ## 9. Plan
 
@@ -1007,4 +1114,5 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
 | 0.9 C | Shaped placeholders, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
 | 0.9 A | Plain values (`0011_plain_values`, `coffre set --plain`, the page's Plain toggle), which deprecate `identifiers`. Built |
 | 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |
+| 0.10 | Sensitivity per key (`0012_sensitive_values`, `coffre set --sensitive`, `coffre mark`, the page's control); `people`, `expose` and `identifiers` removed. Built |
 | 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |

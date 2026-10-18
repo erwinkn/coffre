@@ -26,15 +26,20 @@ export interface Vault {
   /**
    * Wrap fresh data keys for new versions `principal` writes: all, or none.
    * `seqs` are the `key.wrap` entries, one per key, which the app's
-   * `secret.write` entries name as related.
+   * `secret.write` entries name as related. `sensitive` says, per key,
+   * whether its wrap binds it as sensitive: a vault older than 0.10 answers
+   * none, binding none, and the app stores no sensitive version it wrapped.
    */
-  wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>>;
+  wrap(input: WrapInput): Promise<Outcome<Wrapped>>;
   /**
    * Wrap existing data keys again for new versions of the same secrets,
-   * under the current key: restoring an old value. It needs a write grant,
-   * not a read one, since the key never leaves the vault.
+   * under the current key: restoring an old value, or making one stricter.
+   * It needs a write grant, not a read one, since the key never leaves the
+   * vault. A new version is never less sensitive than the one it is made
+   * from, or than its secret's newest: a value is made looser only by
+   * being written again (`invalid`).
    */
-  rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>>;
+  rewrap(input: RewrapInput): Promise<Outcome<Wrapped>>;
 
   /**
    * Make secrets references to others: whoever can read the holder's
@@ -164,11 +169,11 @@ export type RefusalCode =
   /** The wrapped key does not belong to the secret it was presented as, or a reference is not the vault's. */
   | 'bad_claim'
   /**
-   * A person asked for values to be handed back, where people get placeholders
-   * (`people: 'stand-ins'`): their apps use values through the credential
-   * proxy instead, and only service accounts read them.
+   * A person asked for a sensitive value to be handed back (`handsBack`):
+   * nobody sees one, Owners included. Their apps use it through the
+   * credential proxy, and service accounts read it.
    */
-  | 'stand_ins'
+  | 'sensitive'
   /**
    * The project or environment was deleted for good: nothing under it is
    * opened or wrapped again, whatever grant would cover it.
@@ -221,7 +226,18 @@ export type SecretRef = {
   version: number;
   /** `market/prod/DATABASE_URL`. */
   path: string;
+  /**
+   * Whether the version is sensitive: its value is never handed back to a
+   * person, on any credential of theirs, only used for them or read by a
+   * service account. Its data key's wrap binds it, so a version written
+   * sensitive opens as nothing else. Absent, or false, for a secret or a
+   * plain value.
+   */
+  sensitive?: boolean;
 };
+
+/** What a wrap or rewrap answers: each key as wrapped, its entry, and whether its wrap binds it sensitive. */
+export type Wrapped = { wrapped: WrappedKey[]; seqs: number[]; sensitive: boolean[] };
 
 /** A wrapped data key and the key encryption key that wrapped it; `bytes` is base64. */
 export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: string; bytes: string };
@@ -237,18 +253,22 @@ export type KeyChecks = { current: { kekProvider: string; kekId: string }; check
 /**
  * Why someone reads: shown in the log, and the same rules apply to each. A
  * fork reads to `copy`. The credential proxy reads to `use`, a value it
- * injects into a request and never hands back, or to `expose`, one the
- * deployment lets people's apps hold. Where people get placeholders
- * (`people: 'stand-ins'`), a person opens nothing to `reveal`, `run` or
- * `compare` (`HANDED_BACK`).
+ * injects into a request and never hands back, or to `expose`, one it
+ * gives a person's app as it is (`coffre run`'s plan).
  */
 export type Purpose = 'reveal' | 'run' | 'compare' | 'copy' | 'use' | 'expose';
 
 /**
- * What a person never opens where people get placeholders: values handed back
- * to them, and a dry run's `compare`, which tells them whether a guess was right.
+ * Whether a read hands values back to whoever asked, which a person never
+ * gets of a sensitive value: every purpose but the proxy's `use` and a
+ * fork's `copy` that keeps them sensitive (`keepsSensitive`), a dry run's
+ * `compare` included, which tells them whether a guess was right, and any
+ * purpose a later app may name.
  */
-export const HANDED_BACK: readonly Purpose[] = ['reveal', 'run', 'compare'];
+export function handsBack(read: { purpose: string; keepsSensitive?: boolean }): boolean {
+  if (read.purpose === 'use') return false;
+  return !(read.purpose === 'copy' && read.keepsSensitive === true);
+}
 
 /** Ties the vault's entries to the app's request and audit rows. */
 type Correlation = {
@@ -277,6 +297,13 @@ export type Through = { credentialScope?: CredentialScope | null };
 export type UnwrapInput = Correlation & Through & {
   principal: string;
   purpose: Purpose;
+  /**
+   * That a `copy` keeps each sensitive value sensitive in what it writes:
+   * the vault opens a sensitive value to copy for a person only when told
+   * so, which an app older than 0.10, that would write it as a secret
+   * anyone with read sees, never says.
+   */
+  keepsSensitive?: boolean;
   /**
    * `via` reads a source's current version through a reference: the vault
    * checks the reader's grants on the holder's environment, as its

@@ -6,6 +6,8 @@ import {
   companionsOf,
   generationsOf,
   hasSecretEditConflict,
+  levelsOf,
+  madeSensitive,
   valueEdit,
   type SecretChange,
   type SecretDraft,
@@ -16,6 +18,9 @@ const active = [{ key: 'A' }, { key: 'B' }, { key: 'C' }];
 function change(key: string, value: string): SecretChange {
   return { key, value, archived: false };
 }
+
+/** A value as every write says it: with who sees it, a secret unless the row says otherwise. */
+const secret = (value: string) => ({ value, sensitivity: 'secret' });
 
 test('one draft can append a version to an unchanged active key', () => {
   assert.equal(
@@ -73,7 +78,7 @@ test('values, new keys and archives are saved as one patch', async () => {
     },
   });
 
-  assert.deepEqual(patches, [{ A: 'one', B: null, NEW: 'fresh' }]);
+  assert.deepEqual(patches, [{ A: secret('one'), B: null, NEW: secret('fresh') }]);
   assert.equal(result.error, null);
   assert.equal(result.applied, 3);
   assert.deepEqual(result.drafts, []);
@@ -165,7 +170,7 @@ test('a key named __proto__ is written like any other', async () => {
   });
 
   assert.deepEqual(Object.keys(patches[0]), ['__proto__']);
-  assert.equal(JSON.stringify(patches[0]), '{"__proto__":"x"}');
+  assert.equal(JSON.stringify(patches[0]), '{"__proto__":{"value":"x","sensitivity":"secret"}}');
 });
 
 test('dependent renames free destinations before they are reused', async () => {
@@ -240,7 +245,7 @@ test("a row's companion is written in the same patch as the row", async () => {
   });
   assert.equal(result.error, null);
   assert.deepEqual(writes, [
-    { A: 'a-private', JWT_PRIVATE_KEY: 'private', JWT_PUBLIC_KEY: 'public', A_PUBLIC: 'a-public' },
+    { A: secret('a-private'), JWT_PRIVATE_KEY: secret('private'), JWT_PUBLIC_KEY: secret('public'), A_PUBLIC: secret('a-public') },
   ]);
 });
 
@@ -266,10 +271,10 @@ test('a generated value is written with its recipe, and a key pair names both ke
   assert.equal(result.error, null);
   const pair = { recipe: 'ecdsa:p-256', pair: { private: 'SIGNING_PRIVATE_KEY', public: 'SIGNING_PUBLIC_KEY' } };
   assert.deepEqual(writes, [{
-    SIGNING_PRIVATE_KEY: { value: 'private', generated: pair },
-    SIGNING_PUBLIC_KEY: { value: 'public', generated: pair },
-    B: 'typed',
-    TOKEN: { value: 'made', generated: { recipe: 'bytes:32:hex' } },
+    SIGNING_PRIVATE_KEY: { value: 'private', generated: pair, sensitivity: 'secret' },
+    SIGNING_PUBLIC_KEY: { value: 'public', generated: pair, sensitivity: 'secret' },
+    B: secret('typed'),
+    TOKEN: { value: 'made', generated: { recipe: 'bytes:32:hex' }, sensitivity: 'secret' },
   }]);
   // And what the list shows until it is read back.
   assert.deepEqual(generationsOf(active, drafts, changes), new Map([
@@ -348,18 +353,19 @@ test("an edit whose key left the list on a refresh writes no companion either", 
     changes,
     operations: { rename: async () => {}, write: async (patch) => void writes.push(patch) },
   });
-  assert.deepEqual(writes, [{ OTHER: 'other' }]);
+  assert.deepEqual(writes, [{ OTHER: secret('other') }]);
 });
 
-test('a plain value is written plain, a stored secret made plain with the version it replaces, and the rest as secrets', async () => {
+test('each value is written with who sees it, a mark alone with its level, and a generated value never plain', async () => {
   const patches: unknown[] = [];
   await applySecretEditBatch({
-    active,
-    drafts: [{ id: 1, key: 'ACCOUNT', value: 'acct_42', plain: true }],
+    active: [...active, { key: 'D' }],
+    drafts: [{ id: 1, key: 'ACCOUNT', value: 'acct_42', sensitivity: 'plain' }],
     changes: {
-      A: { ...change('A', 'region-eu'), plain: true },
-      B: { ...change('B', 'revealed'), plain: true, replaces: 'version-b-1' },
-      C: { ...change('C', 'secret-again'), plain: false },
+      A: { ...change('A', 'region-eu'), sensitivity: 'plain' },
+      B: { key: 'B', value: null, archived: false, sensitivity: 'sensitive' },
+      C: { ...change('C', 'secret-again'), sensitivity: 'secret' },
+      D: { ...change('D', 'made'), recipe: 'bytes:32:hex', sensitivity: 'plain' },
     },
     operations: {
       rename: async () => assert.fail('nothing was renamed'),
@@ -369,22 +375,112 @@ test('a plain value is written plain, a stored secret made plain with the versio
     },
   });
   assert.deepEqual(patches, [{
-    A: { value: 'region-eu', plain: true },
-    B: { value: 'revealed', plain: true, replaces: 'version-b-1' },
-    C: 'secret-again',
-    ACCOUNT: { value: 'acct_42', plain: true },
+    A: { value: 'region-eu', sensitivity: 'plain' },
+    B: { sensitivity: 'sensitive' },
+    C: secret('secret-again'),
+    D: { value: 'made', generated: { recipe: 'bytes:32:hex' }, sensitivity: 'secret' },
+    ACCOUNT: { value: 'acct_42', sensitivity: 'plain' },
   }]);
 });
 
-test('a value edit keeps the version it started from, a remount of its row included, and back where it started it is no change', () => {
-  const revealed = { start: 'v1-secret', plain: false, startedAt: 'version-1' };
-  // Made plain from what the reveal showed: it replaces that version.
-  const plain = valueEdit({ key: 'B', value: null, archived: false }, revealed, 'v1-secret', true);
-  assert.deepEqual(plain, { value: 'v1-secret', plain: true, replaces: 'version-1', companion: undefined, recipe: undefined });
-  // The row remounts after a refused rename: no reveal, no start, but the change still says where it started.
-  const remounted = { start: '', plain: false, startedAt: undefined };
-  const retyped = valueEdit({ key: 'B2', archived: false, ...plain, value: 'v1-secret' } as SecretChange, remounted, 'v1-secret', true);
-  assert.equal(retyped.replaces, 'version-1');
-  // Back as it was, the edit is none.
-  assert.deepEqual(valueEdit({ ...plain, key: 'B', archived: false } as SecretChange, revealed, 'v1-secret', false), { value: null, plain: undefined, replaces: 'version-1' });
+test('a mark follows its key through a rename refused after it, for the retry', async () => {
+  const result = await applySecretEditBatch({
+    active,
+    drafts: [],
+    changes: { A: { key: 'A2', value: null, archived: false, sensitivity: 'sensitive' } },
+    operations: {
+      rename: async () => {},
+      write: async () => {
+        throw new Error('refused');
+      },
+    },
+  });
+  assert.deepEqual(result.changes, { A2: { key: 'A2', value: null, archived: false, sensitivity: 'sensitive' } });
+});
+
+test('a level changed alone is a mark, looser waits for a value typed into an empty field, and back where it started is no change', () => {
+  const opened = { start: 'sk_1', level: 'secret' as const };
+  // Stricter, the value as it opened: a mark.
+  assert.deepEqual(valueEdit(opened, { value: null, sensitivity: 'sensitive' }), { value: null, sensitivity: 'sensitive' });
+  // Looser: the field opens empty, and the value is typed again, even as it was.
+  assert.deepEqual(valueEdit(opened, { value: null, sensitivity: 'plain' }), { value: null, sensitivity: 'plain' });
+  assert.deepEqual(valueEdit(opened, { value: '', sensitivity: 'plain' }), { value: null, sensitivity: 'plain' });
+  assert.deepEqual(valueEdit(opened, { value: 'sk_1', sensitivity: 'plain' }), { value: 'sk_1', sensitivity: 'plain' });
+  // A new value says its level, the row's included.
+  assert.deepEqual(valueEdit(opened, { value: 'sk_2', sensitivity: 'secret' }), { value: 'sk_2', sensitivity: 'secret' });
+  // Back where it started.
+  assert.deepEqual(valueEdit(opened, { value: 'sk_1', sensitivity: 'secret' }), { value: null, sensitivity: undefined });
+  // A key with no value of its own, a reference: written, it is a secret unless it says.
+  assert.deepEqual(valueEdit({ start: '', level: null }, { value: null, sensitivity: 'secret' }), { value: null, sensitivity: undefined });
+  // A sensitive one, never read: anything typed is a new value, and it stays sensitive.
+  assert.deepEqual(valueEdit({ start: '', level: 'sensitive' }, { value: 'sk_3', sensitivity: 'sensitive' }), { value: 'sk_3', sensitivity: 'sensitive' });
+});
+
+test("a generated pair's public key is written at its own level, not its private key's", async () => {
+  const pair = { recipe: 'ecdsa:p-256', pair: { private: 'PRIVATE_KEY', public: 'PUBLIC_KEY' } };
+  const listed = [
+    { key: 'PRIVATE_KEY', sensitivity: 'sensitive' as const },
+    { key: 'PUBLIC_KEY', sensitivity: 'secret' as const },
+    { key: 'SIGNING_PRIVATE', sensitivity: 'secret' as const },
+    { key: 'SIGNING_PUBLIC', sensitivity: 'sensitive' as const },
+  ];
+  const changes: Record<string, SecretChange> = {
+    // A sensitive private key regenerated: its public key stays a secret.
+    PRIVATE_KEY: { ...change('PRIVATE_KEY', 'private'), recipe: 'ecdsa:p-256', sensitivity: 'sensitive', companion: { key: 'PUBLIC_KEY', value: 'public' } },
+    // A public key someone made sensitive stays so.
+    SIGNING_PRIVATE: { ...change('SIGNING_PRIVATE', 'private-2'), recipe: 'ecdsa:p-256', companion: { key: 'SIGNING_PUBLIC', value: 'public-2' } },
+  };
+  // A new pair's public key is a secret, its private key sensitive.
+  const drafts: SecretDraft[] = [{ id: 1, key: 'NEW_PRIVATE', value: 'private-3', recipe: 'ecdsa:p-256', sensitivity: 'sensitive', companion: { key: 'NEW_PUBLIC', value: 'public-3' } }];
+  const patches: unknown[] = [];
+  await applySecretEditBatch({
+    active: listed,
+    drafts,
+    changes,
+    operations: {
+      rename: async () => assert.fail('nothing is renamed'),
+      write: async (patch) => {
+        patches.push(patch);
+      },
+    },
+  });
+  const signing = { recipe: 'ecdsa:p-256', pair: { private: 'SIGNING_PRIVATE', public: 'SIGNING_PUBLIC' } };
+  const made = { recipe: 'ecdsa:p-256', pair: { private: 'NEW_PRIVATE', public: 'NEW_PUBLIC' } };
+  assert.deepEqual(patches, [{
+    PRIVATE_KEY: { value: 'private', generated: pair, sensitivity: 'sensitive' },
+    PUBLIC_KEY: { value: 'public', generated: pair, sensitivity: 'secret' },
+    SIGNING_PRIVATE: { value: 'private-2', generated: signing, sensitivity: 'secret' },
+    SIGNING_PUBLIC: { value: 'public-2', generated: signing, sensitivity: 'sensitive' },
+    NEW_PRIVATE: { value: 'private-3', generated: made, sensitivity: 'sensitive' },
+    NEW_PUBLIC: { value: 'public-3', generated: made, sensitivity: 'secret' },
+  }]);
+  // What the list shows until it is read back, and what the save asks to confirm: only the new private key.
+  assert.equal(levelsOf(listed, drafts, changes).get('PUBLIC_KEY')?.sensitivity, 'secret');
+  assert.equal(levelsOf(listed, drafts, changes).get('NEW_PUBLIC')?.sensitivity, 'secret');
+  assert.deepEqual(madeSensitive(listed, drafts, changes), ['NEW_PRIVATE']);
+});
+
+test('a save asks to confirm every key it makes sensitive, a public key made so included', () => {
+  const listed = [
+    { key: 'PRIVATE_KEY', sensitivity: 'secret' as const },
+    { key: 'PUBLIC_KEY', sensitivity: 'secret' as const },
+    { key: 'TOKEN', sensitivity: 'secret' as const },
+    { key: 'OLD', sensitivity: 'sensitive' as const },
+  ];
+  const changes: Record<string, SecretChange> = {
+    PRIVATE_KEY: {
+      ...change('PRIVATE_KEY', 'private'),
+      recipe: 'ecdsa:p-256',
+      sensitivity: 'sensitive',
+      companion: { key: 'PUBLIC_KEY', value: 'public', sensitivity: 'sensitive' },
+    },
+    // A mark, named by the key's name after its rename.
+    TOKEN: { key: 'API_TOKEN', value: null, archived: false, sensitivity: 'sensitive' },
+    // Already sensitive: nothing to confirm.
+    OLD: { ...change('OLD', 'next'), sensitivity: 'sensitive' },
+  };
+  assert.deepEqual(madeSensitive(listed, [], changes), ['PRIVATE_KEY', 'PUBLIC_KEY', 'API_TOKEN']);
+  // Its public key at its own level: a secret, nothing more to confirm than the private key.
+  const { sensitivity: _, ...secretPublic } = changes.PRIVATE_KEY!.companion!;
+  assert.deepEqual(madeSensitive(listed, [], { PRIVATE_KEY: { ...changes.PRIVATE_KEY!, companion: secretPublic } }), ['PRIVATE_KEY']);
 });

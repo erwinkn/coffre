@@ -46,7 +46,7 @@ import {
   checkpointMessage,
   checkpointVerifier,
   describeAccessFault,
-  HANDED_BACK,
+  handsBack,
   type Access,
   type AccessChange,
   type AccessFault,
@@ -73,6 +73,7 @@ import {
   type Settings,
   type Through,
   type UnwrapInput,
+  type Wrapped,
   type Vault,
   type Via,
   type VerifyLogInput,
@@ -269,6 +270,9 @@ class Outage {
   }
 }
 
+/** A rewrap that would make a value less sensitive than it is. */
+const LOOSER = 'a value is made less sensitive only by writing it again: an old version comes back, and a key is made stricter, as sensitive as its newest version or more';
+
 function refusal(code: RefusalCode, message: string): Refusal {
   return { code, message };
 }
@@ -283,7 +287,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   deleted: 'this project or environment was deleted',
   ended: 'the reference read through was ended',
   personal: "a personal config's values are its owner's alone",
-  stand_ins: "people use this instance's values through placeholders, never as values: `coffre run` gives your app them; a service account reads values",
+  sensitive: "a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it",
   not_allowed: 'not allowed to change this',
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
@@ -790,6 +794,7 @@ class VaultService implements Vault {
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
     const { principal } = input;
     validateText(input.purpose);
+    if (input.keepsSensitive !== undefined && typeof input.keepsSensitive !== 'boolean') throw new Error('keepsSensitive is true, false or absent');
     const vias = input.items.map((item) => validateVia(item.via));
     const throughs = input.items.map((item) => validateThrough(item.through));
     const loaded = await this.#versions(input, 'secret.read', { purpose: input.purpose });
@@ -867,7 +872,7 @@ class VaultService implements Vault {
     );
   }
 
-  async wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>> {
+  async wrap(input: WrapInput): Promise<Outcome<Wrapped>> {
     const { principal, items } = input;
     validateItems(items, 'key');
     validateText(principal);
@@ -893,11 +898,11 @@ class VaultService implements Vault {
             dek.fill(0);
           }
         }),
-      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[] }),
+      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[], sensitive: items.map(({ secret }) => secret.sensitive === true) }),
     );
   }
 
-  async rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>> {
+  async rewrap(input: RewrapInput): Promise<Outcome<Wrapped>> {
     const { principal } = input;
     const loaded = await this.#versions(input, 'key.rewrap');
     if (!loaded.ok) return loaded;
@@ -911,6 +916,13 @@ class VaultService implements Vault {
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'bad_claim', input), secretVersionId: source.id,
       })));
     }
+    // A value is made looser only by writing it again: a sensitive version's key, or one of a secret whose newest is,
+    // is never wrapped again as anything but sensitive, so that a person who may not read it never makes it readable.
+    if (items.some((item, i) => item.secret.sensitive !== true && (loaded.versions[i].secret.sensitive || loaded.versions[i].newestSensitive))) {
+      return this.#refuseVersions(principal, 'invalid', loaded.versions.map((source) => ({
+        ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'invalid', input), secretVersionId: source.id,
+      })), LOOSER);
+    }
     const sources = new Map(items.map((item, i) => [item.secret, loaded.versions[i]]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => ({
       ...keyEntry('key.rewrap', principal, secret, decision, code, input, { from: sources.get(secret)!.secret.version }),
@@ -919,10 +931,18 @@ class VaultService implements Vault {
     const remote =
       this.#remote(this.#config.keks.primary) || items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
-      { action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input },
+      {
+        action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input,
+        // Again in the decision and under the log's head: a sensitive version written since it was loaded is as newest as any.
+        vet: async (db) => {
+          const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
+          return items.map(({ secret }) => (secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null));
+        },
+      },
       (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
-          const key = await this.#open(wrapped, contextOf(secret), operation);
+          // Opened as the source was written, sensitive or not, and wrapped as the new version is.
+          const key = await this.#open(wrapped, contextOf(sources.get(secret)!.secret), operation);
           if (key === null) return null;
           try {
             return { wrapped: serialisable(await this.#config.keks.wrap(key, contextOf(secret), operation)), wipe: () => {} };
@@ -930,7 +950,7 @@ class VaultService implements Vault {
             key.fill(0);
           }
         }),
-      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[] }),
+      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[], sensitive: items.map(({ secret }) => secret.sensitive === true) }),
     );
   }
 
@@ -968,9 +988,9 @@ class VaultService implements Vault {
     return { ok: true, versions: ids.map((id) => found.get(id)!) };
   }
 
-  async #refuseVersions(principal: string, code: 'bad_claim' | 'deleted', entries: NewEntry[]): Promise<Outcome<never>> {
+  async #refuseVersions(principal: string, code: 'bad_claim' | 'deleted' | 'invalid', entries: NewEntry[], message = MESSAGES[code]): Promise<Outcome<never>> {
     return this.#decide([principal], async () => {
-      throw new Refused(refusal(code, MESSAGES[code]), entries);
+      throw new Refused(refusal(code, message), entries);
     });
   }
 
@@ -1015,7 +1035,7 @@ class VaultService implements Vault {
       vet?: (db: Queryable) => Promise<(RefusalCode | null)[]>;
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
-      input: Correlation & Through & { purpose?: string };
+      input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
     },
     /**
      * One per secret; null for a bad claim, an error for an outage or an
@@ -1056,9 +1076,17 @@ class VaultService implements Vault {
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
       }
+      // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks. And
+      // a fork copies one, for anyone, a service account too, only where its app says it keeps it sensitive: an app of
+      // 0.9, mid-deploy, would write the copy as a secret its people read.
+      const copying = action === 'secret.read' && call.input.purpose === 'copy';
+      const handedBack = action === 'secret.read' && principal.startsWith('user:') && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true });
+      if (handedBack || (copying && call.input.keepsSensitive !== true)) {
+        secrets.forEach((secret, i) => {
+          if (codes[i] === null && secret.sensitive === true) codes[i] = 'sensitive';
+        });
+      }
       let first = codes.find((code) => code !== null) ?? null;
-      // A person's values are only ever used for them, where people get placeholders: by whatever credential of theirs asks.
-      if (first === null && action === 'secret.read' && this.#config.people === 'stand-ins' && principal.startsWith('user:') && HANDED_BACK.includes(call.input.purpose as Purpose)) first = 'stand_ins';
       if (first === null && action === 'secret.read' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
       if (first !== null) {
         throw new Refused(
@@ -2442,6 +2470,7 @@ function validateItems(items: readonly { secret: SecretRef; key?: string; wrappe
     if (field === 'key' && typeof key !== 'string') throw new Error('DEK must be base64');
     if (field === 'wrapped' && (wrapped === undefined || wrapped === null)) throw new Error('wrapped key is required');
     checkContext(context(secret));
+    if (secret.sensitive !== undefined && typeof secret.sensitive !== 'boolean') throw new Error('a secret is sensitive or not: true, false or absent');
     if (!Number.isSafeInteger(secret.version) || secret.version < 1) throw new Error('secret version must be a positive integer');
     if (typeof secret.path !== 'string' || /[\uD800-\uDFFF]/u.test(secret.path)) throw new Error('secret path must be a well-formed string');
     if (key !== undefined) {
@@ -2781,9 +2810,15 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-/** A secret's binding context: its ids, and a personal config's owner, hashed, as the decision read it. */
+/** A secret's binding context: its ids, a personal config's owner, hashed, as the decision read it, and whether it is sensitive. */
 function context(secret: SecretRef, owner?: string): SecretContext {
-  return { projectId: secret.projectId, environmentId: secret.environmentId, secretId: secret.secretId, ...(owner === undefined ? {} : { owner }) };
+  return {
+    projectId: secret.projectId,
+    environmentId: secret.environmentId,
+    secretId: secret.secretId,
+    ...(owner === undefined ? {} : { owner }),
+    ...(secret.sensitive === true ? { sensitive: true as const } : {}),
+  };
 }
 
 function unwrappable(wrapped: WrappedKey) {

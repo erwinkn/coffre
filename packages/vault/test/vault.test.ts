@@ -161,6 +161,100 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
 });
 
+test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork that keeps it so, read by a service", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const SERVICE = 'token:deploy';
+  await member(w, SERVICE, [[w.dev, 'viewer']]);
+  const secret = { ...(await w.secret(w.dev)), sensitive: true };
+  const key = randomBytes(32).toString('base64');
+  const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key }] });
+  assert.ok(wrap.ok);
+  assert.deepEqual(wrap.sensitive, [true], 'the vault says it bound the key as sensitive');
+  const items = await versionItems([{ secret, wrapped: wrap.wrapped[0] }]);
+  for (const principal of [ADA, ROOT]) {
+    for (const purpose of ['reveal', 'run', 'compare', 'expose'] as const) {
+      const refused = await w.vault.unwrap({ principal, purpose, items });
+      assert.equal(!refused.ok && refused.refusal.code, 'sensitive', `${principal} to ${purpose}`);
+    }
+    assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'use', items }), { ok: true, keys: [key] });
+    assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
+    // A copy by an app before 0.10, which would write the value as a secret anyone with read sees.
+    const old = await w.vault.unwrap({ principal, purpose: 'copy', items });
+    assert.equal(!old.ok && old.refusal.code, 'sensitive', `${principal}'s copy that keeps nothing sensitive`);
+  }
+  // A purpose a later app may name is one that hands values back.
+  const unknown = await w.vault.unwrap({ principal: ADA, purpose: 'peek' as 'reveal', items });
+  assert.equal(!unknown.ok && unknown.refusal.code, 'sensitive');
+  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items }), { ok: true, keys: [key] });
+  // A service account's fork, through an app of 0.9 that would write the copy as a secret, copies nothing sensitive either.
+  const serviceCopy = await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', items });
+  assert.equal(!serviceCopy.ok && serviceCopy.refusal.code, 'sensitive');
+  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
+  // A batch is all or nothing: a secret beside it is refused with it, its own entry saying why.
+  const plain = await w.secret(w.dev);
+  const both = [...items, ...(await versionItems([{ secret: plain, wrapped: await wrapped(w, plain) }]))];
+  const batch = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: both });
+  assert.equal(!batch.ok && batch.refusal.code, 'sensitive');
+  const denied = (await vaultLog()).filter((entry) => entry.action === 'secret.read' && entry.outcome === 'refuse');
+  assert.ok(denied.some((entry) => entry.code === 'sensitive'));
+});
+
+test("a sensitive version's key opens as nothing else: its column flipped back is a bad claim, for everyone", async () => {
+  const w = await world();
+  const secret = { ...(await w.secret(w.dev)), sensitive: true };
+  const sealed = await wrapped(w, secret);
+  const flipped = await versionItems([{ secret: { ...secret, sensitive: false }, wrapped: sealed }]);
+  const SERVICE = 'token:deploy';
+  await member(w, SERVICE, [[w.dev, 'viewer']]);
+  const read = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: flipped });
+  assert.equal(!read.ok && read.refusal.code, 'bad_claim');
+  // And a secret's key read as sensitive does not open either.
+  const other = await w.secret(w.dev);
+  const marked = await versionItems([{ secret: { ...other, sensitive: true }, wrapped: await wrapped(w, other) }]);
+  const as = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: marked });
+  assert.equal(!as.ok && as.refusal.code, 'bad_claim');
+});
+
+test('a rewrap makes a value stricter, never looser: not from a sensitive version, nor of a secret whose newest is', async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const base = await w.secret(w.dev);
+  const v1 = await versionItems([{ secret: base, wrapped: await wrapped(w, base) }]);
+  // Secret to sensitive, with no value: a new version, its key wrapped again as sensitive.
+  const tightened = await w.vault.rewrap({ principal: ADA, items: [{ secret: { ...base, version: 2, sensitive: true }, ...v1[0]! }] });
+  assert.ok(tightened.ok, JSON.stringify(tightened));
+  assert.deepEqual(tightened.sensitive, [true]);
+  const v2 = await versionItems([{ secret: { ...base, version: 2, sensitive: true }, wrapped: tightened.wrapped[0]! }]);
+  // Back to secret from it, or the old secret version restored as one while the newest is sensitive: refused.
+  for (const item of [{ secret: { ...base, version: 3 }, ...v2[0]! }, { secret: { ...base, version: 3, sensitive: false }, ...v1[0]! }]) {
+    const looser = await w.vault.rewrap({ principal: ROOT, items: [item] });
+    assert.equal(!looser.ok && looser.refusal.code, 'invalid');
+    assert.match(!looser.ok ? looser.refusal.message : '', /only by writing it again/);
+  }
+  // The old version restored as sensitive is fine.
+  assert.ok((await w.vault.rewrap({ principal: ADA, items: [{ secret: { ...base, version: 3, sensitive: true }, ...v1[0]! }] })).ok);
+  // A new value may be anything: writing it again is how a value is made looser.
+  assert.ok((await w.vault.wrap({ principal: ADA, items: [{ secret: { ...base, version: 4 }, key: randomBytes(32).toString('base64') }] })).ok);
+});
+
+test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  const base = await w.secret(w.dev);
+  const [v1] = await versionItems([{ secret: base, wrapped: await wrapped(w, base) }]);
+  const sensitive = { ...base, version: 2, sensitive: true };
+  const later = await wrapped(w, sensitive);
+  // The key service takes its time over the old key, as the rewrap waits under its decision; meanwhile a sensitive
+  // version, wrapped before, is stored.
+  remote.seen.hanging.add(base.secretId);
+  const rewrap = w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3 }, ...v1! }] });
+  await sleep(100);
+  await versionItems([{ secret: sensitive, wrapped: later }]);
+  const refused = await rewrap;
+  assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
+});
+
 test('a read records the stored version instead of the app claim', async () => {
   const w = await world();
   const secret = await w.secret(w.dev);

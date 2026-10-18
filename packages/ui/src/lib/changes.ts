@@ -8,7 +8,7 @@ import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
 import { regenerateWrite, type Generation } from '@coffre/core/recipe';
 import { regeneratedKeys, renamePairs } from './recipes.ts';
-import { applySecretEditBatch, companionsOf, generationsOf, plainValuesOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
+import { applySecretEditBatch, companionsOf, generationsOf, levelsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
 
 /**
@@ -520,7 +520,7 @@ export function saveSecrets(
       const now = new Date().toISOString();
       // A value typed by hand has no recipe; a generated one has the one it was made by. A plain one shows as it is.
       const generations = generationsOf(vars.active, vars.drafts, vars.changes);
-      const plains = plainValuesOf(vars.active, vars.drafts, vars.changes);
+      const levels = levelsOf(vars.active, vars.drafts, vars.changes);
       const bumped = (entry: SecretKey | undefined, key: string): SecretKey => {
         // In a fork, a value written over the parent's is an override, whose own version the list read back says.
         const inherited = entry?.parent != null && entry.parent.state !== 'overridden' && entry.key === key;
@@ -537,7 +537,8 @@ export function saveSecrets(
           updatedAt: now,
           updatedBy: author,
           generated: generations.get(key) ?? null,
-          value: plains.get(key) ?? null,
+          value: levels.get(key)?.value ?? null,
+          sensitivity: levels.get(key)?.sensitivity ?? 'secret',
           parent: entry?.parent == null || entry.key !== key ? null : { ...entry.parent, state: 'overridden', changed: false, reset: false },
         };
       };
@@ -547,7 +548,11 @@ export function saveSecrets(
         if (change === undefined || change.archived) return entry;
         const key = change.key.trim();
         if (key !== entry.key) renames.set(entry.key, key);
-        return change.value === null ? { ...entry, key } : bumped(entry, key);
+        if (change.value !== null) return bumped(entry, key);
+        // A mark: the same value, as a new version, stricter, so a plain one no longer listed.
+        return change.sensitivity === undefined
+          ? { ...entry, key }
+          : { ...entry, key, version: (entry.version ?? 0) + 1, versionId: null, updatedAt: now, updatedBy: author, value: null, sensitivity: change.sensitivity };
       });
       // A rename moves no value: a pair it touches names the new key, in both halves.
       next = renamePairs(next, renames);
@@ -644,8 +649,9 @@ export function regenerateSecret(
           updatedAt: now,
           updatedBy: author,
           generated: vars.generated,
-          // A generated value is a secret.
+          // A generated value is a secret, and sensitive where the key is.
           value: null,
+          sensitivity: entry.sensitivity === 'sensitive' ? 'sensitive' : 'secret',
           parent: entry.parent == null ? null : { ...entry.parent, state: 'overridden', changed: false, reset: false },
         };
       });

@@ -28,19 +28,7 @@ export type ResolvedVaultConfig = {
    */
   signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
-  /** `values` when left out. */
-  people?: People;
 };
-
-/**
- * What a person's reads open (docs/design/credential-proxy.md): `values`,
- * as any member's; or `stand-ins`, where a person, on any credential of
- * theirs (a session, a personal token, an MCP connection), opens values
- * only for coffre to use for them, never to be handed back: the credential
- * proxy injects them, and the deployment's `expose` list names the few it
- * may pass on. Service accounts read values either way.
- */
-export type People = 'values' | 'stand-ins';
 
 /**
  * A key-encryption key: 32 random bytes, base64, and the id envelopes record
@@ -76,8 +64,12 @@ export type VaultConfig = {
   signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
-  /** What a person's reads open (`People`): `values` unless set. */
-  people?: People;
+  /**
+   * @deprecated Gone in 0.10, and refused: each key says who sees it now. Mark
+   * those no person may read sensitive (`coffre mark <env> sensitive`), and
+   * give people read through their roles where they should see values.
+   */
+  people?: 'gone in 0.10: mark keys sensitive (coffre mark <env> sensitive), and let roles say who reads the rest';
 } & Owners;
 
 /**
@@ -146,6 +138,12 @@ function kek(entry: Kek): { provider: KekProvider; signingKey: Buffer | null } {
 
 /** Check a deployment's vault configuration, failing on the first problem. */
 export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
+  if ('people' in config && config.people !== undefined) {
+    throw new Error(
+      `people is gone in 0.10 (it was ${JSON.stringify(config.people)}): each key says who sees it now. Remove people, mark the keys no person may read sensitive ` +
+        '(coffre mark <env> sensitive, or coffre set <env>/<KEY> --sensitive), and let roles say who reads the rest (docs/design/credential-proxy.md)',
+    );
+  }
   const keks = [config.kek, ...(config.previousKeks ?? [])].map(kek);
   const [current, ...previous] = keks.map((entry) => entry.provider);
   const refs = [current, ...previous].map(({ provider, keyId }) => `${provider}:${keyId}`);
@@ -156,7 +154,6 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
-    people: checkPeople(config.people ?? 'values'),
   };
 }
 
@@ -184,10 +181,6 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
   return [signing, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);
 }
 
-function checkPeople(people: People): People {
-  if (people !== 'values' && people !== 'stand-ins') throw new Error(`people is 'values' or 'stand-ins'; got ${JSON.stringify(people)}`);
-  return people;
-}
 
 function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {
   if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0)) {

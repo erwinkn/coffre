@@ -888,8 +888,8 @@ async function list(args: string[]): Promise<void> {
       const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: ${rotate})` : '';
       const made = recipe === null ? '' : `  (generated, ${recipe})`;
       const archived = entry.archived ? '  (archived)' : '';
-      // A plain value is no secret, and lists as it is; an instance before 0.9 says nothing.
-      const plain = entry.value == null ? '' : `  plain: ${entry.value}`;
+      // A plain value is no secret, and lists as it is; a sensitive one nobody sees says so, a reference reading one too. An instance before 0.9 says nothing.
+      const plain = entry.value != null ? `  plain: ${entry.value}` : entry.sensitivity === 'sensitive' ? '  sensitive' : '';
       // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
       const parent = entry.parent ?? null;
       const standing = parent === null
@@ -903,7 +903,7 @@ async function list(args: string[]): Promise<void> {
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${plain}${due}${archived}${standing}\n`);
         continue;
       }
       process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${plain}${due}${archived}${standing}\n`);
@@ -924,6 +924,8 @@ async function set(args: string[]): Promise<void> {
     generate: { type: 'string' },
     'public-key': { type: 'string' },
     plain: { type: 'boolean' },
+    secret: { type: 'boolean' },
+    sensitive: { type: 'boolean' },
   }, ['<project>/<environment>/<KEY>', '[value]'], 1);
   const [target, given] = positionals as [string, string | undefined];
   // A secret on the command line is in the shell's history and `ps`: it is asked for. A plain value is no secret.
@@ -931,12 +933,18 @@ async function set(args: string[]): Promise<void> {
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre set <project>/<environment>/<KEY>');
+  // Who sees the value: said, or a secret, and sensitive where the key is now (`Sensitivity`, docs/design/credential-proxy.md).
+  const levels = (['plain', 'secret', 'sensitive'] as const).filter((level) => values[level] === true);
+  if (levels.length > 1) fail(`--plain, --secret or --sensitive: one says who sees the value, not ${levels.map((level) => `--${level}`).join(' and ')}`);
+  const sensitivity = levels[0];
   if (values.ref !== undefined && values.generate !== undefined) fail('--ref or --generate: a key reads another secret, or holds a value made here, not both');
-  if (values.plain === true && (values.ref !== undefined || values.generate !== undefined)) fail('--plain writes a value given here, as it is: not with --ref or --generate');
+  if (values.ref !== undefined && sensitivity !== undefined) fail(`--${sensitivity} says who sees a value: a reference has its source's`);
+  if (values.plain === true && values.generate !== undefined) fail('--plain writes a value given here, as it is: not with --generate');
   if (values['public-key'] !== undefined && values.generate === undefined) fail('--public-key goes with --generate and a key pair\'s recipe, as ecdsa:p-256');
   // Made here, sent with its recipe, and never shown: nobody sees the value, and Regenerate makes the next one alike.
   if (values.generate !== undefined) {
-    const patch = await generatedPatch(key, recipeFlag(values.generate), values['public-key']);
+    const made = await generatedPatch(key, recipeFlag(values.generate), values['public-key']);
+    const patch = sensitivity === undefined ? made : Object.fromEntries(Object.entries(made).map(([name, write]) => [name, { ...write, sensitivity: sensitivity as 'secret' | 'sensitive' }]));
     const result = await client().secrets.set(`${project}/${environment}`, patch);
     process.stdout.write(`${generatedLines(patch, versionsOf(result.keys), 'generated').join('\n')}\n`);
     return;
@@ -952,11 +960,60 @@ async function set(args: string[]): Promise<void> {
   }
 
   // Plain, no secret: whoever lists the environment sees it, and its apps get it as it is, placeholders or not.
+  // Said as 0.9 says it, which an instance of 0.9 takes too.
   const value = given ?? await readValue(key);
-  const result = await client().secrets.set(`${project}/${environment}`, { [key]: values.plain === true ? { value, plain: true } : value });
+  const written = sensitivity === undefined ? value : sensitivity === 'plain' ? { value, plain: true as const } : { value, sensitivity };
+  const result = await client().secrets.set(`${project}/${environment}`, { [key]: written });
   const outcome = result.keys[key];
+  const said = sensitivity === 'plain' ? `, plain: shown to whoever lists ${project}/${environment}`
+    : sensitivity === 'sensitive' ? ', sensitive: shown to nobody, Owners included; apps use it through the credential proxy, and services read it' : '';
+  process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}${said}\n`);
+}
 
-  process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}${values.plain === true ? ', plain: shown to whoever lists ' + `${project}/${environment}` : ''}\n`);
+/**
+ * Make keys stricter, their values kept (`Sensitivity`): one key, or every
+ * key of an environment that is looser now. A key is made looser only by
+ * writing its value again (`coffre set … --plain`), never by flipping one
+ * nobody could read, so only stricter levels are asked for here. A key of
+ * the environment's that is a reference, or that a fork inherits, reads
+ * the level of the value where it is held: left as it is, and named, with
+ * where to mark it, when it is looser than asked.
+ */
+async function mark(args: string[]): Promise<void> {
+  const { positionals } = parse(args, {}, ['<project>/<environment>[/<KEY>]', '<plain|secret|sensitive>']);
+  const [target, level] = positionals as [string, string];
+  if (level !== 'plain' && level !== 'secret' && level !== 'sensitive') fail(`coffre mark makes keys plain, secret or sensitive, not "${level}"`);
+  const { project, environment, key } = parsePath(target);
+  const path = `${project}/${environment}`;
+  const coffre = client();
+  const listed = (await coffre.secrets.list(path)).keys;
+  const order = ['plain', 'secret', 'sensitive'];
+  // Each key's own value, looser than asked: an instance before 0.10 lists no sensitivity, and marks nothing.
+  const own = listed.filter((entry) => !entry.archived && entry.reference === null && entry.version !== null && entry.parent?.state !== 'inherited' && entry.parent?.state !== 'removed');
+  if (listed.some((entry) => entry.version !== null && entry.sensitivity === undefined)) fail(`${path}'s instance is older than sensitivity (coffre 0.10): upgrade it first`);
+  const marking = key === undefined
+    ? own.filter((entry) => order.indexOf(entry.sensitivity ?? 'secret') < order.indexOf(level)).map((entry) => entry.key)
+    : [key];
+  // What the environment reads from elsewhere, looser than asked: its level is where the value is held, so it is marked there.
+  // A reference that reads nothing, and a key a fork removes, have no level to mark.
+  const left = key !== undefined ? [] : listed.flatMap((entry) => {
+    if (entry.archived || order.indexOf(entry.sensitivity ?? 'secret') >= order.indexOf(level)) return [];
+    if (entry.reference !== null) return entry.reference.state === 'live' ? [`${entry.key}, a reference to ${entry.reference.source}: mark it there`] : [];
+    if (entry.parent?.state !== 'inherited') return [];
+    return [`${entry.key}, inherited from ${project}/${entry.parent.from}: mark it there, or write ${environment}'s own`];
+  });
+  if (marking.length === 0) process.stdout.write(`nothing to mark in ${path}: every value of its own is ${level} or stricter\n`);
+  else {
+    const before = new Map(listed.map((entry) => [entry.key, entry.sensitivity]));
+    const result = await coffre.secrets.set(path, Object.fromEntries(marking.map((name) => [name, { sensitivity: level }])));
+    for (const name of marking) {
+      const outcome = result.keys[name];
+      const was = before.get(name);
+      const version = outcome !== undefined && 'version' in outcome ? outcome.version : '?';
+      process.stdout.write(was === level ? `${name}: already ${level}\n` : `${name}: ${was ?? 'secret'} → ${level}, as version ${version}, its value kept\n`);
+    }
+  }
+  if (left.length > 0) process.stderr.write(`coffre: left as they are: ${left.join('; ')}\n`);
 }
 
 /**
@@ -1003,7 +1060,7 @@ async function readValue(key: string): Promise<string> {
  * came back is checked again, for an environment changed in between. What
  * stops it is thrown, for the command to end on or, watching, to outlive.
  */
-async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<{ entries: [string, string][]; version: string }> {
+async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<{ entries: [string, string][]; version: string; sensitive: string[] }> {
   if (paths.length > 1) {
     const keys: [string, string[]][] = [];
     for (const path of paths) {
@@ -1021,19 +1078,30 @@ async function readEnvironments(paths: readonly string[], api: { read: CoffreCli
     const shared = clash(keys);
     if (shared !== null) throw new Error(`${shared}: a key comes from one environment only. Nothing was read`);
   }
-  const read: [string, { values: Record<string, string>; version: string | null }][] = [];
+  const read: [string, { values: Record<string, string>; version: string | null; sensitive?: string[] }][] = [];
   for (const path of paths) read.push([path, await api.read.secrets.reveal(path)]);
   const shared = clash(read.map(([path, { values }]) => [path, Object.keys(values)]));
   if (shared !== null) throw new Error(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
   // The environments' versions, of what was read: as `coffre version` answers them, together.
-  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' ') };
+  // A person's read leaves its sensitive values out, by name; an instance before 0.10 says nothing.
+  const sensitive = read.flatMap(([, answer]) => answer.sensitive ?? []).sort();
+  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' '), sensitive };
+}
+
+/** What a person's read left out, on stderr: its sensitive keys, which nobody is handed. */
+function sayLeftOut(sensitive: readonly string[]): void {
+  if (sensitive.length === 0) return;
+  process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
 }
 
 /** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
 function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
   const api = { read: client(), list: client(target(), undefined, [403, 404]) };
   return readEnvironments(paths, api).then(
-    (read) => read.entries,
+    (read) => {
+      sayLeftOut(read.sensitive);
+      return read.entries;
+    },
     (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
   );
 }
@@ -1043,7 +1111,7 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
  * environment, what the proxy left out, and what this run made of the
  * person's own, by personal config.
  */
-type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
+type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; given: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
 
 /** A plan, `GET /use/<project>/<env>`: what the app gets, and what this run is to make of the person's own. */
 type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string }> };
@@ -1052,8 +1120,8 @@ type Plan = { env: Record<string, string>; credentials: Record<string, string>; 
  * Placeholders for the environments named, where the instance has the
  * credential proxy (docs/design/credential-proxy.md) and the session is a
  * person's: one handle for the run, which the proxy takes in place of each
- * credential's keys, and the values the deployment exposes. Null where the instance has no proxy, or
- * for a service account, which reads values (R13).
+ * credential's keys, and the values the person may read, as they are. Null where the instance has no
+ * proxy, or for a service account, which reads values (R13).
  */
 async function placeholders(paths: readonly string[], to: Target = target()): Promise<Placeholders | null> {
   if (!(await proxied(to))) return null;
@@ -1104,7 +1172,7 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     left: plans.flatMap(([, plan]) => plan.left).sort(),
     credentials: Object.keys(credentials).sort(),
     // A placeholder is the handle, or holds it in the shape its client checks (`sk_test_coffre_use_…`, a JWT's last part).
-    exposed: Object.keys(env).filter((key) => !env[key]!.includes(handle.token)).sort(),
+    given: Object.keys(env).filter((key) => !env[key]!.includes(handle.token)).sort(),
     expiresAt: handle.expiresAt,
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
     handle: handle.token,
@@ -1127,9 +1195,9 @@ function sayPlaceholders(placed: Placeholders, paths: readonly string[], to: Tar
   const lines = [
     `coffre: placeholders for ${listOf(paths)}: ${placed.credentials.length === 0 ? 'no credential the proxy covers' : `${placed.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(placed.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
     ...placed.made.map(([mine, keys]) => `coffre: made your own ${keys.join(', ')} in ${mine}, each by its recipe: your next runs use them`),
-    ...(placed.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${placed.exposed.join(', ')}`]),
+    ...(placed.given.length === 0 ? [] : [`coffre: values as they are, which you may read: ${placed.given.join(', ')}`]),
     ...(placed.tunnels.length === 0 ? [] : [`coffre: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
-    ...(placed.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${placed.left.join(', ')}`]),
+    ...(placed.left.length === 0 ? [] : [`coffre: left out, neither proxied nor yours to read: ${placed.left.join(', ')}`]),
   ];
   process.stderr.write(`${lines.join('\n')}\n`);
 }
@@ -1226,10 +1294,14 @@ async function exportEnv(args: string[]): Promise<void> {
     if (await proxied(to)) fail("--watch keeps a file of values current, and a person's gets placeholders, which change only with the deployment: export again then");
     const api = enduringClient(to);
     process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
+    // What a person's read leaves out, said when it changes, as the first read's is.
+    let said = '';
     await watch({
       version: async () => (await Promise.all(paths.map((path) => api.environments.version(path)))).map((answer) => answer.version).join(' '),
       read: async () => {
-        const { entries, version } = await readEnvironments(paths, { read: api, list: api });
+        const { entries, version, sensitive } = await readEnvironments(paths, { read: api, list: api });
+        if (sensitive.join(' ') !== said) sayLeftOut(sensitive);
+        said = sensitive.join(' ');
         return { text: text(byKey(entries)), version };
       },
       file: file!,
@@ -1793,6 +1865,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   list,
   get,
   set,
+  mark,
   regenerate,
   run,
   export: exportEnv,

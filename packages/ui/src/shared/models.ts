@@ -16,6 +16,8 @@ export type Me = ApiMe;
 export type SecretKey = ApiSecretKey;
 export type ProjectSummary = ApiProjectSummary;
 export type SecretVersion = ApiSecretVersion;
+/** Who sees a key's value (`lib/sensitivity.ts`). */
+export type Sensitivity = SecretVersion['sensitivity'];
 
 /** One member's role at one place in a project, as the project page lists them. */
 export type GrantRow = {

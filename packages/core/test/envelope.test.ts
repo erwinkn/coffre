@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { seal, open, ENVELOPE_VERSION } from '../src/envelope.ts';
+import { seal, open, encrypt, decrypt, ENVELOPE_VERSION } from '../src/envelope.ts';
 import { encodeAad, ownerKey, type SecretContext } from '../src/context.ts';
 import { LocalKekProvider } from '../src/kek/local.ts';
 import { KekBadClaimError } from '../src/kek/types.ts';
@@ -181,4 +181,19 @@ test("a personal config's data key opens for its owner alone: another owner, or 
   await assert.rejects(kek.unwrap(wrapped, dev), KekBadClaimError);
   assert.notDeepEqual(encodeAad(ada), encodeAad(dev));
   assert.throws(() => encodeAad({ ...dev, owner: 'user:ada@acme.example' }), /owner must be a lowercase SHA-256/);
+});
+
+test("a sensitive value's data key opens only as sensitive, and its ciphertext binds the ids alone", async () => {
+  const { dev } = fixture();
+  const kek = LocalKekProvider.generate('kek-test-1');
+  const dek = randomBytes(32);
+  const sensitive = { ...dev, sensitive: true as const };
+  const wrapped = await kek.wrap(dek, sensitive);
+  assert.deepEqual(await kek.unwrap(wrapped, sensitive), dek);
+  // A sensitivity column flipped back to secret does not open it.
+  await assert.rejects(kek.unwrap(wrapped, dev), KekBadClaimError);
+  // The value's own ciphertext is the same either way: a key made sensitive keeps it, its data key wrapped again.
+  const sealed = encrypt(Buffer.from('v', 'utf8'), dev, dek);
+  assert.equal(decrypt(sealed, sensitive, dek).toString('utf8'), 'v');
+  assert.throws(() => encodeAad({ ...dev, sensitive: false as unknown as true }), /sensitive is true or absent/);
 });

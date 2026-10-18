@@ -12,8 +12,18 @@ import { signedInWithToken } from './fakes.ts';
 const TOKEN = `coffre_cli_${'g'.repeat(43)}`;
 
 type Generation = { recipe: string; pair?: { private: string; public: string } };
-type Held = { version: number; archived?: boolean; generated?: Generation | null; value?: string | null };
-type Written = { value: string; generated?: Generation; replaces?: string; plain?: true };
+type Sensitivity = 'plain' | 'secret' | 'sensitive';
+type Held = {
+  version: number | null;
+  archived?: boolean;
+  generated?: Generation | null;
+  value?: string | null;
+  sensitivity?: Sensitivity | null;
+  // A key read from elsewhere: a reference to another environment's, or a parent's, in a fork.
+  reference?: { source: string; state: 'live' | 'source_deleted' };
+  parent?: { from: string; state: 'inherited' | 'overridden' | 'removed' };
+};
+type Written = { value?: string; generated?: Generation; replaces?: string; plain?: true; sensitivity?: Sensitivity };
 
 /**
  * A coffre with one environment, app/prod, which lists its keys with their
@@ -33,9 +43,11 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     if (req.method === 'GET') {
       return send(200, {
         permissions: ['secret.read', 'secret.write'],
-        keys: Object.entries(held).map(([key, { version, archived = false, generated = null, value = null }]) => ({
-          key, version, archived, reference: null, folder: null, updatedAt: null, updatedBy: null,
-          ...(unsaid ? {} : { generated, versionId: `${key}-v${version}`, value }),
+        keys: Object.entries(held).map(([key, { version, archived = false, generated = null, value = null, sensitivity = 'secret', reference = null, parent = null }]) => ({
+          key, version, archived, folder: null, updatedAt: null, updatedBy: null,
+          reference: reference === null ? null : { holder: key, version: 1, createdBy: 'user:admin@acme.example', ...reference },
+          parent: parent === null ? null : { changed: false, reset: false, held: true, ...parent },
+          ...(unsaid ? {} : { generated, versionId: `${key}-v${version}`, value, sensitivity }),
         })),
         rotateAfterDays: null,
       });
@@ -44,8 +56,12 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     writes.push(patch);
     const keys: Record<string, { version: number }> = {};
     for (const [key, written] of Object.entries(patch)) {
-      held[key] = { version: (held[key]?.version ?? 0) + 1, generated: written.generated ?? null, value: typeof written === 'object' && written.plain === true ? written.value : null };
-      keys[key] = { version: held[key].version };
+      // A mark keeps the value and how it was made; a write says its own, plain as 0.9 says it too.
+      const sensitivity = written.plain === true ? 'plain' : written.sensitivity ?? (held[key]?.sensitivity === 'sensitive' ? 'sensitive' : 'secret');
+      held[key] = written.value === undefined
+        ? { ...held[key]!, version: (held[key]!.version ?? 0) + 1, sensitivity, value: null }
+        : { version: (held[key]?.version ?? 0) + 1, generated: written.generated ?? null, value: sensitivity === 'plain' ? written.value : null, sensitivity };
+      keys[key] = { version: held[key].version! };
     }
     send(200, { operationId: 'op', keys });
   });
@@ -76,6 +92,7 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
 function unseen(run: { stdout: string; stderr: string }, writes: readonly Record<string, Written>[]): void {
   for (const patch of writes) {
     for (const [key, { value }] of Object.entries(patch)) {
+      if (value === undefined) continue;
       assert.ok(!run.stdout.includes(value) && !run.stderr.includes(value), `${key}'s value was shown`);
     }
   }
@@ -88,14 +105,14 @@ test('set --generate writes a value made here, with its recipe, and shows only t
   assert.equal(run.stdout, 'SESSION_SECRET generated as version 1: 32 random bytes as 64 hex characters (bytes:32:hex)\n');
   assert.equal(coffre.writes.length, 1);
   const { SESSION_SECRET } = coffre.writes[0]!;
-  assert.match(SESSION_SECRET!.value, /^[0-9a-f]{64}$/);
+  assert.match(SESSION_SECRET!.value!, /^[0-9a-f]{64}$/);
   assert.deepEqual(SESSION_SECRET!.generated, { recipe: 'bytes:32:hex' });
   unseen(run, coffre.writes);
 
   // The shortest recipe, in any case, is sent canonical.
   const again = await coffre.coffre(['set', 'app/prod/SESSION_SECRET', '--generate', 'BYTES:24']);
   assert.equal(again.code, 0, again.stderr);
-  assert.match(coffre.writes[1]!.SESSION_SECRET!.value, /^[0-9A-Za-z]{33}$/);
+  assert.match(coffre.writes[1]!.SESSION_SECRET!.value!, /^[0-9A-Za-z]{33}$/);
   assert.deepEqual(coffre.writes[1]!.SESSION_SECRET!.generated, { recipe: 'bytes:24:base62' });
   assert.notEqual(coffre.writes[1]!.SESSION_SECRET!.value, SESSION_SECRET!.value);
 });
@@ -149,7 +166,7 @@ test('regenerate makes a new value by the recipe the key has, and a key pair who
   const run = await coffre.coffre(['regenerate', 'app/prod/TOKEN']);
   assert.equal(run.code, 0, run.stderr);
   assert.equal(run.stdout, 'TOKEN regenerated as version 5: 16 random bytes as 22 base64 URL characters (bytes:16:base64url)\n');
-  assert.match(coffre.writes[0]!.TOKEN!.value, /^[A-Za-z0-9_-]{22}$/);
+  assert.match(coffre.writes[0]!.TOKEN!.value!, /^[A-Za-z0-9_-]{22}$/);
   assert.deepEqual(coffre.writes[0]!.TOKEN!.generated, { recipe: 'bytes:16:base64url' });
   // It replaces the version listed, which the server holds it to.
   assert.equal(coffre.writes[0]!.TOKEN!.replaces, 'TOKEN-v4');
@@ -207,4 +224,66 @@ test('set --plain writes a value that is no secret, given as an argument; list s
   // Not with a value made here or a reference, and a secret is still never an argument.
   assert.equal((await coffre.coffre(['set', 'app/prod/KEY', '--plain', '--generate', 'bytes:32'])).code, 1);
   assert.match((await coffre.coffre(['set', 'app/prod/KEY', 'hunter2'])).stderr, /never as an argument/);
+});
+
+test('set --sensitive says who sees the value with it, a generated one too; list says so; one level at a time', async (t) => {
+  const coffre = await instance(t, {});
+  const run = await coffre.coffre(['set', 'app/prod/SEAL_KEY', '--generate', 'bytes:32:hex', '--sensitive']);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(coffre.writes[0]!.SEAL_KEY!.sensitivity, 'sensitive');
+  unseen(run, coffre.writes);
+  assert.match((await coffre.coffre(['list', 'app/prod'])).stdout, /^SEAL_KEY\tv1\t.*  sensitive\n$/);
+  const both = await coffre.coffre(['set', 'app/prod/KEY', '--plain', '--sensitive']);
+  assert.equal(both.code, 1);
+  assert.match(both.stderr, /one says who sees the value, not --plain and --sensitive/);
+});
+
+test('mark makes a key stricter, or every looser key of an environment, its value kept', async (t) => {
+  const coffre = await instance(t, {
+    ACCOUNT_ID: { version: 1, value: 'acct_42', sensitivity: 'plain' },
+    API_KEY: { version: 3, sensitivity: 'secret' },
+    SEAL_KEY: { version: 1, sensitivity: 'sensitive' },
+  });
+  const one = await coffre.coffre(['mark', 'app/prod/API_KEY', 'sensitive']);
+  assert.equal(one.code, 0, one.stderr);
+  assert.deepEqual(coffre.writes, [{ API_KEY: { sensitivity: 'sensitive' } }]);
+  assert.equal(one.stdout, 'API_KEY: secret → sensitive, as version 4, its value kept\n');
+  // The whole environment: only what is looser now, in one write.
+  const all = await coffre.coffre(['mark', 'app/prod', 'sensitive']);
+  assert.equal(all.code, 0, all.stderr);
+  assert.deepEqual(coffre.writes[1], { ACCOUNT_ID: { sensitivity: 'sensitive' } });
+  assert.equal(all.stdout, 'ACCOUNT_ID: plain → sensitive, as version 2, its value kept\n');
+  assert.equal((await coffre.coffre(['mark', 'app/prod', 'secret'])).stdout, 'nothing to mark in app/prod: every value of its own is secret or stricter\n');
+  assert.match((await coffre.coffre(['mark', 'app/prod', 'hidden'])).stderr, /plain, secret or sensitive, not "hidden"/);
+});
+
+test('mark of an environment names the keys it reads from elsewhere and leaves, and where to mark them', async (t) => {
+  const coffre = await instance(t, {
+    TOKEN: { version: 2, sensitivity: 'secret' },
+    API_KEY: { version: null, sensitivity: 'secret', reference: { source: 'backend/shared/API_KEY', state: 'live' } },
+    SENTRY_DSN: { version: 1, sensitivity: 'secret', parent: { from: 'base', state: 'inherited' } },
+    // Strict enough already, reading nothing, or removed here: nothing to say.
+    SEAL_KEY: { version: null, sensitivity: 'sensitive', reference: { source: 'backend/shared/SEAL_KEY', state: 'live' } },
+    GONE: { version: null, sensitivity: null, reference: { source: 'backend/old/GONE', state: 'source_deleted' } },
+    DROPPED: { version: null, sensitivity: null, parent: { from: 'base', state: 'removed' } },
+  });
+  const run = await coffre.coffre(['mark', 'app/prod', 'sensitive']);
+  assert.equal(run.code, 0, run.stderr);
+  // Only the environment's own value is written.
+  assert.deepEqual(coffre.writes, [{ TOKEN: { sensitivity: 'sensitive' } }]);
+  assert.equal(run.stdout, 'TOKEN: secret → sensitive, as version 3, its value kept\n');
+  assert.equal(
+    run.stderr,
+    'coffre: left as they are: API_KEY, a reference to backend/shared/API_KEY: mark it there; SENTRY_DSN, inherited from app/base: mark it there, or write prod\'s own\n',
+  );
+  // With nothing of its own to mark, it still names them; asked no stricter than they are, it names none.
+  const again = await coffre.coffre(['mark', 'app/prod', 'sensitive']);
+  assert.equal(again.stdout, 'nothing to mark in app/prod: every value of its own is sensitive or stricter\n');
+  assert.match(again.stderr, /^coffre: left as they are: API_KEY, .*; SENTRY_DSN, /);
+  assert.equal((await coffre.coffre(['mark', 'app/prod', 'secret'])).stderr, '');
+  // The listing says each key's level, what it reads from elsewhere included.
+  const listed = (await coffre.coffre(['list', 'app/prod'])).stdout;
+  assert.match(listed, /^SEAL_KEY\t→ backend\/shared\/SEAL_KEY\tv1\t.*  sensitive\n/m);
+  assert.match(listed, /^API_KEY\t→ backend\/shared\/API_KEY\tv1\t[^\n]*-\n/m);
+  assert.match(listed, /^TOKEN\tv3\t.*  sensitive\n/m);
 });

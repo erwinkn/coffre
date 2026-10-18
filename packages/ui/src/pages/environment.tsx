@@ -1,7 +1,7 @@
 import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import type { Generation } from '@coffre/core/recipe';
-import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -20,11 +20,14 @@ import type {
   Permission,
   SecretKey,
   SecretVersion,
+  Sensitivity,
 } from '../shared/models';
 import { canRevealSecrets } from '../lib/capabilities';
+import { LEVELS, markable, SENSITIVITIES, stricter, waitsForValue } from '../lib/sensitivity';
 import {
   companionsOf,
   hasSecretEditConflict,
+  madeSensitive,
   secretChangeFor,
   valueEdit,
   type Companion,
@@ -211,6 +214,14 @@ function EnvironmentLedger({
   // pending change is in edit mode whether or not it is listed here.
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
+  // A save that makes keys sensitive, waiting for its confirmation: nobody sees them again, which the row's menu asks too.
+  const [hiding, setHiding] = useState<{ keys: string[]; go: () => void } | null>(null);
+  // Every key the save writes counts, a key pair's public key included.
+  function confirmingSensitive(drafts: readonly SecretDraft[], changes: Record<string, SecretChange>, go: () => void) {
+    const keys = madeSensitive(active, drafts, changes);
+    if (keys.length === 0) go();
+    else setHiding({ keys, go });
+  }
   const [query, setQuery] = useState(Route.useSearch().filter ?? '');
   const [sort, setSort] = useState<Sort>({ by: 'key', descending: false });
   // A column's first click sorts it ascending: names A to Z, the oldest values first.
@@ -280,8 +291,10 @@ function EnvironmentLedger({
   ];
   const unnamed = pendingNames.some((name) => name === '');
   const invalid = pendingNames.some((name) => name !== '' && secretKeyProblem(name) !== null);
+  // A key made more visible, or marked where it holds no value of its own, waits for its value typed.
+  const waiting = changedEntries.find((entry) => waitsForValue(entry, secretChangeFor(changes, entry.key)));
   const pendingCount = drafts.length + changedEntries.length;
-  const ready = pendingCount > 0 && !unnamed && !invalid && !hasConflict;
+  const ready = pendingCount > 0 && !unnamed && !invalid && !hasConflict && waiting === undefined;
 
   function patchChange(entry: SecretKey, patch: Partial<SecretChange>) {
     setChanges((current) => {
@@ -293,7 +306,7 @@ function EnvironmentLedger({
         }),
         ...patch,
       };
-      const dirty = next.key !== entry.key || next.value !== null || next.archived;
+      const dirty = next.key !== entry.key || next.value !== null || next.sensitivity !== undefined || next.archived;
       if (dirty) return { ...current, [entry.key]: next };
       const { [entry.key]: _, ...rest } = current;
       return rest;
@@ -306,14 +319,18 @@ function EnvironmentLedger({
    */
   function saveRow(key: string) {
     const change = secretChangeFor(changes, key);
-    dropChange(key);
-    if (change === undefined) return;
-    sendAlone({ active, drafts: [], changes: { [key]: change } });
+    if (change === undefined) return dropChange(key);
+    confirmingSensitive([], { [key]: change }, () => {
+      dropChange(key);
+      sendAlone({ active, drafts: [], changes: { [key]: change } });
+    });
   }
 
   function saveDraft(draft: SecretDraft) {
-    setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
-    sendAlone({ active, drafts: [draft], changes: {} });
+    confirmingSensitive([draft], {}, () => {
+      setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
+      sendAlone({ active, drafts: [draft], changes: {} });
+    });
   }
 
   /** Whether one row's change could go alone: named, well named, and clashing with nothing. */
@@ -326,7 +343,8 @@ function EnvironmentLedger({
     return (
       (drafts.length > 0 || Object.keys(changes).length > 0) &&
       names.every((name) => name !== '' && secretKeyProblem(name) === null) &&
-      !hasSecretEditConflict(active, drafts, changes)
+      !hasSecretEditConflict(active, drafts, changes) &&
+      !active.some((entry) => waitsForValue(entry, secretChangeFor(changes, entry.key)))
     );
   }
 
@@ -358,7 +376,7 @@ function EnvironmentLedger({
 
   function addDraft(key = '') {
     // New rows go last, by the button that made them, in the order they were added.
-    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value: '' }]);
+    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value: '', sensitivity: 'secret' }]);
   }
 
   function discardAll() {
@@ -387,6 +405,10 @@ function EnvironmentLedger({
    */
   function saveChanges() {
     if (!ready) return;
+    confirmingSensitive(drafts, changes, sendChanges);
+  }
+
+  function sendChanges() {
     const batch = { active, drafts, changes };
     setDrafts([]);
     setChanges({});
@@ -473,13 +495,15 @@ function EnvironmentLedger({
       const change = secretChangeFor(changes, entry.key)!;
       if (change.archived) return { key: entry.key, what: 'archived' };
       const renamed = change.key.trim() !== entry.key;
-      if (renamed && change.value !== null) {
-        return { key: entry.key, what: withCompanion(`→ ${change.key.trim()}, new value`, change.companion) };
-      }
-      if (renamed) return { key: entry.key, what: `→ ${change.key.trim()}` };
+      // Who sees it, where the edit changes that: beside a new value, or alone, a mark.
+      const level = change.sensitivity === undefined || change.sensitivity === entry.sensitivity ? null : change.sensitivity;
+      const written = change.value === null
+        ? (level === null ? null : `made ${level}`)
+        : withCompanion(level === null ? 'new value' : `new value, ${level}`, change.companion);
+      if (renamed) return { key: entry.key, what: written === null ? `→ ${change.key.trim()}` : `→ ${change.key.trim()}, ${written}` };
       // In a fork, a value written over the parent's overrides it.
       if (entry.parent !== null && entry.parent.state !== 'overridden') return { key: entry.key, what: withCompanion(`overrides ${entry.parent.from}`, change.companion) };
-      return { key: entry.key, what: withCompanion('new value', change.companion) };
+      return { key: entry.key, what: written ?? 'new value' };
     }),
   ];
 
@@ -491,7 +515,9 @@ function EnvironmentLedger({
       ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
       : invalid
         ? 'Names are letters, digits and underscores, and cannot start with a digit.'
-        : null;
+        : waiting !== undefined
+          ? `${waiting.key} waits for its value: type it again.`
+          : null;
 
   // Filtering narrows what is listed, never what is saved: a pending edit on
   // a row the filter hides still counts, and still shows in the bar under the table.
@@ -727,6 +753,20 @@ function EnvironmentLedger({
           />
         )}
       </section>
+
+      <ConfirmDialog
+        open={hiding !== null}
+        onOpenChange={(open) => !open && setHiding(null)}
+        title={hiding?.keys.length === 1 ? <>Make <span className="mono">{hiding.keys[0]}</span> sensitive?</> : `Make ${hiding?.keys.length ?? 0} keys sensitive?`}
+        body={`${hiding !== null && hiding.keys.length > 1 ? `${hiding.keys.join(', ')}: n` : 'N'}obody, Owners included, will see ${hiding?.keys.length === 1 ? 'this value' : 'these values'} again. Apps use ${hiding?.keys.length === 1 ? 'it' : 'them'} through the proxy; service accounts still read ${hiding?.keys.length === 1 ? 'it' : 'them'}.`}
+        confirmLabel="Make sensitive"
+        destructive={false}
+        onConfirm={() => {
+          const go = hiding?.go;
+          setHiding(null);
+          go?.();
+        }}
+      />
 
       {canWrite && (
         <div className="table-actions">
@@ -1233,7 +1273,7 @@ function SecretRow({
   versionOf: (key: string) => number | null;
   saveReady: boolean;
   onMarkArchive: () => void;
-  /** In a personal config, whose values are its owner's alone: never plain. */
+  /** In a personal config, whose values are its owner's alone: always a secret. */
   personal: boolean;
 }) {
   const [reads, dispatch] = useReducer(rowReads, noReads);
@@ -1249,8 +1289,10 @@ function SecretRow({
   // Archiving a key others read through references waits until they are broken (D41).
   const [archiveBlocked, setArchiveBlocked] = useState(false);
   const blockers = archiveBlockers(`${project}/${environment}/${entry.key}`, lent);
-  // Making or breaking a reference: its refusal shows under the row, as a reveal's does.
+  // Making or breaking a reference, or marking it: its refusal shows under the row, as a reveal's does.
   const { run: act, error: actError } = useAction();
+  // Made sensitive from the menu, once confirmed: nobody sees its value after.
+  const [hiding, setHiding] = useState(false);
   const { reference, parent } = entry;
   // In a fork (docs/design/forking.md): a key it inherits has no row of its
   // own, one it overrides has, and one it removed is not served.
@@ -1260,7 +1302,9 @@ function SecretRow({
   const own = !inherited && !removed;
   // Inherited from a parent you do not read: its name is yours to know, its value is not.
   const parentHidden = inherited && entry.version === null && reference === null;
-  const canRead = canReveal && !removed && !parentHidden;
+  // A sensitive value is shown to nobody, its readers included: no Reveal, no Copy, and an edit starts empty.
+  const sensitive = entry.sensitivity === 'sensitive';
+  const canRead = canReveal && !removed && !parentHidden && !sensitive;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
   // And where that version is held: a reset, an override or a new reference changes it under the same number.
@@ -1268,11 +1312,12 @@ function SecretRow({
   const holderPath = `${project}/${environment}/${entry.key}`;
   // A plain value is no secret: listed as it is, shown inline and copied with no read.
   const rowPlain = entry.value !== null;
-  // What the edit writes: plain or not as the row is, until the toggle says otherwise; in a personal config, a secret.
-  const plainNow = change.value !== null ? change.plain === true : rowPlain && !personal;
-  // The version the edit started from, by id: what a stored secret made plain replaces (`valueEdit`).
-  const [startedAt, setStartedAt] = useState<string | undefined>(undefined);
-  const from = () => ({ start: editBase?.value ?? '', plain: rowPlain, startedAt });
+  // Who sees its value now, and who will once the edit is saved; in a personal config, its owner alone, a secret.
+  const rowLevel = personal ? 'secret' : entry.sensitivity;
+  const level = change.sensitivity ?? rowLevel ?? 'secret';
+  // More visible than it is: the value is typed again, never shown and kept.
+  const loosening = rowLevel !== null && stricter(rowLevel, level);
+  const from = () => ({ start: editBase?.value ?? '', level: rowLevel });
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
   // version identical to the one it came from.
@@ -1368,7 +1413,6 @@ function SecretRow({
   const [focusName, setFocusName] = useState(false);
   async function startEdit({ name = false } = {}) {
     setFocusName(name);
-    setStartedAt(entry.versionId ?? undefined);
     if (entry.value !== null) setBase({ value: entry.value, version: readVersion, from: readFrom, at: Date.now() });
     else if (canRead) {
       setOpening(true);
@@ -1381,9 +1425,31 @@ function SecretRow({
     onEdit();
   }
 
+  // Who sees it, chosen from its menu: stricter at once, its value kept; more
+  // visible in the editor, which asks for the value typed again.
+  function chooseLevel(next: Sensitivity) {
+    if (entry.sensitivity === null || next === entry.sensitivity) return;
+    if (stricter(entry.sensitivity, next)) {
+      setFocusName(false);
+      setReveal(null);
+      onEdit();
+      onPatch({ sensitivity: next });
+    } else if (next === 'sensitive') setHiding(true);
+    else mark(next);
+  }
+
+  function mark(next: Sensitivity) {
+    setReveal(null);
+    act(() => coffre.secrets.set(`${project}/${environment}`, { [entry.key]: { sensitivity: next } }), {
+      affects: affects.secrets({ project, environment }),
+      onSuccess: () => toast.success(`Made ${entry.key} ${next}`),
+    });
+  }
+
   const leaving = change.archived;
   const renamed = change.key !== entry.key;
-  const valueChanged = change.value !== null;
+  // A new value, or a level alone, a mark: either makes a new version.
+  const valueChanged = change.value !== null || change.sensitivity !== undefined;
   const keyProblem = editing ? secretKeyProblem(change.key.trim()) : null;
   const state = leaving
     ? ' is-leaving'
@@ -1434,7 +1500,13 @@ function SecretRow({
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
               {generated !== null && <RecipeMark generated={generated} />}
-              {rowPlain && <span className="tag" title="Not a secret: shown to whoever reads this environment">Plain</span>}
+              {rowPlain && <span className="tag" title={LEVELS.plain.hint}>Plain</span>}
+              {sensitive && (
+                <span className="tag" title={LEVELS.sensitive.hint}>
+                  <Lock size={11} aria-hidden />
+                  Sensitive
+                </span>
+              )}
               {leaving && <span className="tag tag-red">Will be archived</span>}
               {parent !== null && <Standing project={project} secretKey={entry.key} parent={parent} />}
               {lent.length > 0 && (
@@ -1460,15 +1532,21 @@ function SecretRow({
                 <div className="edit-stack">
                   <ValueField
                     label={`New value for ${entry.key}`}
-                    value={change.value ?? editBase?.value ?? ''}
-                    start={editBase?.value}
-                    placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
-                    plain={plainNow}
+                    // Made more visible, the field opens empty: the value is typed again.
+                    value={change.value ?? (loosening ? '' : editBase?.value ?? '')}
+                    start={loosening ? undefined : editBase?.value}
+                    placeholder={
+                      loosening ? 'Its value, typed again'
+                        : editBase !== null ? 'Value'
+                          : sensitive ? 'Type a new value'
+                            : canReveal ? 'New value' : 'New value; the current one is hidden from you'
+                    }
+                    plain={level === 'plain'}
                     disabled={disabled}
                     autoFocus={!focusName}
                     // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
                     onChange={(value) =>
-                      onPatch(valueEdit(change, from(), value, plainNow))
+                      onPatch({ ...valueEdit(from(), { value, sensitivity: level }), companion: undefined, recipe: undefined })
                     }
                     onEscape={onUndo}
                     generate={{
@@ -1476,21 +1554,27 @@ function SecretRow({
                       name: change.key,
                       renamable: false,
                       companion: change.companion,
-                      // A generated value is a secret.
-                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false }),
+                      // A generated value is never plain.
+                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, sensitivity: level === 'plain' ? 'secret' : level }),
                     }}
                   />
-                  {/* Nor over a reference, whose value is its source's: no version of its own guards making it plain. */}
-                  {!personal && reference === null && (
-                    <PlainToggle
-                      plain={plainNow}
+                  {/* In a personal config, every value is its owner's secret. */}
+                  {!personal && (
+                    <SensitivityField
+                      name={change.key.trim() === '' ? entry.key : change.key.trim()}
+                      value={level}
                       disabled={disabled}
-                      // The value as it stands, written the other way.
-                      onToggle={() => onPatch(valueEdit(change, from(), change.value ?? editBase?.value ?? '', !plainNow))}
+                      // A value made plain is typed by hand: it drops the recipe of one generated.
+                      onChange={(next) => onPatch({
+                        ...valueEdit(from(), { value: change.value, sensitivity: next }),
+                        ...(next === 'plain' ? { companion: undefined, recipe: undefined } : {}),
+                      })}
                     />
                   )}
-                  {plainNow && !rowPlain && editBase === null && (
-                    <span className="edit-note">Type its value: a stored secret is never shown, and so never made plain</span>
+                  {waitsForValue(entry, change) && (
+                    <span className="edit-note">
+                      {loosening ? 'Making it visible takes a new value: type it again.' : 'Type its value: only a value of its own here is marked.'}
+                    </span>
                   )}
                   <CompanionNote companion={change.companion} versionOf={versionOf} />
                   {!overridden && parent !== null && (
@@ -1520,7 +1604,7 @@ function SecretRow({
               ) : reference !== null ? (
                 <ReferenceValue reference={reference} />
               ) : (
-                <span className="mask" aria-label="Hidden">
+                <span className="mask" aria-label={sensitive ? 'Never shown' : 'Hidden'}>
                   ••••••••••••
                 </span>
               )}
@@ -1702,6 +1786,26 @@ function SecretRow({
                       Break reference…
                     </Menu.Item>
                   )}
+                  {/* Its own value's level: a reference's is its source's, an inherited one's its parent's. */}
+                  {canWrite && !editing && !leaving && !personal && markable(entry) && (
+                    <>
+                      <Menu.Separator className="menu-sep" />
+                      <Menu.RadioGroup value={entry.sensitivity} onValueChange={(next: Sensitivity) => chooseLevel(next)}>
+                        <Menu.GroupLabel className="menu-label">Who sees it</Menu.GroupLabel>
+                        {SENSITIVITIES.map((each) => (
+                          <Menu.RadioItem key={each} value={each} className="menu-item menu-item-level" closeOnClick>
+                            <span className="menu-item-text">
+                              {LEVELS[each].label}
+                              <span className="menu-item-hint">{LEVELS[each].hint}</span>
+                            </span>
+                            <Menu.RadioItemIndicator className="menu-check">
+                              <Check size={14} />
+                            </Menu.RadioItemIndicator>
+                          </Menu.RadioItem>
+                        ))}
+                      </Menu.RadioGroup>
+                    </>
+                  )}
                   {/* An override's way out is Reset, which keeps it; archiving there would be the same, by more. */}
                   {canArchive && !leaving && own && !overridden && (
                     <>
@@ -1769,6 +1873,20 @@ function SecretRow({
         confirmLabel="Archive on save"
         confirmDisabled={blockers.length > 0}
         onConfirm={onMarkArchive}
+      />
+
+      <ConfirmDialog
+        open={hiding}
+        onOpenChange={setHiding}
+        title={
+          <>
+            Make <span className="mono">{entry.key}</span> sensitive?
+          </>
+        }
+        body="Nobody, Owners included, will see this value again. Apps use it through the proxy; service accounts still read it."
+        confirmLabel="Make sensitive"
+        destructive={false}
+        onConfirm={() => mark('sensitive')}
       />
 
       <ConfirmDialog
@@ -2029,32 +2147,54 @@ function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays
 }
 
 /**
+ * Who sees the value being written, loosest first, and beside it what the
+ * level pointed at, or else the one chosen, means. Native radios: the arrow
+ * keys move the choice, and a screen reader hears one group of three.
+ */
+function SensitivityField({
+  name,
+  value,
+  disabled,
+  onChange,
+}: {
+  /** The key it is for, naming the group. */
+  name: string;
+  value: Sensitivity;
+  disabled: boolean;
+  onChange: (level: Sensitivity) => void;
+}) {
+  const id = useId();
+  const [pointed, setPointed] = useState<Sensitivity | null>(null);
+  return (
+    <div className="edit-note sensitivity-field">
+      <div className="segmented segmented-sm" role="radiogroup" aria-label={`Who sees ${name}`} aria-describedby={`${id}-hint`}>
+        {SENSITIVITIES.map((level) => (
+          <label key={level} onPointerEnter={() => setPointed(level)} onPointerLeave={() => setPointed(null)}>
+            <input
+              type="radio"
+              className="visually-hidden"
+              name={id}
+              value={level}
+              checked={value === level}
+              disabled={disabled}
+              onChange={() => onChange(level)}
+            />
+            {LEVELS[level].label}
+          </label>
+        ))}
+      </div>
+      <span id={`${id}-hint`}>{LEVELS[pointed ?? value].hint}</span>
+    </div>
+  );
+}
+
+/**
  * A secret being typed, sitting in the table where it will end up.
  *
  * This replaced a separate "Add a secret" form. The form made you look away
  * from the list to add to it, and only ever accepted one key at a time; a row
  * in place accepts as many as you want to queue.
  */
-/**
- * Whether the value being written is plain, no secret: an account's id,
- * which whoever reads the environment then sees as it is, and its apps get
- * as it is under placeholders. Off, it is a secret, as every value is unless
- * this says otherwise.
- */
-function PlainToggle({ plain, disabled, onToggle }: { plain: boolean; disabled: boolean; onToggle: () => void }) {
-  return (
-    <span className="edit-note">
-      <button type="button" className="act plain-toggle" aria-pressed={plain} disabled={disabled} onClick={onToggle}>
-        <span className="plain-toggle-box" aria-hidden>
-          {plain && <Check size={11} />}
-        </span>
-        Plain value
-      </button>
-      {plain && 'shown to whoever reads this environment'}
-    </span>
-  );
-}
-
 function DraftRow({
   draft,
   existingVersion,
@@ -2076,7 +2216,7 @@ function DraftRow({
   /** The current version of a key in this environment, for a companion's note. */
   versionOf: (key: string) => number | null;
   saveReady: boolean;
-  /** In a personal config, whose values are its owner's alone: never plain. */
+  /** In a personal config, whose values are its owner's alone: always a secret. */
   personal: boolean;
 }) {
   const [touched, setTouched] = useState(false);
@@ -2124,7 +2264,7 @@ function DraftRow({
               <ValueField
                 label={`Value for ${trimmed === '' ? 'the new secret' : trimmed}`}
                 value={draft.value}
-                plain={draft.plain === true}
+                plain={draft.sensitivity === 'plain'}
                 placeholder="Value"
                 disabled={disabled}
                 // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
@@ -2134,15 +2274,18 @@ function DraftRow({
                   name: draft.key,
                   renamable: true,
                   companion: draft.companion,
-                  // A generated value is a secret.
-                  onUse: ({ value, name, companion, recipe }) => onChange({ key: name, value, companion, recipe, plain: false }),
+                  // A generated value is never plain.
+                  onUse: ({ value, name, companion, recipe }) =>
+                    onChange({ key: name, value, companion, recipe, sensitivity: draft.sensitivity === 'plain' ? 'secret' : draft.sensitivity }),
                 }}
               />
               {!personal && (
-                <PlainToggle
-                  plain={draft.plain === true}
+                <SensitivityField
+                  name={trimmed === '' ? 'the new secret' : trimmed}
+                  value={draft.sensitivity}
                   disabled={disabled}
-                  onToggle={() => onChange({ plain: draft.plain !== true, companion: undefined, recipe: undefined })}
+                  // A value made plain is typed by hand: it drops the recipe of one generated.
+                  onChange={(sensitivity) => onChange(sensitivity === 'plain' ? { sensitivity, companion: undefined, recipe: undefined } : { sensitivity })}
                 />
               )}
               <CompanionNote companion={draft.companion} versionOf={versionOf} />
@@ -2380,6 +2523,12 @@ function VersionHistory({
                   <td className="cell-mono nowrap">
                     v{version.version}{' '}
                     {version.current && <span className="tag tag-blue">Current</span>}
+                    {version.sensitivity !== 'secret' && (
+                      <>
+                        {' '}
+                        <span className="tag" title={LEVELS[version.sensitivity].hint}>{LEVELS[version.sensitivity].label}</span>
+                      </>
+                    )}
                   </td>
                   <td className="nowrap">
                     <Timestamp iso={version.createdAt} />

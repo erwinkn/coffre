@@ -76,11 +76,10 @@ useMcp(
     await root.members.add(`user:${DEV}`);
     await root.projects.create('market');
     await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { DATABASE_URL: REAL, OTHER: 'x' });
+    await root.secrets.set('market/dev', { DATABASE_URL: { value: REAL, sensitivity: 'sensitive' }, OTHER: { value: 'x', sensitivity: 'sensitive' } });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
     handle = (await (await route('/api/handles', { method: 'POST', headers: { authorization: `Bearer ${await sessionFor(DEV)}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: ['market/dev'] }) })).json() as { token: string }).token;
   },
-  { people: 'stand-ins' },
 );
 
 /** The app's client, on the listener, the handle its password: what `coffre run` puts in DATABASE_URL. */
