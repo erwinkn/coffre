@@ -60,6 +60,13 @@ export type Credential = {
   inject: Inject;
   /** The key the app reads the upstream's address from, `SCHUMANN_BASE_URL`: `coffre run` sets it to this proxy's URL for the credential. */
   baseUrl?: string;
+  /**
+   * Keys the rule reads that are no secret, and that the app needs as they
+   * are: an account's id it puts in its URLs, Twilio's `TWILIO_SID` in
+   * `/Accounts/{sid}/Messages.json`. `coffre run` gives the app their
+   * values, each opened to `expose`, and the handle stands in for the rest.
+   */
+  identifiers?: readonly string[];
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. */
   methods?: readonly string[];
   /** The paths under `upstream` it may be used on, by prefix, `['/companies']`; any, unless set. */
@@ -181,10 +188,12 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     purpose: 'expose',
     logged: { plan: true },
     keys: (environment, rows) => {
-      const covered = new Set(covering(rows.map((row) => row.key)).flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]));
+      const using = covering(rows.map((row) => row.key));
+      const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
+      const covered = new Set(using.flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]));
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
       return rows
-        .filter((row) => !covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false)))
+        .filter((row) => identifiers.has(row.key) || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
         .map((row) => row.key);
     },
   });
@@ -195,6 +204,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     const at = `${coffre.publicUrl}/use/${path}/${credential.name}`;
     credentials[credential.name] = at;
     for (const key of credential.keys) {
+      if (credential.identifiers?.includes(key)) continue;
       env[key] = handle;
       covered.add(key);
     }
@@ -277,7 +287,9 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   }
   // What the request carried: each value, and what the rule made of them, Basic's base64, in each form an honest
   // upstream may echo it in (`echoed`).
-  const sent = [...Object.values(values), ...(inject.kind === 'basic' ? [headers.get('authorization')!.slice('Basic '.length)] : [])];
+  // As they went out, too: `Headers` trims a value's surrounding whitespace, and the query its own way.
+  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length) : target.searchParams.get(inject.name)!;
+  const sent = [...Object.values(values).flatMap((value) => [value, value.trim()]), injected];
   return redacted(upstream, sent.flatMap(echoed), at);
 }
 
@@ -494,6 +506,8 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   const keys = [...new Set(templates.flatMap((template) => [...template.matchAll(PLACEHOLDER)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);
   if (credential.baseUrl !== undefined && (!KEY.test(credential.baseUrl) || keys.includes(credential.baseUrl))) throw new Error(`credentialProxy: ${name}'s baseUrl is the key the app reads its address from, and none of its rule's`);
+  if (credential.identifiers?.some((key) => !keys.includes(key))) throw new Error(`credentialProxy: ${name}'s identifiers are keys its rule reads`);
+  if (credential.identifiers !== undefined && keys.every((key) => credential.identifiers!.includes(key))) throw new Error(`credentialProxy: ${name}'s rule needs a key that is no identifier, for the handle to stand in for`);
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
   return { ...credential, ...(methods === undefined ? {} : { methods }), name, base, keys };

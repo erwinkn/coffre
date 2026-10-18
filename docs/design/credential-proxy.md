@@ -89,7 +89,8 @@ credentialProxy({
     schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
     openai: { upstream: 'https://api.openai.com/v1', inject: header('authorization', 'Bearer {OPENAI_API_KEY}'), baseUrl: 'OPENAI_BASE_URL' },
     maps: { upstream: 'https://maps.googleapis.com/maps/api', inject: query('key', '{MAPS_API_KEY}'), methods: ['GET'] },
-    twilio: { upstream: 'https://api.twilio.com/2010-04-01', inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
+    // The account's id is in Twilio's paths, /Accounts/{sid}/Messages.json: an identifier, which the app holds as it is.
+    twilio: { upstream: 'https://api.twilio.com/2010-04-01', inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'], paths: ['/Accounts'] },
   },
   expose: { 'market/local': 'all', 'market/dev': ['STRIPE_WEBHOOK_SECRET'] },
 })
@@ -102,6 +103,9 @@ credentialProxy({
   goes to `<upstream>/<path>` and nowhere else.
 - A handle grants the use of every credential its environment holds, and
   each only to its own upstream.
+- `identifiers` names the keys a rule reads that are no secret and that
+  the app needs as they are (an account's id in its URLs). The plan gives
+  their values, opened to `expose`, and the handle stands in for the rest.
 
 **`expose`** names the few values an environment's apps may hold as they
 are, because they cannot be used through a proxy: a webhook's HMAC secret
@@ -224,7 +228,8 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    redirect anywhere else is a 502, naming no destination, so the app
    never follows it with the handle.
 6. **Redacted.** Every string the request carried, each value and
-   Basic's assembled base64, 8 characters or longer, is replaced by
+   Basic's assembled base64, as stored and as sent (`Headers` trims a
+   value's surrounding whitespace), 8 characters or longer, is replaced by
    `[redacted by coffre]` wherever an honest upstream may quote it back:
    in headers, the reason phrase, and a text body (JSON, XML, text, event
    streams), streamed. The forms are a closed list: as it is; URL-encoded

@@ -133,7 +133,8 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
     credentials: {
       schumann: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{SCHUMANN_API_KEY}'), baseUrl: 'SCHUMANN_BASE_URL' },
       maps: { upstream: `${upstreamUrl}/maps`, inject: query('key', '{MAPS_KEY}'), methods: ['GET'] },
-      twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
+      twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'], paths: ['/Accounts'] },
+      padded: { upstream: `${upstreamUrl}/padded`, inject: header('x-api-key', '{PADDED_KEY}') },
       quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
       prefixed: { upstream: `${upstreamUrl}/prefixed`, inject: basic('{P_USER}', '{P_PASS}') },
       accented: { upstream: `${upstreamUrl}/accented`, inject: header('x-api-key', '{ACCENT_KEY}') },
@@ -162,6 +163,7 @@ useMcp(
       TWILIO_TOKEN: 'twilio_real_token_0??0123456789',
       WEBHOOK_SECRET: WEBHOOK,
       QUOTED_KEY: QUOTED,
+      PADDED_KEY: `${KEY}\n`,
       P_USER,
       P_PASS,
       ACCENT_KEY,
@@ -390,8 +392,12 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(new URL(received.at(-1)!.url, 'http://x').searchParams.get('key'), 'maps+real/key=0123456789');
   assert.equal((await route(`/use/market/dev/maps/geocode?key=${handle}`, { method: 'POST' })).status, 405);
 
-  const basicAuth = `Basic ${btoa(`${handle}:${handle}`)}`;
-  const twilio = await route('/use/market/dev/twilio/Accounts/AC1/Messages.json', { method: 'POST', headers: { authorization: basicAuth, 'content-type': 'application/x-www-form-urlencoded' }, body: 'To=%2B33600000000&Body=hi' });
+  // Twilio as its client calls it, from the plan: the account's id in the path and as the user, the handle as the token.
+  const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string> };
+  assert.equal(plan.env.TWILIO_SID, 'AC0123456789', 'an identifier, as it is');
+  assert.equal(plan.env.TWILIO_TOKEN, handle);
+  const basicAuth = `Basic ${btoa(`${plan.env.TWILIO_SID}:${plan.env.TWILIO_TOKEN}`)}`;
+  const twilio = await route(`/use/market/dev/twilio/Accounts/${plan.env.TWILIO_SID}/Messages.json`, { method: 'POST', headers: { authorization: basicAuth, 'content-type': 'application/x-www-form-urlencoded' }, body: 'To=%2B33600000000&Body=hi' });
   assert.equal(twilio.status, 200);
   const sent = received.at(-1)!;
   assert.equal(sent.headers.authorization, `Basic ${btoa('AC0123456789:twilio_real_token_0??0123456789')}`);
@@ -409,6 +415,9 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(prefixed, 'user [redacted by coffre] password [redacted by coffre] end');
 
   // The encodings an honest upstream quotes a key in: XML's entities, Python's \u escapes, a reason phrase.
+  // A key Headers trims on the way out is redacted as it went out.
+  const padded = await (await route('/use/market/dev/padded/echo', { headers: { 'x-api-key': handle } })).text();
+  assert.equal(padded.includes(KEY), false, padded);
   const xml = await (await route('/use/market/dev/quoted/xml', { headers: { 'x-api-key': handle } })).text();
   assert.equal(xml, '<Error><Message>bad key [redacted by coffre]</Message></Error>');
   const python = await (await route('/use/market/dev/accented/python', { headers: { 'x-api-key': handle } })).text();
@@ -472,7 +481,8 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   const dev = await plan('market/dev');
   assert.equal(dev.env.WEBHOOK_SECRET, WEBHOOK, 'exposed by its exact path');
   assert.equal(dev.env.MAPS_KEY?.startsWith('coffre_use_'), true);
-  assert.equal(dev.env.TWILIO_SID?.startsWith('coffre_use_'), true);
+  assert.equal(dev.env.TWILIO_SID, 'AC0123456789', 'an identifier its credential names');
+  assert.equal(dev.env.TWILIO_TOKEN?.startsWith('coffre_use_'), true);
   assert.deepEqual(dev.left, ['DATABASE_URL'], 'neither proxied nor exposed: the app does without');
   assert.equal(JSON.stringify(dev).includes(KEY), false);
 
@@ -487,9 +497,10 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   assert.ok(mine.left.includes('WEBHOOK_SECRET'));
   assert.equal(mine.env.LOCAL_ONLY, 'x', "but its own values, which only its owner wrote, are its owner's app's");
 
-  // Each exposure is logged as the vault's read to expose, and the proxy's entry of it.
+  // Each exposure is logged as the vault's read to expose, one entry per environment it opens in: dev's webhook secret and
+  // Twilio's account id; the fork's id, read in dev; the personal config's own value, and the id from dev.
   const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
-  assert.equal(exposed.length, 2);
+  assert.equal(exposed.length, 4);
 });
 
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {
