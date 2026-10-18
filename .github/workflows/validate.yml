@@ -138,6 +138,27 @@ jobs:
         with:
           # The consumer script builds before packing; keep that single build.
           build: 'false'
+      # The packed client declares Node 20 and up: the consumer test loads and
+      # calls it on each Node named here (scripts/client-smoke.cjs). 24, the
+      # workspace's, goes last so that it is the Node the rest runs on.
+      - name: Install Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Name Node.js 20
+        run: echo "COFFRE_CLIENT_NODES=$(command -v node)" >> "$GITHUB_ENV"
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Name Node.js 22
+        run: echo "COFFRE_CLIENT_NODES=$COFFRE_CLIENT_NODES $(command -v node)" >> "$GITHUB_ENV"
+      - name: Install Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Name Node.js 24
+        run: echo "COFFRE_CLIENT_NODES=$COFFRE_CLIENT_NODES $(command -v node)" >> "$GITHUB_ENV"
       - name: Packed consumer
         run: pnpm test:consumer --kind ${{ matrix.kind }}
 

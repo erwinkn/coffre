@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`@coffre/client` runs on Node 20 and 22.** Its `engines` said Node 24,
+  which only the workspace's sources need; the published client is plain
+  JavaScript built for Node 20, with no dependency, so it now declares
+  `>=20`. From CommonJS, `require('@coffre/client')` works where Node
+  loads ES modules that way (20.19, 22.12 and later), `await import(…)`
+  anywhere. The packed consumer test loads and calls it on Node 20, 22
+  and 24, by `import` and by `require`.
+
 ## 0.8.1 (2026-10-18)
 
 - **Postgres through the credential proxy, on Node.** `credentialProxy({
