@@ -414,6 +414,38 @@ test("a group of sessions is checked once an interval, however many it holds, an
   assert.ok(Math.max(...times) - revoked < 350, `${Math.max(...times) - revoked} ms`);
 });
 
+test('a check the vault never answers is a no, by its deadline: the sessions do not outlive a stalled vault', postgresOnly, async () => {
+  const client = appClient();
+  client.on('error', () => undefined);
+  await client.connect();
+  const ended = new Promise<number>((resolve) => client.once('end', () => resolve(Date.now())));
+  const unwrap = deps.vault.unwrap;
+  deps.vault.unwrap = () => new Promise(() => undefined);
+  const stalled = Date.now();
+  try {
+    assert.ok((await ended) - stalled < 600, 'within an interval and a deadline');
+  } finally {
+    deps.vault.unwrap = unwrap;
+  }
+});
+
+test("a new group let in on a cached URL decides at once: a grant lost meanwhile ends it, not an interval later", postgresOnly, async () => {
+  const first = appClient();
+  await first.connect();
+  await first.end();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: null });
+  // The URL is still in the cache: the connection is let in, and its group's own first check ends it.
+  const second = appClient();
+  second.on('error', () => undefined);
+  const started = Date.now();
+  const outcome = await second.connect().then(
+    () => new Promise<number>((resolve) => second.once('end', () => resolve(Date.now()))),
+    () => Date.now(),
+  );
+  assert.ok(outcome - started < 150, `${outcome - started} ms`);
+});
+
 /** Revoke the suite's handle, as its person would. */
 async function revoke(): Promise<void> {
   const session = await sessionFor(DEV);

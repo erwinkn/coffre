@@ -193,7 +193,10 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 }
 
 /** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timer. */
-type Group = { ends: Set<() => void>; stands: boolean; checking: boolean; timer: ReturnType<typeof setInterval> };
+type Group = { ends: Set<() => void>; stands: boolean; checking: boolean; timer: ReturnType<typeof setInterval>; expiry: ReturnType<typeof setTimeout> };
+
+/** How long a group's check may take before it counts as a no: the vault has that long to answer. */
+const RECHECK_DEADLINE_MS = 10_000;
 
 type Proxy = {
   credentials: Map<string, Resolved>;
@@ -322,8 +325,9 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
   const path = `${place[0]}/${place[1]}`;
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
-  await coffre.handle(handle);
-  const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null);
+  const { expiresAt } = await coffre.handle(handle);
+  let fresh = false;
+  const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null, () => (fresh = true));
   let db: Database;
   try {
     db = database(values[tunnel.key]!);
@@ -343,7 +347,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
       connect,
       // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.
       stands: async () => (await coffre.handle(handle).then(() => true, () => false)) && (proxy.groups.get(key)?.stands ?? true),
-      watch: (end) => watch(coffre, proxy, key, { path, handle, name: place[2]!, key: tunnel.key }, end),
+      watch: (end) => watch(coffre, proxy, key, { path, handle, name: place[2]!, key: tunnel.key, expiresAt, fresh }, end),
     });
 }
 
@@ -354,27 +358,51 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
  * logged as a use; and the first answer that is no ends every one of them
  * at once. It lives as long as its sessions, and goes with the last.
  */
-function watch(coffre: PluginContext, proxy: Proxy, key: string, tunnel: { path: string; handle: string; name: string; key: string }, end: () => void): () => void {
+function watch(
+  coffre: PluginContext,
+  proxy: Proxy,
+  key: string,
+  /** `fresh`: the session was let in on the vault's answer just now, not the cache's. */
+  tunnel: { path: string; handle: string; name: string; key: string; expiresAt: string; fresh: boolean },
+  end: () => void,
+): () => void {
   let group = proxy.groups.get(key);
   if (group === undefined) {
-    const made: Group = { ends: new Set(), stands: true, checking: false, timer: setInterval(() => void recheck(made), proxy.recheckMs) };
+    const made: Group = {
+      ends: new Set(),
+      stands: true,
+      checking: false,
+      timer: setInterval(() => void recheck(made), proxy.recheckMs),
+      // The handle's end, whatever any check is doing: the sessions end with it.
+      expiry: setTimeout(() => close(made), Math.max(0, Date.parse(tunnel.expiresAt) - Date.now())),
+    };
+    /** The sessions end, and the URL the values' cache holds goes with them, so no new one is let in on it. */
+    const close = (closing: Group) => {
+      closing.stands = false;
+      proxy.cache.delete(key);
+      for (const ending of [...closing.ends]) ending();
+    };
     const recheck = async (checked: Group) => {
-      // One check at a time for the group, however many sessions it holds.
+      // One check at a time for the group, however many sessions it holds; one that has not answered in time is a no.
       if (checked.checking) return;
       checked.checking = true;
-      const stands = await coffre.use(tunnel.handle, { path: tunnel.path, keys: [tunnel.key], purpose: 'use', logged: { credential: tunnel.name, tunnel: true, recheck: true } }).then(
-        (used) => Object.hasOwn(used.values, tunnel.key),
-        () => false,
-      );
+      let late: ReturnType<typeof setTimeout> | undefined;
+      const stands = await Promise.race([
+        coffre.use(tunnel.handle, { path: tunnel.path, keys: [tunnel.key], purpose: 'use', logged: { credential: tunnel.name, tunnel: true, recheck: true } }).then(
+          (used) => Object.hasOwn(used.values, tunnel.key),
+          () => false,
+        ),
+        new Promise<boolean>((resolve) => (late = setTimeout(() => resolve(false), Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS)))),
+      ]);
+      clearTimeout(late);
       checked.checking = false;
       checked.stands = stands;
-      if (stands) return;
-      // No: the sessions end, and the URL the values' cache holds goes with them, so no new one is let in on it.
-      proxy.cache.delete(key);
-      for (const ending of [...checked.ends]) ending();
+      if (!stands) close(checked);
     };
     group = made;
     proxy.groups.set(key, group);
+    // A new group let in on the cache's URL decides now, through the vault: its first interval starts from an answer of its own.
+    if (!tunnel.fresh) void recheck(made);
   }
   const mine = group;
   mine.ends.add(end);
@@ -382,6 +410,7 @@ function watch(coffre: PluginContext, proxy: Proxy, key: string, tunnel: { path:
     mine.ends.delete(end);
     if (mine.ends.size > 0) return;
     clearInterval(mine.timer);
+    clearTimeout(mine.expiry);
     if (proxy.groups.get(key) === mine) proxy.groups.delete(key);
   };
 }
@@ -545,6 +574,8 @@ async function valuesFor(
   path: string,
   credential: { name: string; keys: readonly string[] },
   host: string | null,
+  /** Told when the vault decided now, not the cache. */
+  decided?: () => void,
 ): Promise<Record<string, string>> {
   const key = `${handle}\u0000${path}\u0000${credential.name}`;
   const now = Date.now();
@@ -553,6 +584,7 @@ async function valuesFor(
   const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
+  decided?.();
   if (proxy.cacheMs > 0) {
     // A handful of handles in a dev loop: past a thousand, the oldest go.
     if (proxy.cache.size >= 1000) for (const [old, entry] of proxy.cache) if (entry.until <= now || proxy.cache.size >= 1000) proxy.cache.delete(old);

@@ -389,7 +389,12 @@ SCRAM. A pool pays that once per connection.
 and tunnel are one group, with one timer: every `recheckSeconds` (60 unless
 set) it opens the database's URL again, as the vault decides it, for all of
 them at once, logged as a use. Ten pooled connections cost one read a
-minute, not ten. The group lives as long as its sessions. So a revoked handle
+minute, not ten. A check the vault has not answered within ten seconds
+(or the interval, if shorter) is a no, so a stalled vault ends the
+sessions rather than freeing them. The handle's end ends them too, on a
+timer of its own. A new group whose first session came in on a cached URL
+checks at once, so the interval always starts from the vault's own
+answer. The group lives as long as its sessions. So a revoked handle
 and a person's lost grant each end the sessions, within the minute: the
 first check that fails ends every session of that handle and tunnel at
 once, both sockets of each close, and the app's driver sees its
