@@ -225,16 +225,22 @@ up. `left` lists what the app does without, and `coffre run` prints it.
    never follows it with the handle.
 6. **Redacted.** Every string the request carried, each value and
    Basic's assembled base64, 8 characters or longer, is replaced by
-   `[redacted by coffre]` in each form an honest upstream may echo it in:
-   as it is, URL-encoded both ways, and as a JSON string as JavaScript, Go
-   (`\u003c`) and PHP (`\/`) write one. That covers headers and a text
-   body (JSON, XML, text, event streams), streamed. Matches are leftmost,
-   then longest, and a part is let through only once no longer value
-   could still match across the next chunk, so a password that begins
-   with the user name is caught whole. No surrogate pair is cut. A binary
-   body passes as it is. This guards against an echo, an error message
-   quoting the request, not against a hostile upstream, which holds the
-   key anyway.
+   `[redacted by coffre]` wherever an honest upstream may quote it back:
+   in headers, the reason phrase, and a text body (JSON, XML, text, event
+   streams), streamed. The forms are a closed list: as it is; URL-encoded
+   both ways; HTML's and XML's entities; and as a JSON string as
+   JavaScript, Go (`\u003c`), PHP (`\/`) and Python (`\u00e9`) write one.
+   Each form is matched as the bytes it travels as, UTF-8 or Latin-1, on
+   the body's bytes, so a body in any charset passes byte for byte.
+   Matches are leftmost, then longest, and a part is let through only once
+   no longer value could still match across the next chunk, so the output
+   is what redacting the whole body at once would give. A binary body
+   passes as it is. This guards against an echo, an error message quoting
+   the request, not against a hostile upstream, which holds the key anyway
+   and could encode it in any way at all. Nor does it cover an encoding
+   off the list (base64 of a single value, UTF-16 bodies): the guarantee
+   coffre makes is that it never hands a value to the app, and redaction
+   is a second line against the upstream doing it.
 
 coffre's own refusals carry `coffre-proxy: refused`, so the app can tell
 them from the upstream's.

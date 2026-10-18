@@ -24,6 +24,9 @@ import { vaultKv } from '../src/plugins/vault-kv.ts';
 
 const KEY = 'sk_schumann_real_0123456789abcdef';
 const WEBHOOK = 'whsec_local_only_0123456789';
+/** A key with a Latin-1 letter, and a password with one past Latin-1. */
+const ACCENT_KEY = 'clé-0123456789';
+const U_PASS = 'pāssword-0123456789';
 /** A user name the password begins with. */
 const P_USER = 'acct_one';
 const P_PASS = 'acct_one_unknownabcdefgh0123456789';
@@ -41,13 +44,33 @@ before(async () => {
     request.on('data', (chunk: Buffer) => (body += chunk.toString()));
     request.on('end', () => {
       received.push({ method: request.method!, url: request.url!, headers: request.headers, body });
-      if (request.headers['x-api-key'] !== KEY && request.headers['x-api-key'] !== QUOTED && request.headers.authorization === undefined && !request.url!.includes('key=')) {
+      if (![KEY, QUOTED, ACCENT_KEY].includes(String(request.headers['x-api-key'])) && request.headers.authorization === undefined && !request.url!.includes('key=')) {
         response.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"bad key"}');
         return;
       }
       if (request.url!.includes('/echo')) {
         response.writeHead(200, { 'content-type': 'application/json', 'x-echo': String(request.headers['x-api-key']), 'set-cookie': 'upstream=1' });
         response.end(JSON.stringify({ youSent: request.headers['x-api-key'], authorization: request.headers.authorization, url: request.url }));
+        return;
+      }
+      const key = String(request.headers['x-api-key']);
+      if (request.url!.includes('/xml')) {
+        // An XML error quoting the key, entities and all.
+        const escaped = key.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        response.writeHead(400, { 'content-type': 'application/xml' }).end(`<Error><Message>bad key ${escaped}</Message></Error>`);
+        return;
+      }
+      if (request.url!.includes('/python')) {
+        // As Python's json.dumps writes it: every non-ASCII character escaped.
+        response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ key }).replace(/[\u0080-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`));
+        return;
+      }
+      if (request.url!.includes('/reason')) {
+        response.writeHead(401, `Invalid API key ${key}`, { 'content-type': 'text/plain' }).end('no');
+        return;
+      }
+      if (request.url!.includes('/latin1')) {
+        response.writeHead(200, { 'content-type': 'text/csv; charset=iso-8859-1' }).end(Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2c, 0xff, 0x0a]));
         return;
       }
       if (request.url!.includes('/echo-escaped')) {
@@ -108,6 +131,8 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
       quoted: { upstream: `${upstreamUrl}/quoted`, inject: header('x-api-key', '{QUOTED_KEY}') },
       prefixed: { upstream: `${upstreamUrl}/prefixed`, inject: basic('{P_USER}', '{P_PASS}') },
+      accented: { upstream: `${upstreamUrl}/accented`, inject: header('x-api-key', '{ACCENT_KEY}') },
+      ubasic: { upstream: `${upstreamUrl}/ubasic`, inject: basic('{TWILIO_SID}', '{U_PASS}') },
     },
     expose: { 'market/dev': ['WEBHOOK_SECRET'] },
     insecureUpstreams: true,
@@ -134,6 +159,8 @@ useMcp(
       QUOTED_KEY: QUOTED,
       P_USER,
       P_PASS,
+      ACCENT_KEY,
+      U_PASS,
       DATABASE_URL: 'postgres://dev-db/market',
     });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
@@ -375,6 +402,19 @@ test('query and Basic credentials, with their methods and paths', async () => {
   // A password that begins with the user name, split right after it: neither shows, nor any of the rest.
   const prefixed = await (await route('/use/market/dev/prefixed/split', { headers: { authorization: `Basic ${btoa(`${handle}:${handle}`)}` } })).text();
   assert.equal(prefixed, 'user [redacted by coffre] password [redacted by coffre] end');
+
+  // The encodings an honest upstream quotes a key in: XML's entities, Python's \u escapes, a reason phrase.
+  const xml = await (await route('/use/market/dev/quoted/xml', { headers: { 'x-api-key': handle } })).text();
+  assert.equal(xml, '<Error><Message>bad key [redacted by coffre]</Message></Error>');
+  const python = await (await route('/use/market/dev/accented/python', { headers: { 'x-api-key': handle } })).text();
+  assert.equal(python, '{"key":"[redacted by coffre]"}');
+  const reason = await route('/use/market/dev/schumann/reason', { headers: { 'x-api-key': handle } });
+  assert.equal(reason.statusText.includes(KEY), false, reason.statusText);
+  // A body in another charset passes byte for byte.
+  assert.deepEqual([...new Uint8Array(await (await route('/use/market/dev/schumann/latin1', { headers: { 'x-api-key': handle } })).arrayBuffer())], [0x63, 0x61, 0x66, 0xe9, 0x2c, 0xff, 0x0a]);
+  // Basic takes a password past Latin-1, as UTF-8.
+  assert.equal((await route('/use/market/dev/ubasic/Accounts', { headers: { authorization: basicAuth } })).status, 200);
+  assert.equal(received.at(-1)!.headers.authorization, `Basic ${Buffer.from(`AC0123456789:${U_PASS}`).toString('base64')}`);
 
   // A redirect under the upstream that keeps the key's parameter keeps the handle there, for an unchanged client to follow.
   const moved = await route(`/use/market/dev/maps/geocode/redirect?address=paris&key=${handle}`);

@@ -241,7 +241,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   }
   const inject = credential.inject;
   if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
-  if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(`${render(inject.user, values)}:${render(inject.password, values)}`)}`);
+  if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
   if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
   const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await boundedBody(request);
   if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB`);
@@ -282,16 +282,35 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
 }
 
 /**
- * The forms a string takes when an upstream echoes it: as it is,
- * URL-encoded both ways, and as a JSON string, as JavaScript writes one, as
- * Go's does (escaping <, > and &) and as PHP's does (escaping /). An echo,
- * an error quoting the request, not a hostile upstream, which holds the
- * key anyway.
+ * The forms a string takes when an honest upstream quotes it back, in an
+ * echo or an error message: as it is; URL-encoded both ways; HTML's and
+ * XML's entities; and as a JSON string, as JavaScript writes one, as Go's
+ * does (escaping <, > and &), as PHP's does (escaping /), and as Python's
+ * does (every non-ASCII character as \uXXXX). This is the whole list
+ * (docs/design/credential-proxy.md, section 4): a hostile upstream holds
+ * the key anyway, and could encode it in any way at all.
  */
 function echoed(value: string): string[] {
-  const json = JSON.stringify(value).slice(1, -1);
-  const go = json.replace(/[<>&]/g, (char) => `\\u00${char.charCodeAt(0).toString(16)}`);
-  return [value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2), json, go, json.replaceAll('/', '\\/'), go.replaceAll('/', '\\/')];
+  const js = JSON.stringify(value).slice(1, -1);
+  const go = js.replace(/[<>&]/g, (char) => `\\u00${char.charCodeAt(0).toString(16)}`);
+  const python = js.replace(/[\u0080-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  const entities = (text: string, quote: string) => text.replace(/[&<>"']/g, (char) => (char === "'" ? quote : `&${{ '&': 'amp', '<': 'lt', '>': 'gt', '"': 'quot' }[char]};`));
+  return [
+    value,
+    encodeURIComponent(value),
+    new URLSearchParams({ v: value }).toString().slice(2),
+    entities(value, '&#39;'),
+    entities(value, '&apos;'),
+    entities(value, '&#x27;'),
+    ...[js, go, python].flatMap((json) => [json, json.replaceAll('/', '\\/')]),
+  ];
+}
+
+/** Bytes as a string of one character each, U+0000 to U+00FF: what the redaction scans, in any charset. */
+function binary(bytes: Uint8Array): string {
+  let text = '';
+  for (let at = 0; at < bytes.length; at += 8192) text += String.fromCharCode(...bytes.subarray(at, at + 8192));
+  return text;
 }
 
 /** Whether a header's value carries a handle: as it is, or inside Basic authentication's base64. */
@@ -387,14 +406,20 @@ function render(template: string, values: Record<string, string>): string {
 
 /**
  * The upstream's answer, with each value the request carried replaced
- * wherever it shows: in headers, and in a text body, streamed, holding back
- * what a longer value could still complete, so that one split across
- * chunks, or one that begins another, is caught too. A binary body passes as it is. Cookies stay with the upstream: one
+ * wherever it shows: in headers, the reason phrase and a text body,
+ * streamed, as bytes, holding back what a longer value could still
+ * complete, so that one split across chunks, or one that begins another,
+ * is caught too. A binary body passes as it is. Cookies stay with the upstream: one
  * set on coffre's origin could stand in for coffre's own. `location`, a
  * redirect's, is already the proxy's own URL for it.
  */
 function redacted(upstream: Response, values: string[], location: string | null): Response {
-  const secrets = [...new Set(values)].filter((value) => value.length >= MIN_REDACTED).sort((a, b) => b.length - a.length);
+  // Each form as the bytes an answer carries it in, UTF-8 or Latin-1, scanned as binary strings: lossless in any charset.
+  const forms = values.filter((value) => value.length >= MIN_REDACTED).flatMap((value) => {
+    const utf8 = binary(new TextEncoder().encode(value));
+    return /^[\u0000-\u00ff]*$/.test(value) && value !== utf8 ? [utf8, value] : [utf8];
+  });
+  const secrets = [...new Set(forms)].sort((a, b) => b.length - a.length);
   // Leftmost, then longest: a value that begins another is replaced only once the longer one cannot match there.
   const pattern = secrets.length === 0 ? null : new RegExp(secrets.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
   const longest = secrets[0]?.length ?? 0;
@@ -414,12 +439,11 @@ function redacted(upstream: Response, values: string[], location: string | null)
       done += text.slice(from, match.index) + REDACTED;
       from = match.index + match[0].length;
     }
-    // Nothing more matches before `settled`: up to it is done, never cutting a surrogate pair.
-    let cut = Math.max(from, settled);
-    if (!final && cut > from && cut < text.length && /[\uD800-\uDBFF]/.test(text[cut - 1]!)) cut -= 1;
+    const cut = Math.max(from, settled);
     return { done: done + text.slice(from, cut), rest: text.slice(cut) };
   };
-  const whole = (text: string) => scrub(text, true).done;
+  // A header's value, and the reason phrase, as the bytes they are sent as.
+  const whole = (text: string) => new TextDecoder().decode(Uint8Array.from(scrub(binary(new TextEncoder().encode(text)), true).done, (char) => char.charCodeAt(0)));
   const headers = new Headers();
   for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, whole(value));
   if (location !== null) headers.set('location', whole(location));
@@ -430,26 +454,26 @@ function redacted(upstream: Response, values: string[], location: string | null)
   // with no cookie of coffre's, and `setSecurityHeaders` keeps a policy that only narrows.
   headers.set('content-security-policy', "sandbox; default-src 'none'; frame-ancestors 'none'");
   headers.set('x-content-type-options', 'nosniff');
+  const init = { status: upstream.status, statusText: whole(upstream.statusText), headers };
   const type = upstream.headers.get('content-type') ?? '';
   const text = /^text\/|json|xml|javascript|x-www-form-urlencoded|event-stream/i.test(type);
-  if (upstream.body === null || !text || pattern === null) return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
+  if (upstream.body === null || !text || pattern === null) return new Response(upstream.body, init);
   let carry = '';
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
+  const bytes = (part: string) => Uint8Array.from(part, (char) => char.charCodeAt(0));
   const body = upstream.body.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, out) {
-        const { done, rest } = scrub(carry + decoder.decode(chunk, { stream: true }), false);
+        const { done, rest } = scrub(carry + binary(chunk), false);
         carry = rest;
-        if (done.length > 0) out.enqueue(encoder.encode(done));
+        if (done.length > 0) out.enqueue(bytes(done));
       },
       flush(out) {
-        const last = whole(carry + decoder.decode());
-        if (last.length > 0) out.enqueue(encoder.encode(last));
+        const last = scrub(carry, true).done;
+        if (last.length > 0) out.enqueue(bytes(last));
       },
     }),
   );
-  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
+  return new Response(body, init);
 }
 
 function resolve(name: string, credential: Credential, insecure: boolean): Resolved {
