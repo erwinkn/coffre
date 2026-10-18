@@ -58,8 +58,9 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 for workspace source, not just an `engines` field: the CLI, dev IdP, migrations, and the
 `node --test` suite all execute TypeScript source (`*.ts`) directly with plain `node`,
 which relies on native type-stripping (default only in Node 23.6+/24). The
-published CLI is bundled JavaScript targeting Node 20 and runs on Node >= 20;
-this does not relax the workspace's or deployments' Node 24 requirement.
+published CLI is bundled JavaScript targeting Node 20 and runs on Node >= 20, as
+does the published client (built for Node 20, no dependency); this does not relax the
+workspace's or deployments' Node 24 requirement.
 `pnpm install` itself is version-agnostic.
 
 **Database.** Postgres runs in Docker via `docker compose` on **:55432** (owner
@@ -105,7 +106,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`). Don't add another to a package or the
+`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
@@ -204,7 +205,10 @@ unsupported diff select full validation.
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
-  builds and runs conformance on each. It needs network for third-party packages.
+  builds and runs conformance on each. It also loads and calls the packed
+  client, which declares Node >= 20, with each Node `COFFRE_CLIENT_NODES`
+  lists (`scripts/client-smoke.cjs`; the current one when unset; CI names 20,
+  22 and 24). It needs network for third-party packages.
 - `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, with
   TLC (`docs/formal.md`): every scenario must hold, and each again without one
   of the code's protections must fail. It needs Java 11+, and downloads TLC's

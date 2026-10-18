@@ -8,6 +8,10 @@
 #   pnpm test:consumer [--kind workers|node] [<dir>]
 # <dir> defaults to a new temporary one. Without --kind, exercise both kinds.
 #
+# The packed client also loads and calls on every Node it declares, 20 and up,
+# as COFFRE_CLIENT_NODES lists them (Node binaries, space-separated; the
+# current `node` when unset). CI names 20, 22 and 24.
+#
 # Temporary directories are removed on success and kept on failure. An explicit
 # directory is always kept.
 #
@@ -53,7 +57,7 @@ finish() {
 }
 trap finish EXIT
 
-rm -rf "$work/tarballs" "$work/cli" "$work/coffre-workers" "$work/coffre-node"
+rm -rf "$work/tarballs" "$work/cli" "$work/client" "$work/coffre-workers" "$work/coffre-node"
 
 # The Workers deployment runs on the local Postgres, in a database the
 # conformance run makes and drops; the logins it runs as must exist.
@@ -100,6 +104,17 @@ done
 # What setup sets on GitHub, sealed by the libsodium the CLI bundles.
 node --conditions=coffre:source "$root/packages/cli/test/sealed.ts" "$work/cli/package/dist/deploy-on-push.js"
 echo "    sealed a secret GitHub opens"
+
+# The client has no dependency, so its tarball unpacked under node_modules is
+# an install. `engines` says it runs from Node 20; each Node named loads it by
+# `import` and by `require`, as a CommonJS app does, and calls an instance.
+echo '==> @coffre/client, packed'
+mkdir -p "$work/client/node_modules/@coffre/client"
+tar -xzf "$work"/tarballs/coffre-client-*.tgz --strip-components=1 -C "$work/client/node_modules/@coffre/client"
+cp "$root/scripts/client-smoke.cjs" "$work/client/"
+for node in ${COFFRE_CLIENT_NODES:-node}; do
+    (cd "$work/client" && "$node" client-smoke.cjs)
+done
 
 for kind in "${kinds[@]}"; do
     project="$work/coffre-$kind"
