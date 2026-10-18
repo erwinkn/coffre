@@ -396,3 +396,46 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
   assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
   assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);
 });
+
+test("a person's run carries each tunnel's connections to coffre, with the handle, on a listener of its own", async (t) => {
+  const { WebSocketServer } = await import('ws');
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pat = `coffre_pat_${'p'.repeat(43)}`;
+  const handle = `coffre_use_${'t'.repeat(43)}`;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/use') return send(200, { proxy: 'coffre', credentials: [] });
+    if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: {} });
+    if (req.url === '/use/market/dev') return send(200, { environment: 'market/dev', env: {}, credentials: {}, tunnels: { db: { key: 'DATABASE_URL', url: `ws://${req.headers.host}/use/market/dev/db` } }, left: [] });
+    send(404, { error: 'not_found', message: req.url });
+  });
+  // coffre's end of the tunnel: the handle checked, each byte echoed back with what it saw.
+  const sockets = new WebSocketServer({ noServer: true });
+  const asked: string[] = [];
+  server.on('upgrade', (req, socket, head) => {
+    asked.push(`${req.url} ${req.headers.authorization}`);
+    sockets.handleUpgrade(req, socket, head, (ws) => ws.on('message', (data: Buffer) => ws.send(Buffer.concat([Buffer.from('echo:'), data]))));
+  });
+  t.after(() => new Promise<void>((resolve) => (sockets.close(), server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  signedInWithToken(home, `http://127.0.0.1:${port}`, pat);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  // The app: connects to DATABASE_URL's host and port, sends a byte string, prints the URL and what came back.
+  const app = `const u = new URL(process.env.DATABASE_URL); const s = require('node:net').connect(Number(u.port), u.hostname, () => s.write('ping')); s.on('data', (d) => { console.log(JSON.stringify({ url: process.env.DATABASE_URL, got: String(d) })); s.destroy(); });`;
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/dev', '--', process.execPath, '-e', app], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stderr);
+  const { url, got } = JSON.parse(stdout) as { url: string; got: string };
+  assert.match(url, new RegExp(`^postgres://app:${handle}@127\\.0\\.0\\.1:\\d+/app\\?sslmode=disable$`));
+  assert.equal(got, 'echo:ping');
+  assert.deepEqual(asked, [`/use/market/dev/db Bearer ${handle}`]);
+  assert.match(stderr, /DATABASE_URL through a tunnel to its database/);
+});

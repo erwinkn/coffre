@@ -25,8 +25,30 @@ export type CoffrePlugin = {
    * the method. The deployment's app routes them to coffre with a file
    * route of their own, `routes/v1.$.ts` (`plugin`, in `@coffre/server/routes`).
    */
-  routes?: { prefix: string; fetch: (request: Request, coffre: PluginContext) => Promise<Response> };
+  routes?: {
+    prefix: string;
+    fetch: (request: Request, coffre: PluginContext) => Promise<Response>;
+    /**
+     * A WebSocket asked for under `prefix`: a refusal, or what carries the
+     * connection's bytes once it is open (`SocketSession`). On Node, the
+     * server's `upgrade` events reach it (`createCoffre(…).upgrade`); not on
+     * Workers yet.
+     */
+    socket?: (request: Request, coffre: PluginContext) => Promise<Response | SocketSession>;
+  };
 };
+
+/** A connection's bytes both ways: a WebSocket's, a TCP socket's. */
+export type Pipe = { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array>; close(): void };
+
+/** An outbound TCP connection, which can turn to TLS once the protocol on it says it will. */
+export type Socket = Pipe & { startTls(servername: string): Promise<Pipe> };
+
+/** TCP out, as the platform opens it. */
+export type Connect = (host: string, port: number) => Promise<Socket>;
+
+/** What runs a plugin's WebSocket once it is open: its bytes, and TCP out. Ends when the connection does. */
+export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;
 
 /** What a plugin's route answers with: where coffre is, and its API as a credential's holder. */
 export type PluginContext = {
@@ -65,6 +87,8 @@ export type PluginContext = {
    * refusal throws a `CoffreError`.
    */
   use(handle: string, asked: UseAsked): Promise<Used>;
+  /** Whether `handle` still stands, opening nothing and logging nothing: when it ends. A refusal throws a `CoffreError`. */
+  handle(handle: string): Promise<{ expiresAt: string }>;
 };
 
 /**
@@ -105,9 +129,22 @@ export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffreP
 
 /** The plugin's answer to a request under its prefix; null when no plugin takes the path. */
 export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> | null {
+  const routes = routesFor(request, runtime);
+  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, sourceIp));
+}
+
+/** A plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
+export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
+  const routes = routesFor(request, runtime);
+  return routes?.socket === undefined ? null : routes.socket(request, pluginContext(request, runtime, sourceIp));
+}
+
+function routesFor(request: Request, runtime: CoffreRuntime) {
   const { pathname } = new URL(request.url);
-  const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
-  if (routes === undefined) return null;
+  return runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
+}
+
+function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null): PluginContext {
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
   // One of coffre's own routes outside the API's, in process: its answer, or its refusal as the client throws one.
@@ -116,16 +153,20 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
     if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
     return body;
   };
-  return routes.fetch(request, {
+  const proxyHandle = async (handle: string): Promise<AuthenticatedIdentity> => {
+    const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true });
+    if (identity instanceof Response) await answer(identity);
+    return identity as AuthenticatedIdentity;
+  };
+  return {
     publicUrl: runtime.publicUrl,
+    handle: async (handle) => ({ expiresAt: (await proxyHandle(handle)).credentialExpiresAt! }),
     exchange: async (asked) => (await answer(await exchangeWorkloadToken(request, runtime, sourceIp, asked))) as { token: string; expiresAt: string },
     signOut: async (token) => {
       await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));
     },
     use: async (handle, asked) => {
-      const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true });
-      if (identity instanceof Response) await answer(identity);
-      const caller = identity as AuthenticatedIdentity;
+      const caller = await proxyHandle(handle);
       try {
         if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
         const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), asked);
@@ -153,5 +194,5 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
           }),
       });
     },
-  });
+  };
 }

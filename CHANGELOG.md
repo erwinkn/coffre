@@ -28,8 +28,15 @@
     the handle, at the proxy's endpoint (`AWS_ENDPOINT_URL_S3`,
     `forcePathStyle`), and coffre signs again with the real key pair.
     aws-chunked uploads and presigned URLs are refused, for now.
-  - The design, its decisions and what comes next (the Postgres tunnel)
-    are in docs/design/credential-proxy.md. Migration
+  - Postgres through a tunnel, on Node: `tunnels: { db: postgres('DATABASE_URL') }`.
+    `coffre run` starts a local listener, and the app's `DATABASE_URL`
+    is it, with the handle as the password. coffre logs in to the real
+    database with the real one (SCRAM), then pipes bytes: queries, COPY,
+    LISTEN/NOTIFY, cancel requests. A revoked handle ends open sessions
+    within a minute. The deployment's server hands its upgrades to
+    `coffre.upgrade(…)`.
+  - The design, its decisions and what comes next (the tunnel on Workers,
+    Redis) are in docs/design/credential-proxy.md. Migration
     `0009_handles` widens a check, and nothing else.
 
 ## 0.7.0 (2026-10-17)

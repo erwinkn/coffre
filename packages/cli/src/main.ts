@@ -23,6 +23,7 @@ import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
 import { clash, environmentPaths, listOf } from './environments.ts';
+import { listen, type Tunnel } from './tunnels.ts';
 import * as manage from './manage.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
@@ -1032,7 +1033,7 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
 }
 
 /** What a person's app gets through the credential proxy (`standIns`): its environment, and what the proxy left out. */
-type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string };
+type StandIns = { env: Record<string, string>; left: string[]; credentials: string[]; exposed: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string };
 
 /**
  * Stand-ins for the environments named, where the instance has the
@@ -1049,14 +1050,15 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
   // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   const handle = await client(to).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
-  const plans: [string, { env: Record<string, string>; credentials: Record<string, string>; left: string[] }][] = [];
+  const plans: [string, { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[] }][] = [];
   for (const path of paths) {
     const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });
     const body = (await response.json().catch(() => ({}))) as { message?: string };
     if (!response.ok) fail(`${path}: ${body.message ?? `the credential proxy answered ${response.status}`}`);
     plans.push([path, body as (typeof plans)[number][1]]);
   }
-  const shared = clash(plans.map(([path, plan]) => [path, [...Object.keys(plan.env), ...plan.left]]));
+  const tunnelsOf = (plan: (typeof plans)[number][1]) => Object.values(plan.tunnels ?? {});
+  const shared = clash(plans.map(([path, plan]) => [path, [...Object.keys(plan.env), ...tunnelsOf(plan).map((tunnel) => tunnel.key), ...plan.left]]));
   if (shared !== null) fail(`${shared}: a key comes from one environment only`);
   // Merged as entries: a variable may be named __proto__, which assigning into an object would drop.
   const credentials = Object.fromEntries(plans.flatMap(([, plan]) => Object.entries(plan.credentials)));
@@ -1068,6 +1070,8 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
     credentials: Object.keys(credentials).sort(),
     exposed: Object.keys(env).filter((key) => env[key] !== handle.token && !Object.values(credentials).includes(env[key]!)).sort(),
     expiresAt: handle.expiresAt,
+    tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
+    handle: handle.token,
   };
 }
 
@@ -1086,6 +1090,7 @@ function sayStandIns(stood: StandIns, paths: readonly string[], to: Target): voi
   const lines = [
     `coffre: stand-ins for ${listOf(paths)}: ${stood.credentials.length === 0 ? 'no credential the proxy covers' : `${stood.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(stood.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
     ...(stood.exposed.length === 0 ? [] : [`coffre: exposed as they are, by the deployment: ${stood.exposed.join(', ')}`]),
+    ...(stood.tunnels.length === 0 ? [] : [`coffre: ${stood.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
     ...(stood.left.length === 0 ? [] : [`coffre: left out, neither proxied nor exposed: ${stood.left.join(', ')}`]),
   ];
   process.stderr.write(`${lines.join('\n')}\n`);
@@ -1117,6 +1122,8 @@ async function run(args: string[]): Promise<void> {
   const stood = await standIns(paths);
   if (stood !== null) sayStandIns(stood, paths, target());
   const values = stood?.env ?? Object.fromEntries(await readOrEnd(paths));
+  // Each database the app reaches through a tunnel: a listener of this run's, for as long as its command runs.
+  for (const tunnel of stood?.tunnels ?? []) values[tunnel.key] = (await listen(tunnel, stood!.handle).catch((error: unknown) => fail((error as Error).message))).url;
   // The shell's own variables win, if asked: one that is set, empty or not, is kept, and coffre's value for it dropped (it was read, and the read is audited).
   const kept = flags['keep-existing'] ? Object.keys(values).filter((key) => Object.hasOwn(process.env, key)) : [];
   for (const key of kept) delete values[key];
@@ -1193,6 +1200,9 @@ async function exportEnv(args: string[]): Promise<void> {
   // GitHub's environment is a CI run's, which a service account signs in for.
   const stood = format === 'github' ? null : await standIns(paths);
   if (stood !== null) sayStandIns(stood, paths, target());
+  if (stood !== null && stood.tunnels.length > 0) {
+    process.stderr.write(`coffre: left out of the export: ${stood.tunnels.map((tunnel) => tunnel.key).join(', ')}, whose tunnel lives only as long as \`coffre run\`\n`);
+  }
   const entries = byKey(stood === null ? await readOrEnd(paths) : Object.entries(stood.env));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the

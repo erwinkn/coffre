@@ -31,7 +31,8 @@
  */
 import { CoffreError } from '@coffre/client';
 
-import type { CoffrePlugin, PluginContext } from '../plugins.ts';
+import type { CoffrePlugin, PluginContext, SocketSession } from '../plugins.ts';
+import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { signV4 } from './sigv4.ts';
 
 /** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
@@ -96,9 +97,27 @@ export type Credential = {
   paths?: readonly string[];
 };
 
+/** A database the proxy tunnels to: the key that holds its URL, and the hosts that URL may name. */
+export type Tunnel = { kind: 'postgres'; key: string; hosts?: readonly string[] };
+
+/**
+ * A Postgres database, reached through `coffre run`'s local listener and
+ * coffre's tunnel: `postgres('DATABASE_URL', { hosts: ['db.acme.example'] })`.
+ * The environment's `DATABASE_URL` is the real one, `postgres://…`, which
+ * coffre logs in with; the app's is the listener's, with the handle as its
+ * password. `hosts`, when set, are the only ones the URL may name.
+ */
+export function postgres(key: string, options: { hosts?: readonly string[] } = {}): Tunnel {
+  return { kind: 'postgres', key, ...options };
+}
+
 export type CredentialProxyOptions = {
   /** By name, as the proxy's URLs say it: lowercase letters, digits and dashes. */
   credentials: Record<string, Credential>;
+  /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL') }`. */
+  tunnels?: Record<string, Tunnel>;
+  /** How often an open tunnel checks its handle still stands, ending when it does not: 60 seconds unless set. */
+  recheckSeconds?: number;
   /**
    * The values an environment's apps may hold as they are, by the exact
    * path of the environment a read resolves to: `{ 'market/local': 'all',
@@ -141,6 +160,9 @@ type Resolved = Credential & { name: string; base: URL; keys: string[] };
 export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const credentials = new Map(Object.entries(options.credentials).map(([name, credential]) => [name, resolve(name, credential, options.insecureUpstreams === true)]));
   const expose = checkExpose(options.expose ?? {});
+  const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
+  const recheckMs = (options.recheckSeconds ?? 60) * 1000;
+  if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
@@ -151,7 +173,15 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, expose, cacheMs, cache });
+          return await serve(request, coffre, { credentials, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+        } catch (error) {
+          if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
+          throw error;
+        }
+      },
+      socket: async (request, coffre) => {
+        try {
+          return await open(request, coffre, { credentials, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -163,6 +193,9 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 
 type Proxy = {
   credentials: Map<string, Resolved>;
+  tunnels: Map<string, Tunnel>;
+  insecure: boolean;
+  recheckMs: number;
   expose: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
   cache: Map<string, { values: Record<string, string>; until: number }>;
@@ -213,7 +246,10 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     keys: (environment, rows) => {
       const using = covering(rows.map((row) => row.key));
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
-      const covered = new Set(using.flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]));
+      const covered = new Set([
+        ...using.flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]),
+        ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
+      ]);
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
       return rows
         // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's.
@@ -241,12 +277,66 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     env[key] = value;
     covered.add(key);
   }
+  // A database's URL is `coffre run`'s to make, its listener's, with the handle as the password: never the real one.
+  const tunnels: Record<string, { key: string; url: string }> = {};
+  for (const [name, tunnel] of proxy.tunnels) {
+    if (!held.keys.includes(tunnel.key)) continue;
+    tunnels[name] = { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` };
+    delete env[tunnel.key];
+    covered.add(tunnel.key);
+  }
   return answer({
     environment: held.environment.path,
     env: { ...env },
     credentials,
+    tunnels,
     left: held.keys.filter((key) => !covered.has(key)),
   });
+}
+
+/**
+ * A tunnel asked for, `/use/<project>/<env>/<name>` as a WebSocket, by
+ * `coffre run`'s listener with the handle as its bearer token: the
+ * database's URL opened (or remembered) as a credential's values are,
+ * checked against the tunnel's hosts, and the session that logs in with it.
+ * Each connection asks again: a cancel request comes on one of its own.
+ */
+async function open(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response | SocketSession> {
+  const raw = new URL(request.url).pathname.slice('/use/'.length).split('/');
+  if (raw.length !== 3) return failure(404, 'a tunnel is /use/<project>/<environment>/<name>');
+  let place: string[];
+  try {
+    place = raw.map(decodeURIComponent);
+  } catch {
+    return failure(400, 'the path is not valid percent-encoding');
+  }
+  const tunnel = proxy.tunnels.get(place[2]!);
+  if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  const path = `${place[0]}/${place[1]}`;
+  // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
+  await coffre.handle(handle);
+  const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null);
+  let db: Database;
+  try {
+    db = database(values[tunnel.key]!);
+  } catch {
+    // The value is a secret: what is wrong with it is said, never what it is.
+    return failure(409, `${path}'s ${tunnel.key} is no postgres:// URL`);
+  }
+  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(db.host)) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
+  if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
+    return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, allows`);
+  }
+  return (client, connect) =>
+    tunnelPostgres(client, {
+      handle,
+      database: db,
+      recheckMs: proxy.recheckMs,
+      connect,
+      stands: () => coffre.handle(handle).then(() => true, () => false),
+    });
 }
 
 /** One request through a credential: the handle checked, its values opened (or remembered), the request sent on with them. */
@@ -401,12 +491,12 @@ function safeDecode(text: string): string {
 }
 
 /** The credential's values for the handle: remembered for `cacheSeconds`, or opened now, logged as one use. */
-async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, path: string, credential: Resolved, host: string): Promise<Record<string, string>> {
+async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, path: string, credential: { name: string; keys: readonly string[] }, host: string | null): Promise<Record<string, string>> {
   const key = `${handle}\u0000${path}\u0000${credential.name}`;
   const now = Date.now();
   const kept = proxy.cache.get(key);
   if (kept !== undefined && kept.until > now) return kept.values;
-  const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host } });
+  const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
   if (proxy.cacheMs > 0) {
@@ -582,6 +672,15 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
   return { ...credential, ...(methods === undefined ? {} : { methods }), name, base, keys };
+}
+
+function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Resolved>, insecure: boolean): Tunnel {
+  if (!NAME.test(name)) throw new Error(`credentialProxy: a tunnel's name is lowercase letters, digits and dashes; got ${JSON.stringify(name)}`);
+  if (credentials.has(name)) throw new Error(`credentialProxy: ${name} names a credential and a tunnel`);
+  if (tunnel.kind !== 'postgres') throw new Error(`credentialProxy: tunnel ${name} is postgres(…), the only kind there is`);
+  if (!KEY.test(tunnel.key)) throw new Error(`credentialProxy: tunnel ${name} names the key that holds its URL, DATABASE_URL`);
+  if (!insecure && tunnel.hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams reaches`);
+  return tunnel;
 }
 
 function checkExpose(expose: Record<string, 'all' | readonly string[]>): Map<string, 'all' | readonly string[]> {

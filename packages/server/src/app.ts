@@ -140,7 +140,7 @@ const SERVED_WHILE_MIGRATING = new Set(['/livez', '/readyz']);
  * anyway: a page shows its error state, the API answers 503. Any other
  * failure of the question fails the request.
  */
-async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
+export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
   if (!runtime.schema.migrated) {
     try {
       runtime.schema.migrated = await migrated(runtime.db);

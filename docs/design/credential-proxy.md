@@ -3,7 +3,7 @@
 A design for 0.8, written on 2026-10-18 (W125), from Erwin's R11 and R13.
 PR 1 is built: stand-ins for people, handles, the proxy's HTTP shapes
 (a header, a query parameter, Basic) and `coffre run`'s side of it. PR 2
-adds SigV4, for S3. The Postgres tunnel comes next (section 9). The decisions in section 8
+adds SigV4, for S3. PR 3 adds the Postgres tunnel, on Node (section 9). The decisions in section 8
 were taken on the recommended option while Erwin was away (R10), and each
 is his to revisit.
 
@@ -319,23 +319,74 @@ holding the handle as its keys was refused by MinIO directly, and a GET's
 median was 1.4 ms direct against 2.7 ms through the proxy, over loopback
 HTTP to coffre.
 
-**Postgres through a tunnel (PR 3).** A local listener, which `coffre run`
-starts on 127.0.0.1 for each database credential, carries each connection
-over a WebSocket to `/use/<project>/<env>/<credential>`. It holds nothing
-and understands nothing: it pipes bytes. On coffre's side the tunnel
-speaks Postgres's startup as a server. It answers `SSLRequest` with `N`
-(the hop to localhost is local) and asks for a cleartext password, which
-is the handle, from `DATABASE_URL=postgres://app:<handle>@127.0.0.1:<port>/app`.
-It then opens TCP to the real database (TLS to a public one), performs the
-login itself (SCRAM-SHA-256 with the real password), relays
-`AuthenticationOk`, the parameters and `BackendKeyData`, and from then on
-pipes bytes both ways: queries, COPY, LISTEN/NOTIFY. Each session is one
-`credential.use` entry. A revoked handle ends open sessions at the next
-check, every minute. A cancel request comes on a new connection with the
-`BackendKeyData` the client saw, which is the real server's. The listener
-sends it over its own WebSocket, authenticated by the person's session,
-and coffre forwards it to the credential's database. Minted short-lived
-logins (W108) replace the shared password later.
+**Postgres through a tunnel (PR 3, built on Node).** The deployment
+names the key that holds the database's real URL:
+
+```ts
+credentialProxy({ credentials: { … }, tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })
+```
+
+and, on Node, hands its HTTP server's upgrades to coffre:
+`server.on('upgrade', (request, socket, head) => coffre.upgrade(request, socket, head))`.
+
+The plan names the tunnel, `tunnels: { db: { key: 'DATABASE_URL', url:
+'wss://…/use/market/dev/db' } }`, and gives the app no `DATABASE_URL` of
+its own. `coffre run` starts a listener on 127.0.0.1 for it, for as long as
+its command runs, and sets
+`DATABASE_URL=postgres://app:<handle>@127.0.0.1:<port>/app?sslmode=disable`.
+The listener (`packages/cli/src/tunnels.ts`) holds nothing and reads
+nothing. It carries each connection over a WebSocket to coffre, with the
+handle as its bearer token, and pipes bytes. `coffre export` leaves the key
+out: a tunnel lives only as long as a run.
+
+On coffre's side (`packages/server/src/plugins/postgres-tunnel.ts`, web
+streams and WebCrypto only), each connection does this:
+
+1. Checks the handle, then opens the URL, as a credential's values are
+   opened (one `credential.use` entry, `tunnel: true`, cached for a
+   minute).
+2. Checks the URL's host against `hosts` (and refuses a private address,
+   or `sslmode=disable`, without `insecureUpstreams`).
+3. Speaks Postgres's startup to the app as a server. It answers
+   `SSLRequest` and `GSSENCRequest` with `N`, since the hop to the
+   listener is local, and asks for a cleartext password. That password
+   must be the handle: any process on the machine reaches the listener,
+   and only one that holds the handle gets in.
+4. Opens TCP to the database, TLS unless `sslmode=disable`, and logs in
+   itself with the real password: SCRAM-SHA-256, or cleartext if the
+   server asks. MD5 is refused, since WebCrypto has no MD5.
+5. Pipes bytes both ways from `AuthenticationOk` on, the server's
+   parameters and `BackendKeyData` included. Queries, the extended
+   protocol, COPY both ways and LISTEN/NOTIFY work unchanged.
+
+The app's own startup parameters go through (`application_name`, …), but
+the user and database are the real URL's. Measured locally: a query adds
+0.14 ms (0.08 ms direct, 0.22 ms tunnelled), and opening a connection takes
+54 ms against 6 ms direct: the handle's check, the read, the WebSocket and
+SCRAM. A pool pays that once per connection.
+
+**Revocation mid-session.** Every `recheckSeconds` (60 unless set), an
+open session asks whether its handle still stands (`coffre.handle`, which
+opens and logs nothing). When it does not, the session ends: both sockets
+close, the app's driver sees its connection drop, and every new connection
+is refused at once, whatever the cache holds. *Decision:* end open sessions
+rather than let them run out, within a minute.
+
+**Cancel requests.** A `CancelRequest` comes on a connection of its own,
+with the `BackendKeyData` the app was given, which is the real server's.
+The listener carries it like any other connection, with the handle, and
+coffre forwards it to the tunnel's database as it is. `pg_cancel_backend`
+from psql's Ctrl-C works, and a test holds it.
+
+**Not yet:**
+- *Workers.* The tunnel's code is platform-neutral, but only Node's
+  `upgrade` is wired. Workers take an inbound WebSocket (`WebSocketPair`)
+  and open TCP with `connect()` from `cloudflare:sockets` (`startTls()`
+  for Postgres's upgrade), so the adapter is about 40 lines. It needs a
+  check on a deployed Worker first: see section 7.
+- *The privileged-role warning* (section 6): reading `rolsuper` and
+  `rolcreaterole` after login, before the app's first query.
+- *Minted short-lived logins* (W108), which replace the shared password.
 
 **Redis.** The same tunnel, intercepting the first `AUTH <password>` or
 `HELLO 3 AUTH <user> <password>` and replacing the handle with the real
@@ -505,6 +556,7 @@ is reversible.
 |---|---|
 | 1 | Stand-ins in the vault (`people`), handles (`0009_handles`, `POST /api/handles`), the plugin's `use` capability, `credentialProxy` with header, query and Basic, the plan, `coffre run`/`export` stand-ins, `@coffre/client/credential`. Built |
 | 2 | `sigv4()`: S3 through the proxy, tested with the AWS SDK against a signature-checking fake, and by hand against MinIO. Built |
-| 3 | The Postgres tunnel: a socket capability for plugins (Node's `upgrade`, Workers' `WebSocketPair` and `connect()`), the listener in `coffre run`, SCRAM, cancel, revocation mid-session, the privileged-role warning |
+| 3 | The Postgres tunnel: a socket capability for plugins (`routes.socket`, Node's `upgrade`), the listener in `coffre run`, SCRAM, cancel, revocation mid-session. Built |
+| 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), checked on a deployed Worker; the privileged-role warning |
 | 4 | Redis through the tunnel |
 | 5 | `sign`/`presign`/`verify` helpers, SDK credential files |
