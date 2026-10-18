@@ -26,6 +26,7 @@ import {
   companionsOf,
   hasSecretEditConflict,
   secretChangeFor,
+  valueEdit,
   type Companion,
   type SecretChange,
   type SecretDraft,
@@ -1269,9 +1270,9 @@ function SecretRow({
   const rowPlain = entry.value !== null;
   // What the edit writes: plain or not as the row is, until the toggle says otherwise; in a personal config, a secret.
   const plainNow = change.value !== null ? change.plain === true : rowPlain && !personal;
-  // The version the edit started from, by id: what a stored secret made plain replaces.
+  // The version the edit started from, by id: what a stored secret made plain replaces (`valueEdit`).
   const [startedAt, setStartedAt] = useState<string | undefined>(undefined);
-  const replacing = (plain: boolean) => (plain && !rowPlain && startedAt !== undefined ? { replaces: startedAt } : { replaces: undefined });
+  const from = () => ({ start: editBase?.value ?? '', plain: rowPlain, startedAt });
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
   // version identical to the one it came from.
@@ -1467,13 +1468,7 @@ function SecretRow({
                     autoFocus={!focusName}
                     // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
                     onChange={(value) =>
-                      onPatch({
-                        value: value === (editBase?.value ?? '') && plainNow === rowPlain ? null : value,
-                        plain: plainNow,
-                        ...replacing(plainNow),
-                        companion: undefined,
-                        recipe: undefined,
-                      })
+                      onPatch(valueEdit(change, from(), value, plainNow))
                     }
                     onEscape={onUndo}
                     generate={{
@@ -1482,22 +1477,15 @@ function SecretRow({
                       renamable: false,
                       companion: change.companion,
                       // A generated value is a secret.
-                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false, replaces: undefined }),
+                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false }),
                     }}
                   />
                   {!personal && (
                     <PlainToggle
                       plain={plainNow}
                       disabled={disabled}
-                      onToggle={() => {
-                        // The value as it stands, written the other way: back where it started, it is no change.
-                        const start = editBase?.value ?? '';
-                        const value = change.value ?? start;
-                        const plain = !plainNow;
-                        onPatch(value === start && plain === rowPlain
-                          ? { value: null, plain: undefined, replaces: undefined }
-                          : { value, plain, ...replacing(plain), companion: undefined, recipe: undefined });
-                      }}
+                      // The value as it stands, written the other way.
+                      onToggle={() => onPatch(valueEdit(change, from(), change.value ?? editBase?.value ?? '', !plainNow))}
                     />
                   )}
                   {plainNow && !rowPlain && editBase === null && (

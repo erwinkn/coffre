@@ -29,12 +29,27 @@ export type SecretChange = {
   /** Only beside a new value: whether it is written plain, no secret. A value is a secret unless it says so. */
   plain?: boolean;
   /**
-   * Only beside a plain value: the version the edit started from, by id,
-   * which a stored secret made plain replaces, or the write is refused, so
-   * that it never publishes a value someone has written over since.
+   * The version the edit started from, by id (`valueEdit`): a plain write
+   * replaces it, or is refused, so that making a stored secret plain never
+   * publishes a value someone has written over since.
    */
   replaces?: string;
 };
+
+/**
+ * What a value edit makes of a row's change: `value`, written `plain` or
+ * not, from where the edit started (`from.start`, the row's plain value or
+ * the secret it revealed, `from.plain`, whether the row is plain, and
+ * `from.startedAt`, that version's id). Back where it started, it is no
+ * change. The version it started from stays with the change from its first
+ * edit on, so a remount of the row (a rename refused, then retried) never
+ * loses it.
+ */
+export function valueEdit(change: SecretChange, from: { start: string; plain: boolean; startedAt: string | undefined }, value: string, plain: boolean): Partial<SecretChange> {
+  const replaces = change.replaces ?? from.startedAt;
+  if (value === from.start && plain === from.plain) return { value: null, plain: undefined, replaces };
+  return { value, plain, replaces, companion: undefined, recipe: undefined };
+}
 
 type ActiveSecret = { key: string };
 

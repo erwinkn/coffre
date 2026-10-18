@@ -6,6 +6,7 @@ import {
   companionsOf,
   generationsOf,
   hasSecretEditConflict,
+  valueEdit,
   type SecretChange,
   type SecretDraft,
 } from '../src/lib/secret-edit-batch.ts';
@@ -373,4 +374,17 @@ test('a plain value is written plain, a stored secret made plain with the versio
     C: 'secret-again',
     ACCOUNT: { value: 'acct_42', plain: true },
   }]);
+});
+
+test('a value edit keeps the version it started from, a remount of its row included, and back where it started it is no change', () => {
+  const revealed = { start: 'v1-secret', plain: false, startedAt: 'version-1' };
+  // Made plain from what the reveal showed: it replaces that version.
+  const plain = valueEdit({ key: 'B', value: null, archived: false }, revealed, 'v1-secret', true);
+  assert.deepEqual(plain, { value: 'v1-secret', plain: true, replaces: 'version-1', companion: undefined, recipe: undefined });
+  // The row remounts after a refused rename: no reveal, no start, but the change still says where it started.
+  const remounted = { start: '', plain: false, startedAt: undefined };
+  const retyped = valueEdit({ key: 'B2', archived: false, ...plain, value: 'v1-secret' } as SecretChange, remounted, 'v1-secret', true);
+  assert.equal(retyped.replaces, 'version-1');
+  // Back as it was, the edit is none.
+  assert.deepEqual(valueEdit({ ...plain, key: 'B', archived: false } as SecretChange, revealed, 'v1-secret', false), { value: null, plain: undefined, replaces: 'version-1' });
 });
