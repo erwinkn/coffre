@@ -510,6 +510,8 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(to.origin + to.pathname, `${ORIGIN}/use/market/dev/maps/geocode/`);
   assert.equal(to.searchParams.get('key'), handle);
   assert.equal(to.searchParams.get('address'), 'paris');
+  const helped = await route('/use/market/dev/maps/geocode/redirect?key=unused', { headers: { 'x-coffre-handle': handle } });
+  assert.equal(new URL(helped.headers.get('location')!).searchParams.get('key'), handle, 'a parameter that stands in for no handle gets the handle instead');
   const bare = await route(`/use/market/dev/maps/geocode/bare?key=${handle}`);
   assert.equal(new URL(bare.headers.get('location')!).searchParams.get('key'), handle, 'a query the redirect dropped gets the handle back');
 

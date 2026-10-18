@@ -1068,7 +1068,8 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
     env: { ...env, COFFRE_CREDENTIALS: JSON.stringify(credentials), COFFRE_HANDLE: handle.token },
     left: plans.flatMap(([, plan]) => plan.left).sort(),
     credentials: Object.keys(credentials).sort(),
-    exposed: Object.keys(env).filter((key) => env[key] !== handle.token && !Object.values(credentials).includes(env[key]!)).sort(),
+    // A stand-in is the handle, or holds it in the shape its client checks (`sk_test_coffre_use_…`, a JWT's last part).
+    exposed: Object.keys(env).filter((key) => !env[key]!.includes(handle.token) && !Object.values(credentials).includes(env[key]!)).sort(),
     expiresAt: handle.expiresAt,
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
     handle: handle.token,

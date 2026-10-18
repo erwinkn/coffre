@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Shaped stand-ins.** A credential's `standIn` gives its client a
+  stand-in in the shape it checks: `jwt({ claims })`, a JWT of the real
+  token's named claims whose last part is the handle, or `prefix('sk_test_')`.
+  DFNS's SDK reads its organization from its token's claims, so
+  `DFNS_AUTH_TOKEN` no longer needs `expose`: `dfns: { upstream:
+  'https://api.dfns.io', inject: header('authorization', 'Bearer
+  {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: ['https://custom/app_metadata'] }) }`.
+  For a header or query rule that carries one key (docs/design/credential-proxy.md,
+  section 5).
+
 ## 0.8.2 (2026-10-18)
 
 - **`@coffre/client` runs on Node 20 and 22.** Its `engines` said Node 24,

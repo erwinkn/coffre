@@ -363,7 +363,8 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
     if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/dev': 'viewer' } });
     if (req.url === '/use/market/dev') {
       const at = `http://${req.headers.host}/use/market/dev/schumann`;
-      return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle, SCHUMANN_BASE_URL: at, WEBHOOK_SECRET: 'whsec_local' }, credentials: { schumann: at }, left: ['DATABASE_URL'] });
+      // A stand-in shaped as its client checks it, a JWT here, is no exposed value.
+      return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle, SCHUMANN_BASE_URL: at, WEBHOOK_SECRET: 'whsec_local', DFNS_AUTH_TOKEN: `e30.e30.${handle}` }, credentials: { schumann: at }, left: ['DATABASE_URL'] });
     }
     send(404, { error: 'not_found', message: `no route for ${req.url}` });
   });
@@ -390,7 +391,7 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
     COFFRE_CREDENTIALS: JSON.stringify({ schumann: at }),
   });
   assert.match(stderr, /stand-ins for market\/dev: schumann/);
-  assert.match(stderr, /exposed as they are, by the deployment: WEBHOOK_SECRET/);
+  assert.match(stderr, /exposed as they are, by the deployment: WEBHOOK_SECRET$/m);
   assert.match(stderr, /left out, neither proxied nor exposed: DATABASE_URL/);
   // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle.
   assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
