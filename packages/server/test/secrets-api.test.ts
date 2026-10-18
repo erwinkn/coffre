@@ -411,7 +411,7 @@ test('me shows only the environments and audit capability held', async () => {
   const me = await reader.me();
   assert.equal(me.instanceRole, 'member');
   assert.equal(me.canReadAudit, false);
-  assert.deepEqual(me.environments, [{ project: 'market', environment: 'dev', permissions: ['secret.read'] }]);
+  assert.deepEqual(me.environments, [{ project: 'market', environment: 'dev', permissions: ['secret.read', 'secret.use'] }]);
 });
 
 test('an empty secret patch is refused before it can disclose another environment', async () => {

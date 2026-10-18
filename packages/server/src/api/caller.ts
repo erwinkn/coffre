@@ -89,18 +89,23 @@ export function callerFrom(principal: PrincipalRef, access: Access, credentialSc
 export function can(caller: Caller, permission: Permission, place: Place): boolean {
   if (!('personal' in place)) return allows(caller, permission, place);
   const parent = { projectId: place.projectId, ...place.personal.parent };
-  // A personal config's values: its owner's alone, while they read its parent; no grant or role reaches them,
+  // A personal config's values: its owner's alone, while they read or use its parent; no grant or role reaches them,
   // an Owner's included (docs/design/forking.md, section 3). The vault decides the same.
   // A credential's scope caps it still: an owner's viewer token on the parent reads their config, and writes nothing.
   if (SECRET_PERMISSIONS.includes(permission)) {
     return caller.principal.type === 'user' && formatMember(caller.principal) === place.personal.owner
-      && allows(caller, 'secret.read', parent) && withinCredential(caller, permission, parent);
+      && (allows(caller, 'secret.read', parent) || allows(caller, 'secret.use', parent)) && withinCredential(caller, permission, parent);
   }
   // Anything else, as at its parent: its log, to whoever reads the parent's.
   return allows(caller, permission, parent);
 }
 
-const SECRET_PERMISSIONS: readonly Permission[] = ['secret.read', 'secret.write', 'secret.archive'];
+const SECRET_PERMISSIONS: readonly Permission[] = ['secret.read', 'secret.use', 'secret.write', 'secret.archive'];
+
+/** Whether the caller lists an environment's keys: reads its values, or uses them, as a Contributor does (R6). */
+export function lists(caller: Caller, place: Place): boolean {
+  return can(caller, 'secret.read', place) || can(caller, 'secret.use', place);
+}
 
 /** Everything the caller may do at `place`, in catalogue order. */
 export function permissionsAt(caller: Caller, place: Place): Permission[] {

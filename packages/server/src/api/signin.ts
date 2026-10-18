@@ -958,7 +958,8 @@ export class SigninService {
       // What the person holds now, and, on a personal token, what it does: a handle never reaches past the credential that made it.
       const holder = { ...callerFrom(person, access), credentialScope: ctx.caller.credentialScope };
       const { reached, madeFor } = await this.#handlePlaces(holder, input.paths);
-      const wanted = Object.fromEntries(reached.map((path) => [path, 'viewer' as const]));
+      // `viewer` where its person reads; `contributor` where they only use, which the proxy needs, and no more: a handle writes nothing.
+      const wanted = Object.fromEntries(reached.map(({ path, reads }) => [path, reads ? 'viewer' as const : 'contributor' as const]));
       const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details);
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       return audited(this.#deps, async (tx, log) => {
@@ -994,22 +995,26 @@ export class SigninService {
    * as they would for its person. A parent they do not read stays out, and
    * its keys refused, as for a read. And those it was made for, once each.
    */
-  async #handlePlaces(holder: Holdings, paths: readonly string[]): Promise<{ reached: string[]; madeFor: HandlePlace[] }> {
-    const places = new Set<string>();
+  async #handlePlaces(holder: Holdings, paths: readonly string[]): Promise<{ reached: { path: string; reads: boolean }[]; madeFor: HandlePlace[] }> {
+    const places = new Map<string, boolean>();
     const madeFor: HandlePlace[] = [];
+    const at = (place: NonNullable<Awaited<ReturnType<typeof resolvePath>>>) =>
+      ({ projectId: place.project.id, environmentId: place.environment!.id, environmentSlug: place.environment!.slug });
     for (const raw of paths) {
       const path = parsePath(raw.replace(/@me$/, ''), [2]);
-      places.add(`${path.project}/${path.environment}`);
       let place = await resolvePath(this.#deps.db, path);
+      // One it names: viewer where its person reads, and otherwise the use the proxy needs (or nothing, refused below as beyond them).
+      places.set(`${path.project}/${path.environment}`, place?.environment == null || allows(holder, 'secret.read', at(place)));
       const named = { environmentId: place?.environment?.id, personal: raw.endsWith('@me') };
       if (named.environmentId != null && !madeFor.some((made) => made.environmentId === named.environmentId && made.personal === named.personal)) madeFor.push({ environmentId: named.environmentId, personal: named.personal });
       for (let depth = 0; place?.environment?.parentSlug != null && depth < MAX_PARENTS; depth += 1) {
         place = await resolvePath(this.#deps.db, { project: path.project, environment: place.environment.parentSlug });
         if (place?.environment == null) break;
-        if (allows(holder, 'secret.read', { projectId: place.project.id, environmentId: place.environment.id, environmentSlug: place.environment.slug })) places.add(`${path.project}/${place.environment.slug}`);
+        const reads = allows(holder, 'secret.read', at(place));
+        if (reads || allows(holder, 'secret.use', at(place))) places.set(`${path.project}/${place.environment.slug}`, reads);
       }
     }
-    return { reached: [...places], madeFor };
+    return { reached: [...places].map(([path, reads]) => ({ path, reads })), madeFor };
   }
 
   /** What a personal token made now would reach, checked as making one is (`issuePersonalToken`); makes nothing. */

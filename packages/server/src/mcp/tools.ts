@@ -86,7 +86,8 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'list_secrets',
-    needs: 'secret.read',
+    // Listing takes use, which every role that reads holds too: a Contributor lists what it never reads.
+    needs: 'secret.use',
     title: 'List secrets',
     description: "An environment's keys: each one's version, folder, who last changed it and when (`updatedAt`; a reference's value is its source's), and whether it is a reference to another secret; and `rotateAfterDays`, the days a value may go unchanged before it is due for rotation. In a fork, `parents` names the environments it inherits from, and each key's `parent` says whether it is inherited, overridden or removed, and from where. Never a value.",
     scope: 'read',
@@ -100,7 +101,8 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'secret_history',
-    needs: 'secret.read',
+    // Listing takes use, which every role that reads holds too: a Contributor lists what it never reads.
+    needs: 'secret.use',
     title: 'Secret history',
     description: "A secret's versions, newest first: who made each and when. Never a value.",
     scope: 'read',

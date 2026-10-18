@@ -28,7 +28,7 @@ import {
   projectFolderOf,
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { can, canAnywhere, permissionsAt, placeOf, seesProject, type Caller } from './caller.ts';
+import { can, canAnywhere, lists, permissionsAt, placeOf, seesProject, type Caller } from './caller.ts';
 import { allowed, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
@@ -191,8 +191,8 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       permissions: permissionsAt(caller, scope),
       // Someone else's personal config is not listed; your own is, as `dev@me`.
       environments: project.environments.filter((environment) => environment.owner === null || mine(caller, environment)).map((environment) => {
-        // Every role that writes or archives also reads, so read is the test.
-        const secretAccess = can(caller, 'secret.read', placeOf(project, environment));
+        // Every role that writes or archives also reads or uses, so listing is the test.
+        const secretAccess = lists(caller, placeOf(project, environment));
         const personal = environment.owner !== null;
         const slug = listedSlug(environment);
         if (!manages && !secretAccess) {
@@ -218,7 +218,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       .filter(
         (environment) =>
           environment.archivedAt === null &&
-          can(caller, 'secret.read', placeOf(project, environment)),
+          lists(caller, placeOf(project, environment)),
       )
       .map((environment) => environment.id);
     if (project.archivedAt === null && environmentIds.length > 0) {

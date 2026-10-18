@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Place } from '@coffre/core/access';
+import type { Permission, Place } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
@@ -336,18 +336,20 @@ export async function resolveValues(
  * from: values, and unreadable keys alike, since why a key cannot be read
  * (a broken reference's source, who broke it) is the parent's to tell.
  * Reading what a fork inherits takes read on that parent, by the caller's
- * own grants: a fork lends nothing.
+ * own grants: a fork lends nothing. Using it, as the credential proxy
+ * does, takes use there, which read implies (`anyOf`).
  */
 export function unreadParents(
   ctx: ApiContext,
   projectId: string,
   read: { items: readonly Readable[]; unreadable: readonly Unreadable[] },
+  anyOf: readonly Permission[] = ['secret.read'],
 ): Map<string, string[]> {
   const unread = new Map<string, string[]>();
   for (const row of [...read.items, ...read.unreadable]) {
     if (row.parent === undefined || row.key === undefined) continue;
     const parent = { projectId, environmentId: row.parent.environmentId, environmentSlug: row.parent.slug };
-    if (!can(ctx.caller, 'secret.read', parent)) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key].sort());
+    if (!anyOf.some((permission) => can(ctx.caller, permission, parent))) unread.set(row.parent.slug, [...(unread.get(row.parent.slug) ?? []), row.key].sort());
   }
   return unread;
 }

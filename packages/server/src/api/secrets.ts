@@ -1527,7 +1527,8 @@ export async function reveal(
         }),
       );
     }
-    need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', {
+    // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.
+    need(ctx, use === undefined ? 'secret.read' : 'secret.use', placeOf(place.project, place.environment), 'secret.read', {
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
@@ -1538,13 +1539,15 @@ export async function reveal(
     // else, its key is a key like any other.
     const told = (item: Readable) => item.parent === undefined
       || can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: item.parent.environmentId, environmentSlug: item.parent.slug });
+    // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
+    const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
     const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
       key: item.key,
       inherited: item.parent !== undefined,
       from: item.parent?.slug ?? null,
       plain: plain(item) && told(item),
       sensitive: item.secret.sensitive === true,
-      reads: told(item),
+      reads: item.parent === undefined ? readsHere : told(item),
       versionId: told(item) ? item.secretVersionId : null,
       recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
     }))) : use.keys;
@@ -1562,7 +1565,8 @@ export async function reveal(
       );
     }
     // Before any other refusal: past a key's name, a fork says nothing of what its reader cannot read.
-    const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable });
+    // The proxy's: what it uses takes use on each parent, and what it hands back was chosen only where its reader reads.
+    const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable }, use === undefined ? ['secret.read'] : ['secret.read', 'secret.use']);
     if (unread.size > 0) {
       const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
       throw new Refusal(
@@ -1625,7 +1629,7 @@ export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): 
   // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
   const person = ctx.caller.principal.type === 'user';
   const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) };
-  const unread = unreadParents(ctx, environment.projectId, opened);
+  const unread = unreadParents(ctx, environment.projectId, opened, ['secret.read', 'secret.use']);
   if (unread.size > 0) {
     const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
     await refuse(ctx, new Refusal(

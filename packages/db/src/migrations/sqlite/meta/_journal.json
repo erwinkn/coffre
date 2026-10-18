@@ -92,6 +92,13 @@
       "when": 1792340920098,
       "tag": "0012_sensitive_values",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1792343374795,
+      "tag": "0013_contributor_role",
+      "breakpoints": true
     }
   ]
 }

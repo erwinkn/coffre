@@ -117,7 +117,7 @@ test('a personal token acts as its person within its scope: it reads what it nam
   const me = await bearer(issued.token).me();
   assert.deepEqual(me.principal, { type: 'user', id: 'ada@acme.example' });
   assert.deepEqual(me.personalToken && { label: me.personalToken.label, scope: me.personalToken.scope }, { label: 'cursor-agent', scope: { 'market/dev': 'viewer' } });
-  assert.deepEqual(me.environments, [{ project: 'market', environment: 'dev', permissions: ['secret.read'] }]);
+  assert.deepEqual(me.environments, [{ project: 'market', environment: 'dev', permissions: ['secret.read', 'secret.use'] }]);
   assert.equal((await ada.me()).personalToken, null, 'a session is no token');
 });
 

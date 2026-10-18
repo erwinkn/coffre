@@ -4,7 +4,7 @@ import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments } from '@coffre/db/schema';
 
 import { environmentsCreatedAt, insert, liveEnvironment, liveKeysIn, MAX_PARENTS, parentsOf, personalConfig, places, resolvePath, type ResolvedPath } from '../db/queries.ts';
-import { can, placeOf } from './caller.ts';
+import { can, lists, placeOf } from './caller.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
@@ -58,8 +58,8 @@ export async function makePersonal(ctx: ApiContext, place: ResolvedPath, action:
     }
     const parent = await resolvePath(ctx.db, { project: place.project.slug, environment: of.slug });
     if (parent?.environment == null || parent.project.archivedAt !== null || parent.environment.archivedAt !== null) throw notFound(`no live environment ${path}`);
-    if (!can(ctx.caller, 'secret.read', placeOf(parent.project, parent.environment))) {
-      throw new Refusal(forbidden(`a personal config of ${path} takes read on it`), denied(ctx, action, 'missing_secret_read', fields));
+    if (!lists(ctx.caller, placeOf(parent.project, parent.environment))) {
+      throw new Refusal(forbidden(`a personal config of ${path} takes read or use on it`), denied(ctx, action, 'missing_secret_read', fields));
     }
     const above = await parentsOf(ctx.db, of.id);
     if (above === null || above.length >= MAX_PARENTS) {

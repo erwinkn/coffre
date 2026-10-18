@@ -843,7 +843,8 @@ class VaultService implements Vault {
       {
         action: 'secret.read',
         principal,
-        permission: 'secret.read',
+        // The proxy's use opens a value for coffre to use for its reader, never to hand back: `secret.use`. Anything else reads.
+        permission: input.purpose === 'use' ? 'secret.use' : 'secret.read',
         secrets: items.map((item) => item.secret),
         // Through a reference, the reader's grants on the holder's environment decide.
         places: sealed.map((seal, i) => seal?.holder ?? items[i]!.secret),
@@ -2607,7 +2608,9 @@ function personalRefusal(
   if (own?.owner == null && held?.owner == null) return undefined;
   if (own !== held || principal !== own?.owner || own.parentId === null) return 'personal';
   const parent = placeIn({ projectId: secret.projectId, environmentId: own.parentId }, environments);
-  const refused = refuses(reader, 'secret.read', parent, own.deleted || (environments.get(own.parentId)?.deleted ?? true));
+  // Its owner reads what they wrote while they read or use the environment it configures (R8).
+  const gone = own.deleted || (environments.get(own.parentId)?.deleted ?? true);
+  const refused = refuses(reader, 'secret.use', parent, gone) === null ? null : refuses(reader, 'secret.read', parent, gone);
   if (refused !== null) return refused;
   // The credential's scope caps the owner still: their viewer token on the parent reads, and wraps no key.
   return withinCredential(reader.live, permission, parent) ? null : 'no_grant';

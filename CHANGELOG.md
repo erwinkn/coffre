@@ -62,6 +62,15 @@
   narrows them. Let only the pipeline's service account through (its
   token, or its runner's address), deploy, mark, check, and open it
   again. See docs/design/credential-proxy.md, section 2.
+- **`secret.use`, and the Contributor role.** Reading a value hands it
+  back; using it does not: a person's app holds a placeholder, which the
+  credential proxy fills in. Every role that reads now uses too, so
+  nobody's access changed. A Contributor uses and writes, and reads
+  nothing: they list the keys, set values and run their app on
+  placeholders, and a reveal answers 403. `coffre grant market
+  bob@acme.example --role contributor --env prod`. What a person gets is
+  the narrower of their role and the key: a sensitive key is only ever
+  used. Migration `0013_contributor_role` widens the grants' role check.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output

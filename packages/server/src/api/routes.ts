@@ -36,7 +36,15 @@ import {
 } from './secrets.ts';
 
 /** A permission at the route's place, or at its project for project-wide ones. */
-export type Check = Permission | { permission: Permission; on: 'project' };
+export type Check = Permission | { permission: Permission; on: 'project' } | { anyOf: readonly Permission[] };
+
+/**
+ * What lists an environment, its keys, their history and versions, and
+ * what it is missing: reading its values, or using them, as a Contributor
+ * does, who writes values they never read. Key names are no secret within
+ * a project (R6), and a plain value shows to whoever lists.
+ */
+const LISTS: Check = { anyOf: ['secret.read', 'secret.use'] };
 
 type ParamNames<Pattern> = Pattern extends `${string}:${infer Name}/${infer Rest}`
   ? Name | ParamNames<`/${Rest}`>
@@ -303,14 +311,14 @@ export const routes = {
 
   // What an environment lacks of its siblings' keys, and what its team dismissed.
   ...route('GET /projects/:project/:environment/missing', {
-    needs: 'secret.read',
+    needs: LISTS,
     personal: 'falls back',
     action: 'missing.list',
     run: (ctx, { place }) => missingKeys(ctx, place),
   }),
   // A version of what a read of it would open, which changes whenever that does: pollers ask it before reading.
   ...route('GET /projects/:project/:environment/version', {
-    needs: 'secret.read',
+    needs: LISTS,
     // What a read of `dev@me` would open: dev's while you have no personal config of it.
     personal: 'falls back',
     action: 'secret.version',
@@ -326,7 +334,7 @@ export const routes = {
 
   // Secrets
   ...route('GET /secrets/:project/:environment', {
-    needs: 'secret.read',
+    needs: LISTS,
     personal: 'falls back',
     action: 'secret.list',
     run: (ctx, { place }) => listSecrets(ctx, place),
@@ -374,7 +382,7 @@ export const routes = {
     run: (ctx, { place, input }) => (input.inherit === undefined ? patchSecret(ctx, place, input) : inheritSecret(ctx, place, input.inherit)),
   }),
   ...route('GET /secrets/:project/:environment/:key/versions', {
-    needs: 'secret.read',
+    needs: LISTS,
     action: 'secret.history',
     run: (ctx, { place }) => listVersions(ctx, place),
   }),
