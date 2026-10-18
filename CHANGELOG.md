@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0 (2026-10-18)
+
 - **Breaking: the credential proxy's `baseUrl` is gone, for a stable
   URL.** `ANY /use/<credential>/<path>` (`https://secrets.acme.example/use/schumann`)
   is the same for every environment, fork and `@me`: its environment is
