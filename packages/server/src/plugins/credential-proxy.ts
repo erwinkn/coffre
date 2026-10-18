@@ -448,7 +448,8 @@ async function presign(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (credential.methods !== undefined && !credential.methods.includes(method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
   const expiresIn = asked.expiresIn ?? 900;
   if (typeof expiresIn !== 'number' || !Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > 3600) return failure(400, 'a presigned URL lasts between a second and an hour: expiresIn, in seconds');
-  if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
+  // No control character either: a URL drops a tab or a line break, which could join what the checks below saw apart.
+  if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#\u0000-\u001F\u007F]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
   const query = asked.query ?? {};
   if (typeof query !== 'object' || query === null || Object.values(query).some((value) => typeof value !== 'string')) return failure(400, 'query is a map of strings, response-content-disposition and the like');
   // The same rules as a request through it: under the upstream, its paths, no dot segment and no slash smuggled in a segment.
@@ -461,6 +462,8 @@ async function presign(request: Request, coffre: PluginContext, proxy: Proxy, pa
   }
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
+  // And again on the path as the URL made it, which is the one signed: no dot segment, no slash or backslash in a segment.
+  if (target.pathname.split('/').some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment))) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);

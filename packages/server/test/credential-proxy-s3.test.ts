@@ -288,6 +288,8 @@ test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', method: 'PUT' })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', expiresIn: 86_400 })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/%2e%2e/x' })).status, 400);
+  // A tab or a line break inside an encoded slash or backslash, which the URL would drop, joining it again.
+  for (const path of ['/uploads/..%2\tfprivate', '/uploads/..%5\ncprivate', '/uploads/a\rb']) assert.equal((await ask({ credential: 's3', path })).status, 400, JSON.stringify(path));
   assert.equal((await ask({ credential: 's3', path: '/uploads/x?X-Amz-Expires=99' })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'X-Amz-Expires': '99' } })).status, 400);
   assert.equal((await ask({ credential: 'nope', path: '/uploads/x' })).status, 404);
