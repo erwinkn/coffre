@@ -2656,6 +2656,34 @@ table.claims-table td {
   color: var(--red);
 }
 
+/* Whether a value is written plain, no secret: a checkbox's box and its label, as one button. */
+.plain-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--ink-2);
+}
+
+.plain-toggle-box {
+  display: inline-grid;
+  place-items: center;
+  width: 0.8125rem;
+  height: 0.8125rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.1875rem;
+}
+
+.plain-toggle[aria-pressed='true'] .plain-toggle-box {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--panel);
+}
+
+/* A plain value, listed as it is: a revealed one's type, with no timer. */
+.plain-value {
+  color: var(--ink-2);
+}
+
 .version-shift {
   font-family: var(--font-mono);
   font-size: 0.78125rem;

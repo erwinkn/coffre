@@ -252,8 +252,11 @@ const TEMPLATES: Record<string, Template> = {
     },
     tried: 'change',
     what: secrets,
-    then: ({ entry, batch }) =>
-      batch.length > 1 || entry.version === null || entry.version === 1 ? [] : [`, now version ${entry.version}`],
+    // A plain value is no secret: the sentence says it was written as one.
+    then: ({ entry, batch }) => [
+      ...(batch.length > 1 || entry.version === null || entry.version === 1 ? [] : [`, now version ${entry.version}`]),
+      ...(batch.length === 1 && entry.metadata.plain === true ? [', as a plain value, no secret'] : []),
+    ],
   },
   // The credential proxy's own entry beside the vault's read: which credential the keys went into, and where.
   'credential.use': {

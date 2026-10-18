@@ -61,7 +61,7 @@ END
 $$;
 
 -- 5. Secret versions are immutable but for being erased: their ciphertext and
--- wrapped key emptied, nothing else. Each block writes a version of its own and
+-- wrapped key emptied, and a plain one's plaintext cleared, nothing else. Each block writes a version of its own and
 -- rolls it back, so the checks below see the fixture as it was.
 DO $$
 DECLARE
@@ -74,15 +74,17 @@ BEGIN
         'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''\x01''::bytea WHERE id = $1',
         'UPDATE secret_versions SET iv = iv WHERE id = $1',
         'UPDATE secret_versions SET version = 2 WHERE id = $1',
-        'UPDATE secret_versions SET recipe = ''bytes:1:hex'' WHERE id = $1'
+        'UPDATE secret_versions SET recipe = ''bytes:1:hex'' WHERE id = $1',
+        'UPDATE secret_versions SET plaintext = ''other'' WHERE id = $1',
+        'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''''::bytea WHERE id = $1'
     ] LOOP
         BEGIN
             INSERT INTO secrets (id, project_id, environment_id, key)
             VALUES (secret_id, '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ERASE_PROBE');
             INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
-                                         kek_provider, kek_id, kek_version, created_by)
+                                         kek_provider, kek_id, kek_version, created_by, plaintext)
             VALUES (version_id, secret_id, 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
-                    '\x00', 'local', 'k', '1', 'user:admin@acme.example');
+                    '\x00', 'local', 'k', '1', 'user:admin@acme.example', 'acct_123');
             EXECUTE attempt USING version_id;
             RAISE EXCEPTION 'FAIL: coffre_app could %', attempt;
         EXCEPTION
@@ -95,10 +97,10 @@ BEGIN
         INSERT INTO secrets (id, project_id, environment_id, key)
         VALUES (secret_id, '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ERASE_PROBE');
         INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
-                                     kek_provider, kek_id, kek_version, created_by)
+                                     kek_provider, kek_id, kek_version, created_by, plaintext)
         VALUES (version_id, secret_id, 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
-                '\x00', 'local', 'k', '1', 'user:admin@acme.example');
-        UPDATE secret_versions SET ciphertext = ''::bytea, wrapped_dek = ''::bytea WHERE id = version_id;
+                '\x00', 'local', 'k', '1', 'user:admin@acme.example', 'acct_123');
+        UPDATE secret_versions SET ciphertext = ''::bytea, wrapped_dek = ''::bytea, plaintext = NULL WHERE id = version_id;
         RAISE EXCEPTION 'erased' USING ERRCODE = 'raise_exception';
     EXCEPTION
         WHEN raise_exception THEN

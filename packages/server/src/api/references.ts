@@ -263,6 +263,8 @@ export type Readable = {
   secretVersionId: string;
   secret: SecretRef;
   envelope: Envelope;
+  /** Its value, when it is a plain one: read without the vault (`openValues`). A reference's is always opened through it. */
+  plaintext?: string | null;
   via?: Via;
   through?: string;
   parent?: { environmentId: string; slug: string };
@@ -373,6 +375,7 @@ async function valuesIn(
           path: `${project}/${environment.slug}/${row.key}`,
         },
         envelope: row.current.envelope,
+        plaintext: row.current.plaintext,
       });
       continue;
     }

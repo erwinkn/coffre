@@ -256,6 +256,7 @@ export type Api = {
             public: string;
           };
         };
+        value: string | null;
         parent: null | {
           from: string;
           state: "inherited" | "overridden" | "removed";
@@ -283,6 +284,10 @@ export type Api = {
             public: string;
           };
         };
+        replaces?: string;
+      } | {
+        value: string;
+        plain: true;
         replaces?: string;
       } | {
         ref: string;
@@ -331,6 +336,7 @@ export type Api = {
         current: boolean;
         kek: string;
         recipe: string | null;
+        plain: boolean;
       }[];
     };
   };
@@ -1966,6 +1972,7 @@ export type SecretKey = {
       public: string;
     };
   };
+  value: string | null;
   parent: null | {
     from: string;
     state: "inherited" | "overridden" | "removed";
@@ -1982,6 +1989,7 @@ export type SecretVersion = {
   current: boolean;
   kek: string;
   recipe: string | null;
+  plain: boolean;
 };
 
 export type SessionRow = {

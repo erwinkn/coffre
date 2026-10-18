@@ -117,8 +117,10 @@ export type Credential = {
    */
   baseUrl?: "gone in 0.9: point the app's own config at <publicUrl>/use/<name>, the proxy's stable URL for this credential";
   /**
-   * Keys the rule reads that are no secret, and that the app needs as they
-   * are: an account's id it puts in its URLs, Twilio's `TWILIO_SID` in
+   * Deprecated: mark the key plain instead (`coffre set … --plain`), which
+   * says it in the data, for every environment and fork alike. Keys the rule
+   * reads that are no secret, and that the app needs as they are: an
+   * account's id it puts in its URLs, Twilio's `TWILIO_SID` in
    * `/Accounts/{sid}/Messages.json`. `coffre run` gives the app their
    * values, each opened to `expose`, and the handle stands in for the rest.
    * Held to `expose`'s limits: configuration only, and only an
@@ -214,7 +216,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
-  const cache = new Map<string, { values: Record<string, string>; until: number }>();
+  const cache = new Map<string, Opened & { until: number }>();
   const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
   const groups = new Map<string, Group>();
   return {
@@ -256,10 +258,13 @@ type Proxy = {
   recheckMs: number;
   expose: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
-  cache: Map<string, { values: Record<string, string>; until: number }>;
+  cache: Map<string, Opened & { until: number }>;
   /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). */
   handles: Map<string, { paths: readonly (string | null)[] | null; until: number }>;
 };
+
+/** A credential's values, opened, and which keys of it are plain, no secret: what the answer's redaction leaves as it is. */
+type Opened = { values: Record<string, string>; plain: readonly string[] };
 
 async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response> {
   const url = new URL(request.url);
@@ -327,10 +332,10 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
 
 /**
  * What `coffre run` gives the app for an environment: each credential whose
- * keys it holds, its keys as the handle; the values `expose` lets it hold
- * as they are; and what the app reads for
- * `credential(name)`. Each key the environment holds that none of these
- * covers is named in `left`, for `coffre run` to say.
+ * keys it holds, its keys as the handle; its plain values, no secrets,
+ * and the values `expose` lets it hold, as they are; and what the app
+ * reads for `credential(name)`. Each key the environment holds that none of
+ * these covers is named in `left`, for `coffre run` to say.
  */
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
   const handle = bearer(request);
@@ -348,9 +353,13 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key)]);
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
+      // What the proxy fills in itself, a tunnel's URL, never the value the environment holds.
+      const filled = new Set([...proxy.tunnels.values()].map((tunnel) => tunnel.key));
       return rows
-        // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's.
-        .filter((row) => (identifiers.has(row.key) && !row.inherited && !environment.personal) || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
+        // A plain value is no secret, wherever it is held. An identifier as `expose` is: the environment's own value,
+        // never a parent's, never a personal config's.
+        .filter((row) => (row.plain && !filled.has(row.key)) || (identifiers.has(row.key) && !row.inherited && !environment.personal)
+          || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
         .map((row) => row.key);
     },
   });
@@ -360,7 +369,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const credential of covering(held.keys)) {
     // The environment's URL, which a run of several environments tells apart, and which `presign()` derives the environment's from.
     credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
-    // Every key the stand-in, and an identifier given as it is below, where its environment holds it itself.
+    // Every key the stand-in, and a plain value or an identifier given as it is below.
     const standIn = credential.standIn === undefined ? handle : await shaped(coffre, credential, handle, path);
     for (const key of credential.keys) {
       env[key] = standIn;
@@ -444,7 +453,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
   const { expiresAt } = await coffre.handle(handle);
   let fresh = false;
-  const values = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null, () => (fresh = true));
+  const { values } = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null, () => (fresh = true));
   let db: Database;
   try {
     db = database(values[tunnel.key]!);
@@ -664,7 +673,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (streamed && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
   const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
   if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB, unless it is AWS-signed with its payload's hash and length, which streams`);
-  const values = await valuesFor(coffre, proxy, handle, path, credential, target.host);
+  const { values, plain } = await valuesFor(coffre, proxy, handle, path, credential, target.host);
 
   const headers = new Headers();
   for (const [name, value] of request.headers) {
@@ -711,11 +720,13 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   } catch (error) {
     return failure(502, `${target.host} did not answer: ${error instanceof Error ? error.message : String(error)}`);
   }
-  // What the request carried: each value, and what the rule made of them, Basic's base64, as stored and as they went out
-  // (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`).
+  // What the request carried: each secret value, and what the rule made of them, Basic's base64, as stored and as they went
+  // out (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`). A plain
+  // value is no secret, and an upstream quotes an account's id back as a matter of course: it stays.
   const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
     : inject.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(inject.name)!;
-  const redact = redactor([...Object.values(values).flatMap((value) => [value, value.trim()]), injected].flatMap(echoed));
+  const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
+  const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), injected].flatMap(echoed));
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
   // Redacted as the bytes it came in, before a URL encodes them again.
   const raw = upstream.headers.get('location');
@@ -838,11 +849,11 @@ async function valuesFor(
   host: string | null,
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
-): Promise<Record<string, string>> {
+): Promise<Opened> {
   const key = `${handle}\u0000${path}\u0000${credential.name}`;
   const now = Date.now();
   const kept = proxy.cache.get(key);
-  if (kept !== undefined && kept.until > now) return kept.values;
+  if (kept !== undefined && kept.until > now) return kept;
   const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
@@ -850,9 +861,9 @@ async function valuesFor(
   if (proxy.cacheMs > 0) {
     // A handful of handles in a dev loop: past a thousand, the oldest go.
     if (proxy.cache.size >= 1000) for (const [old, entry] of proxy.cache) if (entry.until <= now || proxy.cache.size >= 1000) proxy.cache.delete(old);
-    proxy.cache.set(key, { values: used.values, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
+    proxy.cache.set(key, { values: used.values, plain: used.plain, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
   }
-  return used.values;
+  return { values: used.values, plain: used.plain };
 }
 
 /** The handle, where the app sends it: `x-coffre-handle` (the `credential(name)` helper), or where the credential takes its key. */

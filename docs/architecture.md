@@ -695,7 +695,9 @@ chain, but left out of `GET /api/audit` unless `detail=1`.
 What it does not stop: an app fully taken over can act as anyone who already
 has access. The vault makes that loud rather than impossible: the key never
 leaves it, every read lands in a log the app cannot edit, and bulk reads trip
-its limit. Closing it would take requests signed by keys the principals hold
+its limit. A plain value is the exception, by its writer's choice: marked no
+secret, its version keeps it in the clear too, and it is read without the
+vault ([design](design/credential-proxy.md#2-the-model)). Closing it would take requests signed by keys the principals hold
 themselves, which fits this interface later without the vault learning about
 sign-in. The rest of what coffre does not stop is under [Limits](#limits).
 

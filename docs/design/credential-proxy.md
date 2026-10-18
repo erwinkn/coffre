@@ -7,7 +7,8 @@ adds SigV4, for S3. PR 3 adds the Postgres tunnel, on Node (section 9).
 0.9 (W127) adds the stable URL, `/use/<credential>`, and removes
 `baseUrl` (section 4). The decisions in section 8
 were taken on the recommended option while Erwin was away (R10), and each
-is his to revisit.
+is his to revisit. 0.9 closes the gaps that kept keys on `expose`
+(section 2, "What replaces `expose`").
 
 ## 1. What it is for
 
@@ -106,8 +107,8 @@ credentialProxy({
     schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
     openai: { upstream: 'https://api.openai.com/v1', inject: header('authorization', 'Bearer {OPENAI_API_KEY}') },
     maps: { upstream: 'https://maps.googleapis.com/maps/api', inject: query('key', '{MAPS_API_KEY}'), methods: ['GET'] },
-    // The account's id is in Twilio's paths, /Accounts/{sid}/Messages.json: an identifier, which the app holds as it is.
-    twilio: { upstream: 'https://api.twilio.com/2010-04-01', inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), identifiers: ['TWILIO_SID'], paths: ['/Accounts'] },
+    // The account's id is in Twilio's paths, /Accounts/{sid}/Messages.json: TWILIO_SID is plain, and the app holds it as it is.
+    twilio: { upstream: 'https://api.twilio.com/2010-04-01', inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
   },
   expose: { 'market/local': 'all', 'market/dev': ['STRIPE_WEBHOOK_SECRET'] },
 })
@@ -122,15 +123,68 @@ credentialProxy({
   nowhere else.
 - A handle grants the use of every credential its environment holds, and
   each only to its own upstream.
-- `identifiers` names the keys a rule reads that are no secret and that
-  the app needs as they are (an account's id in its URLs). The plan gives
-  their values, opened to `expose`, and the handle stands in for the rest.
-  They are held to `expose`'s limits: configuration only, and only an
-  environment's own value. A fork that inherits `TWILIO_SID`, or a
-  personal config, gets the handle for it, so a fork that calls Twilio
-  holds its own `TWILIO_SID`.
+- A key the rule reads that is no secret, an account's id in its URLs, is
+  marked plain (below), and the app holds it as it is; the handle stands in
+  for the rest. `identifiers: ['TWILIO_SID']`, which said the same in
+  configuration, still works in 0.9 and is deprecated: it held only an
+  environment's own value, so a fork that inherited `TWILIO_SID` got the
+  handle for it. It goes in a later release.
 
-**`expose`** names the few values an environment's apps may hold as they
+**Plain values (0.9).** A key can be marked not secret: an account's id, a
+region, a public address. It is a property of what is written, as a
+recipe is:
+
+```sh
+$ coffre set market/dev/TWILIO_SID AC0123456789 --plain   # a plain value may be an argument
+$ coffre list market/dev
+TWILIO_SID	v1	admin@acme.example	today  plain: AC0123456789
+TWILIO_TOKEN	v1	admin@acme.example	today
+```
+
+- **Who sees it.** Whoever lists the environment sees the value, in the
+  listing (`value`), the page (inline, with a Plain tag) and MCP's list.
+  Inherited by a fork, it shows to a reader of the parent that holds it,
+  as an inherited value always reads. A reference to it reads as a
+  secret, through the vault.
+- **Reading it is no secret read.** A plain version keeps its value in
+  the clear beside its ciphertext (`secret_versions.plaintext`, migration
+  `0011_plain_values`), and a read serves that, with no vault call
+  (`openValues`). So a person gets it under stand-ins (`coffre get`, a
+  reveal, `coffre run` and `export` through the plan), it is in no
+  `secret.read` entry, and it counts towards no bulk limit. The proxy
+  leaves it unredacted in an upstream's answer: Twilio quotes the account
+  back in every one. The ciphertext stays for what opens values through
+  the vault: a reference, KEK rotation.
+- **A write says it, every time.** `{ "value": "…", "plain": true }` in
+  `PATCH /secrets/…`; any other write is a secret, so writing over a plain
+  value without `--plain` makes the key secret again, and that needs only
+  write. Its version and its `secret.write` entry say `plain`. A rollback
+  to a plain version is plain again: that value was shown already. A
+  fork's copy keeps it plain.
+- **Making a stored secret plain discloses it**, so it is a reveal and a
+  write: the client reads the value (an audited `secret.read`), then writes
+  it plain with the version it `replaces`, refused if someone wrote since.
+  Under stand-ins a person has no reveal, so a person never publishes a
+  value they cannot read: they type it again, plain (decision 12). A
+  service account may.
+- **Never in a personal config.** Its values are its owner's alone (R8):
+  a plain write there is refused. A plain value of the environment it
+  overrides reaches its owner as any reader of that environment.
+
+**What replaces `expose`, by what the value is.** Equisafe's
+`backend/local` listed 17 keys under `expose` in 0.8. 0.9 replaces each
+kind:
+
+| The value is | 0.9 | Equisafe's keys |
+|---|---|---|
+| No secret | A plain value | `DFNS_CREDENTIAL_ID`, `STARKNET_TESTNET_ACCOUNT_ADDRESS` |
+| The app's own key: sealing, encryption, HMAC, webhook secrets | A value generated for each person in `<env>@me` | `POLICY_SEAL_KEY`, `IFRAME_TOKEN_SECRET`, `DELEGATED_SESSION_SECRET`, `PLAYWRIGHT_SERVICE_SECRET`, `ROOT_ENCRYPTION_KEY`, `FIAT_CHALLENGE_SECRET`, `*_WEBHOOK_SECRET` |
+| A key whose host is in the app's code | A credential, the app pointing at its proxy URL | `LEMONWAY_API_KEY`, `YOUSIGN_API_KEY`, and `backend/tests`' `TEST_LEMONWAY_SANDBOX_API_KEY` |
+| A token the SDK decodes (a JWT) | A shaped stand-in | `DFNS_AUTH_TOKEN` |
+| A key the app signs with | `credential(name).sign()` | `DFNS_PRIVATE_KEY` |
+| A key no proxy can use yet (a STARK-curve key) | `expose`, still | `STARKNET_TESTNET_PRIVATE_KEY` |
+
+**`expose`** names the few secret values an environment's apps may hold as they
 are, because they cannot be used through a proxy: a webhook's HMAC secret
 the backend verifies a signature with, a local encryption key, a testnet
 signing key. It is configuration only, with no API and no page. It
@@ -197,10 +251,10 @@ still open values, though, so nothing stops the agent from asking for them.
 `coffre run` asks it first. It holds no secret.
 
 `GET /use/<project>/<env>`, with the handle as a bearer token, is the
-**plan**: one read of what the environment holds, which opens only the
-keys it exposes, chosen from the very rows it opens (`PickKeys`), so an
-override reset between two reads cannot swap a parent's value in. It
-answers:
+**plan**: one read of what the environment holds, which opens only its
+plain values and the keys it exposes, chosen from the very rows it opens
+(`PickKeys`, each row saying whether it is plain), so an override reset
+between two reads cannot swap a parent's value in. It answers:
 
 ```json
 {
@@ -212,9 +266,11 @@ answers:
 ```
 
 A credential appears when its environment holds every key of its rule.
-Each of those keys becomes the handle, so a rule that frames its keys
-(`Bearer {K}`, Basic's `user:password`) finds the handle wherever it ends
-up. `left` lists what the app does without, and `coffre run` prints it.
+Each of those keys becomes the handle, but a plain one, which the app holds
+as it is, so a rule that frames its keys (`Bearer {K}`, Basic's
+`user:password`) finds the handle wherever it ends up. A tunnel's URL,
+which the proxy fills itself, is never given as the environment holds it,
+plain or not. `left` lists what the app does without, and `coffre run` prints it.
 `credentials` is what `COFFRE_CREDENTIALS` holds for `credential(name)`:
 each credential's URL for the environment, which a run of several
 environments tells apart, and from which `presign()` finds the
@@ -769,10 +825,27 @@ is reversible.
 9. **No DNS pinning yet.** Literal private addresses are refused. A name
    that resolves to one is the operator's DNS.
 10. **Redaction of values 8 characters or longer**, in headers and text
-    bodies.
+    bodies; never a plain value's (0.9).
 11. **Bodies read whole, up to 16 MiB**, so the upstream gets a
     `Content-Length`. Uploads larger than that go through S3's own path
     (PR 2) or a presigned URL.
+12. **Making a stored secret plain is a reveal, then a write (0.9).**
+    Erwin's brief had it need `secret.read` on the key, and audited. Under
+    stand-ins, though, `secret.read` is a person's right to *use* a value,
+    never to see it (decision 2), and a plain value is shown to everyone
+    who lists the environment: a person, or their agent with a personal
+    token, could publish any key they may use. So the flip is the client's
+    reveal, which the vault refuses a person under stand-ins (R13), and a
+    plain write of what it showed. Without stand-ins, that is exactly
+    `secret.read` and an audited read and write. A person types a value
+    they know again, plain. *Alternative:* a flip the server does, allowed
+    to people, if publishing what one may use is wanted.
+13. **Plain is said by each write, and stored beside the ciphertext.** A
+    write that does not say `plain` is a secret, so nothing becomes or
+    stays plain without someone saying so then. The clear copy is what
+    lets a listing show it and a read skip the vault. The ciphertext keeps
+    the paths that open through the vault (references, KEK rotation)
+    unchanged.
 
 Taken in 0.9 (W127), each for Erwin to review, each reversible:
 
@@ -809,3 +882,4 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
 | 4 | Redis through the tunnel |
 | 5 | `sign`/`presign`/`verify` helpers, SDK credential files |
 | 0.9 C | Shaped stand-ins, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
+| 0.9 A | Plain values (`0011_plain_values`, `coffre set --plain`, the page's Plain toggle), which deprecate `identifiers`. Built |

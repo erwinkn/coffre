@@ -887,6 +887,8 @@ async function list(args: string[]): Promise<void> {
       const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: ${rotate})` : '';
       const made = recipe === null ? '' : `  (generated, ${recipe})`;
       const archived = entry.archived ? '  (archived)' : '';
+      // A plain value is no secret, and lists as it is; an instance before 0.9 says nothing.
+      const plain = entry.value == null ? '' : `  plain: ${entry.value}`;
       // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
       const parent = entry.parent ?? null;
       const standing = parent === null
@@ -903,7 +905,7 @@ async function list(args: string[]): Promise<void> {
         process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
         continue;
       }
-      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${due}${archived}${standing}\n`);
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${plain}${due}${archived}${standing}\n`);
     }
   }
 }
@@ -920,14 +922,16 @@ async function set(args: string[]): Promise<void> {
     ref: { type: 'string' },
     generate: { type: 'string' },
     'public-key': { type: 'string' },
+    plain: { type: 'boolean' },
   }, ['<project>/<environment>/<KEY>', '[value]'], 1);
   const [target, given] = positionals as [string, string | undefined];
-  // A value on the command line is in the shell's history and `ps`: it is asked for.
-  if (given !== undefined) fail('coffre set asks for the value: paste it, or pipe it in, never as an argument');
+  // A secret on the command line is in the shell's history and `ps`: it is asked for. A plain value is no secret.
+  if (given !== undefined && values.plain !== true) fail('coffre set asks for the value: paste it, or pipe it in, never as an argument; a value that is no secret may be one, with --plain');
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre set <project>/<environment>/<KEY>');
   if (values.ref !== undefined && values.generate !== undefined) fail('--ref or --generate: a key reads another secret, or holds a value made here, not both');
+  if (values.plain === true && (values.ref !== undefined || values.generate !== undefined)) fail('--plain writes a value given here, as it is: not with --ref or --generate');
   if (values['public-key'] !== undefined && values.generate === undefined) fail('--public-key goes with --generate and a key pair\'s recipe, as ecdsa:p-256');
   // Made here, sent with its recipe, and never shown: nobody sees the value, and Regenerate makes the next one alike.
   if (values.generate !== undefined) {
@@ -946,11 +950,12 @@ async function set(args: string[]): Promise<void> {
     return;
   }
 
-  const value = await readValue(key);
-  const result = await client().secrets.set(`${project}/${environment}`, { [key]: value });
+  // Plain, no secret: whoever lists the environment sees it, and its apps get it as it is, stand-ins or not.
+  const value = given ?? await readValue(key);
+  const result = await client().secrets.set(`${project}/${environment}`, { [key]: values.plain === true ? { value, plain: true } : value });
   const outcome = result.keys[key];
 
-  process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}\n`);
+  process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}${values.plain === true ? ', plain: shown to whoever lists ' + `${project}/${environment}` : ''}\n`);
 }
 
 /**
