@@ -1046,7 +1046,9 @@ async function standIns(paths: readonly string[], to: Target = target()): Promis
   if (!(await proxied(to))) return null;
   const at = (path: string, headers: Record<string, string>) =>
     fetch(`${to.origin}/use${path}`, { headers, redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
-  const handle = await client(to).handles.create({ label: `coffre run ${paths.join(' ')} on ${hostname()}`, paths: [...paths] });
+  // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
+  const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
+  const handle = await client(to).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
   const plans: [string, { env: Record<string, string>; credentials: Record<string, string>; left: string[] }][] = [];
   for (const path of paths) {
     const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });

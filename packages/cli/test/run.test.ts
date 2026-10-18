@@ -352,8 +352,11 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
   const pat = `coffre_pat_${'p'.repeat(43)}`;
   const handle = `coffre_use_${'h'.repeat(43)}`;
   const requests: string[] = [];
+  const labels: string[] = [];
   const server = createServer(async (req, res) => {
-    for await (const _ of req);
+    let body = '';
+    for await (const chunk of req) body += String(chunk);
+    if (req.url === '/api/handles') labels.push((JSON.parse(body) as { label: string }).label);
     requests.push(`${req.method} ${req.url} ${req.headers.authorization === `Bearer ${handle}` ? 'handle' : req.headers.authorization === `Bearer ${pat}` ? 'token' : 'none'}`);
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     if (req.url === '/use') return send(200, { proxy: 'coffre', credentials: ['schumann'] });
@@ -391,4 +394,5 @@ test("a person's run, on an instance with the credential proxy, gets stand-ins: 
   assert.match(stderr, /left out, neither proxied nor exposed: DATABASE_URL/);
   // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle.
   assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
+  assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);
 });

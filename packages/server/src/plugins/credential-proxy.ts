@@ -268,8 +268,14 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   } catch (error) {
     return failure(502, `${target.host} did not answer: ${error instanceof Error ? error.message : String(error)}`);
   }
+  // What the request carried: each value, and what the rule made of them, Basic's base64, as stored and as they went out
+  // (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`).
+  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length) : target.searchParams.get(inject.name)!;
+  const redact = redactor([...Object.values(values).flatMap((value) => [value, value.trim()]), injected].flatMap(echoed));
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
-  const location = upstream.headers.get('location');
+  // Redacted as the bytes it came in, before a URL encodes them again.
+  const raw = upstream.headers.get('location');
+  const location = raw === null ? null : redact.whole(raw);
   let at: string | null = null;
   if (location !== null) {
     const to = new URL(location, target);
@@ -285,12 +291,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
       return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
     } else at = location;
   }
-  // What the request carried: each value, and what the rule made of them, Basic's base64, in each form an honest
-  // upstream may echo it in (`echoed`).
-  // As they went out, too: `Headers` trims a value's surrounding whitespace, and the query its own way.
-  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length) : target.searchParams.get(inject.name)!;
-  const sent = [...Object.values(values).flatMap((value) => [value, value.trim()]), injected];
-  return redacted(upstream, sent.flatMap(echoed), at);
+  return redacted(upstream, redact, at);
 }
 
 /**
@@ -425,7 +426,10 @@ function render(template: string, values: Record<string, string>): string {
  * set on coffre's origin could stand in for coffre's own. `location`, a
  * redirect's, is already the proxy's own URL for it.
  */
-function redacted(upstream: Response, values: string[], location: string | null): Response {
+/** What redacts the forms of what a request carried (`echoed`): a whole string, or part of a stream (`scrub`). */
+type Redactor = { scrub: (text: string, final: boolean) => { done: string; rest: string }; whole: (text: string) => string; any: boolean };
+
+function redactor(values: string[]): Redactor {
   // Each form as the bytes an answer carries it in, UTF-8 or Latin-1, scanned as binary strings: lossless in any charset.
   const forms = values.filter((value) => value.length >= MIN_REDACTED).flatMap((value) => {
     const utf8 = binary(new TextEncoder().encode(value));
@@ -455,10 +459,13 @@ function redacted(upstream: Response, values: string[], location: string | null)
     return { done: done + text.slice(from, cut), rest: text.slice(cut) };
   };
   // A header's value and the reason phrase are already bytes, one character each, as fetch gives them.
-  const whole = (text: string) => scrub(text, true).done;
+  return { scrub, whole: (text) => scrub(text, true).done, any: pattern !== null };
+}
+
+function redacted(upstream: Response, { scrub, whole, any }: Redactor, location: string | null): Response {
   const headers = new Headers();
   for (const [name, value] of upstream.headers) if (!DROPPED_ANSWER.has(name)) headers.set(name, whole(value));
-  if (location !== null) headers.set('location', whole(location));
+  if (location !== null) headers.set('location', location);
   // Never kept by a cache on the way: the next caller, with another handle or none, would get it without coffre's checks.
   for (const name of ['expires', 'pragma', 'age', 'surrogate-control', 'cdn-cache-control', 'cloudflare-cdn-cache-control']) headers.delete(name);
   headers.set('cache-control', 'no-store');
@@ -469,7 +476,7 @@ function redacted(upstream: Response, values: string[], location: string | null)
   const init = { status: upstream.status, statusText: whole(upstream.statusText), headers };
   const type = upstream.headers.get('content-type') ?? '';
   const text = /^text\/|json|xml|javascript|x-www-form-urlencoded|event-stream/i.test(type);
-  if (upstream.body === null || !text || pattern === null) return new Response(upstream.body, init);
+  if (upstream.body === null || !text || !any) return new Response(upstream.body, init);
   let carry = '';
   const bytes = (part: string) => Uint8Array.from(part, (char) => char.charCodeAt(0));
   const body = upstream.body.pipeThrough(
@@ -480,7 +487,7 @@ function redacted(upstream: Response, values: string[], location: string | null)
         if (done.length > 0) out.enqueue(bytes(done));
       },
       flush(out) {
-        const last = scrub(carry, true).done;
+        const last = whole(carry);
         if (last.length > 0) out.enqueue(bytes(last));
       },
     }),

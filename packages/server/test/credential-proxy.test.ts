@@ -70,6 +70,11 @@ before(async () => {
         response.writeHead(400, { 'content-type': 'text/plain', 'x-error-key': Buffer.from(Buffer.from(key, 'latin1').toString('latin1'), 'utf8').toString('latin1') }).end('no');
         return;
       }
+      if (request.url!.includes('/utf8-location')) {
+        // A redirect under the upstream, the key in its path as UTF-8 bytes.
+        response.writeHead(302, { location: Buffer.from(`/accented/moved/${Buffer.from(key, 'latin1').toString('latin1')}`, 'utf8').toString('latin1') }).end();
+        return;
+      }
       if (request.url!.includes('/reason')) {
         response.writeHead(401, `Invalid API key ${key}`, { 'content-type': 'text/plain' }).end('no');
         return;
@@ -424,6 +429,9 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(python, '{"key":"[redacted by coffre]"}');
   const header = await route('/use/market/dev/accented/utf8-header', { headers: { 'x-api-key': handle } });
   assert.equal(header.headers.get('x-error-key'), '[redacted by coffre]');
+  const relocated = await route('/use/market/dev/accented/utf8-location', { headers: { 'x-api-key': handle } });
+  assert.equal(relocated.status, 302);
+  assert.equal(decodeURIComponent(relocated.headers.get('location')!).includes('0123456789'), false, relocated.headers.get('location')!);
   const reason = await route('/use/market/dev/schumann/reason', { headers: { 'x-api-key': handle } });
   assert.equal(reason.statusText.includes(KEY), false, reason.statusText);
   // A body in another charset passes byte for byte.
