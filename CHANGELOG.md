@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.1 (2026-10-18)
+
 - **Postgres through the credential proxy, on Node.** `credentialProxy({
   tunnels: { db: postgres('DATABASE_URL') } })`: `coffre run` starts a
   local listener for the app, whose `DATABASE_URL` is that listener with
