@@ -258,6 +258,7 @@ export type Api = {
         };
         value: string | null;
         sensitivity: "plain" | "secret" | "sensitive" | null;
+        readable: boolean;
         parent: null | {
           from: string;
           state: "inherited" | "overridden" | "removed";
@@ -1984,6 +1985,7 @@ export type SecretKey = {
   };
   value: string | null;
   sensitivity: "plain" | "secret" | "sensitive" | null;
+  readable: boolean;
   parent: null | {
     from: string;
     state: "inherited" | "overridden" | "removed";

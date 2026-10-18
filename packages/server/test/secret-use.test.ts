@@ -128,6 +128,24 @@ test("a Contributor's personal config is theirs to read: they use the environmen
   assert.equal((await contributor.secrets.reveal('market/dev@me/WEBHOOK')).values.WEBHOOK, 'whsec_mine_0123456789');
 });
 
+test("a Contributor's dev@me lists their own value readable, and dev's inherited ones, told of, not", async () => {
+  const contributor = clientFor(deps, CONTRIBUTOR);
+  await contributor.secrets.set('market/dev@me', { WEBHOOK: 'whsec_mine_0123456789' });
+  const listed = new Map((await contributor.secrets.list('market/dev@me')).keys.map((entry) => [entry.key, entry]));
+  // Dev's key, its version and age told, as to a lister of dev; its value read only by a reader of dev.
+  const inherited = listed.get('API_KEY')!;
+  assert.deepEqual([inherited.parent?.state, inherited.version, inherited.readable], ['inherited', 1, false]);
+  assert.equal((await refusal(contributor.secrets.reveal('market/dev@me/API_KEY'))).status, 403);
+  // A plain value is listed, and is its own read.
+  assert.deepEqual([listed.get('REGION')!.value, listed.get('REGION')!.readable], ['eu-west-3', true]);
+  const own = listed.get('WEBHOOK')!;
+  assert.deepEqual([own.parent?.state, own.readable], ['overridden', true]);
+  // A reader of dev reads both, in their own dev@me.
+  await root.secrets.set('market/dev@me', { WEBHOOK: 'whsec_root_0123456789' });
+  const rootListed = new Map((await root.secrets.list('market/dev@me')).keys.map((entry) => [entry.key, entry.readable]));
+  assert.deepEqual([rootListed.get('API_KEY'), rootListed.get('WEBHOOK')], [true, true]);
+});
+
 test('a personal token of a Contributor names contributor, and reaches no read', async () => {
   const session = await sessionFor(CONTRIBUTOR);
   const viewer = await refusal(bearer(session).tokens.issue(`user:${CONTRIBUTOR}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } }));

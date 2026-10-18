@@ -92,6 +92,14 @@ export type SecretKey = {
    */
   sensitivity: Sensitivity | null;
   /**
+   * Whether you may see its current value: a plain one listed here, or a
+   * secret where it is held, here or, inherited, on the parent that holds
+   * it. A Contributor's personal config reads their own values, and none of
+   * its parent's. False for a sensitive value, which nobody sees, and where
+   * there is no value to read.
+   */
+  readable: boolean;
+  /**
    * In a fork, the key its parents hold under this name
    * (docs/design/forking.md): `inherited`, no row here, the parent's value
    * read live; `overridden`, a value or reference of its own over the
@@ -301,7 +309,7 @@ export async function listSecrets(
     ...rows,
     ...[...inherited.held].filter(([key]) => !own.has(key) && !inherited.removed.has(key)).map(([, held]) => held.row),
   ]);
-  const view = (row: SecretRow): Omit<SecretKey, 'parent'> => ({
+  const view = (row: SecretRow): Omit<SecretKey, 'parent' | 'readable'> => ({
     key: row.key,
     reference: referenceOf(row.id),
     folder: row.folder,
@@ -315,19 +323,28 @@ export async function listSecrets(
     sensitivity: levelOfRow(row),
   });
   // Told of a parent's key, its version, age and plain value, as a lister of the parent is: a reader, or a Contributor who uses it.
-  const reads = (from: { id: string; slug: string }) =>
+  const told = (from: { id: string; slug: string }) =>
     lists(ctx.caller, { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
+  // Whether the caller reads a value where it is held: a Contributor only uses dev, and reads their own values in dev@me.
+  const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
+  const readsAt = (from: { id: string; slug: string }) =>
+    can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
+  const readable = (key: Pick<SecretKey, 'value' | 'sensitivity'>, reader: boolean) =>
+    key.sensitivity !== null && key.sensitivity !== 'sensitive' && (key.value !== null || reader);
 
   // An override reset to the parent's: its key is listed once, as inherited or removed, saying its own value is kept.
   const removedSince = (key: string) => inherited.removed.has(key) && inherited.cut.has(key);
   const reset = new Set(rows.filter((row) => row.archivedAt !== null && (inherited.held.has(row.key) || removedSince(row.key))).map((row) => row.key));
   const keys: SecretKey[] = rows.filter((row) => !reset.has(row.key)).map((row) => {
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
-    if (held === undefined) return { ...view(row), parent: null };
+    // An archived key has no value to read: a read of it is refused.
+    const listed = view(row);
+    const here = { ...listed, readable: row.archivedAt === null && readable(listed, readsHere) };
+    if (held === undefined) return { ...here, parent: null };
     // Flagged while the parent's value is newer than the override, to whoever may know when it was written.
     const [mine, theirs] = [writtenAt(row), writtenAt(held.row)];
-    const changed = reads(held.from) && mine !== null && theirs !== null && theirs > mine;
-    return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
+    const changed = told(held.from) && mine !== null && theirs !== null && theirs > mine;
+    return { ...here, parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
   });
   // A parent archived or deleted, which only a write around coffre leaves in a chain, cuts it: a read refuses there, and no
   // plain value is listed from it or past it.
@@ -336,13 +353,18 @@ export async function listSecrets(
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;
     const removed = inherited.removed.has(key);
-    const shown = !removed && reads(held.from);
-    keys.push({
+    const shown = !removed && told(held.from);
+    const listed = {
       ...view(held.row),
       ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null }),
       ...(shown && live(held.from) ? {} : { value: null }),
       // A removed key resolves to nothing here, and has nothing to regenerate.
       ...(removed ? { generated: null, value: null, sensitivity: null } : {}),
+    };
+    keys.push({
+      ...listed,
+      // Read where it is held, by a reader of that parent, while the chain to it is whole.
+      readable: readable(listed, live(held.from) && readsAt(held.from)),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
@@ -352,7 +374,7 @@ export async function listSecrets(
     const from = inherited.cut.get(key);
     if (from === undefined || own.has(key)) continue;
     keys.push({
-      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null,
+      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null, readable: false,
       parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
     });
   }

@@ -1306,11 +1306,10 @@ function SecretRow({
   const removed = parent?.state === 'removed';
   const overridden = parent?.state === 'overridden';
   const own = !inherited && !removed;
-  // Inherited from a parent you do not read: its name is yours to know, its value is not.
-  const parentHidden = inherited && entry.version === null && reference === null;
   // A sensitive value is shown to nobody, its readers included: no Reveal, no Copy, and an edit starts empty.
   const sensitive = entry.sensitivity === 'sensitive';
-  const canRead = canReveal && !removed && !parentHidden && !sensitive;
+  // Read where it is held: inherited, on its parent, which a Contributor's dev@me tells of and does not read.
+  const canRead = entry.readable;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
   // And where that version is held: a reset, an override or a new reference changes it under the same number.
@@ -1413,7 +1412,8 @@ function SecretRow({
   }
 
   // An edit starts from the current value, read the way Reveal reads it, so
-  // the audit log shows who opened it. One that cannot be read starts empty.
+  // the audit log shows who opened it. One its editor does not read starts
+  // empty: sensitive, or a parent's in a Contributor's dev@me, overridden unread.
   const [opening, setOpening] = useState(false);
   // Rename opens the same editor, its name field focused rather than its value.
   const [focusName, setFocusName] = useState(false);
@@ -1545,7 +1545,7 @@ function SecretRow({
                       loosening ? 'Its value, typed again'
                         : editBase !== null ? 'Value'
                           : sensitive ? 'Type a new value'
-                            : canReveal ? 'New value' : 'New value; the current one is hidden from you'
+                            : canRead ? 'New value' : 'New value; the current one is hidden from you'
                     }
                     plain={level === 'plain'}
                     disabled={disabled}
