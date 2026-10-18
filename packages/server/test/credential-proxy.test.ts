@@ -698,7 +698,7 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   assert.equal(mine.environment, 'market/dev@me');
   assert.equal(mine.env.WEBHOOK_SECRET, WEBHOOK, "a personal config of it does, as dev's own: its owner gets it through dev anyway");
   assert.equal(mine.env.LOCAL_ONLY, 'x', "but its own values, which only its owner wrote, are its owner's app's");
-  assert.equal(mine.env.TWILIO_SID?.startsWith('coffre_use_'), true, 'nor an identifier it inherits');
+  assert.equal(mine.env.TWILIO_SID, 'AC0123456789', "dev's own identifier, which its owner gets through dev anyway");
 
   // Each exposure is logged as the vault's read to expose, one entry per environment it opens in: dev's webhook secret and
   // Twilio's account id; the personal config's own value; and dev's webhook secret, through the personal config. The fork
