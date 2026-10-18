@@ -363,6 +363,39 @@ test('a startup asks for encryption once each, and no more', postgresOnly, async
   assert.ok(!answered.startsWith('NNN'));
 });
 
+test('sessions opened at different times end together, within one check of the revocation', postgresOnly, async () => {
+  const first = appClient();
+  first.on('error', () => undefined);
+  await first.connect();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const second = appClient();
+  second.on('error', () => undefined);
+  await second.connect();
+  const ended = (client: pg.Client) => new Promise<number>((resolve) => client.once('end', () => resolve(Date.now())));
+  const ends = [ended(first), ended(second)];
+  const revoked = Date.now();
+  await revoke();
+  const [a, b] = await Promise.all(ends);
+  // One check is 200 ms here: both within two of it, the first that fails ending them both.
+  assert.ok(Math.max(a, b) - revoked < 450, `${a - revoked} ms and ${b - revoked} ms`);
+});
+
+test('a refused upgrade leaves no socket behind, though the peer keeps its side open', postgresOnly, async () => {
+  const before = await new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count)));
+  const socket = tcp({ host: '127.0.0.1', port: Number(new URL(coffreAt).port), allowHalfOpen: true });
+  await once(socket, 'connect');
+  socket.write('GET /use/market/dev/db HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n');
+  socket.resume();
+  await once(socket, 'end');
+  for (let waited = 0; waited < 1500; waited += 50) {
+    const count = await new Promise<number>((resolve) => coffre.getConnections((_, n) => resolve(n)));
+    if (count <= before) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(await new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count))), before);
+  socket.destroy();
+});
+
 /** Revoke the suite's handle, as its person would. */
 async function revoke(): Promise<void> {
   const session = await sessionFor(DEV);

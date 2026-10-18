@@ -44,7 +44,11 @@ export async function upgrade(runtime: CoffreRuntime, incoming: IncomingMessage,
     // The plugin's refusal as it said it, its headers included (`coffre-proxy`, `www-authenticate`), framed for this one answer.
     const body = Buffer.from(await answer.arrayBuffer());
     const headers = [...answer.headers].filter(([name]) => !FRAMING.has(name)).map(([name, value]) => `${name}: ${value}\r\n`).join('');
-    socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Refused'}\r\n${headers}content-length: ${body.length}\r\nconnection: close\r\n\r\n${body.toString('latin1')}`, 'latin1');
+    // Then gone, once said or a second on: a peer that keeps its side open keeps nothing of the server's.
+    const gone = setTimeout(() => socket.destroy(), 1000);
+    gone.unref();
+    socket.once('close', () => clearTimeout(gone));
+    socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Refused'}\r\n${headers}content-length: ${body.length}\r\nconnection: close\r\n\r\n${body.toString('latin1')}`, 'latin1', () => socket.destroy());
     return;
   }
   const session = answer;

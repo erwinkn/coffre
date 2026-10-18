@@ -389,8 +389,10 @@ SCRAM. A pool pays that once per connection.
 open sessions of a handle ask whether they may go on. The answer comes from
 opening the database's URL again, as the vault decides it, once per handle
 and tunnel for all their sessions, and logged as a use. So a revoked handle
-and a person's lost grant each end the sessions, within the minute: both
-sockets close and the app's driver sees its connection drop. Every new
+and a person's lost grant each end the sessions, within the minute: the
+first check that fails ends every session of that handle and tunnel at
+once, both sockets of each close, and the app's driver sees its
+connections drop. Every new
 connection checks the handle afresh, at admission and again just before the
 login, whatever the cache holds. *Decision:* end open sessions rather than
 let them run out.

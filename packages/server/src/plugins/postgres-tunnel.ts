@@ -169,6 +169,8 @@ export type TunnelSession = {
    * ends when it may not.
    */
   stands(now?: boolean): Promise<boolean>;
+  /** Told how to end this session, so that a check another session of its handle makes, and fails, ends it too. Returns its undoing. */
+  watch(end: () => void): () => void;
   recheckMs: number;
   connect: Connect;
 };
@@ -209,6 +211,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   };
   const end = () => {
     ended = true;
+    unwatch();
     dialing.abort();
     clearInterval(timer);
     if (key !== null) cancels.delete(key);
@@ -225,6 +228,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
     }, () => end());
   }, session.recheckMs);
   const deadline = setTimeout(end, STARTUP_MS);
+  const unwatch = session.watch(end);
   void client.closed.then(end, end);
   /** A step of the startup, which an ended session does not wait for. */
   const step = <T,>(work: Promise<T>): Promise<T> =>

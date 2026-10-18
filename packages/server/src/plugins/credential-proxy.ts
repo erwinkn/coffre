@@ -168,13 +168,14 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
   const cache = new Map<string, { values: Record<string, string>; until: number }>();
   const standing = new Map<string, { stands: boolean; at: number }>();
+  const sessions = new Map<string, Set<() => void>>();
   return {
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, standing, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+          return await serve(request, coffre, { credentials, standing, sessions, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -182,7 +183,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, standing, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
+          return await open(request, coffre, { credentials, standing, sessions, tunnels, insecure: options.insecureUpstreams === true, recheckMs, expose, cacheMs, cache });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -196,6 +197,8 @@ type Proxy = {
   credentials: Map<string, Resolved>;
   /** Each tunnel's last word on whether its sessions go on, by handle, environment and tunnel: settled answers only. */
   standing: Map<string, { stands: boolean; at: number }>;
+  /** How to end each open session, by handle, environment and tunnel: what a failed check ends together. */
+  sessions: Map<string, Set<() => void>>;
   tunnels: Map<string, Tunnel>;
   insecure: boolean;
   recheckMs: number;
@@ -342,6 +345,15 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
       recheckMs: proxy.recheckMs,
       connect,
       stands: async (now) => (!now || (await coffre.handle(handle).then(() => true, () => false))) && stands(coffre, proxy, handle, path, { name: place[2]!, key: tunnel.key }),
+      watch: (end) => {
+        const key = `${handle}\u0000${path}\u0000${place[2]!}`;
+        const ends = proxy.sessions.get(key) ?? new Set();
+        proxy.sessions.set(key, ends.add(end));
+        return () => {
+          ends.delete(end);
+          if (ends.size === 0) proxy.sessions.delete(key);
+        };
+      },
     });
 }
 
@@ -362,6 +374,8 @@ async function stands(coffre: PluginContext, proxy: Proxy, handle: string, path:
     (used) => Object.hasOwn(used.values, tunnel.key),
     () => false,
   );
+  // No: every session of this handle and tunnel ends now, not each at its own next check.
+  if (!now) for (const end of [...(proxy.sessions.get(key) ?? [])]) end();
   // A handful of handles in a dev loop: past a thousand answers, those too old to serve go.
   if (proxy.standing.size >= 1000) for (const [old, answer] of proxy.standing) if (Date.now() - answer.at >= proxy.recheckMs) proxy.standing.delete(old);
   proxy.standing.set(key, { stands: now, at: Date.now() });
