@@ -422,6 +422,7 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
   }
   assert.equal((await call('/companies', { headers: { 'x-other': handle } })).status, 400, 'the handle goes nowhere but where the key goes');
   assert.equal((await call('/companies?token=' + handle)).status, 400);
+  assert.equal((await call(`/%FF/${handle.replace('_', '%5F')}`)).status, 400, 'encoded, beside a byte that is no UTF-8');
   assert.equal((await route('/use/market/dev/schumann/companies')).status, 401, 'no handle, no request');
   assert.equal((await route('/use/market/dev/nope/companies', { headers: { 'x-api-key': handle } })).status, 404);
   assert.equal(received.every((request) => request.url.startsWith('/v1/') || request.url.startsWith('/quoted/')), true);

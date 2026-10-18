@@ -466,7 +466,7 @@ async function presign(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(403, `${credential.name} is not for ${relative}`);
   }
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
-  if (HANDLE.test(safeDecode(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
+  if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
   // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
   const used = await coffre.use(handle, { path, keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
   if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
@@ -569,7 +569,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(409, `${credential.name}'s value is no valid ${inject.kind === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
   }
   // The handle goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
-  const leaked = [...headers].find(([, value]) => carries(value)) ?? (carries(safeDecode(target.href)) ? ['URL'] : undefined)
+  const leaked = [...headers].find(([, value]) => carries(value)) ?? (carries(bytesOf(target.href)) ? ['URL'] : undefined)
     ?? (body !== undefined && HANDLE.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);
   if (leaked !== undefined) {
     return failure(400, `the handle is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
@@ -695,12 +695,13 @@ function carries(value: string): boolean {
   }
 }
 
-function safeDecode(text: string): string {
-  try {
-    return decodeURIComponent(text);
-  } catch {
-    return text;
-  }
+/**
+ * A URL with each `%XX` as its byte, one character each: what the handle,
+ * which is ASCII, is looked for in. It never fails, as decoding the whole
+ * as UTF-8 does on a `%FF`, which would leave `coffre%5Fuse_…` unseen.
+ */
+function bytesOf(text: string): string {
+  return text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 }
 
 /** The credential's values for the handle: remembered for `cacheSeconds`, or opened now, logged as one use. */

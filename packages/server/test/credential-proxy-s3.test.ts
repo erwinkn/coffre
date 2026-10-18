@@ -294,6 +294,8 @@ test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the
   // No URL to share carries the handle, in its path or its query.
   assert.equal((await ask({ credential: 's3', path: `/uploads/${handle}` })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'response-content-disposition': `attachment; filename=${handle}` } })).status, 400);
+  // Encoded, beside a byte that is no UTF-8: still the handle.
+  assert.equal((await ask({ credential: 's3', path: `/uploads/%FF/${handle.replace('_', '%5F')}` })).status, 400);
   assert.equal((await route('/use/market/dev', { method: 'POST', body: JSON.stringify({ presign: { credential: 's3', path: '/x' } }) })).status, 401);
 });
 
