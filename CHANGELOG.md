@@ -18,6 +18,15 @@
   nullable column); one made by 0.8 works on its environments' URLs, and
   on the stable URL once `coffre run` makes a new one. See
   docs/design/credential-proxy.md, section 4.
+- **Signing through the handle.** `credentialProxy({ signers: { 'dfns-key':
+  privateKey('DFNS_PRIVATE_KEY') } })` keeps a private key in coffre, and
+  the app asks for each signature with `credential('dfns-key').sign(message)`
+  (`@coffre/client/credential`): what Node's `crypto.sign(undefined,
+  message, key)` gives, base64url, for an Ed25519, P-256 or RSA key in
+  PKCS#8. Each signature is one use in the log. `DFNS_PRIVATE_KEY` no
+  longer needs `expose`: DFNS's `AsymmetricKeySigner` gives way to a
+  15-line signer that calls coffre (docs/design/credential-proxy.md,
+  section 5).
 - **Shaped stand-ins.** A credential's `standIn` gives its client a
   stand-in in the shape it checks: `jwt({ claims })`, a JWT of the real
   token's named claims whose last part is the handle, or `prefix('sk_test_')`.

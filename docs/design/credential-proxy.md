@@ -707,16 +707,82 @@ with the SDK's own `extractTokenScope` and requires the real one
 `HELLO 3 AUTH <user> <password>` and replacing the handle with the real
 password. Then it pipes bytes. TLS upstream as for Postgres.
 
-**Later: `sign`, `presign`, `verify`, and SDK credential files.** Some
-secrets are used for computation, not presented to a host: an HMAC that
-signs a webhook, a presigned S3 URL, a JWT signed with a service account's
-key. They get explicit helpers on the proxy (`POST /use/…/<credential>/sign`
-with the bytes, returning the signature), which the app calls instead of
-holding the key. An SDK that reads a credentials file (Google's
-service-account JSON) gets a file whose private key is a stand-in and whose
-`token_uri` points at coffre, which signs the token exchange with the real
-key. Both change app code or its configuration, so neither is in the first
-PRs.
+**Signing (0.9, built).** A private key the app signs with stays in
+coffre, and the app asks for each signature. The deployment names the key
+that holds it, as a tunnel names its URL's:
+
+```ts
+credentialProxy({ credentials: { … }, signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY') } })
+```
+
+A signer is no credential with an upstream: it reaches no host, and has
+no rule to fill in. So it is a map of its own beside `credentials` and
+`tunnels`, its names shared with theirs. The plan gives the app the handle
+where the key was, never the key, whatever `expose` says, and names the
+signer among `credentials`, for `credential(name)` to find. The app signs
+with `credential('dfns-key').sign(message)` (`@coffre/client/credential`),
+which is `POST /use/<project>/<env>` with `{ sign: { credential, message } }`,
+the message base64url, and answers the signature, base64url, as Node's
+`crypto.sign(undefined, message, key)` makes it:
+
+| The key, a PKCS#8 PEM | The signature |
+|---|---|
+| Ed25519 | its 64 bytes |
+| EC on P-256 | ECDSA with SHA-256, DER-encoded |
+| RSA | PKCS#1 v1.5 with SHA-256 |
+
+The key says what it is: coffre reads its algorithm, and an EC key's curve,
+from the PEM, and refuses any other (secp256k1, P-384) with a 409 that names
+the key and quotes none of it. A PEM in another form (`BEGIN EC PRIVATE
+KEY`) converts with `openssl pkcs8 -topk8 -nocrypt`. Line breaks may be
+written `\n`, as an env file has them. WebCrypto only
+(`packages/server/src/plugins/sign.ts`), so the same on Workers, which
+convert ECDSA's `r || s` to DER as OpenSSL writes it. Each signature is one
+use in the log, naming the message by its SHA-256, never served from the
+cache.
+
+DFNS's own signer, `AsymmetricKeySigner`, signs a user action's challenge
+with the key. Equisafe's backend replaces it, where `coffre run` gave the
+app stand-ins, with one that asks coffre:
+
+```ts
+import type { CredentialSigner, KeyAssertion, UserActionChallenge } from '@dfns/sdk';
+import { credential, type ProxiedCredential } from '@coffre/client/credential';
+
+/** AsymmetricKeySigner's assertion, its signature made by coffre: the private key never reaches the backend. */
+export class CoffreKeySigner implements CredentialSigner<KeyAssertion> {
+  readonly credId: string;
+  readonly key: ProxiedCredential;
+
+  constructor(credId: string, key: ProxiedCredential = credential('dfns-key')) {
+    this.credId = credId;
+    this.key = key;
+  }
+
+  async sign(challenge: UserActionChallenge): Promise<KeyAssertion> {
+    if (challenge.allowCredentials && !challenge.allowCredentials.key.some((allowed) => allowed.id === this.credId)) {
+      throw new Error(`${this.credId} is not among the credentials DFNS allows for this action`);
+    }
+    const clientData = JSON.stringify({ type: 'key.get', challenge: challenge.challenge });
+    const signature = await this.key.sign(clientData);
+    return { kind: 'Key', credentialAssertion: { credId: this.credId, clientData: Buffer.from(clientData).toString('base64url'), signature } };
+  }
+}
+```
+
+A service, which reads values, keeps `AsymmetricKeySigner`: the backend
+picks `CoffreKeySigner` when `COFFRE_CREDENTIALS` names `dfns-key`. The
+test (`packages/server/test/credential-proxy-sign.test.ts`) runs this very
+class in DFNS's SDK, which creates a wallet through the proxy against a fake DFNS
+that checks the signature with `node:crypto.verify`, as DFNS does.
+
+**Later: `verify`, HMAC, and SDK credential files.** Other secrets used
+for computation get helpers of the same kind: an HMAC that signs or
+verifies a webhook (a signer of another kind, `hmac('WEBHOOK_SECRET')`), a
+JWT signed with a service account's key. An SDK that reads a credentials
+file (Google's service-account JSON) gets a file whose private key is a
+stand-in and whose `token_uri` points at coffre, which signs the token
+exchange with the real key. Both change app code or its configuration.
 
 ## 6. Security
 
@@ -937,7 +1003,8 @@ Taken in 0.9 (W127), each for Erwin to review, each reversible:
 | 0.9 E | The stable URL, `/use/<credential>`, from the environments a handle keeps (`0010_handle_places`); `baseUrl` removed. Built |
 | 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), checked on a deployed Worker; the privileged-role warning |
 | 4 | Redis through the tunnel |
-| 5 | `sign`/`presign`/`verify` helpers, SDK credential files |
+| 5 | `presign` (built in 0.8.1) and `sign` (0.9 D); `verify`, HMAC, SDK credential files |
 | 0.9 C | Shaped stand-ins, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
 | 0.9 A | Plain values (`0011_plain_values`, `coffre set --plain`, the page's Plain toggle), which deprecate `identifiers`. Built |
 | 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |
+| 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |
