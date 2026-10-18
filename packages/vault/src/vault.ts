@@ -97,7 +97,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
-import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, newestVaultSeq, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -447,23 +447,29 @@ class VaultService implements Vault {
   }
 
   /**
-   * Decide in one transaction, with `principals`' rows locked first. A
-   * `Refused` or an `Outage` rolls back all but its own entries, which
-   * commit on their own: then the refusal is the answer, and the outage
-   * fails the call.
+   * Decide in one transaction, with `principals`' rows locked first, then
+   * the log's head. A `Refused` or an `Outage` rolls back all but its own
+   * entries, which commit on their own: then the refusal is the answer, and
+   * the outage fails the call.
+   *
+   * Every change to the policy, the settings, a member or a place appends
+   * under the head, so whatever the decision reads of them stands until it
+   * commits: no decision acts on a policy read before it. A key operation
+   * alone takes the head later (`late`), once its key service has answered,
+   * which it must not wait on holding it, and decides again then (`#keys`).
    */
-  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
+  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, late = false): Promise<Outcome<T>> {
     const superseded = await this.#settled();
     if (superseded !== null) return { ok: false, refusal: refusal('wrong_kek', superseded) };
-    return this.#decideNow(principals, decide);
+    return this.#decideNow(principals, decide, late);
   }
 
   /** `#decide`, once the vault is settled. */
-  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
+  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, late = false): Promise<Outcome<T>> {
     const reports: NewEntry[] = [];
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.#decideOnce(principals, decide, reports);
+        return await this.#decideOnce(principals, decide, reports, late);
       } catch (error) {
         // A member who had no row when this decision locked theirs, and has
         // one now: another decision admitted them meanwhile. Again, with it.
@@ -473,11 +479,12 @@ class VaultService implements Vault {
     }
   }
 
-  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[]): Promise<Outcome<T>> {
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], late: boolean): Promise<Outcome<T>> {
     try {
       const result = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
+        if (!late) await lockLogHead(tx);
         const d: Decision = {
           tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
@@ -679,7 +686,6 @@ class VaultService implements Vault {
     if (everyProject.length === 0) return;
     if (await reportStands(d.tx, principal, this.#check(d.reports, principal))) return;
     // The projects there are now, read under the log's head, which a deletion holds.
-    await lockLogHead(d.tx);
     const before = roleOf(principal, row);
     const conversion = everyProjectConversion(principal, before.role, subject.stored, d.at, await store.liveProjects(d.tx));
     const after = { role: conversion.role, scope: conversion.scope };
@@ -1161,7 +1167,6 @@ class VaultService implements Vault {
     if (call.remote) {
       const intent = await this.#decide([principal], async (d) => {
         await check(d);
-        await lockLogHead(d.tx);
         const at = await this.#now(d.tx);
         const appended = await this.#append(d.tx, [{
           actor: principal,
@@ -1253,7 +1258,7 @@ class VaultService implements Vault {
       } finally {
         for (const value of done) value.wipe();
       }
-    });
+    }, true);
   }
 
   /** Whether `n` more keys would take `principal` past the bulk limit; counted under their row's lock, so exactly. */
@@ -1309,6 +1314,8 @@ class VaultService implements Vault {
       };
     };
     return this.#decide([principal], async (d) => {
+      // Under the log's head, which a deletion and every change to the policy take: neither side deleted, nor protected,
+      // nor a role narrowed, before this commits.
       const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
       // Both sides as the store has them: a grant on a slug matches there, and neither side may be deleted.
       const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
@@ -1327,12 +1334,6 @@ class VaultService implements Vault {
       });
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));
-      // Again under the log's head, as a read is: neither side was deleted since the check above.
-      d.underLock.push(async (locked) => {
-        const now = await store.environmentsById(locked, [...environments.keys()]);
-        if (![...now.values()].some((environment) => environment.deleted)) return;
-        throw new Refused(refusal('deleted', MESSAGES.deleted), items.map((item) => entry(item, 'deny', 'deleted')));
-      });
       const entries = items.map((item) => entry(item, 'allow', null));
       d.log.push(...entries);
       const answer = { seqs: [] as number[] };
@@ -1395,6 +1396,7 @@ class VaultService implements Vault {
       return seals.map((seal) => (done.has(seal.seq) ? ('ended' as const) : null));
     };
     return this.#decide([principal], async (d) => {
+      // Under the log's head: two ends of one reference at once, the second finds the first; and the actor's standing stands.
       const actor = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
       // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
       const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
@@ -1410,11 +1412,6 @@ class VaultService implements Vault {
       if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), vias.map((via, i) => entry(via, seals[i]!, 'deny', codes[i] ?? first)));
-      // Two ends of one reference at once: the second finds the first under the head's lock.
-      d.underLock.push(async (locked) => {
-        if ((await ended(locked)).every((code) => code === null)) return;
-        throw new Refused(refusal('ended', MESSAGES.ended), vias.map((via, i) => entry(via, seals[i]!, 'deny', 'ended')));
-      });
       const entries = vias.map((via, i) => entry(via, seals[i]!, 'allow', null));
       d.log.push(...entries);
       const answer = { seqs: [] as number[] };
@@ -1496,11 +1493,11 @@ class VaultService implements Vault {
   /**
    * Refuse a change that would leave `principal`, an Owner of the whole
    * instance, no longer one, unless another is. Counted under the log's
-   * head: two changes at once, each demoting or removing a different
-   * Owner, lock different rows, and only the head puts one after the other.
+   * head, which every decision holds: two changes at once, each demoting or
+   * removing a different Owner, lock different rows, and only the head puts
+   * one after the other.
    */
   async #keepAnOwner(d: Decision, actor: string, principal: string, refused: (code: RefusalCode, message?: string) => Refused): Promise<void> {
-    await lockLogHead(d.tx);
     if ((await this.#anOwner(d.tx, d.reports, principal)) !== null) return;
     throw refused('last_owner', actor === principal
       ? "you're the last Owner of the whole instance: make someone else an Owner first"
@@ -1686,7 +1683,6 @@ class VaultService implements Vault {
       // A project or an environment must be there, and to be granted, not
       // deleted. Read under the log's head, which a deletion holds while it
       // renames the place, so the place is as it commits.
-      await lockLogHead(d.tx);
       // The roles as the policy defines them now, under the head every change to it takes: a role an Owner made is
       // granted as one that ships, and one deleted meanwhile is granted by nobody.
       const { policy } = await this.#policyAt(d.tx, d.reports);
@@ -2053,8 +2049,9 @@ class VaultService implements Vault {
     return edits === null ? { policy: CLOSED_POLICY, edits: NO_EDITS } : { policy: await livePolicy(db, edits), edits };
   }
 
-  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy }>> {
-    const { actor, change } = input;
+  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>> {
+    const { actor, change, policySeq } = input;
+    if (policySeq !== undefined && policySeq !== null && !Number.isSafeInteger(policySeq)) throw new Error('policySeq names a policy.change by its number');
     // Where a protection is, once its rows are found: its project, and its one environment if that has a row yet. A fork's,
     // protected before its row is written, is named by the change alone, as the log's columns name only rows.
     const at: { projectId?: string; environmentId?: string } = {};
@@ -2075,8 +2072,12 @@ class VaultService implements Vault {
       const acting = through(await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports), input);
       if (acting.status === 'tampered') throw refused('tampered');
       if (acting.status !== 'active') throw refused(acting.status === 'removed' ? 'removed' : 'not_a_member');
-      // Under the log's head, so two changes at once each start from the one before.
-      await lockLogHead(d.tx);
+      // Under the log's head, as the actor's standing above: two changes at once each start from the one before. One the
+      // caller weighed from the policy as of a change it names starts from that one, or is refused, to be asked again.
+      const newest = await newestVaultSeq(d.tx, POLICY);
+      if (policySeq !== undefined && newest !== (policySeq === null ? null : BigInt(policySeq))) {
+        throw refused('invalid', "the instance's roles or protected environments changed while this was asked: try again");
+      }
       const { policy: before, edits } = await this.#policyAt(d.tx, d.reports);
       const next: PolicyEdits = { roles: { ...edits.roles }, instanceRoles: { ...edits.instanceRoles }, protected: edits.protected.map((place) => ({ ...place })) };
       const owner = acting.live.credentialScope == null && ownsInstance(acting.live);
@@ -2138,11 +2139,14 @@ class VaultService implements Vault {
       } else {
         throw refused('invalid', 'a change is to a role, an instance role, or protection');
       }
-      const policy = await livePolicy(d.tx, next);
+      // The policy now, and the newest change, which it is as of: this one's, when it changed anything.
+      const answer = { policy: await livePolicy(d.tx, next), seq: newest === null ? null : Number(newest) };
       if (JSON.stringify(next) !== JSON.stringify(edits)) {
-        d.log.push(entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) }));
+        const made = entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) });
+        d.log.push(made);
+        d.after.push((seqOf) => (answer.seq = seqOf(made)));
       }
-      return { policy };
+      return answer;
     });
   }
 
@@ -2166,7 +2170,6 @@ class VaultService implements Vault {
       if (!runsInstance(acting.live)) throw refused('not_allowed', "only admins and owners of the whole instance change its settings");
       if (!isScope(input.settings?.serviceAccounts)) throw refused('invalid', 'who sets up service accounts is a scope: { projects, environments }, each all, only or except');
       // Under the log's head, so two changes at once each name the one before.
-      await lockLogHead(d.tx);
       const previous = await this.#settingsAt(d.tx, d.reports);
       const settings: Settings = { serviceAccounts: normalScope(input.settings.serviceAccounts) };
       if (JSON.stringify(settings) !== JSON.stringify(previous)) d.log.push(entry('allow', { ...settings, previous }));

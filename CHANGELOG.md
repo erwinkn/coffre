@@ -28,9 +28,14 @@
   `policy.change`. The vault keeps roles and protection in its newest
   `policy.change` entry, under its MAC, and decides on them. A token, a
   service token or a trust binding keeps what its roles held when it was
-  issued, so a role widened later widens no credential, and one narrowed
-  narrows each at once; one issued before 0.10 holds its role as it
-  shipped. The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
+  issued, and no more than its issuer held there, in either column, so
+  neither a role nor its issuer, widened later, widens a credential, and
+  a role narrowed narrows each at once. **Breaking:** a personal token,
+  service token or trust binding issued before 0.10 reaches nothing:
+  issue it again; and during a rolling deploy, a 0.9 replica reads a
+  credential 0.10 issued as reaching nothing. A request whose roles or
+  protected environments changed while it ran answers 409, "try again".
+  The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
   and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and
   `PATCH /api/projects/<p>/<e>` with `{ "protected": true }`. Migration
   `0014_custom_roles` widens the grants' role check. See

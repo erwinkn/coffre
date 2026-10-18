@@ -40,7 +40,7 @@ import {
   updateAuth,
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
-import { allowed, audited, denied, policyStill, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
@@ -716,7 +716,8 @@ export class SigninService {
    * `of`, a credential that is not one of the member's tokens is unknown.
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | null = null): Promise<{ revoked: true }> {
-    return audited(this.#deps, async (tx, log) => {
+    // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
+    return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
       const unknown = () =>
         new Refusal(
@@ -852,10 +853,9 @@ export class SigninService {
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
       const { standing, scope, byPath, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
-        // Its scope was weighed with the policy as the caller was loaded: still so (`policyStill`).
-        await policyStill(ctx, tx);
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,
           identityId: null,
@@ -907,12 +907,12 @@ export class SigninService {
   async issuePersonalToken(ctx: Asker, input: PersonalTokenInput): Promise<IssuedToken> {
     return withRefusals(this.#deps, async () => {
       const { access, scope, byPath, details } = await this.#personalScope(ctx, input);
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
         }
-        await policyStill(ctx, tx);
         const person = ctx.caller.principal;
         const credential = await this.#issue(tx, 'personal', person, {
           generation: standing.generation,
@@ -970,12 +970,12 @@ export class SigninService {
         needs: (role, place) => (role === 'contributor' ? ['secret.use'] : PERMISSIONS.filter((permission) => holds(ROLES.viewer, permission, place, holder))),
       });
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
         }
-        await policyStill(ctx, tx);
         const credential = await this.#issue(tx, 'handle', person, {
           generation: standing.generation,
           identityId: null,

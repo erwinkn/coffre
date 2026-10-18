@@ -543,14 +543,22 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
 
 /**
  * Who reads each of these environments, by a grant or their instance role,
- * as members: those a reference held there lets read its source.
+ * as members: those a reference held there lets read its source. As the
+ * policy has it: a person holds their roles' protected column in a
+ * protected environment, a service account the other one.
  */
 export async function readersAt(ctx: ApiContext, places: readonly { projectId: string; environmentId: string; environmentSlug: string }[]): Promise<string[][]> {
   if (places.length === 0) return [];
   const all = await directory(ctx, new Date());
   return places.map((place) => all
     .filter((listed) => listed.status === 'active' && allows(
-      { role: instanceRole(listed), scope: scopeOf(listed), grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })) },
+      {
+        role: instanceRole(listed),
+        scope: scopeOf(listed),
+        grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })),
+        policy: ctx.caller.policy,
+        service: listed.member.type === 'service',
+      },
       'secret.read',
       place,
     ))
@@ -687,7 +695,7 @@ export async function putMember(
     if (input.access !== undefined) {
       const { changes, admitted } = await setAccess(ctx, member, input.access, true);
       // Housekeeping, as below: one brought back starts a membership of its own.
-      if (admitted !== undefined) await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, admitted.generation, ctx.caller.principal.id));
+      if (admitted !== undefined) await audited({ db: ctx.db, chainKey: ctx.chainKey }, (tx) => revokePriorMembership(tx, ctx.chainKey, member, admitted.generation, ctx.caller.principal.id));
       return { member: principal, instanceRole: 'member' as const, scope: EVERYWHERE, created: admitted?.created ?? false, changes };
     }
     const known = await places(ctx.db);
@@ -712,8 +720,9 @@ export async function putMember(
       credentialScope: ctx.caller.credentialScope,
     });
     if (!result.ok) throw vaultRefused(result.refusal);
-    // Housekeeping: rows of an earlier membership are dead already, by their generation.
-    await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, result.generation, ctx.caller.principal.id));
+    // Housekeeping: rows of an earlier membership are dead already, by their generation. It follows through on the
+    // vault's decision, made under its head: no fence, which would leave the old rows standing (`audited`).
+    await audited({ db: ctx.db, chainKey: ctx.chainKey }, (tx) => revokePriorMembership(tx, ctx.chainKey, member, result.generation, ctx.caller.principal.id));
     return { member: principal, instanceRole: result.role, scope: scopeView(result.scope, known), created: result.created };
   });
 }
@@ -772,7 +781,8 @@ export async function removeMember(
       throw vaultRefused(result.refusal);
     }
     const { generation } = result;
-    return audited(ctx, async (tx) => {
+    // Following through on the vault's removal, made under its head: no fence (`audited`), the ways in end whatever came since.
+    return audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
       const now = new Date();
       const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
       const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < generation);

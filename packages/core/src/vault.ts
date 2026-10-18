@@ -113,8 +113,10 @@ export interface Vault {
    * - environments of one project protected, by whoever manages its
    *   environments, before their rows exist too (a fork's); or
    *   unprotected, by an Owner of the whole instance.
+   * The policy after it, and the newest `policy.change`, which it is as of:
+   * the change's own, when it changed anything.
    */
-  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy }>>;
+  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>>;
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
@@ -470,6 +472,13 @@ export type PolicyChange =
 export type ChangePolicyInput = Correlation & Through & {
   actor: string;
   change: PolicyChange;
+  /**
+   * The newest `policy.change` the caller decided from, by its number (null
+   * for none): refused, as invalid, unless it is still the newest, so that a
+   * request carries on from the policy it made (`seq`) only where nothing
+   * came between. Unchecked when absent.
+   */
+  policySeq?: number | null;
 };
 
 /**

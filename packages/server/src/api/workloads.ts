@@ -54,7 +54,7 @@ import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Asker, SigninService } from './signin.ts';
-import { allowed, audited, denied, policyStill, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
   inheritedScope,
   issuedScope,
@@ -319,10 +319,9 @@ export class WorkloadService {
       });
       if (options.dryRun) return plan(replaced);
 
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
-        // Its scope was weighed with the policy as the caller was loaded: still so (`policyStill`).
-        await policyStill(ctx, tx);
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
           throw conflict('the bindings it replaces changed while it was made: try again');
@@ -421,10 +420,9 @@ export class WorkloadService {
       const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id) };
       if (options.dryRun) return plan;
 
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
-        // Its scope was weighed with the policy as the caller was loaded: still so (`policyStill`).
-        await policyStill(ctx, tx);
         const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
         const now = new Date();
@@ -480,7 +478,8 @@ export class WorkloadService {
     return withRefusals(this.#deps, async () => {
       // Logged as a denial, which no tombstone check counts.
       if (!(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) throw notManager(ctx, 'token.unbind', metadata, 'remove its trust bindings');
-      return audited(this.#deps, async (tx, log) => {
+      // Who manages it was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
         const live = row !== null && row.revokedAt === null
           && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);

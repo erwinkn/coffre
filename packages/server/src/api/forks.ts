@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { asking, audited, need, policyStill, withRefusals, type ApiContext } from './context.ts';
+import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
@@ -72,11 +72,12 @@ export async function forkEnvironment(
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
-    const guard = await protectedFork(ctx, place, source);
-    const { environment, created } = await putEnvironment(ctx, place, slug, { name: input.name }, { from, ...guard });
+    // From here, as of the protection it made, if any: each transaction below commits only while that is the newest change.
+    const { ctx: forking, id } = await protectedFork(ctx, place, source);
+    const { environment, created } = await putEnvironment(forking, place, slug, { name: input.name }, { from, id });
     const copies = readable.items.filter((item) => !plan.has(item.key));
     // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
-    const opened = await openValues(ctx.vault, { ...asking(ctx, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
+    const opened = await openValues(forking.vault, { ...asking(forking, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const patch: Record<string, SecretValue> = Object.create(null);
@@ -93,10 +94,9 @@ export async function forkEnvironment(
     // Each copied key still reads what was opened, `from` resolved again under the head the copy is written under:
     // the same version, through the same reference, held in the same environment. A key written, marked sensitive,
     // retargeted or overridden since it was opened would be copied as it was, and held looser than it is. The
-    // version says its level too: a mark is a new version.
-    await setSecrets(ctx, target, { ...patch }, async (tx) => {
-      // One left unprotected, as its source was when the caller was loaded: still so, or the values stay where they were.
-      if (guard.guarded !== true) await policyStill(ctx, tx);
+    // version says its level too: a mark is a new version. One left unprotected, as its source was when the caller was
+    // loaded, is written only while still so (`audited`): or the values stay where they were.
+    await setSecrets(forking, target, { ...patch }, async (tx) => {
       const now = new Map((await resolveValues(tx, source, sourcePlace)).items.map((item) => [item.key, item]));
       const moved = copies.find((item) => {
         const current = now.get(item.key);
@@ -110,7 +110,7 @@ export async function forkEnvironment(
     const filed = readable.items.flatMap(({ key, folder }) => (folder === null || !(key in patch) ? [] : [{ key, folder }]));
     if (filed.length > 0) {
       const ids = new Map((await environmentSecrets(ctx.db, target.environment.id)).map((secret) => [secret.key, secret.id]));
-      await audited(ctx, async (tx) => {
+      await audited(forking, async (tx) => {
         // Under the head, as every write to a place: the new environment may have gone since the copy.
         await checkEnvironment(tx, target, { projectId: project.id, environmentId: target.environment!.id });
         await fileSecrets(tx, filed.map(({ key, folder }) => ({ secretId: ids.get(key)!, folder })));
@@ -139,7 +139,8 @@ async function inheritFrom(
   if (above === null || above.length >= MAX_PARENTS) {
     throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);
   }
-  const { environment, created } = await putEnvironment(ctx, place, slug, { name }, { from, parentId: parent.environment!.id, ...await protectedFork(ctx, place, parent) });
+  const { ctx: forking, id } = await protectedFork(ctx, place, parent);
+  const { environment, created } = await putEnvironment(forking, place, slug, { name }, { from, parentId: parent.environment!.id, id });
   return { environment, created, forked: { from, keys: 0, references: 0, copied: [], inherits: true } };
 }
 
@@ -147,16 +148,15 @@ async function inheritFrom(
  * A fork of a protected environment is protected from its first moment
  * (docs/design/roles.md): the vault protects its id, made here for one not
  * there yet, before its row is written or a value copied into it. A
- * refusal stops the fork with nothing made. Its id, and whether it is.
- * One left unprotected, as its source was for the caller, is written, and
- * its values copied, only while no policy change came since
- * (`policyStill`): its source protected meanwhile, the fork would not be.
+ * refusal stops the fork with nothing made. The request as of that, and
+ * the id. One left unprotected, as its source was for the caller, is
+ * written, and its values copied, only while no policy change came since
+ * (`audited`): its source protected meanwhile, the fork would not be.
  */
-async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ id?: string; guarded?: boolean }> {
-  if (!protectedFor(ctx.caller, source.environment!)) return {};
+async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ ctx: ApiContext; id?: string }> {
+  if (!protectedFor(ctx.caller, source.environment!)) return { ctx };
   const id = place.environment?.id ?? randomUUID();
-  await protectIds(ctx, place.project.id, [id]);
-  return { id, guarded: true };
+  return { ctx: await protectIds(ctx, place.project.id, [id]), id };
 }
 
 /**

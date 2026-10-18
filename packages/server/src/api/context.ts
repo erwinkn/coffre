@@ -150,11 +150,17 @@ export class Refusal extends Error {
  * without the other. Push entries onto `log` as the work goes.
  * Vault calls belong before or after this transaction.
  *
+ * Given a request's `caller`, it commits only while the policy is the one
+ * the caller was loaded with (`policyStill`): whatever the request decided
+ * from its roles and protected environments, it decided as they are when it
+ * commits. Only what follows through on the vault's own decision, which
+ * the vault made under its head, is written without one (`{ db, chainKey }`).
+ *
  * A thrown Refusal rolls the work back and then commits its own entry: who
  * was turned away is half of what an audit log is for.
  */
 export async function audited<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq'> },
   work: (tx: Transaction, log: AuditEntry[]) => Promise<T>,
 ): Promise<T> {
   try {
@@ -162,6 +168,7 @@ export async function audited<T>(
       const log: AuditEntry[] = [];
       // Take the head before any application rows.
       await lockLogHead(tx);
+      if (ctx.caller !== undefined) await policyStill({ caller: ctx.caller }, tx);
       const result = await work(tx, log);
       if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
       return result;
@@ -175,10 +182,11 @@ export async function audited<T>(
 /**
  * Refuse, inside an audited transaction, if the instance's roles or
  * protected environments changed since the caller was loaded: the fence
- * for a decision made from `caller.policy` that this transaction commits,
- * a fork left unprotected or a credential's scope. A change appends its
- * `policy.change` under the same head this transaction holds, so one that
- * passes here was not overtaken by any:
+ * for every decision made from `caller.policy` that this transaction
+ * commits (`audited` runs it for a request), a fork left unprotected or a
+ * credential's scope. A change appends its `policy.change` under the same
+ * head this transaction holds, so one that passes here was not overtaken
+ * by any:
  *
  *   caller loaded, prod not protected (newest change 41)
  *   a Maintainer protects prod                           change 57
@@ -189,17 +197,36 @@ export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq'> }, tx
   throw conflict("the instance's roles or protected environments changed while this ran: try again");
 }
 
-/** Collect read and vault events without a transaction; commit before returning anything. */
+/**
+ * Collect read and vault events without a transaction; commit before
+ * returning anything, through the fence (`audited`). A read that hands
+ * back a value the app opened itself says so (`fence`), and goes through
+ * it even with nothing to log (`fenced`).
+ */
 export async function recorded<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'>,
-  work: (log: AuditEntry[]) => Promise<T>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller'>,
+  work: (log: AuditEntry[], fence: () => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
     const log: AuditEntry[] = [];
-    const result = await work(log);
-    if (log.length > 0) await audited(ctx, async (_tx, entries) => { entries.push(...log); });
+    let fencing = false;
+    const result = await work(log, () => (fencing = true));
+    if (log.length > 0 || fencing) await audited(ctx, async (_tx, entries) => { entries.push(...log); });
     return result;
   });
+}
+
+/**
+ * Hand back a value the app opened itself, a plain one, only as the policy
+ * is now: once a transaction under the head, which writes nothing, finds
+ * the caller's policy still the newest (`policyStill`). No vault call
+ * decided it, as one decides each value it releases, under its own head.
+ *
+ *   caller loaded, Ada reads prod                    a plain value of prod read
+ *   prod protected; she only uses it now             the read answers 409, not the value
+ */
+export async function fenced(ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller'>): Promise<void> {
+  await audited(ctx, async () => {});
 }
 
 /** Checks made before the write transaction still need their refusal recorded. */

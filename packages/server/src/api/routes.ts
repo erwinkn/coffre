@@ -309,9 +309,8 @@ export const routes = {
     action: 'environment.update',
     run: async (ctx, { place, input }) => {
       const { protected: guarded, ...patch } = input;
-      // The vault's to change, before the patch's transaction: none stays open across a vault call.
-      const now = guarded === undefined ? undefined : await protectEnvironment(ctx, place, guarded);
-      return patchEnvironment(ctx, place, patch, now);
+      // The vault's to change, before the patch's transaction: none stays open across a vault call. The patch goes on as of it.
+      return patchEnvironment(guarded === undefined ? ctx : await protectEnvironment(ctx, place, guarded), place, patch);
     },
   }),
   ...route('DELETE /projects/:project/:environment', {

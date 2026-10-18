@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import type { CredentialScope } from '@coffre/core/access';
+import { issuedGrant, type CredentialScope } from '@coffre/core/access';
 import type { Through } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
@@ -62,10 +62,10 @@ test('every call that takes a credential scope decides on it: within it a call g
     return { reference: id, seq: made.seqs[0]! };
   };
 
-  const marketOwner: CredentialScope = [{ projectId: market.project, environmentId: null, role: 'owner' }];
-  const both: CredentialScope = [...marketOwner, { projectId: billing, environmentId: null, role: 'owner' }];
-  const devViewer: CredentialScope = [{ projectId: market.project, environmentId: market.dev, role: 'viewer' }];
-  const marketViewer: CredentialScope = [{ projectId: market.project, environmentId: null, role: 'viewer' }];
+  const marketOwner: CredentialScope = [issuedGrant({ projectId: market.project, environmentId: null, role: 'owner' })];
+  const both: CredentialScope = [...marketOwner, issuedGrant({ projectId: billing, environmentId: null, role: 'owner' })];
+  const devViewer: CredentialScope = [issuedGrant({ projectId: market.project, environmentId: market.dev, role: 'viewer' })];
+  const marketViewer: CredentialScope = [issuedGrant({ projectId: market.project, environmentId: null, role: 'viewer' })];
 
   /** Each call, as CI with `through`: the scope that lets it through and one that does not, or none for those no service account makes. */
   const calls: { name: string; call: (through: Through) => Promise<{ ok: boolean }>; within?: CredentialScope; past?: CredentialScope }[] = [

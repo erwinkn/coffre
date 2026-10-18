@@ -29,7 +29,7 @@ import {
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, seesProject, type Caller } from './caller.ts';
-import { allowed, audited, denied, missing, policyStill, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
@@ -420,20 +420,17 @@ export async function putEnvironment(
     from,
     parentId = null,
     id = randomUUID(),
-    guarded = false,
   }: {
     from?: string;
     parentId?: string | null;
-    /** Its id, made before it is: a fork's, which the vault protects first. */
+    /** Its id, made before it is: a fork's, which the vault protects first (`protectIds`), the request going on as of that. */
     id?: string;
-    /** Whether the vault protects it already: a fork's of a protected environment. */
-    guarded?: boolean;
   } = {},
 ): Promise<{ environment: EnvironmentView; created: boolean }> {
   const { project, environment } = place;
   const name = input.name ?? slug;
   if (environment !== null) {
-    const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt), protected: guarded || protectedFor(ctx.caller, environment) };
+    const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt), protected: protectedFor(ctx.caller, environment) };
     return { environment: existing, created: false };
   }
   return audited(ctx, async (tx, log) => {
@@ -454,8 +451,6 @@ export async function putEnvironment(
         denied(ctx, 'environment.create', 'parent_archived', { projectId: project.id, metadata: { environmentSlug: slug, from } }),
       );
     }
-    // A fork left unprotected was decided from the policy as the caller was loaded with it: still so (`protectedFork`).
-    if (from !== undefined && !guarded) await policyStill(ctx, tx);
     try {
       await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
     } catch (error) {
@@ -467,7 +462,7 @@ export async function putEnvironment(
       environmentId: id,
       metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
     }));
-    return { environment: { slug, name, archivedAt: null, protected: guarded || protectedFor(ctx.caller, { id }) }, created: true };
+    return { environment: { slug, name, archivedAt: null, protected: protectedFor(ctx.caller, { id }) }, created: true };
   });
 }
 
@@ -513,8 +508,6 @@ export async function patchEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   patch: PlacePatch,
-  /** Whether it is protected now, the vault said, when the request changed it. */
-  guarded?: boolean,
 ): Promise<{ environment: EnvironmentView }> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
@@ -582,7 +575,7 @@ export async function patchEnvironment(
         slug: renames.slug ?? environment.slug,
         name: renames.name ?? environment.name,
         archivedAt: iso(archivedAt === undefined ? environment.archivedAt : archivedAt),
-        protected: guarded ?? protectedFor(ctx.caller, environment),
+        protected: protectedFor(ctx.caller, environment),
       },
     };
   });

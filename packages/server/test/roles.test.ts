@@ -302,16 +302,13 @@ test("a built-in role is put back as it ships only where that is coherent: not a
   assert.equal(await status(root.roles.reset('maintainer')), 409);
 });
 
-test("a credential of a role as it ships keeps its name alone, as a release before 0.10 reads a scope; an edited role's, what it holds", async () => {
-  const { credentials } = await import('./db/tables.ts');
+test("a credential keeps what its role held when it was issued, both columns: a role as it ships, or as an Owner edited it", async () => {
   const shipped = await vic.tokens.issue(VIC, { label: 'shipped', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   await root.roles.set('viewer', { name: 'Viewer', description: 'Uses.', permissions: ['secret.use'], protected: ['secret.use'] });
   await root.access.set(VIC, { market: 'viewer' });
   const edited = await vic.tokens.issue(VIC, { label: 'edited', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  const scopeOf = async (id: string) => JSON.parse((await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope!) as unknown[];
-  const [kept] = (await scopeOf(shipped.id)) as Record<string, unknown>[];
-  assert.deepEqual(Object.keys(kept!).sort(), ['environmentId', 'projectId', 'role']);
-  assert.deepEqual(((await scopeOf(edited.id)) as { permissions?: unknown }[])[0]!.permissions, { normal: ['secret.use'], protected: ['secret.use'] });
+  assert.deepEqual((await storedScopeOf(shipped.id))[0]!.permissions, { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] });
+  assert.deepEqual((await storedScopeOf(edited.id))[0]!.permissions, { normal: ['secret.use'], protected: ['secret.use'] });
 });
 
 /**
@@ -391,4 +388,65 @@ test('a protected environment deleted protects nothing: a Developer gives a serv
   // One made again under its name is another environment, which nothing protects.
   await root.environments.create('market/prod');
   assert.equal(await protectedOf(ada, 'market/prod'), false);
+});
+
+// The rules that hold the policy (docs/design/roles.md, "Rules that hold the policy"), each with a case its protection decides.
+
+/** What a credential's row keeps of its scope, as stored. */
+async function storedScopeOf(id: string): Promise<{ role: string; permissions?: { normal: string[]; protected: string[] } }[]> {
+  const { credentials } = await import('./db/tables.ts');
+  return JSON.parse((await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope!) as never;
+}
+
+const READS_PROTECTED = { name: 'Viewer', description: 'Read and use secret values, protected ones too.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] } as Parameters<CoffreClient['roles']['set']>[1];
+
+test('rule 2: a reveal of plain values, which the app opens itself, weighed before prod was protected and answered after, is refused', async () => {
+  await root.secrets.set('market/prod', { REGION: { value: 'eu-west-3', plain: true } });
+  // No vault call opens a plain value: the app's fence, under the head, is all that sees prod protected meanwhile.
+  meanwhileOn('access', (asked) => asked === ADA, () => maya.environments.protect('market/prod'));
+  assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 409);
+  // Asked again, it is decided as the policy is now: Ada only uses prod.
+  assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 403);
+});
+
+test('rule 3: a personal token holds no more than its person held when it was issued, in both columns: Developer widened later, her viewer token still only uses prod', async () => {
+  // Viewer reads in a protected environment too; nothing is protected yet, so Ada, a Developer, holds all a Viewer
+  // does where her token reaches today, and would only use a protected environment.
+  await root.roles.set('viewer', READS_PROTECTED);
+  const token = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } });
+  await maya.environments.protect('market/prod');
+  await root.roles.set('developer', { ...ROLES.developer, permissions: [...ROLES.developer.permissions], protected: ['secret.read', 'secret.use', 'secret.write'] });
+  assert.equal(await status(ada.secrets.reveal('market/prod')), 200, 'Ada reads prod now');
+  assert.equal(await status(bearer(token.token).secrets.reveal('market/prod')), 403, 'her token does not');
+  assert.equal(await status(bearer(token.token).secrets.reveal('market/dev')), 200);
+  assert.deepEqual((await storedScopeOf(token.id))[0]!.permissions, { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] });
+});
+
+test('rule 3: a service token issued under a narrowed role keeps it when the role is put back as it ships', async () => {
+  await root.roles.set('viewer', { ...READS_PROTECTED, permissions: ['secret.use'], protected: ['secret.use'] });
+  const token = await root.tokens.issue(CI, { label: 'deploy', expiresInDays: 30, scope: { 'market/prod': 'viewer' } });
+  assert.deepEqual((await storedScopeOf(token.id))[0]!.permissions, { normal: ['secret.use'], protected: ['secret.use'] });
+  // Viewer reads again, CI with it; its token holds Viewer as it was when it was issued.
+  await root.roles.reset('viewer');
+  assert.equal(await status(ci.secrets.reveal('market/prod')), 200);
+  assert.equal(await status(bearer(token.token).secrets.reveal('market/prod')), 403);
+});
+
+test("rule 4: a personal token on a whole project takes holding its role in the project's protected environments too", async () => {
+  await root.roles.set('viewer', READS_PROTECTED);
+  await maya.environments.protect('market/prod');
+  // Ada holds viewer's normal column on market, and only uses prod: a viewer token on all of market would read prod.
+  assert.equal(await status(ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } })), 403);
+  assert.equal(await status(ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })), 200, "dev's alone, which she reads");
+  // As Viewer ships, it only uses a protected environment, as Ada does.
+  await root.roles.reset('viewer');
+  assert.equal(await status(ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } })), 200);
+});
+
+test("rule 4: who reads through a reference held in a protected environment is weighed as the policy has it", async () => {
+  await root.secrets.set('market/prod', { DEV_KEY: { ref: 'market/dev/API_KEY' } });
+  await maya.environments.protect('market/prod');
+  const [held] = (await root.references.list('market/prod')).references;
+  // Ada, Maya and Vic only use prod now; CI, a service account, reads it, and the Owner.
+  assert.deepEqual([...held!.readers!].sort(), [CI, `user:${ROOT}`].sort());
 });

@@ -7,16 +7,18 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { ROLES, type RoleDefinition } from '@coffre/core/access';
 import type { SecretRef } from '@coffre/core/vault';
 import { entryHash } from '@coffre/core/audit';
-import { tablesOf } from '@coffre/db';
+import { tablesOf, type Database } from '@coffre/db';
+import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
-import { emptyDatabase, openTestDatabase, places, storedVersions, type TestDatabase } from './database.ts';
+import { emptyDatabase, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -39,7 +41,8 @@ function configure(): ResolvedVaultConfig {
 }
 
 async function world() {
-  const vault = await openLocalVault(db.vault, configure());
+  const config = configure();
+  const vault = await openLocalVault(db.vault, config);
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const where = await places(db.owner);
   const grant = async (principal: string, environmentId: string | null, role: string) => {
@@ -54,7 +57,7 @@ async function world() {
     assert.ok(wrap.ok);
     return storedVersions(db.owner, [{ secret, wrapped: wrap.wrapped[0]! }]);
   };
-  return { vault, ...where, grant, stored };
+  return { vault, config, ...where, grant, stored };
 }
 
 const protect = (vault: LocalVault, actor: string, projectId: string, environmentIds: string[], on = true) =>
@@ -207,4 +210,82 @@ test('a read in flight when an environment is protected is decided as the policy
   const [read, protectedNow] = await Promise.all([reading, protecting]);
   assert.ok(protectedNow.ok);
   assert.equal(!read.ok && read.refusal.code, 'no_grant', 'refused as the policy is when it commits');
+});
+
+/**
+ * Make `change` on a vault of its own connection, as another instance
+ * would, and hold its transaction just before it commits, the log's head
+ * with it; ask `decision` meanwhile, until it waits on that head; then let
+ * the change commit. A decision in flight as the policy changes under it:
+ * one that read the policy before the head would decide as it was.
+ */
+async function overtaken<T>(config: ResolvedVaultConfig, change: (vault: LocalVault) => Promise<{ ok: boolean }>, decision: () => Promise<T>): Promise<T> {
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let armed = false;
+  const connection = await db.connect();
+  const paused = new Proxy(connection, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target) as unknown;
+      if (typeof value !== 'function') return value;
+      if (key !== 'transaction') return value.bind(target);
+      return (work: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) => value.call(target, async (tx: unknown) => {
+        const done = await work(tx);
+        if (armed) {
+          armed = false;
+          holding();
+          await released;
+        }
+        return done;
+      }, ...rest);
+    },
+  }) as Database;
+  const twin = await openLocalVault(paused, config);
+  await twin.policy();
+  armed = true;
+  const changing = change(twin);
+  await Promise.race([held, changing.then((outcome) => assert.fail(`the change finished without committing: ${JSON.stringify(outcome)}`))]);
+  const deciding = decision();
+  // Until the vault's login queues on the head the change holds.
+  for (let i = 0; ; i++) {
+    const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock'`);
+    if (waiting!.n > 0) break;
+    assert.ok(i < 200, 'the decision never waited on the head');
+    await sleep(25);
+  }
+  release();
+  assert.ok((await changing).ok, 'the change commits');
+  return deciding;
+}
+
+test('a reference made as prod is protected is decided under the head, as the policy is when it commits: refused', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'developer');
+  const source = await w.secret(w.prod);
+  const holder = { projectId: w.project, environmentId: w.dev, secretId: randomUUID(), path: 'p/dev/HOLDER' };
+  // Ada reads prod and writes dev: a reference from one to the other, before prod is protected, is hers to make.
+  const made = await overtaken(w.config,
+    (twin) => protect(twin, ROOT, w.project, [w.prod]),
+    () => w.vault.reference({ principal: ADA, items: [{ id: randomUUID(), holder, source: { secretId: source.secretId } }] }),
+  );
+  // Made as prod is protected, which she only uses now: it would let her read prod through dev.
+  assert.equal(!made.ok && made.refusal.code, 'no_grant');
+});
+
+test('a service account removed by its manager as prod is protected is decided under the head: they manage it no more', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'developer');
+  // Ada sets up CI, a Viewer of all of market, while nothing is protected: it is hers to manage.
+  assert.ok((await w.vault.admit({ actor: ADA, principal: CI })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ADA, principal: CI, changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
+  const removed = await overtaken(w.config,
+    (twin) => protect(twin, ROOT, w.project, [w.prod]),
+    () => w.vault.remove({ actor: ADA, principal: CI }),
+  );
+  // CI reads prod, which Ada only uses once it is protected: she no longer reaches all it holds.
+  assert.equal(!removed.ok && removed.refusal.code, 'not_allowed');
+  assert.equal((await w.vault.access(CI)).status, 'active');
 });

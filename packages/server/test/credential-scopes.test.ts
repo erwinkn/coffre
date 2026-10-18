@@ -249,7 +249,7 @@ test('a binding that replaces others reaches what they reached of what the accou
   assert.deepEqual((await root.bindings.list(CI)).bindings.map((each) => each.id), [after.binding.id], 'refused, it replaced nothing');
 });
 
-test("a binding that replaces a Viewer's keeps the Viewer as it ships, by its name alone: it reads what the one before read", async () => {
+test("a binding that replaces a Viewer's keeps what the Viewer held, both columns: it reads what the one before read", async () => {
   const DEPLOY = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
   const first = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'market/dev': 'viewer' } });
   const again = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [first.binding.id] });
@@ -259,7 +259,7 @@ test("a binding that replaces a Viewer's keeps the Viewer as it ships, by its na
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   for (const binding of [first, again, moved]) {
     const [row] = await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.binding.id));
-    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer' }], binding.binding.id);
+    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }], binding.binding.id);
   }
 });
 
@@ -276,8 +276,7 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow')));
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   // With what viewer held when it was issued, both columns: a role widened later widens no credential.
-  // A role as it ships, by its name alone: what it holds is what it ships with.
-  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer' }]);
+  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
 });
 
 test("a scope changed or cleared around the app fails the row's MAC, and the token is refused", async () => {

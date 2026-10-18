@@ -5,7 +5,6 @@ import {
   withinCredential,
   PERMISSIONS,
   roleGrants,
-  scopeDefinition,
   type GrantPlace,
   type InstanceRole,
   type Permission,
@@ -177,6 +176,6 @@ export function seesProject(caller: Caller, project: { id: string; environments:
 /** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role; within their credential's scope. */
 export function canAnywhere(caller: Caller, permission: Permission): boolean {
   // A role's normal column holds all its protected one does: what it holds anywhere.
-  if (caller.credentialScope !== null && !caller.credentialScope.some((grant) => scopeDefinition(grant)?.permissions.includes(permission) === true)) return false;
+  if (caller.credentialScope !== null && !caller.credentialScope.some((grant) => grant.permissions.normal.includes(permission))) return false;
   return instanceRoleGrants(caller.role, permission, caller.policy) || caller.grants.some((grant) => roleGrants(grant.role, permission, caller.policy));
 }

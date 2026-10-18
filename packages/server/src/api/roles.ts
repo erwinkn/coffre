@@ -297,31 +297,37 @@ function impactSentence(weighed: readonly { impact: ImpactLine; only: string | n
  * project's environments protects it, and only an Owner of the whole
  * instance unprotects it (R15). The vault decides, and logs it as
  * `policy.change`. Before any app transaction: none stays open across a
- * vault call. Whether it is protected now.
+ * vault call. The request as of the change (`protectIds`).
  */
-export async function protectEnvironment(ctx: ApiContext, place: ResolvedPath, on: boolean): Promise<boolean> {
+export async function protectEnvironment(ctx: ApiContext, place: ResolvedPath, on: boolean): Promise<ApiContext> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
   if (environment.owner !== null) throw badRequest('a personal config is protected as the environment it is a config of is');
-  return (await protectIds(ctx, project.id, [environment.id], on)).includes(environment.id);
+  return protectIds(ctx, project.id, [environment.id], on);
 }
 
 /**
  * Protect environments of a project by id, rows or not: a fork's, before
- * its row is written, so it is never readable unprotected. The ids the
- * vault's policy protects of them now.
+ * its row is written, so it is never readable unprotected. Asked from the
+ * policy the caller was loaded with, and refused, 409, when another change
+ * came since (`policySeq`): what the request decided before still stands.
+ * The request as of this change, after: its caller holds the policy it
+ * made, as of its `policy.change`, which every later transaction of the
+ * request is fenced on (`audited`), so a fork goes on to write the
+ * environment it protected, and one that came between stops it.
  */
-export async function protectIds(ctx: ApiContext, projectId: string, environmentIds: string[], on = true): Promise<string[]> {
+export async function protectIds(ctx: ApiContext, projectId: string, environmentIds: string[], on = true): Promise<ApiContext> {
   const result = await ctx.vault.changePolicy({
     actor: formatMember(ctx.caller.principal),
     change: { kind: 'protect', projectId, environmentIds, protected: on },
+    policySeq: ctx.caller.policySeq === null ? null : Number(ctx.caller.policySeq),
     requestId: ctx.requestId,
     operationId: randomUUID(),
     credentialId: ctx.provenance,
     credentialScope: ctx.caller.credentialScope,
   });
   if (!result.ok) throw policyRefused(result.refusal);
-  return environmentIds.filter((id) => protects(result.policy, id));
+  return { ...ctx, caller: { ...ctx.caller, policy: result.policy, policySeq: result.seq === null ? null : BigInt(result.seq) } };
 }
 
 /** The vault's refusal of a policy change: one the rules refuse as things are, a role granted where it no longer fits, is a conflict. */

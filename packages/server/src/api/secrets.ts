@@ -36,7 +36,7 @@ import {
 } from '../db/queries.ts';
 import { can, lists, permissionsAt, placeOf } from './caller.ts';
 import { protectedFor } from './roles.ts';
-import { allowed, asking, audited, denied, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
@@ -380,6 +380,8 @@ export async function listSecrets(
     });
   }
   keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  // A plain value, which the app shows from its own rows, only as the policy is now.
+  if (keys.some((key) => key.value !== null)) await fenced(ctx);
   return {
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys,
@@ -1116,6 +1118,7 @@ export async function dryRunSecrets(
     // A null-prototype record: a key named __proto__ is a key like any other.
     const keys: Record<string, DryRunOutcome> = Object.create(null);
     const comparing: { key: string; value: string; secretVersionId: string; secret: SecretRef; envelope: Envelope }[] = [];
+    let plainCompared = false;
     for (const [key, value] of Object.entries(patch)) {
       const secret = rows.get(key);
       // A mark keeps a value, and one with none of its own here, as the write would refuse it, is refused before anything else.
@@ -1156,6 +1159,7 @@ export async function dryRunSecrets(
       const written = typeof value === 'string' ? value : value.value;
       if (now === 'plain') {
         keys[key] = current.plaintext === written ? 'unchanged' : 'changed';
+        plainCompared = true;
         continue;
       }
       comparing.push({ key, value: written, secretVersionId: current.id, secret: secretRef(place, environment, secret, current.version), envelope: current.envelope });
@@ -1165,6 +1169,8 @@ export async function dryRunSecrets(
     comparing.forEach(({ key, value }, i) => {
       keys[key] = opened.values[i] === value ? 'unchanged' : 'changed';
     });
+    // What a plain value is, told as whether it changed: as the policy is now, as the value itself would be (`fenced`).
+    if (plainCompared) await fenced(ctx);
     return { dryRun: true as const, keys: { ...keys } };
   });
 }
@@ -1539,7 +1545,7 @@ export async function reveal(
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
-  return recorded(ctx, async (log) => {
+  return recorded(ctx, async (log, fence) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
     const place = await resolveRead(ctx, path);
     const environment = place === null ? null : liveEnvironment(place);
@@ -1620,8 +1626,10 @@ export async function reveal(
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
     for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
-    // The keys whose values are plain: no secret, for the proxy to hand on as they are and leave unredacted.
+    // The keys whose values are plain: no secret, for the proxy to hand on as they are and leave unredacted. The app
+    // opened them itself, as no vault call did: handed back only as the policy is now (`fenced`).
     const plainKeys = rows.filter(plain).map((row) => row.key);
+    if (plainKeys.length > 0) fence();
     if (use !== undefined) {
       // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
       log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));

@@ -411,48 +411,77 @@ export function grantKind(grant: GrantPlace): 'project' | 'environment' | null {
  * against what they hold now, by their instance role or their grants.
  *
  * Each grant keeps what its role held when the credential was issued, both
- * columns (`permissions`), so a role an Owner widens later widens no
- * credential: one issued before 0.10, which kept none, holds its role as it
- * ships (docs/design/roles.md, section 5).
+ * columns (`permissions`), and no more than its issuer held, so neither a
+ * role an Owner widens later nor its issuer widens the credential
+ * (docs/design/roles.md, section 8, rule 3).
  */
 export type CredentialScope = readonly ScopeGrant[];
 
-/** One place of a credential's scope: a role there, and what it held when the credential was issued. */
-export type ScopeGrant = GrantPlace & { role: Role; permissions?: { normal: readonly Permission[]; protected: readonly Permission[] } };
+/** What a role holds, or a credential's grant held when it was issued: where nothing is protected, and in a protected environment. */
+export type Columns = { normal: readonly Permission[]; protected: readonly Permission[] };
 
-/** A grant of a scope with what its role holds now in `policy`, kept: what a credential issued now carries. */
-export function issuedGrant(grant: GrantPlace & { role: Role }, policy: Policy): ScopeGrant {
+/**
+ * One place of a credential's scope: a role there, and what it held when
+ * the credential was issued (`issuedGrant`). A scope kept by a release
+ * before 0.10, its role's name alone, is no scope: the credential reaches
+ * nothing, and is issued again (R17).
+ */
+export type ScopeGrant = GrantPlace & { role: Role; permissions: Columns };
+
+/**
+ * A grant of a scope with what its role holds now in `policy`, kept: what a
+ * credential issued now carries. Given what its issuer holds at its place
+ * (`heldColumns`), no more than that either, column by column, so that
+ * neither the role nor the issuer, widened later, widens the credential:
+ *
+ *   viewer edited to read in prod; Ada, a Developer, uses there
+ *   Ada's token, viewer on market      read, use / use
+ *   Developer widened to read in prod  the token still only uses prod
+ */
+export function issuedGrant(grant: GrantPlace & { role: Role }, policy: Policy = DEFAULT_POLICY, held?: Columns): ScopeGrant {
   const definition = definitionOf(policy, grant.role);
-  return keptGrant(grant, { normal: definition?.permissions ?? [], protected: definition?.protected ?? [] });
+  const within = (column: readonly Permission[] = [], cap?: readonly Permission[]) => (cap === undefined ? [...column] : column.filter((permission) => cap.includes(permission)));
+  return {
+    projectId: grant.projectId,
+    environmentId: grant.environmentId,
+    role: grant.role,
+    permissions: { normal: within(definition?.permissions, held?.normal), protected: within(definition?.protected, held?.protected) },
+  };
 }
 
 /**
- * A grant of a scope that holds `columns`, as a row keeps it: a built-in
- * role holding what it ships with is kept as its name alone, which reads
- * as it ships (`scopeDefinition`), and as a release before 0.10 reads a
- * scope; only an edited or a made role, which none of those knew, keeps
- * its columns beside it.
+ * What `holder` holds at `place` in each column a credential's grant there
+ * keeps (`issuedGrant`): `normal`, as if nothing were protected; `protected`,
+ * as a person in a protected environment. At an environment, as if it were
+ * protected; at a project, in an environment of it that no grant names,
+ * the least they hold in any of its environments, those it protects later
+ * included: only what covers the whole project reaches one.
  *
- *   viewer, read and use / use        { role: 'viewer' }
- *   viewer, use / use                 { role: 'viewer', permissions: { normal: ['secret.use'], protected: ['secret.use'] } }
+ *   Ada, a Developer of market, at market    read, use, write / use, write
  */
-export function keptGrant(grant: GrantPlace & { role: Role }, columns: { normal: readonly Permission[]; protected: readonly Permission[] }): ScopeGrant {
-  const place = { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role };
-  const held = { name: grant.role, description: '', permissions: columns.normal, protected: columns.protected };
-  if (isBuiltinRole(grant.role) && sameDefinition(held, ROLES[grant.role])) return place;
-  return { ...place, permissions: { normal: [...columns.normal], protected: [...columns.protected] } };
+export function heldColumns(holder: Holdings, place: Place): Columns {
+  const policy = holder.policy ?? DEFAULT_POLICY;
+  const held = (protect: readonly string[], at: Place) => PERMISSIONS.filter((permission) => allows({ ...holder, policy: { ...policy, protected: protect } }, permission, at));
+  const anyOf: Place = place.environmentId != null ? place : { projectId: place.projectId, environmentId: '', environmentSlug: null };
+  return { normal: held([], place), protected: held([EVERY_ENVIRONMENT], anyOf) };
 }
 
-/** Whether two definitions hold the same, both columns. */
-function sameDefinition(a: RoleDefinition, b: RoleDefinition): boolean {
-  const columns = (definition: RoleDefinition) => JSON.stringify([normalDefinition(definition).permissions, normalDefinition(definition).protected]);
-  return columns(a) === columns(b);
+/**
+ * The protected environments a grant at `place` reaches beyond it: for a
+ * grant on a project, each of its environments `policy` protects, where a
+ * person holds the protected column and a service account the other one;
+ * none for a grant on an environment. Whoever checks a grant on a project
+ * against what someone holds checks it there too (`givesService`,
+ * `personalScope`): it reaches them.
+ */
+export function protectedWithin(policy: Policy, place: Place): Place[] {
+  if (place.environmentId != null) return [];
+  return (policy.protectedIn[place.projectId] ?? []).map((environmentId) => ({ projectId: place.projectId, environmentId, environmentSlug: null }));
 }
 
-/** What a scope's grant holds: as issued, or, kept by a release before 0.10, its role as it ships. */
-export function scopeDefinition(grant: ScopeGrant): RoleDefinition | undefined {
-  if (grant.permissions !== undefined) return { name: grant.role, description: '', permissions: grant.permissions.normal, protected: grant.permissions.protected };
-  return isBuiltinRole(grant.role) ? ROLES[grant.role] : undefined;
+/** What a scope's grant holds, as it was issued, as a role holds it: whatever the role is now, which no edit changes. */
+export function scopeDefinition(grant: ScopeGrant): RoleDefinition {
+  return { name: grant.role, description: '', permissions: grant.permissions.normal, protected: grant.permissions.protected };
 }
 
 /** The most places a scope asked for names: far more than any credential needs, and a bound on what a request makes the app check. */
@@ -503,14 +532,11 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
     if (typeof grant !== 'object' || grant === null || Array.isArray(grant)) return false;
     const { projectId, environmentId, role, permissions, ...rest } = grant as Record<string, unknown>;
     if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string') return false;
-    // As issued, both columns; or, kept before 0.10, a role as it ships.
-    if (permissions === undefined ? !isBuiltinRole(role) : !ROLE_ID.test(role)) return false;
-    if (permissions !== undefined) {
-      if (typeof permissions !== 'object' || permissions === null || Array.isArray(permissions)) return false;
-      const { normal, protected: guarded, ...more } = permissions as Record<string, unknown>;
-      if (Object.keys(more).length > 0 || !column(normal) || !column(guarded)) return false;
-    }
-    const definition = scopeDefinition(grant as ScopeGrant)!;
+    // As issued, both columns: a role's name alone, as a release before 0.10 kept it, is none.
+    if (!ROLE_ID.test(role) || typeof permissions !== 'object' || permissions === null || Array.isArray(permissions)) return false;
+    const { normal, protected: guarded, ...more } = permissions as Record<string, unknown>;
+    if (Object.keys(more).length > 0 || !column(normal) || !column(guarded)) return false;
+    const definition = scopeDefinition(grant as ScopeGrant);
     if (environmentId !== null && (typeof environmentId !== 'string' || definition.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission)))) return false;
     const place = `${projectId}/${environmentId ?? ''}`;
     if (places.has(place)) return false;
@@ -649,11 +675,8 @@ export function givesService(holder: Holdings, setting: ServiceSetting | null, r
   if (!definition.permissions.every((permission) => allows(holder, permission, place))) return false;
   // A grant on a whole project reaches its protected environments too, where the service holds the role's normal column:
   // the person giving it holds that there as well, or gives none.
-  if (place.environmentId != null) return true;
-  return (policy.protectedIn[place.projectId] ?? []).every((environmentId) => {
-    const there: Place = { projectId: place.projectId, environmentId, environmentSlug: null };
-    return definition.permissions.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission)).every((permission) => allows(holder, permission, there));
-  });
+  const inEnvironments = definition.permissions.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission));
+  return protectedWithin(policy, place).every((there) => inEnvironments.every((permission) => allows(holder, permission, there)));
 }
 
 /** Whether `holder` gives a service account anything anywhere among `places`: whether they set any up. */

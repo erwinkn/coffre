@@ -37,22 +37,22 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   protected environments is in the vault's newest `policy.change` entry,
   under its MAC, with the roles (section 3). An environment's row says
   nothing of it, so a row written around coffre protects or unprotects
-  nothing. Each change is its own entry, naming what changed. Every read
-  is decided again under the log's head, which each change takes, so one
-  in flight when prod is protected is refused as prod is when it commits.
+  nothing. Each change is its own entry, naming what changed. Every
+  decision the vault makes is made under the log's head, which each
+  change takes, so one in flight when prod is protected is refused as
+  prod is when it commits (section 8, rule 1).
   A deleted environment, or one in a deleted project, protects nothing:
   the vault leaves it out of the policy it answers, and keeps it in the
   entry.
 - **The app's decisions are fenced the same way.** A request reads the
   number of the newest `policy.change` before it asks the vault who is
-  calling, so the policy it decides from is that one or newer. A
-  transaction that commits a decision made from it (a fork left
-  unprotected, a token, a trust binding or a handle with its scope)
+  calling, so the policy it decides from is that one or newer. Every
+  transaction the request commits, and every plain value it hands back,
   reads that number again under the head and answers 409, "try again",
   if it moved: a change appends under the same head, so one that passes
-  was not overtaken. A Developer's service token weighed before prod was
-  protected, and issued after, is refused; asked again, it is weighed as
-  prod is now.
+  was not overtaken (section 8, rule 2). A Developer's service token weighed
+  before prod was protected, and issued after, is refused; asked again,
+  it is weighed as prod is now.
 - **When the vault cannot read its own policy**, only entries forged in
   its name within reach, no role holds anything, a service account's
   neither, but Owner, which holds everything and so writes the policy
@@ -130,14 +130,13 @@ Ada now   prod read, use, write
 request   prod use, write: the token did not grow
 ```
 
-Narrowing a role narrows every token at once, through its holder. A scope
-issued before 0.10 holds the role as its default was, never as edited. A
-role as it ships is kept by its name alone, which reads the same, so a
-scope written while an older release still serves reads there too: only
-an edited or a made role, which no older release knows, keeps its columns.
-A binding that takes another's place holds the narrower of the two, each
-read the same way, and keeps the result by its name alone where that is
-the role as it ships: replacing a Viewer's binding keeps a Viewer.
+Narrowing a role narrows every token at once, through its holder. Each
+place keeps both columns as they were at issue, and no more than its
+issuer held there then (section 8, rule 3): neither the role nor the
+issuer, widened later, widens the token. A scope issued before 0.10,
+which kept its role's name alone, is no scope: its token reaches
+nothing, and is issued again (R17). A binding that takes another's place holds the narrower of the
+two: replacing a Viewer's binding keeps what the Viewer held.
 
 ## 6. Decisions
 
@@ -157,10 +156,24 @@ the role as it ships: replacing a Viewer's binding keeps a Viewer.
    Owner edits the roles.
 5. **Custom roles are project roles**, granted as any is. *Alternative:*
    custom instance roles too.
-6. **A credential's scope keeps both columns as issued.** *Alternative:*
-   resolve its role against the defaults always, which is simpler, and
-   lets a token issued under a narrowed role grow back when the role is
-   reset.
+6. **A credential's scope keeps both columns as issued**, capped by what
+   its issuer held, always, never the role's name alone (R17).
+   *Alternative:* resolve its role against the defaults always, which is
+   simpler, and lets a token issued under a narrowed role grow back when
+   the role is reset.
+7. **Every vault decision takes the log's head before it reads**, a key
+   operation's excepted (rule 1). *Alternative:* re-check under the head
+   method by method, which three review rounds showed misses some. Cost:
+   a decision holds the head for its reads, a few queries.
+8. **Every transaction a request commits is fenced**, not only those
+   that commit a decision made from the policy (rule 2). *Alternative:*
+   fence call site by call site. Cost: a write that races a policy
+   change answers 409 once, and a read that hands back a plain value
+   opens one short transaction; one of sealed values opens none.
+9. **A scope kept by its role's name alone, before 0.10, is no scope**:
+   its credential reaches nothing (R17: nobody runs Coffre in production
+   yet, and an upgrade carries no old security settings over).
+   *Alternative:* read it as the role ships, which no edit changes.
 
 ## 7. The API
 
@@ -192,3 +205,129 @@ A project-wide permission counts `projects` and no environments. Projects
 and environments say `protected` where they are listed (`GET
 /api/projects`, `GET /api/secrets/<p>/<e>`), a personal config as the
 environment it is a config of.
+
+## 8. Rules that hold the policy
+
+Three review rounds found one kind of bug, case by case: a decision made
+from one policy and committed under another, and a check on a project
+that forgot its protected environments. Four rules close it. Each says
+where it applies, all of it, and names a test that fails without it.
+
+**Rule 1: the vault decides under its log's head.** Every vault decision
+locks the head right after its members' rows and before it reads
+anything (`#decide`, packages/vault/src/vault.ts). Every change to the
+policy, the settings, a member or a place appends under that head, so
+nothing the decision reads moves before it commits. It applies to
+`setAccess`, `admit`, `remove`, `changePolicy` (the actor's standing
+included), `setSettings`, `reference`, `endReferences`, `checkpoint`,
+a key operation's intent, and the vault's own conversions
+(`#replaceEveryProject`, `#declare`). One exception: a key operation
+(`#keys`: `unwrap`, `wrap`, `rewrap`) must not hold the head while its key
+service answers, so it checks, asks the key service, then takes the head
+and checks again before it releases anything.
+
+```
+Ada, a Developer of market, asks for a reference from market/prod/KEY to market/dev
+meanwhile an Owner protects prod, whose entry appends under the head
+before   Ada's reference, decided from the old policy, committed: she read prod through dev
+now      it waits for the head, reads prod protected, and is refused
+```
+
+Tests, Postgres only (packages/vault/test/policy.test.ts): "a reference
+made as prod is protected…", "a service account removed by its manager
+as prod is protected…", and "a read in flight when an environment is
+protected…".
+
+**Rule 2: everything a request commits, and every value the app opens
+itself, is fenced.** `audited` (packages/server/src/api/context.ts),
+given the request's caller, checks under the head that the newest
+`policy.change` is still the one the caller was loaded with
+(`policyStill`), and answers 409 otherwise. A sealed value needs no
+fence of the app's: the vault releases each under its own head (rule 1).
+A plain value, which the app opens from its own rows, is handed back
+only after `fenced`, a transaction that writes nothing: by a reveal,
+`coffre run`, the credential proxy's `use`, MCP's and plugins' reads
+(`reveal`, through `recorded`'s `fence`), by a listing (`listSecrets`),
+and as an import preview's "unchanged" (`dryRunSecrets`). Reads that
+hand back no value (key names, history, the log, who holds what) answer
+as the policy was when the request began. Every write is fenced:
+secrets (set, generate, patch, sensitivity, archive, inherit, restore,
+folders), references the app writes, projects and environments (create,
+fork, rename, archive, restore, delete, folders), personal configs,
+dismissals, MCP approvals; and through the sign-in service, which passes
+the caller to `audited`: personal tokens, handles, service tokens, trust
+bindings (bound, keys replaced, unbound), and revoking a token. Left
+unfenced: what follows through on the vault's own decision, made under
+its head (a membership's old sessions and tokens revoked after `admit`
+or `remove`), and sign-in's own writes, which decide nothing from a
+policy: signing in and out, device login, linking and unlinking
+accounts, connecting and disconnecting an MCP app, a CI run's exchange.
+
+A request that changes the policy itself goes on as of its change:
+`protectIds` (packages/server/src/api/roles.ts) asks the vault with the
+caller's `policySeq`, refused unless it is still the newest, and the
+request's caller then holds the policy it made, as of its own entry. A
+fork of a protected environment protects its id first and writes on; a
+change in between stops it.
+
+Test (packages/server/test/roles.test.ts): "rule 2: a reveal of plain
+values…".
+
+**Rule 3: a credential never holds more than its issuer held, in either
+column.** Each grant of a scope keeps the columns it resolved to at
+issue, its role's as the policy defined it then, capped by what its
+issuer held there (`issuedGrant`, `heldColumns`,
+packages/core/src/access.ts): the normal column as if nothing were
+protected, the protected one as a person in a protected environment; for
+a grant on a project, in an environment of it no grant names, the least
+of all of them, those protected later included. Every credential issued
+now stores both columns (R17): personal tokens and handles
+(`personalScope`), service tokens and trust bindings (`issuedScope`), a
+binding replaced or its keys replaced (no more than it held before, nor
+than two it replaces held at one place, `narrowest`), and the scopes
+sealed onto 0.4's credentials (`sealCredentials`). A service credential
+is capped by its role alone: issuing one takes the account, and the
+issuer unless they manage access there, holding all of the role's normal
+column wherever it reaches, protected environments included
+(`issuesCredential`), and a service holds no other column. A scope kept
+by its role's name alone, before 0.10, is no scope (`isCredentialScope`):
+its credential reaches nothing. MCP's connected apps carry feature scopes (`read`,
+`write`, `reveal`, `manage-access`), not roles: nothing to keep.
+
+```
+Viewer edited to read in protected environments; nothing protected yet
+Ada, a Developer of market, makes a token: viewer on market
+kept     read, use / use: her Developer's protected column caps the second
+prod protected, then Developer widened to read there
+Ada reads prod; her token still only uses it
+```
+
+Neither release reads the other's scopes: a 0.9 replica reads one with
+columns as no scope, so a credential 0.10 issues reaches nothing there
+until a rolling deploy finishes, and 0.10 reads one 0.9 issued as none.
+Acceptable under R17: nobody runs Coffre in production yet, and no shim
+carries them across.
+
+Tests (packages/server/test/roles.test.ts): "rule 3: a personal token
+holds no more…", "rule 3: a service token issued under a narrowed
+role…".
+
+**Rule 4: a check on a whole project checks its protected environments
+too.** A grant on a project reaches each environment of it the policy
+protects (`protectedWithin`, packages/core/src/access.ts), where a person
+holds the protected column and a service account the normal one, so a
+check of what someone holds on a project is made there too: giving a
+service account a role (`givesService`, and through it `managesService`,
+`issuesCredential` and `setsUpServices`, in the app and in the vault's
+`setAccess`, `admit` and `remove`, so service tokens and trust bindings
+too), and a personal token's scope (`personalScope`). Handles name
+environments only. Who reads through a reference (`readersAt`) is weighed
+as the policy has each reader. The project-wide checks left
+(`environment.manage`, `grant.manage`, `project.manage`) have one column,
+and a project's log leaves out each protected environment its reader's
+role leaves out (`listAudit`).
+
+Tests (packages/server/test/roles.test.ts): "rule 4: a personal token on
+a whole project…", "rule 4: who reads through a reference…", "a person
+gives a service account a role on a whole project only if…", and "a
+service token weighed before prod was protected…".

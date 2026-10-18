@@ -5,6 +5,7 @@ import * as gs from '@hegeldev/hegel/generators';
 
 import {
   allows,
+  issuedGrant,
   assignableToEnvironment,
   covers,
   DELEGABLE_ROLES,
@@ -161,7 +162,7 @@ function account(held: Holdings['grants']) {
 
 test(`a credential reaches what both its scope and its account hold, and never more than the account held when it was issued, seed ${settings.seed}`, () => hegel.test((tc) => {
   const atIssue = tc.draw(grants);
-  const scope = tc.draw(grants);
+  const scope = tc.draw(grants).map((item) => issuedGrant(item));
   const now = tc.draw(grants);
   const service = (held: Holdings['grants'], credentialScope: Holdings['credentialScope'] = null): Holdings =>
     ({ role: 'member', scope: { projects: 'all', environments: 'all' }, grants: held, credentialScope });
@@ -203,7 +204,7 @@ test('a scope narrows only the role: grants reach past it, and a project is in i
 test("a person's personal token holds their places within its scope, and nothing of the instance's: no running it, whole log, new project or service account", () => {
   const everywhere: Scope = { projects: 'all', environments: 'all' };
   const owner: Holdings = { role: 'owner', scope: everywhere, grants: [] };
-  const token: Holdings = { ...owner, credentialScope: [{ projectId: 'market', environmentId: null, role: 'maintainer' }] };
+  const token: Holdings = { ...owner, credentialScope: [issuedGrant({ projectId: 'market', environmentId: null, role: 'maintainer' })] };
   const dev: Place = { projectId: 'market', environmentId: 'market/dev', environmentSlug: 'dev' };
   assert.deepEqual([runsInstance(owner), readsWholeLog(owner), makesProjects(owner)], [true, true, true]);
   assert.deepEqual([runsInstance(token), readsWholeLog(token), makesProjects(token)], [false, false, false]);
@@ -213,7 +214,7 @@ test("a person's personal token holds their places within its scope, and nothing
   // Where people set up service accounts, a Developer gives one what they hold; through a token, never.
   const developer: Holdings = { role: 'developer', scope: everywhere, grants: [] };
   assert.equal(givesService(developer, everywhere, 'viewer', dev), true);
-  assert.equal(givesService({ ...developer, credentialScope: [{ projectId: 'market', environmentId: 'market/dev', role: 'developer' }] }, everywhere, 'viewer', dev), false);
+  assert.equal(givesService({ ...developer, credentialScope: [issuedGrant({ projectId: 'market', environmentId: 'market/dev', role: 'developer' })] }, everywhere, 'viewer', dev), false);
   // No role it may name manages access, so it gives and takes no grant anywhere.
   assert.deepEqual(DELEGABLE_ROLES, ['viewer', 'contributor', 'developer', 'maintainer', 'auditor']);
   assert.ok(DELEGABLE_ROLES.every((role) => !roleGrants(role, 'grant.manage')));
