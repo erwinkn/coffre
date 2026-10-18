@@ -568,17 +568,19 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   assert.equal(fork.env.WEBHOOK_SECRET, undefined, "a fork inherits dev's value, not its exposure");
   assert.ok(fork.left.includes('WEBHOOK_SECRET'));
   assert.equal(fork.env.SCHUMANN_API_KEY?.startsWith('coffre_use_'), true, 'its inherited keys are still stand-ins');
+  assert.equal(fork.env.TWILIO_SID?.startsWith('coffre_use_'), true, "nor is an inherited identifier given: it is dev's, not the fork's");
 
   const mine = await plan('market/dev@me');
   assert.equal(mine.environment, 'market/dev@me');
   assert.equal(mine.env.WEBHOOK_SECRET, undefined, 'nor does a personal config of it');
   assert.ok(mine.left.includes('WEBHOOK_SECRET'));
   assert.equal(mine.env.LOCAL_ONLY, 'x', "but its own values, which only its owner wrote, are its owner's app's");
+  assert.equal(mine.env.TWILIO_SID?.startsWith('coffre_use_'), true, 'nor an identifier it inherits');
 
   // Each exposure is logged as the vault's read to expose, one entry per environment it opens in: dev's webhook secret and
-  // Twilio's account id; the fork's id, read in dev; the personal config's own value, and the id from dev.
+  // Twilio's account id, and the personal config's own value. The fork exposes nothing.
   const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
-  assert.equal(exposed.length, 4);
+  assert.equal(exposed.length, 2);
 });
 
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {

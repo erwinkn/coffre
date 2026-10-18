@@ -65,6 +65,9 @@ export type Credential = {
    * are: an account's id it puts in its URLs, Twilio's `TWILIO_SID` in
    * `/Accounts/{sid}/Messages.json`. `coffre run` gives the app their
    * values, each opened to `expose`, and the handle stands in for the rest.
+   * Held to `expose`'s limits: configuration only, and only an
+   * environment's own value, never one a fork inherits or a personal
+   * config's, which get the handle like the rest.
    */
   identifiers?: readonly string[];
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. */
@@ -193,7 +196,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const covered = new Set(using.flatMap((credential) => [...credential.keys, ...(credential.baseUrl === undefined ? [] : [credential.baseUrl])]));
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
       return rows
-        .filter((row) => identifiers.has(row.key) || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
+        // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's.
+        .filter((row) => (identifiers.has(row.key) && !row.inherited && !environment.personal) || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
         .map((row) => row.key);
     },
   });

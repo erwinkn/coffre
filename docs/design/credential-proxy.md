@@ -106,6 +106,10 @@ credentialProxy({
 - `identifiers` names the keys a rule reads that are no secret and that
   the app needs as they are (an account's id in its URLs). The plan gives
   their values, opened to `expose`, and the handle stands in for the rest.
+  They are held to `expose`'s limits: configuration only, and only an
+  environment's own value. A fork that inherits `TWILIO_SID`, or a
+  personal config, gets the handle for it, so a fork that calls Twilio
+  holds its own `TWILIO_SID`.
 
 **`expose`** names the few values an environment's apps may hold as they
 are, because they cannot be used through a proxy: a webhook's HMAC secret
