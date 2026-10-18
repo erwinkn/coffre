@@ -12,8 +12,8 @@ import { signedInWithToken } from './fakes.ts';
 const TOKEN = `coffre_cli_${'g'.repeat(43)}`;
 
 type Generation = { recipe: string; pair?: { private: string; public: string } };
-type Held = { version: number; archived?: boolean; generated?: Generation | null };
-type Written = { value: string; generated?: Generation; replaces?: string };
+type Held = { version: number; archived?: boolean; generated?: Generation | null; value?: string | null };
+type Written = { value: string; generated?: Generation; replaces?: string; plain?: true };
 
 /**
  * A coffre with one environment, app/prod, which lists its keys with their
@@ -33,9 +33,9 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     if (req.method === 'GET') {
       return send(200, {
         permissions: ['secret.read', 'secret.write'],
-        keys: Object.entries(held).map(([key, { version, archived = false, generated = null }]) => ({
+        keys: Object.entries(held).map(([key, { version, archived = false, generated = null, value = null }]) => ({
           key, version, archived, reference: null, folder: null, updatedAt: null, updatedBy: null,
-          ...(unsaid ? {} : { generated, versionId: `${key}-v${version}` }),
+          ...(unsaid ? {} : { generated, versionId: `${key}-v${version}`, value }),
         })),
         rotateAfterDays: null,
       });
@@ -44,7 +44,7 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     writes.push(patch);
     const keys: Record<string, { version: number }> = {};
     for (const [key, written] of Object.entries(patch)) {
-      held[key] = { version: (held[key]?.version ?? 0) + 1, generated: written.generated ?? null };
+      held[key] = { version: (held[key]?.version ?? 0) + 1, generated: written.generated ?? null, value: typeof written === 'object' && written.plain === true ? written.value : null };
       keys[key] = { version: held[key].version };
     }
     send(200, { operationId: 'op', keys });
@@ -195,4 +195,16 @@ test('list says which values were generated, and that regenerate rotates them', 
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /^TOKEN\tv2\t-\t-  \(generated, bytes:32:base62\)\n/m);
   assert.match(run.stdout, /^TYPED\tv1\t-\t-\n/m);
+});
+
+test('set --plain writes a value that is no secret, given as an argument; list shows it as it is', async (t) => {
+  const coffre = await instance(t, {});
+  const run = await coffre.coffre(['set', 'app/prod/ACCOUNT_ID', 'acct_42', '--plain']);
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(coffre.writes, [{ ACCOUNT_ID: { value: 'acct_42', plain: true } }]);
+  assert.match(run.stdout, /^ACCOUNT_ID written as version 1, plain: shown to whoever lists app\/prod\n$/);
+  assert.match((await coffre.coffre(['list', 'app/prod'])).stdout, /^ACCOUNT_ID\tv1\t.*plain: acct_42\n$/);
+  // Not with a value made here or a reference, and a secret is still never an argument.
+  assert.equal((await coffre.coffre(['set', 'app/prod/KEY', '--plain', '--generate', 'bytes:32'])).code, 1);
+  assert.match((await coffre.coffre(['set', 'app/prod/KEY', 'hunter2'])).stderr, /never as an argument/);
 });

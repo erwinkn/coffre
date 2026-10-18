@@ -177,6 +177,11 @@ export const secretVersions = sqliteTable(
     // and each says which half it holds: 'private' or 'public'.
     pairId: text('pair_id'),
     pairHalf: text('pair_half'),
+    // The value itself, for a plain one: a key marked not secret, an account's
+    // id, which whoever lists the environment sees and a read serves without
+    // the vault. Null for a secret. Its ciphertext is kept as any version's,
+    // for what opens values through the vault (a reference, a fork's copy).
+    plaintext: text(),
   },
   (table) => [
     unique('secret_versions_secret_id_version_key').on(table.secretId, table.version),

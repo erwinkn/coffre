@@ -50,34 +50,43 @@ export async function sealValues(
 /**
  * Have the vault unwrap each envelope's key, and decrypt; `via` reads a
  * source through a reference, and `through` names the fork an inherited
- * value is read in.
+ * value is read in. A plain value is no secret: it is its `plaintext`,
+ * with no vault call and no `secret.read` of it, so stand-ins and the bulk
+ * limit pass it by. Each caller has checked the read itself, a parent's
+ * included. A reference's is opened through the vault all the same, which
+ * holds the reference to its rules.
  */
 export async function openValues(
   vault: Vault,
   asking: Asking & { purpose: Purpose },
-  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; via?: Via; through?: string }[],
+  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string }[],
 ): Promise<Keyed<string>> {
-  if (items.length === 0) return { ok: true, values: [] };
+  const sealed = items.filter((item) => !plain(item));
+  if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const result = await vault.unwrap({
     ...asking,
-    items: items.map(({ secretVersionId, via, through }) => ({
+    items: sealed.map(({ secretVersionId, via, through }) => ({
       secretVersionId,
       ...(via === undefined ? {} : { via }),
       ...(through === undefined ? {} : { through }),
     })),
   });
   if (!result.ok) return result;
-  return {
-    ok: true,
-    values: items.map(({ secret, envelope }, i) => {
-      const dek = Buffer.from(result.keys[i], 'base64');
-      try {
-        return decrypt(envelope, secret, dek).toString('utf8');
-      } finally {
-        dek.fill(0);
-      }
-    }),
-  };
+  const opened = sealed.map(({ secret, envelope }, i) => {
+    const dek = Buffer.from(result.keys[i], 'base64');
+    try {
+      return decrypt(envelope, secret, dek).toString('utf8');
+    } finally {
+      dek.fill(0);
+    }
+  });
+  let next = 0;
+  return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)) };
+}
+
+/** Whether an item's value is plain, and read as it is: its own or a parent's, never one through a reference. */
+export function plain(item: { plaintext?: string | null; via?: Via }): boolean {
+  return item.plaintext != null && item.via === undefined;
 }
 
 /**

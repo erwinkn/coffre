@@ -104,8 +104,12 @@ export type PluginContext = {
  */
 export type UseAsked = { path: string; keys: readonly string[] | PickKeys; purpose: 'use' | 'expose'; logged: Record<string, unknown> };
 
-/** Values a plugin opened, every key the environment holds, the environment they came from, and when the handle that opened them ends. */
-export type Used = { values: Record<string, string>; keys: string[]; environment: { path: string; personal: boolean }; expiresAt: string };
+/**
+ * Values a plugin opened, and which of them are plain, no secret; every key
+ * the environment holds, the environment they came from, and when the
+ * handle that opened them ends.
+ */
+export type Used = { values: Record<string, string>; plain: string[]; keys: string[]; environment: { path: string; personal: boolean }; expiresAt: string };
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const PREFIX = /^(\/[a-z0-9][a-z0-9._-]*)+$/;
@@ -182,7 +186,7 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
       try {
         if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
         const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), asked);
-        return { values: read.values, keys: read.keys, environment: read.environment, expiresAt: caller.credentialExpiresAt! };
+        return { values: read.values, plain: read.plain, keys: read.keys, environment: read.environment, expiresAt: caller.credentialExpiresAt! };
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
         throw new CoffreError(error.status, error.code, error.message, error.reason);

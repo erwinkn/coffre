@@ -39,7 +39,7 @@ import type { AuditEntry } from '../db/audit.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
-import { openValues, rewrapValue, sealValues } from './keys.ts';
+import { openValues, plain, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
@@ -76,6 +76,12 @@ export type SecretKey = {
    */
   generated: Generation | null;
   /**
+   * The value itself, for a plain key: no secret, an account's id, shown to
+   * whoever lists the environment and, inherited, to whoever reads the
+   * parent that holds it. Null for a secret, and for a reference.
+   */
+  value: string | null;
+  /**
    * In a fork, the key its parents hold under this name
    * (docs/design/forking.md): `inherited`, no row here, the parent's value
    * read live; `overridden`, a value or reference of its own over the
@@ -98,16 +104,25 @@ export type SecretVersion = {
   kek: string;
   /** The recipe that made it, when it was generated. */
   recipe: string | null;
+  /** Whether it was written plain, its value no secret. */
+  plain: boolean;
 };
 
 /**
- * A value, a value a client generated, with how (`@coffre/core/recipe`), or
- * a reference to another secret by path. A value written without a recipe
- * has none: writing one by hand ends what Regenerate can do. A regenerate
- * says the version each key's value `replaces`, by its id, and is refused if that is
- * not its current version.
+ * A value, a value a client generated, with how (`@coffre/core/recipe`), a
+ * plain value, or a reference to another secret by path. A value written
+ * without a recipe has none: writing one by hand ends what Regenerate can
+ * do. A value is a secret unless the write says `plain`, so writing over a
+ * plain one without it makes the key secret again. A regenerate, or a plain
+ * value written over the one its writer revealed, says the version each
+ * key's value `replaces`, by its id, and is refused if that is not its
+ * current version.
  */
-export type SecretValue = string | { value: string; generated: Generation; replaces?: string } | { ref: string };
+export type SecretValue =
+  | string
+  | { value: string; generated: Generation; replaces?: string }
+  | { value: string; plain: true; replaces?: string }
+  | { ref: string };
 
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
 
@@ -235,6 +250,7 @@ export async function listSecrets(
     updatedAt: writtenAt(row)?.toISOString() ?? null,
     updatedBy: row.current?.createdBy ?? null,
     generated: generated.get(row.id) ?? null,
+    value: row.current?.plaintext ?? null,
   });
   const reads = (from: { id: string; slug: string }) =>
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
@@ -250,15 +266,20 @@ export async function listSecrets(
     const changed = reads(held.from) && mine !== null && theirs !== null && theirs > mine;
     return { ...view(row), parent: { from: held.from.slug, state: 'overridden', changed, reset: false, held: true } };
   });
+  // A parent archived or deleted, which only a write around coffre leaves in a chain, cuts it: a read refuses there, and no
+  // plain value is listed from it or past it.
+  const cut = inherited.parents.findIndex((parent) => parent.archivedAt !== null || parent.deleted);
+  const live = (from: { slug: string }) => cut === -1 || inherited.parents.findIndex((parent) => parent.slug === from.slug) < cut;
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;
     const removed = inherited.removed.has(key);
     const shown = !removed && reads(held.from);
     keys.push({
       ...view(held.row),
-      ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null }),
+      ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null }),
+      ...(shown && live(held.from) ? {} : { value: null }),
       // A removed key resolves to nothing here, and has nothing to regenerate.
-      ...(removed ? { generated: null } : {}),
+      ...(removed ? { generated: null, value: null } : {}),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
@@ -268,7 +289,7 @@ export async function listSecrets(
     const from = inherited.cut.get(key);
     if (from === undefined || own.has(key)) continue;
     keys.push({
-      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null,
+      key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null,
       parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
     });
   }
@@ -382,9 +403,10 @@ async function appendVersion(
   envelope: Envelope,
   createdBy: string,
   recipe: VersionRecipe | null,
+  plaintext: string | null,
 ): Promise<void> {
   const id = randomUUID();
-  await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy, ...recipeRow(recipe) });
+  await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy, ...recipeRow(recipe), plaintext });
   await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: new Date() });
 }
 
@@ -443,7 +465,7 @@ function regenerated(
     const resolved = live ? row.currentVersionId : passedDown?.current?.id ?? null;
     if (resolved === value.replaces) continue;
     return resolved === null
-      ? `${key} has no value to regenerate now: it was renamed, archived or made a reference since it was listed. Nothing was written`
+      ? `${key} has no value to ${'generated' in value ? 'regenerate' : 'replace'} now: it was renamed, archived or made a reference since it was listed. Nothing was written`
       : `${key} changed since it was listed: it was written, rolled back or regenerated meanwhile. Nothing was written`;
   }
   return null;
@@ -510,6 +532,11 @@ export async function setSecrets(
   const problem = generationProblem(patch);
   if (problem !== null) throw badRequest(problem);
   const recipes = recipesOf(patch);
+  // A plain value is no secret, and a personal config holds only its owner's secrets (R8): none is plain there.
+  const plainWrites = new Set(Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'plain' in value ? [key] : [])));
+  if (plainWrites.size > 0 && place.environment!.owner !== null) {
+    throw badRequest(`${place.project.slug}/${personalName(place)} is a personal config: its values are its owner's alone, never plain`);
+  }
   const writes = Object.entries(patch).flatMap(([key, value]): [string, string][] =>
     typeof value === 'string' ? [[key, value]] : value !== null && 'value' in value ? [[key, value.value]] : []);
   const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'ref' in value ? [{ key, ref: value.ref }] : []));
@@ -640,16 +667,16 @@ export async function setSecrets(
         await update(tx, secrets, { id: row.id }, { archivedAt: null });
         log.push(allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }));
       }
-      const versions = items.map(({ key, secret }, i) => {
+      const versions = items.map(({ key, secret, value }, i) => {
         const recipe = recipes.get(key) ?? null;
         log.push(allowed(ctx, 'secret.write', {
           ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
-          metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }) },
+          metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...(plainWrites.has(key) ? { plain: true } : {}) },
         }));
         keys[key] = { version: secret.version };
         return {
           id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i],
-          createdBy: ctx.caller.principal.id, ...recipeRow(recipe),
+          createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: plainWrites.has(key) ? value : null,
         };
       });
       await insert(tx, secretVersions, versions);
@@ -847,13 +874,18 @@ export async function dryRunSecrets(
         continue;
       }
       // A reference, or a value over a reference: what it is now is not a value to compare.
-      // A generated value is new by making, and opens nothing to say so.
-      if (typeof value !== 'string' || secret.current === null) {
+      // A generated value is new by making, and opens nothing to say so. A value is unchanged
+      // only as it was, plain or secret: a plain one compares with no read, being no secret.
+      const { current } = secret;
+      if (current === null || (typeof value === 'object' && !('plain' in value))) {
         keys[key] = 'changed';
         continue;
       }
-      const { version, envelope } = secret.current;
-      comparing.push({ key, value, secretVersionId: secret.current.id, secret: secretRef(place, environment, secret, version), envelope });
+      if (typeof value === 'object' || current.plaintext !== null) {
+        keys[key] = typeof value === 'object' && current.plaintext === value.value ? 'unchanged' : 'changed';
+        continue;
+      }
+      comparing.push({ key, value, secretVersionId: current.id, secret: secretRef(place, environment, secret, current.version), envelope: current.envelope });
     }
     const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: 'compare' }, comparing);
     if (!opened.ok) throw vaultRefused(opened.refusal);
@@ -1108,6 +1140,7 @@ export async function listVersions(
       current: row.id === secret.currentVersionId,
       kek: `${row.envelope.kekProvider}:${row.envelope.kekId}`,
       recipe: row.recipe?.recipe ?? null,
+      plain: row.plaintext !== null,
     })),
   };
 }
@@ -1160,9 +1193,9 @@ export async function restoreVersion(
       const [current] = await lock(tx, secrets, { id: secret.id });
       if (current === undefined || current.currentVersion !== fromVersion || current.currentVersionId !== prepared.currentVersionId
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
-      // The old value comes back with how it was made. A key pair's half comes back with its
-      // pair's id, which pairs it again only beside the other half of the same pair.
-      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe);
+      // The old value comes back with how it was made, and plain if it was. A key pair's half comes
+      // back with its pair's id, which pairs it again only beside the other half of the same pair.
+      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, target.plaintext);
       log.push(allowed(ctx, 'secret.restore', {
         ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion },
       }));
@@ -1175,10 +1208,11 @@ export async function restoreVersion(
 
 /**
  * The keys the credential proxy opens, chosen from what the read resolved:
- * the environment it resolved to, and each key it holds, and whether a
- * parent's. Chosen once, from the rows that are then opened.
+ * the environment it resolved to, and each key it holds, whether a
+ * parent's, and whether plain, no secret. Chosen once, from the rows that
+ * are then opened.
  */
-export type PickKeys = (environment: { path: string; personal: boolean }, held: { key: string; inherited: boolean }[]) => readonly string[];
+export type PickKeys = (environment: { path: string; personal: boolean }, held: { key: string; inherited: boolean; plain: boolean }[]) => readonly string[];
 
 /**
  * The only way to decrypt, and a POST so nothing can trigger it by
@@ -1199,7 +1233,7 @@ export async function reveal(
    * left out, not refused: the proxy says which it needs.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
+): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1222,7 +1256,12 @@ export async function reveal(
     const read = await readableValues(ctx.db, place, environment, path.key);
     const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
-    const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({ key: item.key, inherited: item.parent !== undefined }))) : use.keys;
+    // A parent's plain value is plain to its readers alone, as the listing shows it (R8): to anyone else, a key like any other.
+    const told = (item: Readable) => item.parent === undefined
+      || can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: item.parent.environmentId, environmentSlug: item.parent.slug });
+    const chosen = use === undefined ? null : typeof use.keys === 'function'
+      ? use.keys(named, read.items.map((item) => ({ key: item.key, inherited: item.parent !== undefined, plain: plain(item) && told(item) })))
+      : use.keys;
     const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
     const rows = read.items.filter(wanted);
     const unreadable = read.unreadable.filter(wanted);
@@ -1261,17 +1300,19 @@ export async function reveal(
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
     for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
+    // The keys whose values are plain: no secret, for the proxy to hand on as they are and leave unredacted.
+    const plainKeys = rows.filter(plain).map((row) => row.key);
     if (use !== undefined) {
       // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
       log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
-      return { operationId, values: { ...values }, version: null, environment: named, keys: read.items.map((item) => item.key) };
+      return { operationId, values: { ...values }, plain: plainKeys, version: null, environment: named, keys: read.items.map((item) => item.key) };
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
+    return { operationId, values: { ...values }, plain: plainKeys, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
 }
 

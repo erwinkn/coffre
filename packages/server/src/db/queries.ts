@@ -499,22 +499,23 @@ function secretsUnder(secrets: Tables['secrets'], place: Doomed): SQL {
   )!;
 }
 
-/** A version that still holds its value: an erased one has an empty ciphertext and wrapped key. */
+/** A version that still holds its value: an erased one has an empty ciphertext and wrapped key, and no plaintext. */
 function holdsValue(secretVersions: Tables['secretVersions']): SQL {
-  return or(sql`length(${secretVersions.ciphertext}) > 0`, sql`length(${secretVersions.wrappedDek}) > 0`)!;
+  return or(sql`length(${secretVersions.ciphertext}) > 0`, sql`length(${secretVersions.wrappedDek}) > 0`, isNotNull(secretVersions.plaintext))!;
 }
 
 /**
- * Empty the ciphertext and wrapped data key of every version under a place:
- * the one change a version takes (`secret_versions_erase_only`). Its row
- * stays, which the log names. Returns how many still held a value.
+ * Empty the ciphertext and wrapped data key of every version under a place,
+ * and clear a plain one's plaintext: the one change a version takes
+ * (`secret_versions_erase_only`). Its row stays, which the log names.
+ * Returns how many still held a value.
  */
 export async function eraseVersions(tx: Transaction, place: Doomed): Promise<number> {
   const { secrets, secretVersions } = tablesOf(tx);
   const under = tx.select({ id: secrets.id }).from(secrets).where(secretsUnder(secrets, place));
   const empty = Buffer.alloc(0);
   return changedRows(await tx.update(secretVersions)
-    .set({ ciphertext: empty, wrappedDek: empty })
+    .set({ ciphertext: empty, wrappedDek: empty, plaintext: null })
     .where(and(inArray(secretVersions.secretId, under), holdsValue(secretVersions))));
 }
 
@@ -1424,6 +1425,8 @@ export type SecretRow = {
     createdBy: string;
     envelope: Envelope;
     recipe: VersionRecipe | null;
+    /** The value itself, for a plain one: no secret, and opened without the vault. Null for a secret. */
+    plaintext: string | null;
   } | null;
 };
 
@@ -1450,6 +1453,7 @@ export async function environmentSecrets(
       createdBy: secretVersions.createdBy,
       ...envelopeColumns(secretVersions),
       ...recipeColumns(secretVersions),
+      plaintext: secretVersions.plaintext,
     })
     .from(secrets)
     .innerJoin(projects, eq(projects.id, secrets.projectId))
@@ -1477,6 +1481,7 @@ export async function environmentSecrets(
             createdBy: row.createdBy!,
             envelope: envelopeOf(row as Envelope),
             recipe: recipeOf(row),
+            plaintext: row.plaintext,
           },
   }));
 }
@@ -1485,7 +1490,7 @@ export async function environmentSecrets(
 export async function secretHistory(
   db: Queryable,
   secretId: string,
-): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope; recipe: VersionRecipe | null }[]> {
+): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope; recipe: VersionRecipe | null; plaintext: string | null }[]> {
   const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({
@@ -1495,6 +1500,7 @@ export async function secretHistory(
       createdBy: secretVersions.createdBy,
       ...envelopeColumns(secretVersions),
       ...recipeColumns(secretVersions),
+      plaintext: secretVersions.plaintext,
     })
     .from(secretVersions)
     .where(eq(secretVersions.secretId, secretId))
@@ -1506,6 +1512,7 @@ export async function secretHistory(
     createdBy: row.createdBy,
     envelope: envelopeOf(row),
     recipe: recipeOf(row),
+    plaintext: row.plaintext,
   }));
 }
 

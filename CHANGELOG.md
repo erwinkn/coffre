@@ -27,6 +27,22 @@
   {DFNS_AUTH_TOKEN}'), standIn: jwt({ claims: ['https://custom/app_metadata'] }) }`.
   For a header or query rule that carries one key (docs/design/credential-proxy.md,
   section 5).
+- **Plain values.** A key can be marked not secret: an account's id, a
+  region. `coffre set market/dev/TWILIO_SID AC0123… --plain` (a plain value
+  may be an argument), `{ "value": "…", "plain": true }` in the API, or the
+  page's Plain toggle. Whoever lists the environment sees it, the page
+  inline; `coffre list` prints it. Reading it is no secret read: it is
+  served from the clear copy its version keeps, with no vault call, so a
+  person gets it under stand-ins, and `coffre run` and `export` pass it
+  through as it is, the credential proxy unredacted. Any write that does
+  not say `plain` is a secret, so writing over it without `--plain` makes
+  it secret again. Making a stored secret plain is a reveal and a plain
+  write, which stand-ins refuse a person: type the value again. A personal
+  config holds none. Migration `0011_plain_values` adds
+  `secret_versions.plaintext`.
+- **Deprecated: a credential's `identifiers`.** Mark the key plain instead:
+  `coffre set <env>/TWILIO_SID <sid> --plain`. `identifiers` still works,
+  and goes in a later release.
 
 ## 0.8.2 (2026-10-18)
 

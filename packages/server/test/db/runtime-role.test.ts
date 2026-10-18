@@ -58,8 +58,9 @@ const EXPECTED_UPDATE_COLUMNS = [
   'projects.folder',
   'projects.name',
   'projects.slug',
-  // A deleted place's versions are erased, and that is all a version ever takes.
+  // A deleted place's versions are erased, a plain one's plaintext too, and that is all a version ever takes.
   'secret_versions.ciphertext',
+  'secret_versions.plaintext',
   'secret_versions.wrapped_dek',
   'secrets.archived_at',
   'secrets.current_version',

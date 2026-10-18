@@ -95,10 +95,19 @@ export const SECTIONS = [
       {
         command: 'list',
         usage: [`list      ${P} [--older-than <days>d | --stale] [--json]`],
-        about: ['keys, versions, who changed them and when; no value', "--stale: those unchanged past the instance's rotateAfterDays"],
+        about: ['keys, versions, who changed them and when; no secret value,', 'a plain one as it is', "--stale: those unchanged past the instance's rotateAfterDays"],
       },
       { command: 'get', usage: [`get       ${P}/<KEY>`] },
       { command: 'set', usage: [`set       ${P}/<KEY>`], about: ['the value asked for, or piped in'] },
+      {
+        command: 'set',
+        usage: [`set       ${P}/<KEY> [value] --plain`],
+        about: [
+          'a value that is no secret, an account id: shown to whoever lists',
+          'the environment, and given to its apps as it is; written again',
+          'without --plain, it is a secret again',
+        ],
+      },
       {
         command: 'set',
         usage: [`set       ${P}/<KEY> --ref <project>/<environment>/<KEY>`],

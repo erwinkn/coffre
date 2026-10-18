@@ -93,7 +93,7 @@ test('verify instance refuses --service, in a line', () => {
 test('a secret is never an argument: set refuses a value, login refuses two ways in', () => {
   const set = coffre(['--url', 'http://127.0.0.1:9', 'set', 'app/prod/KEY', 'hunter2']);
   assert.equal(set.status, 1);
-  assert.equal(set.stderr, 'coffre: coffre set asks for the value: paste it, or pipe it in, never as an argument\n');
+  assert.equal(set.stderr, 'coffre: coffre set asks for the value: paste it, or pipe it in, never as an argument; a value that is no secret may be one, with --plain\n');
   const both = coffre(['login', 'http://127.0.0.1:9', '--token', '--service', 'deploy']);
   assert.equal(both.status, 1);
   assert.match(both.stderr, /--token and --service are two ways to sign in: give one/);

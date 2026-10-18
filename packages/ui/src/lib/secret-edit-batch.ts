@@ -14,6 +14,8 @@ export type SecretDraft = {
   companion?: Companion;
   /** The recipe a generated value was made by, saved with it; typing over the value drops it. */
   recipe?: string;
+  /** Written plain: no secret, shown to whoever lists the environment. */
+  plain?: boolean;
 };
 
 export type SecretChange = {
@@ -24,15 +26,39 @@ export type SecretChange = {
   companion?: Companion;
   /** Only beside a generated value. */
   recipe?: string;
+  /** Only beside a new value: whether it is written plain, no secret. A value is a secret unless it says so. */
+  plain?: boolean;
+  /**
+   * The version the edit started from, by id (`valueEdit`): a plain write
+   * replaces it, or is refused, so that making a stored secret plain never
+   * publishes a value someone has written over since.
+   */
+  replaces?: string;
 };
+
+/**
+ * What a value edit makes of a row's change: `value`, written `plain` or
+ * not, from where the edit started (`from.start`, the row's plain value or
+ * the secret it revealed, `from.plain`, whether the row is plain, and
+ * `from.startedAt`, that version's id). Back where it started, it is no
+ * change. The version it started from stays with the change from its first
+ * edit on, so a remount of the row (a rename refused, then retried) never
+ * loses it.
+ */
+export function valueEdit(change: SecretChange, from: { start: string; plain: boolean; startedAt: string | undefined }, value: string, plain: boolean): Partial<SecretChange> {
+  const replaces = change.replaces ?? from.startedAt;
+  if (value === from.start && plain === from.plain) return { value: null, plain: undefined, replaces };
+  return { value, plain, replaces, companion: undefined, recipe: undefined };
+}
 
 type ActiveSecret = { key: string };
 
 /**
  * A merge patch: a string sets a key, adding it if it is new; a value with
- * how it was generated sets it with its recipe; `null` archives it.
+ * how it was generated sets it with its recipe; a plain one, no secret,
+ * says so; `null` archives it.
  */
-export type SecretPatch = Record<string, string | { value: string; generated: Generation } | null>;
+export type SecretPatch = Record<string, string | { value: string; generated: Generation } | { value: string; plain: true; replaces?: string } | null>;
 
 /**
  * How a row's generated value was made, as its write says it: its recipe,
@@ -46,9 +72,10 @@ function generationOf(key: string, edit: { recipe?: string; companion?: Companio
 }
 
 /** What a row writes under each key: its value, and its companion's beside it. */
-function rowPatch(key: string, value: string, edit: { recipe?: string; companion?: Companion }): SecretPatch {
+function rowPatch(key: string, value: string, edit: { recipe?: string; companion?: Companion; plain?: boolean; replaces?: string }): SecretPatch {
   const generated = generationOf(key, edit);
-  const entry = (each: string) => (generated === undefined ? each : { value: each, generated });
+  const plain = (each: string) => (edit.replaces === undefined ? { value: each, plain: true as const } : { value: each, plain: true as const, replaces: edit.replaces });
+  const entry = (each: string) => (generated !== undefined ? { value: each, generated } : edit.plain === true ? plain(each) : each);
   const patch: SecretPatch = Object.create(null);
   patch[key] = entry(value);
   if (edit.companion !== undefined) patch[edit.companion.key.trim()] = entry(edit.companion.value);
@@ -75,6 +102,24 @@ export function generationsOf(
   for (const entry of active) {
     const change = secretChangeFor(changes, entry.key);
     if (change !== undefined && !change.archived && change.value !== null) add(change.key.trim(), change);
+  }
+  return out;
+}
+
+/**
+ * The value each key a save writes plain will show, by its name after the
+ * save: what the list shows of it until it is read back.
+ */
+export function plainValuesOf(
+  active: readonly ActiveSecret[],
+  drafts: readonly SecretDraft[],
+  changes: Readonly<Record<string, SecretChange>>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const draft of drafts) if (draft.plain === true && draft.recipe === undefined) out.set(draft.key.trim(), draft.value);
+  for (const entry of active) {
+    const change = secretChangeFor(changes, entry.key);
+    if (change !== undefined && !change.archived && change.value !== null && change.plain === true && change.recipe === undefined) out.set(change.key.trim(), change.value);
   }
   return out;
 }

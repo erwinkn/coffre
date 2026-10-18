@@ -4,7 +4,7 @@ import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, t
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
-import { openValues } from './keys.ts';
+import { openValues, plain } from './keys.ts';
 import { putEnvironment, type PlaceView } from './projects.ts';
 import { readableValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
@@ -77,7 +77,8 @@ export async function forkEnvironment(
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const patch: Record<string, SecretValue> = Object.create(null);
-    copies.forEach((item, i) => (patch[item.key] = opened.values[i]!));
+    // A plain value stays plain in the copy: its forker read it as anyone who lists its environment does.
+    copies.forEach((item, i) => (patch[item.key] = plain(item) ? { value: opened.values[i]!, plain: true } : opened.values[i]!));
     for (const [key, path] of plan) patch[key] = { ref: path };
     const forked = { from, keys: readable.items.length, references: plan.size, copied: input.references ? copies.map((item) => item.key) : [], inherits: false };
     if (readable.items.length === 0) return { environment, created, forked };

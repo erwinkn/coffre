@@ -116,6 +116,17 @@ const generatedValue = z.object({
   replaces: z.string().max(64).optional(),
 }).strict();
 
+/**
+ * A plain value: a key marked not secret, which whoever lists the
+ * environment sees. Making a stored secret plain is the client's reveal of
+ * it, then this write with the version it `replaces`.
+ */
+const plainValue = z.object({
+  value: secretValue,
+  plain: z.literal(true),
+  replaces: z.string().max(64).optional(),
+}).strict();
+
 const role = z.enum(ROLE_NAMES);
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
 const accessPatch = z.record(
@@ -303,8 +314,9 @@ export const routes = {
   }),
   ...route('PATCH /secrets/:project/:environment', {
     // A string is a value; `{ "value", "generated": { "recipe": "bytes:32:hex" } }` one a client
-    // generated; `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
-    input: z.record(secretKey, z.union([secretValue, generatedValue, z.object({ ref: z.string().max(400) }).strict()]).nullable())
+    // generated; `{ "value", "plain": true }` a plain one, no secret; `{ "ref": "market/prod/KEY" }`
+    // makes the key a reference to that secret.
+    input: z.record(secretKey, z.union([secretValue, generatedValue, plainValue, z.object({ ref: z.string().max(400) }).strict()]).nullable())
       .superRefine((patch, issues) => {
         const problem = generationProblem(patch);
         if (problem !== null) issues.addIssue({ code: 'custom', message: problem });

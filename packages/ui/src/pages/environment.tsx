@@ -26,6 +26,7 @@ import {
   companionsOf,
   hasSecretEditConflict,
   secretChangeFor,
+  valueEdit,
   type Companion,
   type SecretChange,
   type SecretDraft,
@@ -655,6 +656,7 @@ function EnvironmentLedger({
                       lent={lentBy.get(entry.key) ?? []}
                       // A personal config holds values only: no reference.
                       environments={personal ? [] : readable}
+                      personal={personal}
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
@@ -698,6 +700,7 @@ function EnvironmentLedger({
                     key={draft.id}
                     draft={draft}
                     existingVersion={versionOf(draft.key)}
+                    personal={personal}
                     disabled={false}
                     onChange={(patch) =>
                       setDrafts((rows) =>
@@ -1000,6 +1003,7 @@ function ValueField({
   autoFocus,
   onEscape,
   generate,
+  plain = false,
 }: {
   label: string;
   value: string;
@@ -1018,6 +1022,8 @@ function ValueField({
     companion: Companion | undefined;
     onUse: (use: GeneratedUse) => void;
   };
+  /** A plain value, no secret: shown as it is typed. */
+  plain?: boolean;
 }) {
   const [shown, setShown] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -1037,7 +1043,7 @@ function ValueField({
   };
   const field = {
     className: 'input input-mono',
-    masked: !shown,
+    masked: !shown && !plain,
     'aria-label': label,
     placeholder,
     value,
@@ -1099,15 +1105,18 @@ function ValueField({
           <Generate size={14} />
         </button>
       </Tip>
-      <button
-        type="button"
-        className="btn btn-quiet btn-sm btn-icon input-addon"
-        aria-label={shown ? 'Mask the value' : 'Show the value'}
-        aria-pressed={shown}
-        onClick={() => setShown((current) => !current)}
-      >
-        {shown ? <EyeOff size={14} /> : <Eye size={14} />}
-      </button>
+      {/* A plain value shows as it is: nothing to mask. */}
+      {!plain && (
+        <button
+          type="button"
+          className="btn btn-quiet btn-sm btn-icon input-addon"
+          aria-label={shown ? 'Mask the value' : 'Show the value'}
+          aria-pressed={shown}
+          onClick={() => setShown((current) => !current)}
+        >
+          {shown ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+      )}
       <GenerateValue
         open={generating}
         onOpenChange={setGenerating}
@@ -1182,6 +1191,7 @@ function SecretRow({
   versionOf,
   saveReady,
   onMarkArchive,
+  personal,
 }: {
   number: number;
   project: string;
@@ -1223,6 +1233,8 @@ function SecretRow({
   versionOf: (key: string) => number | null;
   saveReady: boolean;
   onMarkArchive: () => void;
+  /** In a personal config, whose values are its owner's alone: never plain. */
+  personal: boolean;
 }) {
   const [reads, dispatch] = useReducer(rowReads, noReads);
   const { reveal, revealing, error, copyError } = reads;
@@ -1254,6 +1266,13 @@ function SecretRow({
   // And where that version is held: a reset, an override or a new reference changes it under the same number.
   const readFrom = `${inherited ? parent!.from : '.'}:${reference?.source ?? ''}`;
   const holderPath = `${project}/${environment}/${entry.key}`;
+  // A plain value is no secret: listed as it is, shown inline and copied with no read.
+  const rowPlain = entry.value !== null;
+  // What the edit writes: plain or not as the row is, until the toggle says otherwise; in a personal config, a secret.
+  const plainNow = change.value !== null ? change.plain === true : rowPlain && !personal;
+  // The version the edit started from, by id: what a stored secret made plain replaces (`valueEdit`).
+  const [startedAt, setStartedAt] = useState<string | undefined>(undefined);
+  const from = () => ({ start: editBase?.value ?? '', plain: rowPlain, startedAt });
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
   // version identical to the one it came from.
@@ -1298,6 +1317,7 @@ function SecretRow({
   }
 
   async function fetchValue(): Promise<string> {
+    if (entry.value !== null) return entry.value;
     const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
     return values[entry.key];
   }
@@ -1348,7 +1368,9 @@ function SecretRow({
   const [focusName, setFocusName] = useState(false);
   async function startEdit({ name = false } = {}) {
     setFocusName(name);
-    if (canRead) {
+    setStartedAt(entry.versionId ?? undefined);
+    if (entry.value !== null) setBase({ value: entry.value, version: readVersion, from: readFrom, at: Date.now() });
+    else if (canRead) {
       setOpening(true);
       const value = await readValue({ show: false });
       setOpening(false);
@@ -1412,6 +1434,7 @@ function SecretRow({
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
               {generated !== null && <RecipeMark generated={generated} />}
+              {rowPlain && <span className="tag" title="Not a secret: shown to whoever reads this environment">Plain</span>}
               {leaving && <span className="tag tag-red">Will be archived</span>}
               {parent !== null && <Standing project={project} secretKey={entry.key} parent={parent} />}
               {lent.length > 0 && (
@@ -1440,11 +1463,12 @@ function SecretRow({
                     value={change.value ?? editBase?.value ?? ''}
                     start={editBase?.value}
                     placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
+                    plain={plainNow}
                     disabled={disabled}
                     autoFocus={!focusName}
                     // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
                     onChange={(value) =>
-                      onPatch({ value: value === (editBase?.value ?? '') ? null : value, companion: undefined, recipe: undefined })
+                      onPatch(valueEdit(change, from(), value, plainNow))
                     }
                     onEscape={onUndo}
                     generate={{
@@ -1452,9 +1476,22 @@ function SecretRow({
                       name: change.key,
                       renamable: false,
                       companion: change.companion,
-                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe }),
+                      // A generated value is a secret.
+                      onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false }),
                     }}
                   />
+                  {/* Nor over a reference, whose value is its source's: no version of its own guards making it plain. */}
+                  {!personal && reference === null && (
+                    <PlainToggle
+                      plain={plainNow}
+                      disabled={disabled}
+                      // The value as it stands, written the other way.
+                      onToggle={() => onPatch(valueEdit(change, from(), change.value ?? editBase?.value ?? '', !plainNow))}
+                    />
+                  )}
+                  {plainNow && !rowPlain && editBase === null && (
+                    <span className="edit-note">Type its value: a stored secret is never shown, and so never made plain</span>
+                  )}
                   <CompanionNote companion={change.companion} versionOf={versionOf} />
                   {!overridden && parent !== null && (
                     <span className="edit-note">Saved here, over {parent.from}'s value</span>
@@ -1465,6 +1502,8 @@ function SecretRow({
                     </span>
                   )}
                 </div>
+              ) : rowPlain && !leaving ? (
+                <span className="revealed-value plain-value">{entry.value === '' ? '(empty)' : entry.value}</span>
               ) : shown !== null && !leaving ? (
                 <div
                   className="revealed"
@@ -1526,7 +1565,7 @@ function SecretRow({
                         takes read there too. */}
                     <SecretReadOnly canReveal={canRead}>
                       <CopyButton variant="act" copier={copier} onCopy={copyValue} label={`Copy ${entry.key}`} />
-                      <Tip label={shown === null ? 'Reveal' : 'Hide'}>
+                      {!rowPlain && <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                         <button
                           className="act act-icon act-accent"
                           onClick={toggleReveal}
@@ -1541,7 +1580,7 @@ function SecretRow({
                             <EyeOff size={15} />
                           )}
                         </button>
-                      </Tip>
+                      </Tip>}
                     </SecretReadOnly>
                     {canWrite && (
                       <Tip label={inherited ? `Override ${parent!.from}'s` : 'Edit'}>
@@ -1996,6 +2035,26 @@ function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays
  * from the list to add to it, and only ever accepted one key at a time; a row
  * in place accepts as many as you want to queue.
  */
+/**
+ * Whether the value being written is plain, no secret: an account's id,
+ * which whoever reads the environment then sees as it is, and its apps get
+ * as it is under stand-ins. Off, it is a secret, as every value is unless
+ * this says otherwise.
+ */
+function PlainToggle({ plain, disabled, onToggle }: { plain: boolean; disabled: boolean; onToggle: () => void }) {
+  return (
+    <span className="edit-note">
+      <button type="button" className="act plain-toggle" aria-pressed={plain} disabled={disabled} onClick={onToggle}>
+        <span className="plain-toggle-box" aria-hidden>
+          {plain && <Check size={11} />}
+        </span>
+        Plain value
+      </button>
+      {plain && 'shown to whoever reads this environment'}
+    </span>
+  );
+}
+
 function DraftRow({
   draft,
   existingVersion,
@@ -2005,6 +2064,7 @@ function DraftRow({
   onSave,
   versionOf,
   saveReady,
+  personal,
 }: {
   draft: SecretDraft;
   existingVersion: number | null;
@@ -2016,6 +2076,8 @@ function DraftRow({
   /** The current version of a key in this environment, for a companion's note. */
   versionOf: (key: string) => number | null;
   saveReady: boolean;
+  /** In a personal config, whose values are its owner's alone: never plain. */
+  personal: boolean;
 }) {
   const [touched, setTouched] = useState(false);
   const trimmed = draft.key.trim();
@@ -2062,6 +2124,7 @@ function DraftRow({
               <ValueField
                 label={`Value for ${trimmed === '' ? 'the new secret' : trimmed}`}
                 value={draft.value}
+                plain={draft.plain === true}
                 placeholder="Value"
                 disabled={disabled}
                 // A value typed over a generated one has no recipe, and a private key's no longer matches its public key.
@@ -2071,9 +2134,17 @@ function DraftRow({
                   name: draft.key,
                   renamable: true,
                   companion: draft.companion,
-                  onUse: ({ value, name, companion, recipe }) => onChange({ key: name, value, companion, recipe }),
+                  // A generated value is a secret.
+                  onUse: ({ value, name, companion, recipe }) => onChange({ key: name, value, companion, recipe, plain: false }),
                 }}
               />
+              {!personal && (
+                <PlainToggle
+                  plain={draft.plain === true}
+                  disabled={disabled}
+                  onToggle={() => onChange({ plain: draft.plain !== true, companion: undefined, recipe: undefined })}
+                />
+              )}
               <CompanionNote companion={draft.companion} versionOf={versionOf} />
             </div>
           </div>
