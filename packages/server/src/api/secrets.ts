@@ -589,6 +589,8 @@ export async function setSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
   patch: Record<string, SecretValue | null>,
+  /** Run under the log's head, before anything is written, by a caller whose patch holds what it read elsewhere: a fork's copy. */
+  stillSo?: (tx: Transaction) => Promise<void>,
 ): Promise<SetResult> {
   const environment = requireLive(place);
   const keysIn = Object.keys(patch);
@@ -620,12 +622,26 @@ export async function setSecrets(
     // again. One the parent lacks is archived as anywhere, and unarchiving it takes more than a write.
     const inherited = await inheritedOf(ctx.db, place);
     const resettable = new Set(inherited?.held.keys());
-    // Who sees each key's value now: its own live one's, or in a fork the one it inherits.
+    // Who sees each key's value now: its own live one's, or in a fork the one it inherits; a reference's, its source's
+    // current value's, which the transaction checks did not move.
+    const passedDown = (key: string) => (inherited?.removed.has(key) ? undefined : inherited?.held.get(key)?.row);
+    const inheritedReferences = await currentReferences(ctx.db, keysIn.flatMap((key) => {
+      const row = passedDown(key);
+      return row !== undefined && row.current === null ? [row.id] : [];
+    }));
+    const sourceOf = new Map<string, { secretId: string; versionId: string }>();
+    for (const key of keysIn) {
+      const row = prepared.get(key);
+      const reference = row !== undefined && row.archivedAt === null ? currently.get(row.id) : inheritedReferences.get(passedDown(key)?.id ?? '');
+      if (reference?.state === 'live') sourceOf.set(key, { secretId: reference.source!.id, versionId: reference.source!.currentVersionId! });
+    }
+    const sensitiveSources = await sensitiveVersions(ctx.db, [...sourceOf.values()].map((source) => source.versionId));
     const levelNow = (key: string): Sensitivity | null => {
       const row = prepared.get(key);
-      if (row !== undefined && row.archivedAt === null) return row.current === null ? null : sensitivityOf(row.current);
-      const passedDown = inherited?.removed.has(key) ? undefined : inherited?.held.get(key)?.row.current;
-      return passedDown == null ? null : sensitivityOf(passedDown);
+      const current = row !== undefined && row.archivedAt === null ? row.current : passedDown(key)?.current;
+      if (current != null) return sensitivityOf(current);
+      const source = sourceOf.get(key);
+      return source === undefined ? null : sensitiveSources.has(source.versionId) ? 'sensitive' : 'secret';
     };
     // A write that says nothing is a secret, and sensitive where the key is: never looser than it was, but for plain, said each time.
     // A personal config's own value is a secret over a sensitive one it configures too: its owner reads what they wrote (R8).
@@ -692,6 +708,7 @@ export async function setSecrets(
 
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
+      await stillSo?.(tx);
       // Each source again under the head: archived or deleted since it was checked, it is no source (D41).
       if (references.length > 0) {
         const sources = await secretPlaces(tx, references.map((item) => item.source.id));
@@ -747,6 +764,12 @@ export async function setSecrets(
         const now = await inheritedOf(tx, place);
         const versionOf = (of: Awaited<ReturnType<typeof inheritedOf>>, key: string) => (of?.removed.has(key) ? null : of?.held.get(key)?.row.current?.id ?? null);
         if (fromParent.some(({ key }) => versionOf(now, key) !== versionOf(inherited, key))) throw new PrepareAgain();
+      }
+      // And a level taken from a reference's source: written or marked since, it is prepared again.
+      const fromSources = items.filter(({ key }) => !asked.has(key) && !personal && sourceOf.has(key));
+      if (fromSources.length > 0) {
+        const sources = await secretPlaces(tx, fromSources.map(({ key }) => sourceOf.get(key)!.secretId));
+        if (fromSources.some(({ key }) => sources.get(sourceOf.get(key)!.secretId)?.currentVersionId !== sourceOf.get(key)!.versionId)) throw new PrepareAgain();
       }
 
       const keys: Record<string, SetOutcome> = {};
@@ -879,7 +902,9 @@ async function tightening(
     if (row === undefined || row.currentVersionId === null) {
       throw was === null
         ? refused(key, `${key} has no value of its own to mark ${to}: write one`, 'no_value')
-        : refused(key, `${key} is inherited: mark it where it is held, or write a value of ${place.project.slug}/${place.environment!.slug}'s own`, 'inherited');
+        : row !== undefined
+          ? refused(key, `${key} is a reference: mark its source, which it reads`, 'reference')
+          : refused(key, `${key} is inherited: mark it where it is held, or write a value of ${place.project.slug}/${place.environment!.slug}'s own`, 'inherited');
     }
     if (was === to) return false;
     if (stricter(was!, to)) {
@@ -1047,6 +1072,10 @@ export async function dryRunSecrets(
     const comparing: { key: string; value: string; secretVersionId: string; secret: SecretRef; envelope: Envelope }[] = [];
     for (const [key, value] of Object.entries(patch)) {
       const secret = rows.get(key);
+      // A mark keeps a value, and one with none of its own here, as the write would refuse it, is refused before anything else.
+      if (isMark(value) && (secret === undefined || secret.archivedAt !== null || secret.current === null)) {
+        throw conflict(`${key} has no value of its own to mark ${value.sensitivity}: write one`);
+      }
       if (value === null) {
         // Archiving what is already gone changes nothing, as in setSecrets.
         keys[key] = secret === undefined || secret.archivedAt !== null ? 'unchanged' : 'archived';

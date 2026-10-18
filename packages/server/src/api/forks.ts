@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
+import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, secretPlaces, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -88,7 +88,13 @@ export async function forkEnvironment(
 
     const target = await resolvePath(ctx.db, { project: project.slug, environment: slug });
     if (target?.environment == null) throw notFound(`${project.slug}/${slug} went away while it was being forked`);
-    await setSecrets(ctx, target, { ...patch });
+    // Each copied value is still its source's current version, under the head the copy is written under: a key
+    // written, or marked sensitive, since it was opened would be copied as it was, and held looser than it is.
+    await setSecrets(ctx, target, { ...patch }, async (tx) => {
+      const now = await secretPlaces(tx, copies.map((item) => item.secret.secretId));
+      const moved = copies.find((item) => now.get(item.secret.secretId)?.currentVersionId !== item.secretVersionId);
+      if (moved !== undefined) throw conflict(`${project.slug}/${from}/${moved.key} changed while it was forked: fork again, into the same environment`);
+    });
 
     // Each key keeps its folder, where it is held: an inherited key, its parent's.
     const filed = readable.items.flatMap(({ key, folder }) => (folder === null || !(key in patch) ? [] : [{ key, folder }]));

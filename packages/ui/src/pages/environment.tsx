@@ -213,6 +213,17 @@ function EnvironmentLedger({
   // pending change is in edit mode whether or not it is listed here.
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
+  // A save that makes keys sensitive, waiting for its confirmation: nobody sees them again, which the row's menu asks too.
+  const [hiding, setHiding] = useState<{ keys: string[]; go: () => void } | null>(null);
+  function confirmingSensitive(drafts: readonly SecretDraft[], changes: Record<string, SecretChange>, go: () => void) {
+    const levels = new Map(active.map((entry) => [entry.key, entry.sensitivity]));
+    const keys = [
+      ...drafts.filter((draft) => draft.sensitivity === 'sensitive' && levels.get(draft.key.trim()) !== 'sensitive').map((draft) => draft.key.trim()),
+      ...Object.entries(changes).filter(([key, change]) => change.sensitivity === 'sensitive' && levels.get(key) !== 'sensitive').map(([key]) => key),
+    ];
+    if (keys.length === 0) go();
+    else setHiding({ keys, go });
+  }
   const [query, setQuery] = useState(Route.useSearch().filter ?? '');
   const [sort, setSort] = useState<Sort>({ by: 'key', descending: false });
   // A column's first click sorts it ascending: names A to Z, the oldest values first.
@@ -310,14 +321,18 @@ function EnvironmentLedger({
    */
   function saveRow(key: string) {
     const change = secretChangeFor(changes, key);
-    dropChange(key);
-    if (change === undefined) return;
-    sendAlone({ active, drafts: [], changes: { [key]: change } });
+    if (change === undefined) return dropChange(key);
+    confirmingSensitive([], { [key]: change }, () => {
+      dropChange(key);
+      sendAlone({ active, drafts: [], changes: { [key]: change } });
+    });
   }
 
   function saveDraft(draft: SecretDraft) {
-    setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
-    sendAlone({ active, drafts: [draft], changes: {} });
+    confirmingSensitive([draft], {}, () => {
+      setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
+      sendAlone({ active, drafts: [draft], changes: {} });
+    });
   }
 
   /** Whether one row's change could go alone: named, well named, and clashing with nothing. */
@@ -392,6 +407,10 @@ function EnvironmentLedger({
    */
   function saveChanges() {
     if (!ready) return;
+    confirmingSensitive(drafts, changes, sendChanges);
+  }
+
+  function sendChanges() {
     const batch = { active, drafts, changes };
     setDrafts([]);
     setChanges({});
@@ -736,6 +755,20 @@ function EnvironmentLedger({
           />
         )}
       </section>
+
+      <ConfirmDialog
+        open={hiding !== null}
+        onOpenChange={(open) => !open && setHiding(null)}
+        title={hiding?.keys.length === 1 ? <>Make <span className="mono">{hiding.keys[0]}</span> sensitive?</> : `Make ${hiding?.keys.length ?? 0} keys sensitive?`}
+        body={`${hiding !== null && hiding.keys.length > 1 ? `${hiding.keys.join(', ')}: n` : 'N'}obody, Owners included, will see ${hiding?.keys.length === 1 ? 'this value' : 'these values'} again. Apps use ${hiding?.keys.length === 1 ? 'it' : 'them'} through the proxy; service accounts still read ${hiding?.keys.length === 1 ? 'it' : 'them'}.`}
+        confirmLabel="Make sensitive"
+        destructive={false}
+        onConfirm={() => {
+          const go = hiding?.go;
+          setHiding(null);
+          go?.();
+        }}
+      />
 
       {canWrite && (
         <div className="table-actions">

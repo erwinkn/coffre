@@ -1079,14 +1079,18 @@ async function readEnvironments(paths: readonly string[], api: { read: CoffreCli
   return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' '), sensitive };
 }
 
+/** What a person's read left out, on stderr: its sensitive keys, which nobody is handed. */
+function sayLeftOut(sensitive: readonly string[]): void {
+  if (sensitive.length === 0) return;
+  process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
+}
+
 /** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
 function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
   const api = { read: client(), list: client(target(), undefined, [403, 404]) };
   return readEnvironments(paths, api).then(
     (read) => {
-      if (read.sensitive.length > 0) {
-        process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${read.sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
-      }
+      sayLeftOut(read.sensitive);
       return read.entries;
     },
     (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
@@ -1281,10 +1285,14 @@ async function exportEnv(args: string[]): Promise<void> {
     if (await proxied(to)) fail("--watch keeps a file of values current, and a person's gets placeholders, which change only with the deployment: export again then");
     const api = enduringClient(to);
     process.stderr.write(`coffre: keeping ${file} current with ${listOf(paths)}; each read is in the audit log under your name, and asking whether to read is not\n`);
+    // What a person's read leaves out, said when it changes, as the first read's is.
+    let said = '';
     await watch({
       version: async () => (await Promise.all(paths.map((path) => api.environments.version(path)))).map((answer) => answer.version).join(' '),
       read: async () => {
-        const { entries, version } = await readEnvironments(paths, { read: api, list: api });
+        const { entries, version, sensitive } = await readEnvironments(paths, { read: api, list: api });
+        if (sensitive.join(' ') !== said) sayLeftOut(sensitive);
+        said = sensitive.join(' ');
         return { text: text(byKey(entries)), version };
       },
       file: file!,

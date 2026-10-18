@@ -226,6 +226,37 @@ test("a reference lists as its source reads: sensitive, or a secret, a plain sou
   assert.equal((await refusal(root.secrets.reveal('market/prod/API_KEY'))).reason, 'sensitive');
 });
 
+test("a fork's copy of a key marked sensitive while it was opened is refused, never written as the secret it was", async (t) => {
+  const unwrap = deps.vault.unwrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'unwrap', async (input: Parameters<typeof unwrap>[0]) => {
+    const result = await unwrap(input);
+    if (compete && input.purpose === 'copy') {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  const refused = await refusal(root.environments.create('market/copy', { from: 'dev' }));
+  assert.equal(refused.status, 409);
+  assert.match(refused.message, /market\/dev\/WEBHOOK changed while it was forked: fork again/);
+  // Nothing was copied, and the same fork again fills the environment it made, as the source is now.
+  assert.deepEqual((await root.secrets.list('market/copy')).keys, []);
+  await root.environments.create('market/copy', { from: 'dev' });
+  assert.equal((await levels('market/copy')).WEBHOOK, 'sensitive');
+});
+
+test("a value written over a reference to a sensitive source, saying nothing, is sensitive; a mark of a reference is refused", async () => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' } });
+  const mark = await refusal(root.secrets.set('market/prod', { API_KEY: { sensitivity: 'sensitive' } }));
+  assert.match(mark.message, /API_KEY is a reference: mark its source/);
+  await root.secrets.set('market/prod', { API_KEY: 'sk_live_prod_0123456789abcdef' });
+  assert.equal((await levels('market/prod')).API_KEY, 'sensitive');
+  // A dry run marks no key that has no value here, as the write would refuse it.
+  assert.equal((await refusal(root.secrets.dryRun('market/prod', { MISSING: { sensitivity: 'sensitive' } }))).status, 409);
+});
+
 test("an app before 0.10 copies no sensitive value for a fork: the vault opens one to copy only for an app that keeps it sensitive", async () => {
   const version = (await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'API_KEY')!.versionId!;
   const asked = (keepsSensitive?: boolean) => deps.vault.unwrap({ principal: `user:${ROOT}`, purpose: 'copy', ...(keepsSensitive === undefined ? {} : { keepsSensitive }), items: [{ secretVersionId: version }] });

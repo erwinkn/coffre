@@ -49,10 +49,11 @@
      backend/prod --json` lists each `secret.read`, by whom and when; any
      the deploy window holds is a value to rotate.
 
-  For no window at all, take read away from people before the deploy (an
-  Owner narrows their grants and instance roles to what writes no value,
-  their apps going without until the marks), then give it back once the
-  keys are marked. See docs/design/credential-proxy.md, section 2.
+  For no window at all, close coffre to people at its ingress for the
+  deploy: an Owner the deployment names reads everything, and no grant
+  narrows them. Let only the pipeline's service account through (its
+  token, or its runner's address), deploy, mark, and open it again. See
+  docs/design/credential-proxy.md, section 2.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output
