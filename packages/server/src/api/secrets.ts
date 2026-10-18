@@ -743,16 +743,13 @@ export async function setSecrets(
         const before = new Map([...byKey].filter(([key]) => prepared.has(key)));
         if (regenerated(patch, before, await inheritedOf(tx, place)) !== null) throw new PrepareAgain();
       }
-      // Each key's level, as a write that says nothing takes it, again under the head: a value written or marked, a
-      // reference made, retargeted or ended, here or in a parent, since it was prepared, is prepared again.
-      const unsaid = items.filter(({ key }) => !asked.has(key) && !personal);
-      if (unsaid.length > 0) {
-        const now = await levelsAt(tx, place, environment.environmentId, unsaid.map(({ key }) => key));
-        const loosened = unsaid.filter(({ key, secret }) => now.get(key) === 'sensitive' && secret.sensitive !== true);
-        // Found so, it stays so: the attempt that prepares again keeps it sensitive, whatever its source is by then.
-        for (const { key } of loosened) sticky.add(key);
-        if (loosened.length > 0) throw new PrepareAgain();
-      }
+      // Each written key's level again under the head, what its entry says it was. A write that says nothing takes it: a
+      // value written or marked, a reference made, retargeted or ended, here or in a parent, since it was prepared, is prepared again.
+      const previous = items.length === 0 ? new Map<string, Sensitivity | null>() : await levelsAt(tx, place, environment.environmentId, items.map(({ key }) => key));
+      const loosened = items.filter(({ key, secret }) => !asked.has(key) && !personal && previous.get(key) === 'sensitive' && secret.sensitive !== true);
+      // Found so, it stays so: the attempt that prepares again keeps it sensitive, whatever its source is by then.
+      for (const { key } of loosened) sticky.add(key);
+      if (loosened.length > 0) throw new PrepareAgain();
       const keys: Record<string, SetOutcome> = {};
       // A reset override written again serves again, a reference written again unchanged too; still one the parent holds.
       const revived = keysIn.filter((key) => patch[key] !== null && byKey.get(key)?.archivedAt != null);
@@ -767,10 +764,9 @@ export async function setSecrets(
         ...items.map(({ key, secret, value }, i) => {
           const recipe = recipes.get(key) ?? null;
           const level = levelOf(key);
-          const was = levelNow(key);
           log.push(allowed(ctx, 'secret.write', {
             ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
-            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, was) },
+            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, previous.get(key) ?? null) },
           }));
           keys[key] = { version: secret.version };
           return {
@@ -1420,7 +1416,8 @@ export async function restoreVersion(
     const [prepared] = await secretHeads(ctx.db, environment.environmentId, { id: secret.id });
     if (prepared === undefined) throw notFound('unknown secret');
     if (prepared.archivedAt !== null) throw conflict(`${secret.key} is archived; unarchive it before restoring a version`);
-    const target = (await secretHistory(ctx.db, secret.id)).find((row) => row.version === toVersion);
+    const versions = await secretHistory(ctx.db, secret.id);
+    const target = versions.find((row) => row.version === toVersion);
     if (target === undefined) {
       throw new Refusal(
         notFound(`${secret.key} has no version ${toVersion}`),
@@ -1430,10 +1427,14 @@ export async function restoreVersion(
     const fromVersion = prepared.currentVersion;
     const version = fromVersion + 1;
     // The old value comes back as it was held, plain or a secret, and sensitive while the key is, a reference's source
-    // included: never looser than that. Resolved again under the head.
-    const was = (await levelsAt(ctx.db, place, environment.environmentId, [prepared.key])).get(prepared.key) ?? null;
+    // included, or while its newest stored version is, which a key made a reference keeps: the vault rewraps none looser.
+    // Resolved again under the head.
+    const floor = async (db: Queryable, newest: { sensitive: boolean } | undefined) => {
+      const was = (await levelsAt(db, place, environment.environmentId, [prepared.key])).get(prepared.key) ?? null;
+      return { was, sensitive: was === 'sensitive' || newest?.sensitive === true };
+    };
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
-    if (was === 'sensitive') foundSensitive = true;
+    if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
     const level = foundSensitive ? 'sensitive' : sensitivityOf(target);
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
     if (!rewrapped.ok) {
@@ -1452,7 +1453,8 @@ export async function restoreVersion(
       const [current] = await lock(tx, secrets, { id: secret.id });
       if (current === undefined || current.currentVersion !== fromVersion || current.currentVersionId !== prepared.currentVersionId
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
-      if (level !== 'sensitive' && (await levelsAt(tx, place, environment.environmentId, [prepared.key])).get(prepared.key) === 'sensitive') {
+      const { was, sensitive } = await floor(tx, (await secretHistory(tx, secret.id))[0]);
+      if (level !== 'sensitive' && sensitive) {
         // Found so, it stays so, as above.
         foundSensitive = true;
         throw new PrepareAgain();

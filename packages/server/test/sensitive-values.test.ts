@@ -437,6 +437,58 @@ test('a rollback over a reference to a sensitive source brings the old value bac
   assert.equal((await refusal(root.secrets.reveal('market/prod/API_KEY'))).reason, 'sensitive');
 });
 
+test("a rollback of a key made sensitive, then a reference to a secret, brings the old value back sensitive: never looser than its newest version", async () => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK: 'whsec_old_0123456789abcdef' });
+  await root.secrets.set('market/prod', { WEBHOOK: { sensitivity: 'sensitive' } });
+  await root.secrets.set('market/prod', { WEBHOOK: { ref: 'market/dev/WEBHOOK' } });
+  assert.equal((await levels('market/prod')).WEBHOOK, 'secret', 'as its source reads');
+  await root.secrets.restore('market/prod/WEBHOOK', 1);
+  assert.deepEqual((await history('market/prod/WEBHOOK'))[0], [3, 'sensitive']);
+  assert.equal((await refusal(root.secrets.reveal('market/prod/WEBHOOK'))).reason, 'sensitive');
+  const [restored] = (await entries('secret.restore')).filter((entry) => entry.decision === 'allow');
+  assert.deepEqual(restored!.metadata, { key: 'WEBHOOK', version: 3, from: 1, sensitive: true, was: 'secret' });
+});
+
+test("a write's entry says what the key was as it commits: a reference's source marked sensitive while the value is wrapped", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK: { ref: 'market/dev/WEBHOOK' } });
+  const wrap = deps.vault.wrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/WEBHOOK')) {
+      compete = false;
+      await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  await root.secrets.set('market/prod', { WEBHOOK: { value: 'whsec_prod_0123456789abcdef', sensitivity: 'secret' } });
+  assert.equal((await levels('market/prod')).WEBHOOK, 'secret', 'said so');
+  // The source's mark committed first: the newest is the write over the reference.
+  assert.deepEqual((await writesOf('WEBHOOK')).at(-1), { key: 'WEBHOOK', version: 1, was: 'sensitive' });
+});
+
+test("a rollback's entry says what the key was as it commits: a reference's source written again as a secret while it is rewrapped", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { API_KEY: 'sk_live_old_0123456789abcdef' });
+  await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' } });
+  const rewrap = deps.vault.rewrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'rewrap', async (input: Parameters<typeof rewrap>[0]) => {
+    const result = await rewrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/API_KEY')) {
+      compete = false;
+      await root.secrets.set('market/dev', { API_KEY: { value: 'sk_live_back_0123456789', sensitivity: 'secret' } });
+    }
+    return result;
+  });
+  await root.secrets.restore('market/prod/API_KEY', 1);
+  assert.equal((await levels('market/prod')).API_KEY, 'sensitive', 'found sensitive as it was prepared: never looser');
+  const [restored] = (await entries('secret.restore')).filter((entry) => entry.decision === 'allow');
+  assert.deepEqual(restored!.metadata, { key: 'API_KEY', version: 2, from: 1, sensitive: true, was: 'secret' });
+});
+
 test("an app before 0.10 copies no sensitive value for a fork: the vault opens one to copy only for an app that keeps it sensitive", async () => {
   const version = (await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'API_KEY')!.versionId!;
   const asked = (keepsSensitive?: boolean) => deps.vault.unwrap({ principal: `user:${ROOT}`, purpose: 'copy', ...(keepsSensitive === undefined ? {} : { keepsSensitive }), items: [{ secretVersionId: version }] });
