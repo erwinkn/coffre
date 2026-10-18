@@ -257,6 +257,51 @@ test("a value written over a reference to a sensitive source, saying nothing, is
   assert.equal((await refusal(root.secrets.dryRun('market/prod', { MISSING: { sensitivity: 'sensitive' } }))).status, 409);
 });
 
+test("a write over a sensitive reference, prepared again after its source moved, stays sensitive", async (t) => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' } });
+  const wrap = deps.vault.wrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/prod/API_KEY')) {
+      compete = false;
+      await root.secrets.set('market/dev', { API_KEY: { value: 'sk_live_rotated_0123456789', sensitivity: 'sensitive' } });
+    }
+    return result;
+  });
+  await root.secrets.set('market/prod', { API_KEY: 'sk_live_prod_0123456789abcdef' });
+  assert.equal((await levels('market/prod')).API_KEY, 'sensitive');
+});
+
+test("an override, saying nothing, over a parent's reference retargeted to a sensitive source meanwhile, is sensitive", async (t) => {
+  await root.environments.create('market/base');
+  await root.secrets.set('market/base', { OPEN: 'open_0123456789', HIDDEN: { value: 'hidden_0123456789', sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { LINKED: { ref: 'market/base/OPEN' } });
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  const wrap = deps.vault.wrap;
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    if (compete && input.items.some((item) => item.secret.path === 'market/dev-eu/LINKED')) {
+      compete = false;
+      await root.secrets.set('market/dev', { LINKED: { ref: 'market/base/HIDDEN' } });
+    }
+    return result;
+  });
+  await root.secrets.set('market/dev-eu', { LINKED: 'mine_0123456789' });
+  assert.equal((await levels('market/dev-eu')).LINKED, 'sensitive');
+});
+
+test('a rollback over a reference to a sensitive source brings the old value back sensitive', async () => {
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { API_KEY: 'sk_live_old_0123456789abcdef' });
+  await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' } });
+  await root.secrets.restore('market/prod/API_KEY', 1);
+  assert.equal((await levels('market/prod')).API_KEY, 'sensitive');
+  assert.equal((await refusal(root.secrets.reveal('market/prod/API_KEY'))).reason, 'sensitive');
+});
+
 test("an app before 0.10 copies no sensitive value for a fork: the vault opens one to copy only for an app that keeps it sensitive", async () => {
   const version = (await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'API_KEY')!.versionId!;
   const asked = (keepsSensitive?: boolean) => deps.vault.unwrap({ principal: `user:${ROOT}`, purpose: 'copy', ...(keepsSensitive === undefined ? {} : { keepsSensitive }), items: [{ secretVersionId: version }] });

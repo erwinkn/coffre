@@ -931,7 +931,14 @@ class VaultService implements Vault {
     const remote =
       this.#remote(this.#config.keks.primary) || items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
-      { action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input },
+      {
+        action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input,
+        // Again in the decision and under the log's head: a sensitive version written since it was loaded is as newest as any.
+        vet: async (db) => {
+          const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
+          return items.map(({ secret }) => (secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null));
+        },
+      },
       (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
           // Opened as the source was written, sensitive or not, and wrapped as the new version is.

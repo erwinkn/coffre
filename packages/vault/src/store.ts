@@ -531,6 +531,21 @@ export async function vaultEntriesOf(
   return stored(rows);
 }
 
+/** Which of these secrets' newest versions are sensitive, by the versions' own order. */
+export async function newestSensitive(db: Queryable, secretIds: readonly string[]): Promise<Set<string>> {
+  if (secretIds.length === 0) return new Set();
+  const { secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ secretId: secretVersions.secretId })
+    .from(secretVersions)
+    .where(and(
+      inArray(secretVersions.secretId, [...new Set(secretIds)]),
+      eq(secretVersions.sensitive, true),
+      sql`${secretVersions.version} = (SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
+    ));
+  return new Set(rows.map((row) => row.secretId));
+}
+
 /**
  * A version that still holds its wrapped key. A deleted place's versions are
  * erased, their keys emptied: there is nothing left to open, or to try a

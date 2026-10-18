@@ -234,6 +234,23 @@ test('a rewrap makes a value stricter, never looser: not from a sensitive versio
   assert.ok((await w.vault.wrap({ principal: ADA, items: [{ secret: { ...base, version: 4 }, key: randomBytes(32).toString('base64') }] })).ok);
 });
 
+test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  const base = await w.secret(w.dev);
+  const [v1] = await versionItems([{ secret: base, wrapped: await wrapped(w, base) }]);
+  const sensitive = { ...base, version: 2, sensitive: true };
+  const later = await wrapped(w, sensitive);
+  // The key service takes its time over the old key, as the rewrap waits under its decision; meanwhile a sensitive
+  // version, wrapped before, is stored.
+  remote.seen.hanging.add(base.secretId);
+  const rewrap = w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3 }, ...v1! }] });
+  await sleep(100);
+  await versionItems([{ secret: sensitive, wrapped: later }]);
+  const refused = await rewrap;
+  assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
+});
+
 test('a read records the stored version instead of the app claim', async () => {
   const w = await world();
   const secret = await w.secret(w.dev);
