@@ -66,12 +66,18 @@ with three levels, loosest first:
 ```sh
 $ coffre set market/prod/STRIPE_SECRET_KEY --sensitive   # a new value, shown to nobody from here on
 $ coffre mark market/prod/DATABASE_URL sensitive         # the value as it is, made stricter
-$ coffre mark market/prod sensitive                      # every key of market/prod that is looser now
+$ coffre mark market/prod sensitive                      # every value of market/prod's own that is looser now
 $ coffre list market/prod
 DATABASE_URL	v4	admin@acme.example	today  sensitive
 STRIPE_SECRET_KEY	v2	admin@acme.example	today  sensitive
 TWILIO_SID	v1	admin@acme.example	today  plain: AC0123456789
 ```
+
+A reference reads its source's level, and a fork's inherited key its
+parent's, so `mark` of an environment leaves them as they are, naming
+each one looser than asked and where to mark it: `coffre: left as they
+are: API_KEY, a reference to market/shared/API_KEY: mark it there`. The
+listing says each key's level, those included.
 
 **Two delivery modes (R13), by key.** Who asks, and the key's level,
 decide what a read hands back:
@@ -352,7 +358,7 @@ export const Route = createFileRoute('/use/$')({ ...plugin });
 
 The vault needs nothing more: which values no person reads is each key's
 own setting (section 2), `coffre mark market/prod sensitive` for a whole
-environment. A person's `coffre run` gets the plan wherever the instance
+environment's own values. A person's `coffre run` gets the plan wherever the instance
 has the proxy: placeholders for the credentials' keys, whatever their
 level, and the values they may read as they are.
 

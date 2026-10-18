@@ -121,9 +121,11 @@ export const SECTIONS = [
         command: 'mark',
         usage: [`mark      ${P}[/<KEY>] <plain|secret|sensitive>`],
         about: [
-          'a key, or every key of the environment, made stricter, its value',
-          'kept: plain to secret, secret to sensitive; looser takes the value',
-          'written again, coffre set … --secret',
+          'a key, or every value of the environment\'s own, made stricter, its',
+          'value kept: plain to secret, secret to sensitive; looser takes the',
+          'value written again, coffre set … --secret. A reference or an',
+          'inherited key looser than asked is left, and named, to mark where',
+          'it is held',
         ],
       },
       {

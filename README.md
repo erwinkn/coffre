@@ -136,7 +136,7 @@ coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it pi
 coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a reference: billing reads market's, live
 coffre set      market/dev/TWILIO_SID AC0123456789 --plain   # no secret: listed as it is, given to apps as it is
 coffre set      market/prod/STRIPE_SECRET_KEY --sensitive    # shown to nobody, Owners included: used through the proxy, read by services
-coffre mark     market/prod sensitive       # every key of market/prod made stricter, values kept; looser takes the value again
+coffre mark     market/prod sensitive       # its own values made stricter, kept; names the references and inherited keys it leaves
 coffre set      market/prod/SESSION_SECRET --generate bytes:32:hex   # a value made here, never shown; the recipe is kept
 coffre set      market/prod/JWT_PRIVATE_KEY --generate ecdsa:p-256  # a key pair: JWT_PUBLIC_KEY beside it, in one write
 coffre regenerate market/prod/SESSION_SECRET   # rotates it: a new value by its recipe, a key pair both keys at once

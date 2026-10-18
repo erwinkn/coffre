@@ -888,7 +888,7 @@ async function list(args: string[]): Promise<void> {
       const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays, now) ? `  (unchanged over ${rotateAfterDays} days: ${rotate})` : '';
       const made = recipe === null ? '' : `  (generated, ${recipe})`;
       const archived = entry.archived ? '  (archived)' : '';
-      // A plain value is no secret, and lists as it is; a sensitive one nobody sees says so. An instance before 0.9 says nothing.
+      // A plain value is no secret, and lists as it is; a sensitive one nobody sees says so, a reference reading one too. An instance before 0.9 says nothing.
       const plain = entry.value != null ? `  plain: ${entry.value}` : entry.sensitivity === 'sensitive' ? '  sensitive' : '';
       // In a fork, where a key stands to its parent's: an instance before 0.7 says nothing.
       const parent = entry.parent ?? null;
@@ -903,7 +903,7 @@ async function list(args: string[]): Promise<void> {
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${due}${archived}${standing}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${plain}${due}${archived}${standing}\n`);
         continue;
       }
       process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${plain}${due}${archived}${standing}\n`);
@@ -974,9 +974,10 @@ async function set(args: string[]): Promise<void> {
  * Make keys stricter, their values kept (`Sensitivity`): one key, or every
  * key of an environment that is looser now. A key is made looser only by
  * writing its value again (`coffre set … --plain`), never by flipping one
- * nobody could read, so only stricter levels are asked for here; a key of
- * the environment's that is a reference, or that a fork inherits, is left
- * as it is, said where it is held.
+ * nobody could read, so only stricter levels are asked for here. A key of
+ * the environment's that is a reference, or that a fork inherits, reads
+ * the level of the value where it is held: left as it is, and named, with
+ * where to mark it, when it is looser than asked.
  */
 async function mark(args: string[]): Promise<void> {
   const { positionals } = parse(args, {}, ['<project>/<environment>[/<KEY>]', '<plain|secret|sensitive>']);
@@ -993,18 +994,26 @@ async function mark(args: string[]): Promise<void> {
   const marking = key === undefined
     ? own.filter((entry) => order.indexOf(entry.sensitivity ?? 'secret') < order.indexOf(level)).map((entry) => entry.key)
     : [key];
-  if (marking.length === 0) {
-    process.stdout.write(`nothing to mark in ${path}: every value of its own is ${level} or stricter\n`);
-    return;
+  // What the environment reads from elsewhere, looser than asked: its level is where the value is held, so it is marked there.
+  // A reference that reads nothing, and a key a fork removes, have no level to mark.
+  const left = key !== undefined ? [] : listed.flatMap((entry) => {
+    if (entry.archived || order.indexOf(entry.sensitivity ?? 'secret') >= order.indexOf(level)) return [];
+    if (entry.reference !== null) return entry.reference.state === 'live' ? [`${entry.key}, a reference to ${entry.reference.source}: mark it there`] : [];
+    if (entry.parent?.state !== 'inherited') return [];
+    return [`${entry.key}, inherited from ${project}/${entry.parent.from}: mark it there, or write ${environment}'s own`];
+  });
+  if (marking.length === 0) process.stdout.write(`nothing to mark in ${path}: every value of its own is ${level} or stricter\n`);
+  else {
+    const before = new Map(listed.map((entry) => [entry.key, entry.sensitivity]));
+    const result = await coffre.secrets.set(path, Object.fromEntries(marking.map((name) => [name, { sensitivity: level }])));
+    for (const name of marking) {
+      const outcome = result.keys[name];
+      const was = before.get(name);
+      const version = outcome !== undefined && 'version' in outcome ? outcome.version : '?';
+      process.stdout.write(was === level ? `${name}: already ${level}\n` : `${name}: ${was ?? 'secret'} → ${level}, as version ${version}, its value kept\n`);
+    }
   }
-  const before = new Map(listed.map((entry) => [entry.key, entry.sensitivity]));
-  const result = await coffre.secrets.set(path, Object.fromEntries(marking.map((name) => [name, { sensitivity: level }])));
-  for (const name of marking) {
-    const outcome = result.keys[name];
-    const was = before.get(name);
-    const version = outcome !== undefined && 'version' in outcome ? outcome.version : '?';
-    process.stdout.write(was === level ? `${name}: already ${level}\n` : `${name}: ${was ?? 'secret'} → ${level}, as version ${version}, its value kept\n`);
-  }
+  if (left.length > 0) process.stderr.write(`coffre: left as they are: ${left.join('; ')}\n`);
 }
 
 /**

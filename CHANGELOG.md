@@ -12,14 +12,16 @@
 
   `coffre set market/prod/STRIPE_SECRET_KEY --sensitive` writes one;
   `coffre mark market/prod/DATABASE_URL sensitive` makes a key stricter,
-  its value kept, and `coffre mark market/prod sensitive` every key of the
-  environment. Making a key looser takes its value written again (`coffre
-  set … --secret`), never a flip. A write that says nothing keeps a
-  sensitive key sensitive. The vault decides it: a sensitive version's
-  data key is wrapped as sensitive, so a person's reveal, `coffre get`,
-  MCP or Vault KV read of it is refused (`sensitive`), whatever their
-  role, and a person's read of a whole environment leaves its sensitive
-  values out, naming them. The page has one control per key; the API
+  its value kept, and `coffre mark market/prod sensitive` every value of
+  the environment's own. A reference reads its source's level, and a
+  fork's inherited key its parent's: `mark` leaves them, naming each
+  looser one and where to mark it. Making a key looser takes its value
+  written again (`coffre set … --secret`), never a flip. A write that
+  says nothing keeps a sensitive key sensitive. The vault decides it: a
+  sensitive version's data key is wrapped as sensitive, so a person's
+  reveal, `coffre get`, MCP or Vault KV read of it is refused
+  (`sensitive`), whatever their role, and a person's read of a whole
+  environment leaves its sensitive values out, naming them. The page has one control per key; the API
   takes `{ "value": "…", "sensitivity": "sensitive" }` and `{
   "sensitivity": "sensitive" }`. The vault's `people` option, the
   proxy's `expose` and a credential's `identifiers` are removed: a
@@ -39,21 +41,27 @@
      (what `expose` listed):
 
      ```sh
-     coffre mark backend/prod sensitive        # every key of prod, its values kept
+     coffre mark backend/prod sensitive        # prod's own values, kept as they are
      coffre mark backend/staging sensitive
      coffre mark backend/local/LEMONWAY_API_KEY sensitive   # the real keys a local environment holds
      coffre mark backend/local/YOUSIGN_API_KEY sensitive
      ```
 
-  3. Check that no person read a value in between: `coffre audit
+     `mark` names the references and inherited keys it leaves: mark
+     each where it is held (the shared environment, the parent), or
+     write the environment's own value over it.
+  3. Check every key's level: `coffre list backend/prod` says
+     `sensitive` on each no person should read, references and
+     inherited keys included.
+  4. Check that no person read a value in between: `coffre audit
      backend/prod --json` lists each `secret.read`, by whom and when; any
      the deploy window holds is a value to rotate.
 
   For no window at all, close coffre to people at its ingress for the
   deploy: an Owner the deployment names reads everything, and no grant
   narrows them. Let only the pipeline's service account through (its
-  token, or its runner's address), deploy, mark, and open it again. See
-  docs/design/credential-proxy.md, section 2.
+  token, or its runner's address), deploy, mark, check, and open it
+  again. See docs/design/credential-proxy.md, section 2.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output
