@@ -48,6 +48,7 @@ useMcp(
       credentials: {
         twilio: { upstream: `${upstreamUrl}/twilio`, inject: basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), paths: ['/Accounts'] },
         account: { upstream: `${upstreamUrl}/account`, inject: header('x-account', '{ACCOUNT_ID}') },
+        legacy: { upstream: `${upstreamUrl}/legacy`, inject: basic('{LEGACY_USER}', '{LEGACY_PASSWORD}'), identifiers: ['LEGACY_USER'] },
         s3: { upstream: `${upstreamUrl}/s3`, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
       },
       insecureUpstreams: true,
@@ -64,6 +65,8 @@ useMcp(
       ACCOUNT_ID: { value: 'acct_public_42', plain: true },
       AWS_ACCESS_KEY_ID: { value: 'AKIAPLAINBUTNEEDED', plain: true },
       AWS_SECRET_ACCESS_KEY: 'aws_secret_0123456789',
+      LEGACY_USER: 'legacy_user_0123',
+      LEGACY_PASSWORD: { value: 'legacy_password_marked_plain', plain: true },
     });
     await root.access.set(`user:${DEV}`, { market: 'developer' });
     await root.access.set('token:ci', { 'market/dev': 'viewer' });
@@ -206,6 +209,9 @@ test("a credential's plain key stays a stand-in where the handle would go nowher
   assert.equal(plan.env.AWS_ACCESS_KEY_ID, handle);
   assert.equal(plan.env.AWS_SECRET_ACCESS_KEY, handle);
   assert.equal(plan.env.ACCOUNT_ID, handle);
+  // An identifier counts as given: with its password plain too, Basic would carry no handle, so both stay stand-ins.
+  assert.equal(plan.env.LEGACY_USER, handle);
+  assert.equal(plan.env.LEGACY_PASSWORD, handle);
   assert.deepEqual(plan.left, []);
 
   // The real plain value goes in, and comes back as it is: being no secret, it is not redacted, nor what the rule made of it.

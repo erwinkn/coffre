@@ -353,18 +353,20 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const identifiers = new Set(using.flatMap((credential) => credential.identifiers ?? []));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key)]);
       const listed = environment.personal ? undefined : proxy.expose.get(environment.path);
-      // What the proxy fills in itself, a tunnel's URL, never the value the environment holds; and a credential's plain
-      // keys where giving them would leave the handle nowhere the proxy finds it: S3's access key id, which the SDK
-      // sends as `Credential=`, or every key of a header's. Those stay stand-ins, as secrets do.
-      const plain = new Set(rows.filter((row) => row.plain).map((row) => row.key));
+      // An identifier as `expose` is: the environment's own value, never a parent's, never a personal config's.
+      const identified = (row: { key: string; inherited: boolean }) => identifiers.has(row.key) && !row.inherited && !environment.personal;
+      // What the proxy fills in itself, a tunnel's URL, never the value the environment holds; and a
+      // credential's plain keys and identifiers where giving them would leave the handle nowhere the proxy finds it:
+      // S3's access key id, which the SDK sends as `Credential=`, or every key of a header's. Those stay stand-ins,
+      // as secrets do.
+      const asTheyAre = new Set(rows.filter((row) => row.plain || identified(row)).map((row) => row.key));
       const filled = new Set([
         ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
-        ...using.filter((credential) => !carriesHandle(credential.inject, plain)).flatMap((credential) => credential.keys),
+        ...using.filter((credential) => !carriesHandle(credential.inject, asTheyAre)).flatMap((credential) => credential.keys),
       ]);
       return rows
-        // A plain value is no secret, wherever it is held. An identifier as `expose` is: the environment's own value,
-        // never a parent's, never a personal config's.
-        .filter((row) => (row.plain && !filled.has(row.key)) || (identifiers.has(row.key) && !row.inherited && !environment.personal)
+        // A plain value is no secret, wherever it is held.
+        .filter((row) => ((row.plain || identified(row)) && !filled.has(row.key))
           || (!covered.has(row.key) && (environment.personal ? !row.inherited : listed === 'all' || (listed?.includes(row.key) ?? false))))
         .map((row) => row.key);
     },

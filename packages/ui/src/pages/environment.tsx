@@ -1480,7 +1480,8 @@ function SecretRow({
                       onUse: ({ value, companion, recipe }) => onPatch({ value, companion, recipe, plain: false }),
                     }}
                   />
-                  {!personal && (
+                  {/* Nor over a reference, whose value is its source's: no version of its own guards making it plain. */}
+                  {!personal && reference === null && (
                     <PlainToggle
                       plain={plainNow}
                       disabled={disabled}
