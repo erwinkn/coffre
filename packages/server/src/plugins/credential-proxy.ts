@@ -207,8 +207,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const credential of covering(held.keys)) {
     const at = `${coffre.publicUrl}/use/${path}/${credential.name}`;
     credentials[credential.name] = at;
+    // Every key the handle, and an identifier given as it is below, where its environment holds it itself.
     for (const key of credential.keys) {
-      if (credential.identifiers?.includes(key)) continue;
       env[key] = handle;
       covered.add(key);
     }

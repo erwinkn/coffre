@@ -163,7 +163,6 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
       accented: { upstream: `${upstreamUrl}/accented`, inject: header('x-api-key', '{ACCENT_KEY}') },
       broken: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{BROKEN_KEY}') },
       token: { upstream: `${upstreamUrl}/token`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
-      ubasic: { upstream: `${upstreamUrl}/ubasic`, inject: basic('{TWILIO_SID}', '{U_PASS}') },
     },
     expose: { 'market/dev': ['WEBHOOK_SECRET'] },
     insecureUpstreams: true,
@@ -429,6 +428,9 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
 });
 
 test('query and Basic credentials, with their methods and paths', async () => {
+  // A Basic password past Latin-1, here only: its rule reads TWILIO_SID as a key, not an identifier.
+  const options = proxyOptions();
+  runtime.plugins = checkPlugins([credentialProxy({ ...options, credentials: { ...options.credentials, ubasic: { upstream: `${upstreamUrl}/ubasic`, inject: basic('{TWILIO_SID}', '{U_PASS}') } } })]);
   const handle = await handleFor();
   const maps = await route(`/use/market/dev/maps/geocode?address=paris&key=${handle}`);
   assert.equal(maps.status, 200);
@@ -561,7 +563,7 @@ test('the plan: stand-ins for what the proxy covers, values only for what the ex
   assert.equal(dev.env.MAPS_KEY?.startsWith('coffre_use_'), true);
   assert.equal(dev.env.TWILIO_SID, 'AC0123456789', 'an identifier its credential names');
   assert.equal(dev.env.TWILIO_TOKEN?.startsWith('coffre_use_'), true);
-  assert.deepEqual(dev.left, ['DATABASE_URL'], 'neither proxied nor exposed: the app does without');
+  assert.deepEqual(dev.left, ['DATABASE_URL', 'U_PASS'], 'neither proxied nor exposed: the app does without');
   assert.equal(JSON.stringify(dev).includes(KEY), false);
 
   const fork = await plan('market/dev-eu');
