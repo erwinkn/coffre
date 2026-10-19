@@ -8,6 +8,7 @@ import {
   rowReads,
   type RowReads,
   type RowReadsAction,
+  valueToEdit,
 } from '../src/lib/row-reads.ts';
 
 const value: Reveal = { value: 'hunter2', version: 1, at: 0 };
@@ -102,4 +103,17 @@ test('a read made only to edit from shows nothing', () => {
 test('a new Copy clears the last one\'s complaint', () => {
   const state = run({ type: 'copy-failed', message: 'x' }, { type: 'copy-started' });
   assert.equal(state.copyError, null);
+});
+
+test('an edit always opens: from a plain value as listed, a value read, or empty where the read is refused or fails', async () => {
+  const asked: string[] = [];
+  const read = (answer: string | null) => async () => (asked.push('read'), answer);
+  assert.equal(await valueToEdit({ value: 'eu-west-3', readable: true }, read('never')), 'eu-west-3');
+  assert.equal(await valueToEdit({ value: null, readable: true }, read('hunter2')), 'hunter2');
+  // A read refused, as 0.9's vault refused every person's under `people: 'stand-ins'`, opens it empty, to replace the value.
+  assert.equal(await valueToEdit({ value: null, readable: true }, read(null)), null);
+  assert.equal(asked.length, 2);
+  // A value nobody reads (sensitive, an Owner's override of one in their dev@me included) or a parent's they do not: no read.
+  assert.equal(await valueToEdit({ value: null, readable: false }, read('never')), null);
+  assert.equal(asked.length, 2);
 });

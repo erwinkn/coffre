@@ -11,6 +11,15 @@ import type { SecretChange } from './secret-edit-batch.ts';
  */
 export const SENSITIVITIES = ['plain', 'secret', 'sensitive'] as const satisfies readonly Sensitivity[];
 
+/**
+ * The levels a value may be written at: in a personal config, a secret or
+ * sensitive, never plain, which is read without the vault that binds its
+ * values to their owner (R8); only its owner lists one anyway.
+ */
+export function levelsIn(personal: boolean): readonly Sensitivity[] {
+  return personal ? SENSITIVITIES.filter((level) => level !== 'plain') : SENSITIVITIES;
+}
+
 /** Each level as the page names it, and who it lets see the value. */
 export const LEVELS: Record<Sensitivity, { label: string; hint: string }> = {
   plain: { label: 'Plain', hint: 'Visible to anyone who can see this environment' },

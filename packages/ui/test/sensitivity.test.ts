@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient, SecretKey } from '@coffre/client';
 
 import { saveSecrets } from '../src/lib/changes.ts';
-import { markable, stricter, waitsForValue } from '../src/lib/sensitivity.ts';
+import { levelsIn, markable, stricter, waitsForValue } from '../src/lib/sensitivity.ts';
 
 function listed(key: string, sensitivity: SecretKey['sensitivity'], more: Partial<SecretKey> = {}): SecretKey {
   return {
@@ -73,4 +73,9 @@ test("a save shows at once who reads each value: a secret written over one its w
   });
   // Known only once the list is read back: a new key's, an override's, and a plain one's made a secret.
   assert.deepEqual(Object.fromEntries(shown.map((entry) => [entry.key, entry.readable])), { NEW: false, API_KEY: false, WEBHOOK: true, REGION: false });
+});
+
+test('a personal config offers a secret and sensitive, never plain, which the vault would not bind to its owner', () => {
+  assert.deepEqual(levelsIn(true), ['secret', 'sensitive']);
+  assert.deepEqual(levelsIn(false), ['plain', 'secret', 'sensitive']);
 });

@@ -136,11 +136,11 @@ test('making a sensitive value plain is a reveal first, which no person has; a s
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_TOKEN, null);
 });
 
-test('a personal config holds no plain value', async () => {
+test('a personal config holds no plain value: one is read without the vault, which binds its values to their owner', async () => {
   const dev = clientFor(deps, DEV);
   const refused = await refusal(dev.secrets.set('market/dev@me', { MINE: { value: 'mine', plain: true } }));
   assert.equal(refused.status, 400);
-  assert.match(refused.message, /personal config/);
+  assert.match(refused.message, /personal config: the vault binds its values to their owner, so none is plain/);
   // Its owner sees dev's plain values through it, as dev's reader.
   await dev.secrets.set('market/dev@me', { MINE: 'mine-0123456789' });
   assert.equal((await valuesIn(dev, 'market/dev@me')).TWILIO_SID, SID);
