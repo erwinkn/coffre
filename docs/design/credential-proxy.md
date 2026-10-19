@@ -864,7 +864,7 @@ test (`packages/server/test/credential-proxy-sign.test.ts`) runs this very
 class in DFNS's SDK, which creates a wallet through the proxy against a fake DFNS
 that checks the signature with `node:crypto.verify`, as DFNS does.
 
-**Egress (0.10.1, built).** Some upstreams let in only the addresses they
+**Egress (after 0.10.1, built).** Some upstreams let in only the addresses they
 know. Schuman's API, on AWS API Gateway, allowlists its clients' IPs, and
 a Worker's `fetch` leaves from Cloudflare's shared addresses, which nobody
 can allowlist. Such a credential names what its requests leave through,
@@ -1310,4 +1310,4 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
 | 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |
 | 0.10 | Sensitivity per key (`0012_sensitive_values`, `coffre set --sensitive`, `coffre mark`, the page's control); `people`, `expose` and `identifiers` removed. Built |
 | 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |
-| 0.10.1 | A credential's `egress`: its requests leave through a VPC Service binding, for an upstream that allowlists addresses (Schuman). Built; untested against a real VPC Service |
+| Egress | A credential's `egress`: its requests leave through a VPC Service binding, for an upstream that allowlists addresses (Schuman). Built; untested against a real VPC Service |
