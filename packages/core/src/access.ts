@@ -689,10 +689,11 @@ export type ServiceSetting = Scope;
  * holds its protected column, gives none what they do not hold themselves:
  * a Developer of a protected prod, who only uses it, gives no viewer there.
  */
-export function givesService(holder: Holdings, setting: ServiceSetting | null, role: Role, place: Place): boolean {
+export function givesService(holder: Holdings, setting: ServiceSetting | null, role: Role, place: Place, kept?: RoleDefinition): boolean {
   if (mayManageAccess(holder, place)) return true;
   const policy = holder.policy ?? DEFAULT_POLICY;
-  const definition = definitionOf(policy, role);
+  // What the grant holds: its role as the policy defines it, or what a credential kept of it (`issuesCredential`).
+  const definition = kept ?? definitionOf(policy, role);
   if (definition === undefined || setting === null || holder.credentialScope != null || !inScope(setting, place)) return false;
   if (!definition.permissions.every((permission) => allows(holder, permission, place))) return false;
   // A grant on a whole project reaches its protected environments too, where the service holds the role's normal column:
@@ -735,7 +736,9 @@ export function managesService(holder: Holdings, setting: ServiceSetting | null,
  * Whether `holder`, the member `actor`, may issue a token or a trust
  * binding of `account` whose scope is `scope`: they manage the account
  * (`managesService`), and each grant of the scope is one they could give it
- * (`givesService`) and one it holds, every permission of its role there.
+ * (`givesService`) and one it holds, every permission of its role there;
+ * of a grant that keeps less than its role, every permission it `kept`, as
+ * a binding replacing others keeps what they held.
  * For an account that holds `developer` on `market/dev`, a Developer of
  * `dev` issues `developer` or `viewer` there; nobody issues `market/prod`
  * for it, or `maintainer` on `market/dev`, until the account holds them.
@@ -745,13 +748,13 @@ export function issuesCredential(
   setting: ServiceSetting | null,
   actor: string,
   account: ServiceAccount,
-  scope: ServiceAccount['grants'],
+  scope: readonly { role: Role; place: Place; kept?: RoleDefinition }[],
 ): boolean {
   if (!managesService(holder, setting, actor, account)) return false;
   const policy = holder.policy ?? DEFAULT_POLICY;
   const held: Holdings = { ...NOTHING, policy, service: true, grants: account.grants.map(({ role, place }) => ({ projectId: place.projectId, environmentId: place.environmentId ?? null, role })) };
-  return scope.every(({ role, place }) => givesService(holder, setting, role, place)
-    && (definitionOf(policy, role)?.permissions.every((permission) => allows(held, permission, place)) ?? false));
+  return scope.every(({ role, place, kept }) => givesService(holder, setting, role, place, kept)
+    && ((kept ?? definitionOf(policy, role))?.permissions.every((permission) => allows(held, permission, place)) ?? false));
 }
 
 /**

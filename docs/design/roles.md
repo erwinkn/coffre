@@ -345,7 +345,8 @@ now stores both columns (R17): personal tokens and handles
 there of reading and using, in each column, so an Owner's reads a
 protected prod as they do; service tokens and trust bindings (`issuedScope`), a
 binding replaced or its keys replaced (no more than it held before, nor
-than two it replaces held at one place, `narrowest`), and the scopes
+than two it replaces held at one place, `narrowest`, and weighed by what
+it keeps: a role widened since neither widens it nor stops it), and the scopes
 sealed onto 0.4's credentials (`sealCredentials`, fenced by the policy
 the vault answered with, as rule 2 fences a request). A service credential
 is capped by its role alone: issuing one takes the account, and the

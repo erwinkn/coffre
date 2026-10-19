@@ -263,6 +263,24 @@ test("a binding that replaces a Viewer's keeps what the Viewer held, both column
   }
 });
 
+test("a binding that replaces one whose role was widened since keeps what that one held: the widening neither reaches it nor stops it", async () => {
+  const DEPLOY = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
+  const first = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'market/dev': 'viewer' } });
+  // Viewer widened to retire values, which the account, a Developer of dev, does not hold, nor Ada, who gave it.
+  await root.roles.set('viewer', { name: 'Viewer', description: '', permissions: ['secret.read', 'secret.use', 'secret.archive'], protected: ['secret.use'] });
+  // Its issuer moved its keys; the binding on the new ones, made by Ada, keeps what the one before held.
+  jwks = `${GITHUB}/.well-known/jwks-2`;
+  const moved = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY });
+  const again = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [moved.binding.id] });
+  const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
+  for (const binding of [moved, again]) {
+    assert.deepEqual(binding.binding.scope, { 'market/dev': 'viewer' });
+    const [row] = await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.binding.id));
+    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
+  }
+  assert.notEqual(first.binding.id, again.binding.id);
+});
+
 test('the scope is listed wherever tokens are, and logged by id when made', async () => {
   const issued = await ada.tokens.issue(CI, { label: 'deploy', expiresInDays: 30, scope: { 'market/dev': 'viewer' } });
   const [listed] = (await ada.tokens.list(CI)).tokens;

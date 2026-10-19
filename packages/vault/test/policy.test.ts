@@ -215,6 +215,11 @@ test('an id protected before its row exists protects it for ten minutes; one sti
     [...policy.protectedIn[w.project]!].sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1)),
     [{ environmentId: written, slug: 'staging' }, { environmentId: young, slug: null }].sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1)),
   );
+  // The change after keeps no more of it: its entry holds the ids the policy does.
+  const entries = (await db.owner.select().from(tablesOf(db.owner).auditLog)).filter((row) => row.action === 'policy.change' && row.decision === 'allow')
+    .sort((a, b) => Number(a.seq) - Number(b.seq));
+  const kept = (JSON.parse(entries.at(-1)!.metadata) as { policy: { protected: { environmentId: string }[] } }).policy.protected.map((place) => place.environmentId);
+  assert.deepEqual(kept.sort(), [written, young].sort());
 });
 
 test('a protected environment keeps its slug: a person scoped to it by slug holds what their role holds there', async () => {

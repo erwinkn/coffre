@@ -216,14 +216,26 @@ export async function issuedScope(
   const known = await places(db);
   const { policy } = ctx.caller;
   const account = accountOf(standing.grants, standing.by, known);
+  // Each grant with what its role holds now, kept; one inherited, no more than it held before either. Nothing narrower
+  // to cap it with: the account holds all of what it keeps, the only column a service holds, wherever it reaches, and
+  // the caller could give all of it there, its protected environments included (`issuesCredential`).
+  const before = new Map((inherited ?? []).map((grant) => [`${grant.projectId}/${grant.environmentId ?? ''}`, grant]));
+  const kept = (grant: ServiceAccount['grants'][number]): ScopeGrant => {
+    const now = issuedGrant(asGrant(grant), policy);
+    const was = before.get(`${now.projectId}/${now.environmentId ?? ''}`);
+    return was === undefined ? now : narrowest(now, was);
+  };
   let scope: ServiceAccount['grants'];
   if (wanted !== undefined) {
     scope = placedScope(wanted, known, policy);
   } else if (inherited !== undefined) {
-    // What the replaced bindings reached and the account still holds: a place deleted, or a role it lost, drops out.
+    // What the replaced bindings kept, each as its role is now and no more than it held, where the account still holds
+    // all of that: a place deleted, or what it lost, drops out. A role widened since keeps nothing new, and drops nothing.
     const held: Holdings = { ...NOTHING, policy, service: true, grants: account.grants.map(asGrant) };
-    scope = accountOf(inherited, null, known).grants
-      .filter(({ role, place }) => definitionOf(policy, role)?.permissions.every((permission) => allows(held, permission, place)) === true);
+    scope = accountOf(inherited, null, known).grants.filter((grant) => {
+      const { permissions } = scopeDefinition(kept(grant));
+      return permissions.length > 0 && permissions.every((permission) => allows(held, permission, grant.place));
+    });
     if (scope.length === 0) throw badRequest('the bindings it replaces reach nothing the account still holds: say what it reaches');
   } else {
     scope = account.grants;
@@ -232,7 +244,8 @@ export async function issuedScope(
     throw badRequest('a credential reaches only what its account holds when it is made: give the account a grant first');
   }
   const actor = formatMember(ctx.caller.principal);
-  const beyond = scope.find((grant) => !issuesCredential(ctx.caller, setting, actor, account, [grant]));
+  // Each as it will be kept: the caller gives, and the account holds, what the credential will hold, no more.
+  const beyond = scope.find((grant) => !issuesCredential(ctx.caller, setting, actor, account, [{ ...grant, kept: scopeDefinition(kept(grant)) }]));
   if (beyond !== undefined) {
     const path = Object.keys(scopeByPath([asGrant(beyond)], known)!)[0]!;
     throw new Refusal(
@@ -240,15 +253,7 @@ export async function issuedScope(
       denied(ctx, refused.action, 'beyond_account', { metadata: { ...refused.metadata, path } }),
     );
   }
-  // Each with what its role holds now, kept; one inherited, no more than it held before either. Nothing narrower to cap
-  // it with: the account holds all of its role's normal column, the only one a service holds, wherever it reaches, and
-  // the caller could give all of it there, its protected environments included (`issuesCredential`).
-  const before = new Map((inherited ?? []).map((grant) => [`${grant.projectId}/${grant.environmentId ?? ''}`, grant]));
-  const issued = scope.map((grant) => {
-    const now = issuedGrant(asGrant(grant), policy);
-    const was = before.get(`${now.projectId}/${now.environmentId ?? ''}`);
-    return was === undefined ? now : narrowest(now, was);
-  });
+  const issued = scope.map(kept);
   return { scope: issued, byPath: scopeByPath(issued, known)! };
 }
 

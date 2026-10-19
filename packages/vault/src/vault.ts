@@ -2097,7 +2097,13 @@ class VaultService implements Vault {
       // Unreadable, its edits are unknown: a change made from none would erase every protection and role edit the forged
       // rows hide. An Owner of the whole instance alone writes it again, from the roles as they ship and nothing protected.
       if (!readable && !owner) throw refused('not_allowed', "the vault cannot read its own policy: only an Owner of the whole instance writes it again, from the roles as they ship");
-      const next: PolicyEdits = { roles: { ...edits.roles }, instanceRoles: { ...edits.instanceRoles }, protected: edits.protected.map((place) => ({ ...place })) };
+      // Those the policy no longer holds stay out: a deleted environment's id, and an unwritten fork's past its window,
+      // neither of which comes back, the window being one a fork writes its row well within.
+      const next: PolicyEdits = {
+        roles: { ...edits.roles },
+        instanceRoles: { ...edits.instanceRoles },
+        protected: edits.protected.filter((place) => before.protected.includes(place.environmentId)).map((place) => ({ ...place })),
+      };
       if (change?.kind === 'role' || change?.kind === 'instance-role') {
         // Roles are the whole instance's: an Owner of all of it alone changes them (R1, R15), never through a scoped credential.
         if (!owner) throw refused('not_allowed', 'only an Owner of the whole instance edits roles');

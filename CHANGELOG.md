@@ -18,10 +18,11 @@
   `market/prod` her reveal is refused and `coffre run` gives her app
   placeholders. No environment is protected until someone says so, so
   nobody's access changes on upgrade. Only an Owner of the whole
-  instance unprotects one, and a fork of a protected environment, a copy
-  or one that inherits, is protected before its row exists. Settings ›
-  Roles, or `coffre roles set` and `reset`, lets an Owner of the whole
-  instance edit any role but Owner and the instance's Member, and make
+  instance unprotects one (`coffre environments unprotect`), and a fork
+  of a protected environment, a copy or one that inherits, is protected
+  before its row exists. Settings › Roles, or `coffre roles set`,
+  `reset` and `remove`, lets an Owner of the whole instance edit any
+  role but Owner and the instance's Member, and make
   custom ones (`release-manager`), granted as any is and deleted once no
   grant names one; each change is previewed in words first ("Widens
   secret.read for 6 people on 4 protected environments") and logged as
