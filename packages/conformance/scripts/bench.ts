@@ -55,6 +55,13 @@ for (const name of ['entries', 'members', 'keys', 'warm', 'cold', 'port'] as con
     process.exit(2);
   }
 }
+// The environment's reveals read every key, each sample as the same reader and the same service account, and the
+// examples' vault keeps its default bulk limit: 1000 keys per principal in 15 minutes, which a restart does not reset.
+const released = count('keys') * (count('cold') + 1 + count('warm'));
+if (released > 1000) {
+  console.error(`--keys ${count('keys')} over ${count('cold')} cold and ${count('warm') + 1} warm samples reads ${released} keys as one reader, past the vault's bulk limit of 1000 in 15 minutes: lower one of them`);
+  process.exit(2);
+}
 
 // --- CPU, from /proc ---------------------------------------------------------
 
