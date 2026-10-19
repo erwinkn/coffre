@@ -239,10 +239,17 @@ test('the audit page verifies once an arrival: not again on mount, nor for a fil
   await loadAudit(browser, coffre, { actorId: 'ada@acme.example' });
   assert.equal(verified, 1);
 
+  // Retry asks at once, whatever the window.
+  const observer = new QueryObserver(browser, queries.auditChain(coffre) as never);
+  const stop2 = observer.subscribe(() => {});
+  await observer.refetch();
+  stop2();
+  assert.equal(verified, 2);
+
   // A change made here marks it stale, so the next visit verifies again.
   await refresh(browser, affects.sessions());
   await loadAudit(browser, coffre, {});
-  assert.equal(verified, 2);
+  assert.equal(verified, 3);
 });
 
 test('every change marks the audit log and its verification stale', async () => {

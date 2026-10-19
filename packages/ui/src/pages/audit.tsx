@@ -40,7 +40,8 @@ export function AuditPage() {
   // Loaded with the entries: the page arrives with its badge.
   const verification = useSuspenseQuery(queries.auditChain(client));
   // The walk from the first entry, once someone ran it, beside the check from the newest checkpoint, which
-  // refetches as the page is looked at again: `shownChain` says which the page shows, until the page is left.
+  // the page reuses for `FRESH_MS` and asks again after that, after a change made here, or on Retry:
+  // `shownChain` says which the page shows, until the page is left.
   const [whole, setWhole] = useState<ChainResult | null>(null);
   const chain = shownChain(verification.data, whole);
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
