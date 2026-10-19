@@ -375,3 +375,9 @@ test('an entry a CI run wrote reads with its run, as its issuer stated it', () =
   assert.equal(runLabel({ claims: { sub: '104000' } }), 'CI run 104000');
   assert.equal(runLabel({ claims: {} }), 'a CI run');
 });
+
+test("a credential's use names its upstream's host, and the deployment's egress where its requests left through one", () => {
+  const use = (metadata: Record<string, unknown>) => said(entry({ action: 'credential.use', ...dev, metadata: { purpose: 'use', credential: 'schumann', host: 'dev.api.europ.schuman.io', ...metadata } }));
+  assert.equal(use({}), 'used the credential schumann on dev.api.europ.schuman.io');
+  assert.equal(use({ egress: true }), "used the credential schumann on dev.api.europ.schuman.io, through the deployment's egress");
+});

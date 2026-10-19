@@ -499,14 +499,16 @@ request sent on:
    environment and credential, or opened now: `use(handle, …)`, the API's
    read in process, purpose `use`. That is one vault entry naming the keys,
    and one `credential.use` entry naming the credential and the upstream's
-   host. A key the environment lacks is a 409.
+   host, and `egress: true` where it leaves through one (section 5). A key
+   the environment lacks is a 409.
 4. **Sent on.** Every header but those about the hop, coffre's caller,
    its cookies and the handle; then the rule's header, parameter or
    Basic authorization, filled in. The body is read up to 16 MiB and no
    further, whatever it declares. If the handle is still anywhere in the
    request (a header, inside another header's Basic base64, the URL, the
    body), it is refused rather than leaked to a third party. The request
-   goes out with `redirect: 'manual'`.
+   goes out with `redirect: 'manual'`, through the global `fetch` or the
+   credential's `egress` (section 5).
 5. **Back.** The upstream's answer, without `set-cookie` (it would land on
    coffre's origin), and always `cache-control: no-store`, its own cache
    headers dropped: a cache on the way would serve the next caller, with
@@ -862,6 +864,141 @@ test (`packages/server/test/credential-proxy-sign.test.ts`) runs this very
 class in DFNS's SDK, which creates a wallet through the proxy against a fake DFNS
 that checks the signature with `node:crypto.verify`, as DFNS does.
 
+**Egress (0.10.1, built).** Some upstreams let in only the addresses they
+know. Schuman's API, on AWS API Gateway, allowlists its clients' IPs, and
+a Worker's `fetch` leaves from Cloudflare's shared addresses, which nobody
+can allowlist. Such a credential names what its requests leave through,
+in place of the global `fetch`:
+
+```ts
+schumann: {
+  upstream: 'https://dev.api.europ.schuman.io',
+  inject: header('x-api-key', '{SCHUMANN_API_KEY}'),
+  egress: env.SCHUMAN_EGRESS,
+},
+```
+
+`egress` is anything with a `fetch(url, init)` method: a Workers VPC
+Service binding, a service binding, or an object of the deployment's own,
+on Node as on Workers. The proxy hands it exactly what it would have sent
+the global `fetch`: the upstream's URL and the request it made,
+`redirect: 'manual'` included. Every check of section 4 comes first (the
+handle, `methods` and `paths`, the rule's injection, the handle anywhere
+else refused), and the answer is treated as any upstream's (redacted,
+`no-store`, its redirects kept on the proxy). The `credential.use` entry
+says `egress: true`, and nothing of the binding; the audit page reads
+"used the credential schumann on dev.api.europ.schuman.io, through the
+deployment's egress". A binding that throws is the upstream not
+answering, a 502.
+
+For Schuman, Equisafe's path is a Cloudflare Tunnel to a `cloudflared` VM
+whose traffic leaves from one fixed address, which Schuman allowlists:
+
+```
+app → coffre's Worker, /use/schumann/… → env.SCHUMAN_EGRESS.fetch(…) → Cloudflare Tunnel → cloudflared → NAT → Schuman
+```
+
+```sh
+# Once: the VPC Service, Schuman's own host, through the tunnel.
+wrangler vpc service create schuman-egress --type http --tunnel-id <tunnel id> --hostname dev.api.europ.schuman.io
+```
+
+```jsonc
+// app/wrangler.jsonc, beside "services"
+"vpc_services": [{ "binding": "SCHUMAN_EGRESS", "service_id": "<the id it printed>" }],
+```
+
+and `SCHUMAN_EGRESS: Fetcher` in the app's `Env`. What Cloudflare's docs
+([VPC Services](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/))
+say, and what it means here:
+
+- **The binding's host must be the upstream's.** A VPC Service reaches
+  the one host and port it was made for. The URL its `fetch` is given
+  only sets the request's `Host` header and TLS's SNI, and its port is
+  ignored. coffre cannot read the binding's target, so this is a
+  requirement on the deployment, not a check: one VPC Service per upstream
+  host, made for that host. The scheme is the URL's, HTTPS here, and the
+  certificate is verified by default (`verify_full`).
+- **The target may be a public hostname.** DNS is resolved on the tunnel's
+  side and the request leaves from `cloudflared`'s host; Cloudflare's own
+  example targets `s3.us-west-2.amazonaws.com`. That needs `cloudflared`
+  2025.7.0 or later on QUIC (UDP 7844): on `http2`, its DNS fails.
+- **A deploy needs the right token.** Binding a VPC Service takes the
+  Connectivity Directory Bind permission, which a Workers Builds token
+  lacks unless given it (workers-sdk issue
+  [#15704](https://github.com/cloudflare/workers-sdk/issues/15704)).
+- **Local development has no VPC Service.** wrangler and the Vite plugin
+  reach the real one (a remote binding) or fail; there is no local
+  simulator. A local stack names no `egress`, or a `{ fetch }` of its own.
+- Workers VPC is in beta, free on every plan for now.
+
+**Fails closed.** A binding missing from `wrangler.jsonc` is `undefined` in
+`env`, so `egress: env.SCHUMAN_EGRESS` is then a key that is there with
+the value `undefined`. The proxy tells it apart from no `egress` at all
+(`'egress' in credential`) and refuses the configuration:
+
+```
+credentialProxy: schumann's egress is undefined, as a binding the Worker lacks is: add the binding to wrangler.jsonc, or remove egress. schumann's requests never leave without it
+```
+
+An `egress` with no `fetch` method (`{}`, `null`) is refused too. On
+Workers the configuration is read from `env` at the first request, so the
+Worker answers nothing until the binding is there, as with any
+configuration error. It never falls back to the global `fetch`, which
+would send the real key by a road other than the one the deployment
+chose: at best a 403 from the allowlist to debug, at worst, for a name
+that resolves elsewhere outside the tunnel's network, another host.
+
+**Not settled, and not built on.** Cloudflare documents neither of these
+for VPC Services, and nothing here was run against a real one:
+
+- *Redirects.* workerd returns a 3xx as it is when `redirect` is
+  `'manual'`, for any binding (its `fetch` follows only on `'follow'`), so
+  the proxy gets it as it does from the global `fetch`. Whether
+  Cloudflare's side of a VPC binding follows one itself is not
+  documented. If it did, the next request would still go to the
+  binding's one host, so the key reaches no other.
+- *Streamed bodies.* An upload streams through a service binding in
+  workerd, 24 MiB with its length kept (`FixedLengthStream`), as
+  `packages/server/test/credential-proxy-egress-workers.test.ts` checks.
+  Through a VPC Service it is untested, and Cloudflare documents no limit
+  of its own beyond Workers' (the request into coffre's Worker is capped
+  by plan anyway: 100 MB on Free and Pro). Streamed answers are untested
+  too.
+
+**Through Cloudflare Access, if the VPC Service cannot be used.** A
+tunnel's public hostname behind Access, its policy Service Auth, takes a
+service token in two headers. The deployment writes that as its own
+`{ fetch }`, sending the proxy's request to the tunnel's hostname with
+the token added; `cloudflared`'s ingress for that hostname points at
+`https://dev.api.europ.schuman.io`, with `httpHostHeader` and
+`originServerName` set to Schuman's host:
+
+```ts
+import type { Egress } from '@coffre/server/plugins/credential-proxy';
+
+/** Schuman through the tunnel's public hostname, behind Access: the service token from the Worker's secrets, sent to Access and logged nowhere. */
+function throughAccess(origin: string, token: { id: string; secret: string }): Egress {
+  return {
+    fetch(url, init) {
+      const headers = new Headers(init.headers);
+      headers.set('cf-access-client-id', token.id);
+      headers.set('cf-access-client-secret', token.secret);
+      return fetch(new URL(`${url.pathname}${url.search}`, origin), { ...init, headers });
+    },
+  };
+}
+
+egress: throughAccess('https://schuman-egress.equisafe.example', { id: env.SCHUMAN_ACCESS_ID, secret: env.SCHUMAN_ACCESS_SECRET }),
+```
+
+The token is the deployment's, not the environment's: coffre's redaction
+knows only the credential's values, so an upstream that echoed the two
+headers back would show them to the app. Whether Access removes them
+before the request reaches `cloudflared`'s origin is not documented;
+assume Schuman sees them. No helper ships for this: it is eight lines,
+and a VPC Service needs none.
+
 **Later: `verify`, HMAC, and SDK credential files.** Other secrets used
 for computation get helpers of the same kind: an HMAC that signs or
 verifies a webhook (a signer of another kind, `hmac('WEBHOOK_SECRET')`), a
@@ -913,7 +1050,8 @@ private, loopback or link-local address (`10.0.0.8`, `169.254.169.254`,
 `insecureUpstreams: true` allows both, for local fakes in development, and
 never belongs in production. A hostname that *resolves* to a private
 address is the operator's own DNS. On Workers, `fetch` cannot reach a
-private network anyway. On Node, pinning the resolved address is left for
+private network anyway; an `egress` binding can (section 5), and reaches
+only the host it was made for. On Node, pinning the resolved address is left for
 later (decision 9).
 
 **Injection** goes into headers, the query and Basic only. Nothing is
@@ -1147,6 +1285,14 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     `dev@me` stored sealed and shown as plain, which keeps the vault's
     binding at the cost of a vault read for each listing, and a plain
     that behaves unlike plain elsewhere (logged reads, bulk limits).
+28. **A credential's `egress` is any `{ fetch }`, named by value, and fails
+    closed (Erwin 2026-10-19).** The binding itself, `egress:
+    env.SCHUMAN_EGRESS`, rather than a name coffre looks up or an
+    `egress(name, binding)` helper: the deployment already holds it, and a
+    `{ fetch }` of its own covers every other road (Access, a test fake).
+    Named and missing, it refuses the configuration rather than leave by
+    the global `fetch`. HTTP credentials only: a tunnel's `connect()` and a
+    signer reach no upstream through it.
 
 ## 9. Plan
 
@@ -1164,3 +1310,4 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
 | 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |
 | 0.10 | Sensitivity per key (`0012_sensitive_values`, `coffre set --sensitive`, `coffre mark`, the page's control); `people`, `expose` and `identifiers` removed. Built |
 | 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |
+| 0.10.1 | A credential's `egress`: its requests leave through a VPC Service binding, for an upstream that allowlists addresses (Schuman). Built; untested against a real VPC Service |

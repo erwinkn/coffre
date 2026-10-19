@@ -55,6 +55,27 @@
 - **Pages with times render with less CPU.** A relative time ("3 hours
   ago") made a new formatter each time it was shown; it reuses one. The
   audit page's render costs about a quarter less.
+- **A proxied credential can leave through the deployment's egress.** An
+  upstream that lets in only the addresses it knows, as Schuman's API
+  does, cannot allowlist a Worker's `fetch`, which leaves from
+  Cloudflare's shared addresses. A credential now takes `egress`, anything
+  with a `fetch(url, init)` method, which its requests go through instead:
+  a Workers VPC Service binding to a Cloudflare Tunnel that exits from a
+  fixed address, a service binding, or an object of the deployment's own,
+  on Node too.
+
+  ```ts
+  schumann: { upstream: 'https://dev.api.europ.schuman.io', inject: header('x-api-key', '{SCHUMANN_API_KEY}'), egress: env.SCHUMAN_EGRESS },
+  ```
+
+  Every check before it is as it was, and so is everything done to the
+  answer. The VPC Service must be made for the upstream's own host:
+  coffre cannot read where a binding goes. A binding missing from
+  `wrangler.jsonc`, `undefined` in `env`, fails the configuration, and
+  the request never leaves through the global `fetch` in its place. The
+  log's `credential.use` entry says `egress: true`. Redirects and streamed
+  uploads through a real VPC Service are untested
+  ([design](docs/design/credential-proxy.md), section 5, "Egress").
 
 ## 0.10.0 (2026-10-19)
 

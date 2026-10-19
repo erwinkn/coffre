@@ -24,7 +24,7 @@ import { coffreRoute } from '../src/app.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { setSecurityHeaders } from '../src/security-headers.ts';
-import { basic, credentialProxy, header, jwt, query, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
+import { basic, credentialProxy, header, jwt, query, type CredentialProxyOptions, type Egress } from '../src/plugins/credential-proxy.ts';
 import { vaultKv } from '../src/plugins/vault-kv.ts';
 
 const KEY = 'sk_schumann_real_0123456789abcdef';
@@ -375,6 +375,79 @@ test("Schumann's own client, its base URL the proxy's stable URL and its key fro
   const reads = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'use');
   assert.equal(reads.length, 1);
   assert.equal(reads[0]!.operationId, uses[0]!.operationId);
+});
+
+test("a credential with an egress leaves through it, never the global fetch, as the proxy made the request: the real key in, the same checks, the log saying so", async () => {
+  // Schuman's allowlist sees one address: the request leaves through the deployment's binding, a fake here, which answers itself.
+  const sent: { input: URL; init: RequestInit; body: string }[] = [];
+  let answer = (input: URL) => Response.json({ path: input.pathname + input.search });
+  const egress: Egress = {
+    async fetch(input, init) {
+      sent.push({ input, init, body: init.body === undefined ? '' : new TextDecoder().decode(init.body as Uint8Array) });
+      return answer(input);
+    },
+  };
+  const options = proxyOptions();
+  options.credentials.schumann = { ...options.credentials.schumann!, egress };
+  runtime.plugins = checkPlugins([credentialProxy(options)]);
+  const global = mock.method(globalThis, 'fetch');
+  try {
+    const handle = await handleFor();
+    const call = (path: string, init: RequestInit = {}) => route(`/use/schumann${path}`, { ...init, headers: { 'x-api-key': handle, ...(init.headers as Record<string, string> | undefined) } });
+
+    const got = await call('/companies?q=acme', { method: 'POST', headers: { 'content-type': 'application/json', cookie: 'coffre=1' }, body: '{"siren":"123"}' });
+    assert.equal(got.status, 200);
+    assert.deepEqual(await got.json(), { path: '/v1/companies?q=acme' });
+    assert.equal(sent.length, 1);
+    const [one] = sent;
+    assert.equal(one!.input.href, `${upstreamUrl}/v1/companies?q=acme`, 'the upstream URL, its host the one the binding reaches');
+    assert.equal(one!.init.method, 'POST');
+    assert.equal(one!.init.redirect, 'manual');
+    assert.equal(one!.body, '{"siren":"123"}');
+    const headers = new Headers(one!.init.headers);
+    assert.equal(headers.get('x-api-key'), KEY, 'the real key, injected before it leaves');
+    assert.equal(headers.get('content-type'), 'application/json');
+    assert.equal(headers.get('cookie'), null);
+    assert.equal([...headers].some(([, value]) => value.includes(handle)), false);
+    assert.equal(received.length, 0, 'the fake Schumann, which the global fetch reaches, got nothing');
+    assert.equal(global.mock.callCount(), 0);
+
+    // The answer is the upstream's as the proxy hands any back: redacted, no-store, its redirects kept on the proxy.
+    answer = () => new Response(JSON.stringify({ youSent: KEY }), { headers: { 'content-type': 'application/json', 'cache-control': 'max-age=60' } });
+    const echoed = await call('/echo');
+    assert.equal((await echoed.text()).includes(KEY), false);
+    assert.equal(echoed.headers.get('cache-control'), 'no-store');
+    answer = () => new Response(null, { status: 302, headers: { location: 'https://evil.example/steal' } });
+    assert.equal((await call('/redirect')).status, 502);
+
+    // Refused before it leaves, as without an egress: the handle in the body, a path out of the upstream.
+    const before = sent.length;
+    assert.equal((await call('/companies', { method: 'POST', body: JSON.stringify({ token: handle }) })).status, 400);
+    assert.equal((await call('/a%2Fb')).status, 400);
+    assert.equal(sent.length, before);
+
+    // A binding that fails is the upstream not answering, said as the egress.
+    answer = () => {
+      throw new Error('tunnel down');
+    };
+    const down = await call('/companies');
+    assert.equal(down.status, 502);
+    assert.match((await down.json()).message, /did not answer through schumann's egress: tunnel down/);
+
+    // A credential without one still leaves through the global fetch.
+    assert.equal((await route('/use/market/dev/maps/geocode?key=' + handle)).status, 200);
+    assert.equal(global.mock.callCount(), 1);
+    assert.equal(received.length, 1);
+
+    // The log says which credentials' openings went out through their egress, and nothing of the binding.
+    const uses = (await entries('credential.use')).filter((entry) => entry.metadata.plan !== true);
+    assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.host, entry.metadata.egress]), [
+      ['schumann', new URL(upstreamUrl).host, true],
+      ['maps', new URL(upstreamUrl).host, undefined],
+    ]);
+  } finally {
+    global.mock.restore();
+  }
 });
 
 test('the proxy sends nothing outside the upstream, follows no redirect, redacts an echoed key, and keeps the handle and cookies from the upstream', async () => {
@@ -809,6 +882,14 @@ test("the configuration is checked: HTTPS upstreams, no private address, rules t
   // `standIn` is `placeholder` in 0.10: refused at typecheck and at startup, saying so.
   // @ts-expect-error -- the type says to rename it
   assert.throws(make({ dfns: { upstream: 'https://api.example.com', inject: header('authorization', 'Bearer {K}'), standIn: jwt() } }), /dfns's standIn is called placeholder in 0\.10: rename it/);
+  // An egress named is one that fetches: a binding the Worker lacks, `undefined` with its key still there, fails the configuration.
+  const env: { SCHUMANN_EGRESS?: Egress } = {};
+  assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: env.SCHUMANN_EGRESS } }), /schumann's egress is undefined, as a binding the Worker lacks is: add the binding to wrangler\.jsonc/);
+  // @ts-expect-error -- an egress has a fetch method
+  assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: {} } }), /schumann's egress has no fetch method/);
+  // @ts-expect-error -- and is no null
+  assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: null } }), /schumann's egress has no fetch method/);
+  assert.doesNotThrow(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: { fetch: (input, init) => fetch(input, init) } } }));
   assert.doesNotThrow(make({ a: { upstream: 'https://api.example.com/v1', inject: header('authorization', 'Bearer {K}') } }));
   assert.doesNotThrow(make({ a: { upstream: 'http://127.0.0.1:9000', inject: header('x', '{K}') } }, { insecureUpstreams: true }));
 });
