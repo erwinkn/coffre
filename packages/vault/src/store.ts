@@ -1,7 +1,7 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
-import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns, withinBytes } from '@coffre/db/log';
@@ -61,10 +61,11 @@ export async function boundLockWaits(tx: Transaction, ms: number): Promise<void>
 
 /** The database's clock, now. */
 export async function now(db: Queryable): Promise<number> {
-  const { auditChainHead } = tablesOf(db);
-  const [{ at }] = await db.select({ at: clockMillis(db) }).from(auditChainHead);
+  const [{ at }] = await clock(db);
   return at;
 }
+
+const clock = prepared((db) => db.select({ at: clockMillis(db) }).from(tablesOf(db).auditChainHead));
 
 // --- members --------------------------------------------------------------------
 
@@ -101,10 +102,14 @@ function storedChange(change: Partial<Omit<Member, 'principal'>>): Record<string
 }
 
 export async function member(db: Queryable, principal: string): Promise<Member | undefined> {
-  const { vaultMembers } = tablesOf(db);
-  const [row] = await db.select(memberColumns(db)).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const [row] = await memberRow(db, { principal });
   return row === undefined ? undefined : memberOf(row as StoredMember);
 }
+
+const memberRow = prepared((db) => {
+  const { vaultMembers } = tablesOf(db);
+  return db.select(memberColumns(db)).from(vaultMembers).where(eq(vaultMembers.principal, sql.placeholder('principal')));
+});
 
 export async function allMembers(db: Queryable): Promise<Member[]> {
   const { vaultMembers } = tablesOf(db);
@@ -312,24 +317,28 @@ export const RELEASE = 'secret.read';
  * several (`secrets`), a read logged once per place.
  */
 export async function releasesSince(db: Queryable, principal: string, after: number): Promise<number> {
+  const [{ n }] = await released(db, { principal, after });
+  return Number(n ?? 0);
+}
+
+const released = prepared((db) => {
   const { auditLog } = tablesOf(db);
   const listed = engineOf(db) === 'postgres'
     ? sql`jsonb_array_length((${auditLog.metadata})::jsonb -> 'secrets')`
     : sql`json_array_length(${auditLog.metadata}, '$.secrets')`;
-  const [{ n }] = await db
+  return db
     .select({ n: sql<string | number | null>`SUM(COALESCE(${listed}, 1))` })
     .from(auditLog)
     .where(
       and(
         eq(auditLog.author, 'vault'),
-        eq(auditLog.actor, principal),
+        eq(auditLog.actor, sql.placeholder('principal')),
         eq(auditLog.action, RELEASE),
         eq(auditLog.decision, 'allow'),
-        gt(auditLog.occurredAt, after),
+        gt(auditLog.occurredAt, sql.placeholder('after')),
       ),
     );
-  return Number(n ?? 0);
-}
+});
 
 /** Rows of the log as the chain's codec reads them: `author` and `decision` are checked by the table. */
 function stored(rows: object[]): StoredEntry[] {

@@ -3175,9 +3175,35 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
       };
     },
   });
+  // A query built once (`prepared` in @coffre/db) runs on the session, with its values bound there.
+  type Prepared = { execute?: (values: Record<string, unknown>) => Promise<unknown>; all?: (values: Record<string, unknown>) => Promise<unknown> };
+  const session = (target: { prepareQuery: (query: { sql: string }, ...rest: unknown[]) => Prepared }) => new Proxy(target, {
+    get(inner, property) {
+      const value = Reflect.get(inner, property, inner) as unknown;
+      if (property !== 'prepareQuery') return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(inner) : value;
+      return (query: { sql: string }, ...rest: unknown[]) => {
+        const prepared = inner.prepareQuery(query, ...rest);
+        for (const run of ['execute', 'all'] as const) {
+          const original = prepared[run]?.bind(prepared);
+          if (original === undefined) continue;
+          prepared[run] = async (values) => {
+            const result = await original(values);
+            if (armed && query.sql.includes(table) && Object.values(values ?? {}).includes(principal)) {
+              armed = false;
+              paused();
+              await released;
+            }
+            return result;
+          };
+        }
+        return prepared;
+      };
+    },
+  });
   const wrapped = new Proxy(database, {
     get(target, property) {
       if (property === 'select') return (...args: Parameters<Database['select']>) => wrap(target.select(...args));
+      if (property === 'session') return session(Reflect.get(target, property, target) as never);
       const value = Reflect.get(target, property, target) as unknown;
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
