@@ -27,7 +27,7 @@ type Written = { value?: string; generated?: Generation; replaces?: string; plai
 
 /**
  * A coffre with one environment, app/prod, which lists its keys with their
- * recipes and keeps what each write sends. `unsaid` plays an instance
+ * recipes and keeps what each write sends, answering each key's level. `unsaid` plays an instance
  * before 0.7, whose listing says nothing of recipes.
  */
 async function instance(t: test.TestContext, held: Record<string, Held>, { unsaid = false } = {}) {
@@ -39,7 +39,8 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     for await (const chunk of req) body += String(chunk);
     assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
-    if (req.url !== '/api/secrets/app/prod') return send(404, { error: 'not_found', message: 'unknown project or environment' });
+    // app/prod@me answers as app/prod: one set of keys, which is all a write's answer here needs.
+    if (decodeURIComponent(req.url!).replace(/@me$/, '') !== '/api/secrets/app/prod') return send(404, { error: 'not_found', message: 'unknown project or environment' });
     if (req.method === 'GET') {
       return send(200, {
         permissions: ['secret.read', 'secret.write'],
@@ -54,14 +55,14 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     }
     const patch = JSON.parse(body) as Record<string, Written>;
     writes.push(patch);
-    const keys: Record<string, { version: number }> = {};
+    const keys: Record<string, { version: number; sensitivity: string }> = {};
     for (const [key, written] of Object.entries(patch)) {
       // A mark keeps the value and how it was made; a write says its own, plain as 0.9 says it too.
       const sensitivity = written.plain === true ? 'plain' : written.sensitivity ?? (held[key]?.sensitivity === 'sensitive' ? 'sensitive' : 'secret');
       held[key] = written.value === undefined
         ? { ...held[key]!, version: (held[key]!.version ?? 0) + 1, sensitivity, value: null }
         : { version: (held[key]?.version ?? 0) + 1, generated: written.generated ?? null, value: sensitivity === 'plain' ? written.value : null, sensitivity };
-      keys[key] = { version: held[key].version! };
+      keys[key] = { version: held[key].version!, sensitivity };
     }
     send(200, { operationId: 'op', keys });
   });
@@ -74,10 +75,12 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
 
   return {
     writes,
-    async coffre(args: string[]) {
+    /** `input`, piped in: a value `coffre set` reads from stdin. */
+    async coffre(args: string[], input?: string) {
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_')));
       Object.assign(env, { COFFRE_STATE_DIR: home, HOME: home });
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: 10_000 });
+      if (input !== undefined) child.stdin!.end(input);
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
@@ -212,6 +215,19 @@ test('list says which values were generated, and that regenerate rotates them', 
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /^TOKEN\tv2\t-\t-  \(generated, bytes:32:base62\)\n/m);
   assert.match(run.stdout, /^TYPED\tv1\t-\t-\n/m);
+});
+
+test('set says the level a value saying none got: the sensitive key it is written over, or in <env>@me the one it overrides', async (t) => {
+  const coffre = await instance(t, { SEAL_KEY: { version: 1, sensitivity: 'sensitive' }, DATABASE_URL: { version: 1, sensitivity: 'sensitive' } });
+  const kept = await coffre.coffre(['set', 'app/prod/SEAL_KEY'], 'seal_0123456789\n');
+  assert.equal(kept.code, 0, kept.stderr);
+  assert.match(kept.stdout, /^SEAL_KEY written as version 2, sensitive: shown to nobody, .*, as it was; --secret makes it a secret its readers see\n$/);
+  const mine = await coffre.coffre(['set', 'app/prod@me/DATABASE_URL'], 'postgres://localhost/me\n');
+  assert.equal(mine.code, 0, mine.stderr);
+  assert.match(mine.stdout, /^DATABASE_URL written as version 2, sensitive: .*, as the key it overrides; --secret makes it a secret your app is given\n$/);
+  // Said, it is as said, with nothing more.
+  const said = await coffre.coffre(['set', 'app/prod@me/DATABASE_URL', '--secret'], 'postgres://localhost/me\n');
+  assert.match(said.stdout, /^DATABASE_URL written as version 3\n$/);
 });
 
 test('set --plain writes a value that is no secret, given as an argument; list shows it as it is', async (t) => {

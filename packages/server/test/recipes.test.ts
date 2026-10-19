@@ -52,7 +52,7 @@ function pairWrite(names = PAIR.pair, recipe = PAIR.recipe) {
 
 test('a generated value keeps its recipe, written canonical, until a value is written by hand', async () => {
   const written = await root.secrets.set('market/dev', { TOKEN: { value: 'made-in-the-client', generated: { recipe: 'BYTES:32' } } });
-  assert.deepEqual(written.keys, { TOKEN: { version: 1 } });
+  assert.deepEqual(written.keys, { TOKEN: { version: 1, sensitivity: 'secret' } });
   assert.deepEqual(await generatedIn('market/dev'), { TOKEN: { recipe: 'bytes:32:base62' } });
   // The value is the one sent: the server made nothing.
   assert.deepEqual((await root.secrets.reveal('market/dev/TOKEN')).values, { TOKEN: 'made-in-the-client' });
@@ -142,7 +142,7 @@ test('a regenerate replaces the versions it was listed with, by their ids, or wr
   await root.secrets.set('market/dev', pairWrite());
   const keys = ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY'];
   const first = await regenerateOf('market/dev', keys);
-  assert.deepEqual((await first.send()).keys, { JWT_PRIVATE_KEY: { version: 2 }, JWT_PUBLIC_KEY: { version: 2 } });
+  assert.deepEqual((await first.send()).keys, { JWT_PRIVATE_KEY: { version: 2, sensitivity: 'secret' }, JWT_PUBLIC_KEY: { version: 2, sensitivity: 'secret' } });
   // The same listing again: both have moved on since.
   await assert.rejects(first.send(), { status: 409, message: /JWT_PRIVATE_KEY changed since it was listed/ });
 
@@ -181,7 +181,7 @@ test('in a fork, an inherited key keeps its recipe, and regenerating it override
 
   // Regenerating replaces the version it inherits, by its id, written as the fork's own.
   const written = await (await regenerateOf('market/prod-eu', ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY'])).send();
-  assert.deepEqual(written.keys, { JWT_PRIVATE_KEY: { version: 1 }, JWT_PUBLIC_KEY: { version: 1 } });
+  assert.deepEqual(written.keys, { JWT_PRIVATE_KEY: { version: 1, sensitivity: 'secret' }, JWT_PUBLIC_KEY: { version: 1, sensitivity: 'secret' } });
   assert.deepEqual((await listed()).JWT_PUBLIC_KEY, [PAIR, 1, 'overridden']);
   // The parent is as it was.
   assert.deepEqual((await root.secrets.list('market/prod')).keys.map(({ key, versionId }) => [key, versionId]), parentBefore);
@@ -228,7 +228,7 @@ test("in a personal config, regenerating a key it reads from its environment wri
   const devBefore = (await root.secrets.list('market/dev')).keys.map(({ key, versionId }) => [key, versionId]);
   // With no personal config yet, market/dev@me lists dev's own keys; the write makes one.
   const regenerate = await regenerateOf('market/dev@me', ['JWT_PRIVATE_KEY', 'JWT_PUBLIC_KEY']);
-  assert.deepEqual((await regenerate.send()).keys, { JWT_PRIVATE_KEY: { version: 1 }, JWT_PUBLIC_KEY: { version: 1 } });
+  assert.deepEqual((await regenerate.send()).keys, { JWT_PRIVATE_KEY: { version: 1, sensitivity: 'secret' }, JWT_PUBLIC_KEY: { version: 1, sensitivity: 'secret' } });
   const mine = await root.secrets.list('market/dev@me');
   assert.equal(mine.personal?.fallback, false);
   assert.deepEqual(mine.keys.map(({ key, generated, parent }) => [key, generated, parent?.state]), [

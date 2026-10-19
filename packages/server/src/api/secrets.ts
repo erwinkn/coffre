@@ -197,7 +197,8 @@ export type PersonalView = { of: string; fallback: boolean };
 /** A reset in a fork, or its undoing: the key as it is now, and the environment that holds the parent's. */
 export type InheritResult = { key: string; archived: boolean; folder: string | null; from: string };
 
-export type SetOutcome = { version: number } | { archived: true } | { reference: string };
+/** What a write did to each key: its new version and who sees it, its archiving, or the reference it is now. */
+export type SetOutcome = { version: number; sensitivity: Sensitivity } | { archived: true } | { reference: string };
 export type SetResult = { operationId: string; keys: Record<string, SetOutcome> };
 
 type Environment = { projectId: string; environmentId: string };
@@ -787,7 +788,7 @@ export async function setSecrets(
             ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
             metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, previous.get(key) ?? null) },
           }));
-          keys[key] = { version: secret.version };
+          keys[key] = { version: secret.version, sensitivity: level };
           return {
             id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: level === 'plain' ? value : null, sensitive: level === 'sensitive',
@@ -799,14 +800,14 @@ export async function setSecrets(
             ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
             metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(to, was), kept: from.version },
           }));
-          keys[key] = { version: secret.version };
+          keys[key] = { version: secret.version, sensitivity: to };
           return {
             id: randomUUID(), secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: null, sensitive: to === 'sensitive',
           };
         }),
       ];
-      for (const { key, version } of unchangedMarks(marks, prepared, levelNow)) keys[key] = { version };
+      for (const { key, version, sensitivity } of unchangedMarks(marks, prepared, levelNow)) keys[key] = { version, sensitivity };
       await insert(tx, secretVersions, versions);
       const now = new Date();
       for (const { id, secretId, version } of versions) {
@@ -988,8 +989,8 @@ function unchangedMarks(
   marks: readonly { key: string; to: Sensitivity }[],
   prepared: ReadonlyMap<string, { currentVersion: number }>,
   levelNow: (key: string) => Sensitivity | null,
-): { key: string; version: number }[] {
-  return marks.filter(({ key, to }) => levelNow(key) === to).map(({ key }) => ({ key, version: prepared.get(key)!.currentVersion }));
+): { key: string; version: number; sensitivity: Sensitivity }[] {
+  return marks.filter(({ key, to }) => levelNow(key) === to).map(({ key, to }) => ({ key, version: prepared.get(key)!.currentVersion, sensitivity: to }));
 }
 
 /**

@@ -111,7 +111,7 @@ test('a write that names no sensitivity keeps a sensitive key sensitive and make
 
 test('marking a key stricter keeps its value as a new version; as strict already is unchanged, and looser is refused', async () => {
   const marked = await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' }, REGION: { sensitivity: 'secret' }, API_KEY: { sensitivity: 'sensitive' } });
-  assert.deepEqual({ ...marked.keys }, { WEBHOOK: { version: 2 }, REGION: { version: 2 }, API_KEY: { version: 1 } });
+  assert.deepEqual({ ...marked.keys }, { WEBHOOK: { version: 2, sensitivity: 'sensitive' }, REGION: { version: 2, sensitivity: 'secret' }, API_KEY: { version: 1, sensitivity: 'sensitive' } });
   assert.deepEqual(await levels('market/dev'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'secret', WEBHOOK: 'sensitive' });
   assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, null, 'a secret lists no value');
   // The same values, which a service account reads as before.

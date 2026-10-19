@@ -563,7 +563,8 @@ test('a handle for a fork reads what it inherits, and one for dev@me stands in f
   assert.equal(inherited.status, 200, await inherited.clone().text());
   assert.equal(received.at(-1)!.headers['x-api-key'], KEY);
 
-  await clientFor(deps, DEV).secrets.set('market/dev@me', { DATABASE_URL: 'postgres://localhost/dev' });
+  // A local database the app is given, said a secret: saying nothing, it would be as sensitive as dev's (decision 27).
+  await clientFor(deps, DEV).secrets.set('market/dev@me', { DATABASE_URL: { value: 'postgres://localhost/dev', sensitivity: 'secret' } });
   const mine = await bearer(session).handles.create({ label: 'run', paths: ['market/dev@me'] });
   assert.deepEqual(mine.scope, { 'market/dev': 'viewer' });
   const plan = (await (await route('/use/market/dev@me', { headers: { authorization: `Bearer ${mine.token}` } })).json()) as { env: Record<string, string> };

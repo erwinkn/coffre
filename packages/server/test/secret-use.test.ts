@@ -83,7 +83,7 @@ test('a Contributor lists the keys and writes values, and is refused every value
   assert.equal((await contributor.secrets.history('market/dev/API_KEY')).versions.length, 1);
   assert.ok(typeof (await contributor.environments.version('market/dev')).version === 'string');
   // A value of their own, written without reading the one before.
-  assert.deepEqual((await contributor.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' })).keys, { WEBHOOK: { version: 2 } });
+  assert.deepEqual((await contributor.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' })).keys, { WEBHOOK: { version: 2, sensitivity: 'secret' } });
   for (const path of ['market/dev', 'market/dev/WEBHOOK']) {
     const refused = await refusal(contributor.secrets.reveal(path));
     assert.equal(refused.status, 403, path);
@@ -212,7 +212,7 @@ test("a Viewer of base who contributes to its fork dev reads none of base's secr
   assert.equal((await contributor.secrets.reveal('market/base/SHARED')).values.SHARED, 'shared_0123456789');
   assert.deepEqual([listed.get('ZONE')!.value, listed.get('ZONE')!.readable], ['eu', true]);
   // Override: a value of dev-base's own, written unread.
-  assert.deepEqual((await contributor.secrets.set('market/dev-base', { SHARED: 'shared_dev_0123456789' })).keys, { SHARED: { version: 1 } });
+  assert.deepEqual((await contributor.secrets.set('market/dev-base', { SHARED: 'shared_dev_0123456789' })).keys, { SHARED: { version: 1, sensitivity: 'secret' } });
   const overridden = (await contributor.secrets.list('market/dev-base')).keys.find((entry) => entry.key === 'SHARED')!;
   assert.deepEqual([overridden.parent?.state, overridden.readable], ['overridden', false]);
 });

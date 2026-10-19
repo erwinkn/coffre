@@ -965,8 +965,13 @@ async function set(args: string[]): Promise<void> {
   const written = sensitivity === undefined ? value : sensitivity === 'plain' ? { value, plain: true as const } : { value, sensitivity };
   const result = await client().secrets.set(`${project}/${environment}`, { [key]: written });
   const outcome = result.keys[key];
-  const said = sensitivity === 'plain' ? `, plain: shown to whoever lists ${project}/${environment}`
-    : sensitivity === 'sensitive' ? ', sensitive: shown to nobody, Owners included; apps use it through the credential proxy, and services read it' : '';
+  // Who sees it, as the write answers (an instance before 0.10 says nothing): said, or the key's own, kept, in
+  // <env>@me the one it overrides.
+  const level = 'sensitivity' in outcome ? outcome.sensitivity : sensitivity;
+  const personal = environment.endsWith('@me');
+  const kept = sensitivity === undefined ? `, as ${personal ? 'the key it overrides' : 'it was'}; --secret makes it a secret ${personal ? 'your app is given' : 'its readers see'}` : '';
+  const said = level === 'plain' ? `, plain: shown to ${personal ? 'you alone' : `whoever lists ${project}/${environment}`}`
+    : level === 'sensitive' ? `, sensitive: shown to nobody, Owners included; apps use it through the credential proxy, and services read it${kept}` : '';
   process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}${said}\n`);
 }
 

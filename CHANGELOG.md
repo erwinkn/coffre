@@ -84,7 +84,9 @@
   of the value the key reads now: the environment's for an override, so
   `coffre set market/dev@me/DATABASE_URL` over a sensitive
   `DATABASE_URL` is sensitive (say `--secret` for a local database your
-  app is given), then your own. A plain value there is in the clear in
+  app is given), then your own; `coffre set` says so, and each key of
+  `PATCH /secrets/…`'s answer now names its `sensitivity` beside its
+  `version`. A plain value there is in the clear in
   the database, as every plain value is: the vault binds a personal
   config's secrets and sensitive values to their owner, and the app's
   rule alone holds a plain one to them. `coffre run`'s values of a
