@@ -22,7 +22,7 @@ import {
   type Policy,
   type RoleDefinition,
 } from '@coffre/core/access';
-import type { PolicyChange } from '@coffre/core/vault';
+import { policyRevision, type PolicyChange } from '@coffre/core/vault';
 
 import { memberHoldings, places, roleHolders, type ResolvedPath } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
@@ -77,10 +77,11 @@ export type ImpactLine = {
 
 /**
  * What a change to a role would do, and the policy it was weighed from, by
- * its newest `policy.change` (null for none): the change, confirmed with
- * it, is made from that policy or refused (`changeRole`).
+ * its revision (`policyRevision`): its newest `policy.change` and its
+ * protected environments' rows. The change, confirmed with it, is made
+ * from that policy or refused (`changeRole`).
  */
-export type RoleImpact = { impact: ImpactLine[]; sentence: string; policySeq: number | null };
+export type RoleImpact = { impact: ImpactLine[]; sentence: string; revision: string };
 
 /** What a role definition is sent as. */
 export type RoleInput = { name: string; description: string; permissions: Permission[]; protected: Permission[] };
@@ -151,7 +152,7 @@ export async function changeRole(
   kind: Kind,
   id: string,
   definition: RoleInput | null,
-  { dryRun, policySeq = seqOf(ctx.caller.policySeq) }: { dryRun: boolean; policySeq?: number | null },
+  { dryRun, revision = revisionOf(ctx) }: { dryRun: boolean; revision?: string },
 ): Promise<RoleImpact | { role: RoleView | null }> {
   return withRefusals(ctx, async () => {
     const change = proposed(ctx, kind, id, definition);
@@ -166,13 +167,13 @@ export async function changeRole(
         );
       }
     }
-    if (dryRun) return { ...await roleImpact(ctx, before, after(before, change), change), policySeq: seqOf(ctx.caller.policySeq) };
+    if (dryRun) return { ...await roleImpact(ctx, before, after(before, change), change), revision: revisionOf(ctx) };
     const result = await ctx.vault.changePolicy({
       actor: formatMember(ctx.caller.principal),
       change,
-      // Weighed from the policy its preview was, or else the caller's: refused, to be asked again, if another change came
-      // since. What was confirmed is what is made.
-      policySeq,
+      // Weighed from the policy its preview was, or else the caller's: refused, to be asked again, if it changed since,
+      // a protected environment renamed included. What was confirmed is what is made.
+      revision,
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
@@ -233,7 +234,7 @@ const EXAMPLES = 3;
  * display of the rules (`allows`), from the rows as stored; the vault
  * decides. Personal configs are their owners', and left out.
  */
-async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change: Extract<PolicyChange, { kind: 'role' | 'instance-role' }>): Promise<Omit<RoleImpact, 'policySeq'>> {
+async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change: Extract<PolicyChange, { kind: 'role' | 'instance-role' }>): Promise<Omit<RoleImpact, 'revision'>> {
   const [members, known] = await Promise.all([memberHoldings(ctx.db, new Date()), places(ctx.db)]);
   type Lines = { line: Omit<ImpactLine, 'people' | 'services' | 'environments' | 'projects' | 'examples'>; people: Set<string>; services: Set<string>; places: Set<string>; projects: Set<string>; examples: string[] };
   const lines = new Map<string, Lines>();
@@ -331,7 +332,7 @@ export async function protectEnvironment(ctx: ApiContext, place: ResolvedPath, o
  * Protect environments of a project by id, rows or not: a fork's, before
  * its row is written, so it is never readable unprotected. Asked from the
  * policy the caller was loaded with, and refused, 409, when another change
- * came since (`policySeq`): what the request decided before still stands.
+ * came since (`revision`): what the request decided before still stands.
  * The request as of this change, after: its caller holds the policy it
  * made, as of its `policy.change`, which every later transaction of the
  * request is fenced on (`audited`), so a fork goes on to write the
@@ -341,7 +342,7 @@ export async function protectIds(ctx: ApiContext, projectId: string, environment
   const result = await ctx.vault.changePolicy({
     actor: formatMember(ctx.caller.principal),
     change: { kind: 'protect', projectId, environmentIds, protected: on },
-    policySeq: seqOf(ctx.caller.policySeq),
+    revision: revisionOf(ctx),
     requestId: ctx.requestId,
     operationId: randomUUID(),
     credentialId: ctx.provenance,
@@ -364,9 +365,9 @@ export function rowWritten(ctx: ApiContext, environmentId: string | undefined, s
   return { ...ctx, caller: { ...ctx.caller, policy: { ...policy, protectedIn } } };
 }
 
-/** A `policy.change`'s number as the vault is told it. */
-function seqOf(seq: bigint | null): number | null {
-  return seq === null ? null : Number(seq);
+/** The policy the caller was loaded with, as the vault is told it (`policyRevision`). */
+function revisionOf(ctx: ApiContext): string {
+  return policyRevision(ctx.caller.policySeq, ctx.caller.policy);
 }
 
 /**

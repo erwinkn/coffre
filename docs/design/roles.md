@@ -33,8 +33,11 @@ service account, a Viewer of `market/prod`, reads them as it always did.
 - **Forks stay protected.** A fork of a protected environment, a copy or
   one that inherits, is protected from its first moment: the vault
   protects its id before its row exists, and only an Owner unprotects it.
-  Each protected id keeps when it was protected: one with no row an hour
-  later is a fork refused or abandoned, and protects nothing.
+  Each protected id keeps when it was protected: one with no row ten
+  minutes later is a fork refused or abandoned, and protects nothing.
+  Until then, a scoped instance role's holder, whose filters take in no
+  environment without a slug, gives nothing on its project that reaches
+  it: a refusal for a few minutes, never a widening.
 - **The vault keeps it**, as it keeps the instance's settings: the set of
   protected environments is in the vault's newest `policy.change` entry,
   under its MAC, with the roles (section 3). An environment's row says
@@ -193,7 +196,8 @@ two: replacing a Viewer's binding keeps what the Viewer held.
    that commit a decision made from the policy (rule 2). *Alternative:*
    fence call site by call site. Cost: a write that races a policy
    change answers 409 once, and a read that hands back a plain value
-   reads one row more, with no lock; one of sealed values reads none.
+   reads the newest change and the protected environments' rows again,
+   with no lock; one of sealed values reads none.
 9. **A scope kept by its role's name alone, before 0.10, holds the role
    as it ships**, a constant no edit changes: it never widens, and the
    credentials CI already holds keep working. *Alternative:* none at all,
@@ -271,7 +275,8 @@ given the request's caller, checks under the head that the newest
 change weighed from an older one. A sealed value needs no fence of the
 app's: the vault releases each under its own head (rule 1). A plain
 value, which the app opens from its own rows, is handed back only after
-`fenced`, one read of the newest `policy.change` after the value's,
+`fenced`, one read of the newest `policy.change` and of the protected
+environments' rows after the value's,
 which takes no lock: a change committed before it is seen, and one after
 it came after the value was read, which stands before it. By a reveal,
 `coffre run`, the credential proxy's `use`, MCP's and plugins' reads
@@ -301,17 +306,21 @@ answers 409 for it, and nothing that renames or deletes one has to
 remember to say so. What changes the policy, and how the fence sees each,
 is the table below.
 
-A request that changes the policy itself goes on as of its change:
-`protectIds` (packages/server/src/api/roles.ts) asks the vault with the
-caller's `policySeq`, refused unless it is still the newest; and the
-request's caller then holds the policy it made, as of its own entry. A
-role's edit (`changeRole`) is asked with its preview's: the preview
-answers with the `policySeq` it was weighed from, the confirmation sends
-it back (`?policySeq=`), and the vault refuses it, `policy_changed`, if
-another change came since, so what was confirmed is what is made, or the
-UI weighs it again and asks again, saying why. A
+A request that changes the policy itself goes on as of its change. It
+names the policy it was weighed from by its revision (`policyRevision`,
+packages/core/src/vault.ts): the newest `policy.change` and a digest of
+the protected environments' slugs, by id, which the vault computes again
+under its head and refuses, `policy_changed`, unless equal.
+`protectIds` (packages/server/src/api/roles.ts) asks with the caller's,
+and the request's caller then holds the policy it made, as of its own
+entry. A role's edit (`changeRole`) is asked with its preview's: the
+preview answers with the revision it was weighed from, the confirmation
+sends it back (`?revision=`), so what was confirmed is what is made, or
+the UI weighs it again and asks again, saying why. The UI confirms the
+role and definition it weighed, and weighs again one the grid changed
+under while it was weighed. A
 fork of a protected environment protects its id first and writes on; a
-change in between stops it. Its row comes well within the hour the policy
+change in between stops it. Its row comes well within the ten minutes the policy
 keeps an id with none (`UNWRITTEN_FORK_MS`), or the fork is refused: a
 row written later could protect again an id the policy had let go, which
 no request is fenced on.
@@ -394,7 +403,9 @@ service token weighed before prod was protected…".
 Each change that can change what a decision made from the policy
 decides, and how the fence (rule 2) sees it: by the newest
 `policy.change` (seq), by the protected environments' rows read again
-by id (rows), or not at all, and why it need not. A change to this list,
+by id (rows), or not at all, and why it need not. A change to the
+policy itself, and a role's edit confirmed from its preview, is checked
+by the vault for both at once, under its head, as the revision. A change to this list,
 or a new way to make one, comes with its row here and its case in
 packages/server/test/roles.test.ts ("what changes the policy: …"), where
 each is made while Ada gives a token on all of market, a decision rule 4
@@ -407,7 +418,7 @@ weighs in protected prod.
 | A role edited, made, put back or deleted; an instance role edited | seq | the vault's `policy.change` |
 | A protected environment renamed | rows | its slug is what a scoped instance role matches |
 | A protected environment deleted, or its project | rows | a deleted one protects nothing |
-| A fork's id dropped, its row never written | none | an id with no row is in no scope (null slug), and protects no place a request names |
+| A fork's id dropped, its row never written | none | an id with no row is in no scope (null slug), and protects no place a request names; until it is dropped, ten minutes on, a check on its project weighs it, and refuses a scoped instance role's holder, never widens |
 | An environment not protected renamed or made | none | the policy names no other environment; who holds what there is each grant's, at its slug, as the request found it |
 | An environment named again (`name`), archived or restored | none | the policy reads neither |
 | A project renamed | none | scopes, grants and the policy name projects by id |

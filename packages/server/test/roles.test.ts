@@ -9,7 +9,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createClient, type CoffreClient, type RoleView } from '@coffre/client';
-import { ROLES } from '@coffre/core/access';
+import { ROLES, UNWRITTEN_FORK_MS } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
 import { asc, eq } from 'drizzle-orm';
 
@@ -578,16 +578,30 @@ test('a role edit confirmed with its preview is made as previewed, or refused, p
   assert.equal(preview.sentence, 'Changes what nobody holds');
   await maya.environments.protect('market/prod');
   // What the preview said is no longer what it does: Vic would read prod.
-  assert.deepEqual(await refusal(root.roles.set('viewer', READS_PROTECTED, { policySeq: preview.policySeq })), { status: 409, reason: 'policy_changed' });
+  assert.deepEqual(await refusal(root.roles.set('viewer', READS_PROTECTED, { revision: preview.revision })), { status: 409, reason: 'policy_changed' });
   assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, false);
   const again = await root.roles.preview('viewer', READS_PROTECTED);
   assert.match(again.sentence, /^Widens secret.read for 1 person on market\/prod, protected/);
-  await root.roles.set('viewer', READS_PROTECTED, { policySeq: again.policySeq });
+  await root.roles.set('viewer', READS_PROTECTED, { revision: again.revision });
   assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, true);
   // A reset, the same way.
   const reset = await root.roles.previewReset('viewer');
   await maya.environments.protect('market/dev');
-  assert.deepEqual(await refusal(root.roles.reset('viewer', { policySeq: reset.policySeq })), { status: 409, reason: 'policy_changed' });
+  assert.deepEqual(await refusal(root.roles.reset('viewer', { revision: reset.revision })), { status: 409, reason: 'policy_changed' });
+});
+
+test('a role edit confirmed with its preview is refused, policy_changed, once a protected environment it was weighed in is renamed', async () => {
+  // Ada, a Developer of market and an Owner of every prod: Developer reading in protected environments widens nothing
+  // for her while prod is protected as prod, where her Owner role reads already.
+  await maya.environments.protect('market/prod');
+  await root.members.add(ADA, { role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } });
+  const reads = { name: 'Developer', description: '', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.read', 'secret.use', 'secret.write'] } as Parameters<CoffreClient['roles']['set']>[1];
+  const preview = await root.roles.preview('developer', reads);
+  assert.doesNotMatch(preview.sentence, /secret\.read/);
+  // Renamed staging, it is out of her Owner role's reach: the change widens her read there, which the preview did not say.
+  await root.environments.update('market/prod', { slug: 'staging' });
+  assert.deepEqual(await refusal(root.roles.set('developer', reads, { revision: preview.revision })), { status: 409, reason: 'policy_changed' });
+  assert.match((await root.roles.preview('developer', reads)).sentence, /^Widens secret\.read for 1 person on market\/staging, protected/);
 });
 
 test("a role's impact counts the service accounts it reaches, which hold its first column in a protected environment too", async () => {
@@ -606,7 +620,7 @@ test('a fork of a protected environment whose row would come after the policy ma
   await maya.environments.protect('market/prod');
   const now = Date.now;
   meanwhileOn('changePolicy', () => true, async () => {
-    Date.now = () => now() + 31 * 60 * 1000;
+    Date.now = () => now() + UNWRITTEN_FORK_MS / 2 + 60_000;
   });
   try {
     assert.equal(await status(root.environments.create('market/prod-next', { from: 'prod', inherit: true })), 409);

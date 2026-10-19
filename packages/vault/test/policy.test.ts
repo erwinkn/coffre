@@ -10,7 +10,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import { INSTANCE_ROLES, ROLES, type RoleDefinition } from '@coffre/core/access';
+import { INSTANCE_ROLES, ROLES, UNWRITTEN_FORK_MS, type RoleDefinition } from '@coffre/core/access';
 import type { SecretRef } from '@coffre/core/vault';
 import { entryHash } from '@coffre/core/audit';
 import { tablesOf, type Database } from '@coffre/db';
@@ -200,12 +200,12 @@ test("a policy the vault cannot read is written again by an Owner of the whole i
   assert.deepEqual((await w.vault.policy()).protected, [w.dev]);
 });
 
-test('an id protected before its row exists protects it for an hour; one still with no row after is a fork never written, and protects nothing', async () => {
+test('an id protected before its row exists protects it for ten minutes; one still with no row after is a fork never written, and protects nothing', async () => {
   const w = await world();
   const [refused, written] = [randomUUID(), randomUUID()];
   assert.ok((await protect(w.vault, ROOT, w.project, [refused, written])).ok);
   await db.owner.insert(tablesOf(db.owner).environments).values({ id: written, projectId: w.project, slug: 'staging', name: 'Staging' });
-  w.clock.offset = 61 * 60_000;
+  w.clock.offset = UNWRITTEN_FORK_MS + 60_000;
   const young = randomUUID();
   assert.ok((await protect(w.vault, ROOT, w.project, [young])).ok);
   const policy = await w.vault.policy();

@@ -674,7 +674,7 @@ test('roles lists both columns of every role, says which an Owner made, edited o
 });
 
 test('roles set says what the change would do and saves it only with --apply, keeping what the flags leave out', async () => {
-  const impact = { impact: [], sentence: 'Widens secret.read for 1 person on market/prod, protected', policySeq: 57 };
+  const impact = { impact: [], sentence: 'Widens secret.read for 1 person on market/prod, protected', revision: '57.3f9a0c2e81b4d7a6' };
   const preview = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
   await manage.rolesSet(preview.connect, ['developer', '--protected', 'read,use,write'], preview.io);
   const definition = { name: 'Developer', description: '', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.read', 'secret.use', 'secret.write'] };
@@ -683,7 +683,7 @@ test('roles set says what the change would do and saves it only with --apply, ke
   const applied = fixture(({ method, path }) => (method === 'GET' ? LISTED_ROLES : path.endsWith('dryRun=1') ? impact : { role: null }));
   await manage.rolesSet(applied.connect, ['developer', '--protected', 'secret.read,secret.use,secret.write', '--apply'], applied.io);
   // Saved as previewed, from the policy its preview was weighed from.
-  assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'PUT /roles/developer?dryRun=1', 'PUT /roles/developer?policySeq=57']);
+  assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'PUT /roles/developer?dryRun=1', 'PUT /roles/developer?revision=57.3f9a0c2e81b4d7a6']);
   assert.match(applied.written.out, /^saved developer: /);
   // A new role holds nothing it is not given; an instance role is one that ships.
   const made = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
@@ -694,11 +694,11 @@ test('roles set says what the change would do and saves it only with --apply, ke
 });
 
 test('roles reset puts an edited role back, shown first; roles remove deletes one an Owner made, and neither the other kind', async () => {
-  const impact = { impact: [], sentence: 'Changes what nobody holds', policySeq: null };
+  const impact = { impact: [], sentence: 'Changes what nobody holds', revision: 'none.b20e94d1c6a8f305' };
   const reset = fixture(({ method, path }) => (method === 'GET' ? LISTED_ROLES : path.endsWith('dryRun=1') ? impact : { role: LISTED_ROLES.roles[0] }));
   await manage.rolesReset(reset.connect, ['developer'], reset.io);
   await manage.rolesReset(reset.connect, ['developer', '--apply'], reset.io);
-  assert.deepEqual(reset.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'DELETE /roles/developer?dryRun=1', 'GET /roles', 'DELETE /roles/developer?dryRun=1', 'DELETE /roles/developer?policySeq=none']);
+  assert.deepEqual(reset.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'DELETE /roles/developer?dryRun=1', 'GET /roles', 'DELETE /roles/developer?dryRun=1', 'DELETE /roles/developer?revision=none.b20e94d1c6a8f305']);
   assert.match(reset.written.out, /Nothing changed\. Re-run with --apply to reset it\.\nreset developer, as it ships\n/);
   await assert.rejects(manage.rolesReset(reset.connect, ['release-manager'], reset.io), /`coffre roles remove release-manager` deletes it/);
   const removed = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : { role: null }));

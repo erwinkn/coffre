@@ -37,7 +37,7 @@
   credential 0.10 issued (500), where a 0.9 app reads it as reaching
   nothing. A request whose roles or protected environments changed while
   it ran answers 409 `policy_changed`, "try again", as does a role's edit
-  confirmed with an impact preview (`?policySeq=`) another change
+  confirmed with an impact preview (`?revision=`) another change
   overtook.
   The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
   and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and

@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { CoffreError, type RoleImpact, type RoleView } from '@coffre/client';
 import { definitionProblem, type Permission, type RoleDefinition } from '@coffre/core/access';
 import { useSuspenseQuery } from '@tanstack/react-query';
@@ -157,8 +157,12 @@ function RoleBadges({ role }: { role: RoleView }) {
 
 type Draft = RoleDefinition & Columns & { id: string };
 
-/** A change asked for, weighed, waiting for its confirmation: `again` once the policy it was first weighed from changed. */
-type Pending = { action: 'save' | 'reset' | 'delete'; impact: RoleImpact; again?: boolean };
+/**
+ * A change asked for, weighed, waiting for its confirmation: the role and
+ * definition weighed, which the confirmation makes, whatever the grid says
+ * by then; `again` once the policy it was first weighed from changed.
+ */
+type Pending = { action: 'save' | 'reset' | 'delete'; id: string; definition: RoleDefinition & Columns; impact: RoleImpact; again?: boolean };
 
 /**
  * One role's editor, or a new one's: its name, description and grid, and
@@ -203,6 +207,9 @@ function RoleEditor({
   const definitionError = draft.name.trim() === '' ? 'A role needs a name.' : definitionProblem(draft);
   const changed = role === null || !sameDefinition(draft, role);
   const definition = { name: draft.name.trim(), description: draft.description, permissions: draft.permissions, protected: draft.protected };
+  // What the grid says now, for a weighing that answers after an edit made while it ran.
+  const latest = useRef({ id: draft.id, definition });
+  latest.current = { id: draft.id, definition };
   const busy = weigh.pending || apply.pending;
 
   const set = (permission: Permission, column: Column, on: boolean) => setDraft((current) => ({ ...current, ...toggle(current, permission, column, on) }));
@@ -211,14 +218,20 @@ function RoleEditor({
     setDraft((current) => ({ ...current, ...(source === undefined ? { permissions: [], protected: [] } : ordered(source)) }));
   };
 
-  /** Ask what an action would do; the confirmation shows it. */
+  /**
+   * Ask what an action would do; the confirmation shows it, for what was
+   * weighed. One the grid changed under while it was weighed is weighed
+   * again, as the grid is now.
+   */
   function ask(action: Pending['action'], again = false) {
+    const asked = latest.current;
     void weigh.run(
-      () => (action === 'save' ? coffre.roles.preview(draft.id, definition, { instance }) : coffre.roles.previewReset(draft.id, { instance })),
+      () => (action === 'save' ? coffre.roles.preview(asked.id, asked.definition, { instance }) : coffre.roles.previewReset(asked.id, { instance })),
       {
         affects: [],
         onSuccess: (impact) => {
-          setPending({ action, impact, again });
+          if (JSON.stringify(latest.current) !== JSON.stringify(asked)) return ask(action, again);
+          setPending({ action, ...asked, impact, again });
           setAsking(true);
         },
       },
@@ -226,13 +239,13 @@ function RoleEditor({
   }
 
   /** Do what was confirmed, as it was weighed: the policy changed since, it is weighed again, and asked again. */
-  function confirm({ action, impact }: Pending) {
-    const name = action === 'save' ? definition.name : label;
-    const confirmed = { instance, policySeq: impact.policySeq };
+  function confirm({ action, id, definition: weighed, impact }: Pending) {
+    const name = action === 'save' ? weighed.name : label;
+    const confirmed = { instance, revision: impact.revision };
     void apply.run(
       async () => {
         try {
-          await (action === 'save' ? coffre.roles.set(draft.id, definition, confirmed) : coffre.roles.reset(draft.id, confirmed));
+          await (action === 'save' ? coffre.roles.set(id, weighed, confirmed) : coffre.roles.reset(id, confirmed));
           return true;
         } catch (failure) {
           if (failure instanceof CoffreError && failure.reason === 'policy_changed') return false;
@@ -423,7 +436,7 @@ function RoleEditor({
             : pending?.action === 'reset'
               ? `Reset ${label} to its default?`
               : made
-                ? `Make the ${definition.name} role?`
+                ? `Make the ${pending?.definition.name ?? definition.name} role?`
                 : `Save the ${label} role?`
         }
         body={pending === null ? '' : impactLead(pending)}
@@ -555,7 +568,7 @@ function RoleGrid({
         <tbody>{values.map(row)}</tbody>
         <tbody>
           <tr className="role-grid-group">
-            <th scope="colgroup" colSpan={3}>
+            <th scope="rowgroup" colSpan={3}>
               Project-wide <span className="role-grid-note">one column: a project is never protected</span>
             </th>
           </tr>

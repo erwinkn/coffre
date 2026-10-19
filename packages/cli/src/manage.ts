@@ -769,14 +769,14 @@ export async function rolesSet(connect: () => CoffreClient, args: string[], io: 
     protected: (values.protected === undefined ? current?.protected ?? [] : permissionsFrom(values.protected, '--protected')) as Permissions,
   };
   const which = { instance: values.instance };
-  const { sentence, policySeq } = await api.roles.preview(id, definition, which);
+  const { sentence, revision } = await api.roles.preview(id, definition, which);
   const what = `${current === undefined ? 'a new role' : id}: ${column(definition.permissions)}, protected: ${column(definition.protected)}`;
   if (!values.apply) {
     io.out.write(`${what}\n  ${sentence}\nNothing changed. Re-run with --apply to save it.\n`);
     return;
   }
   // Saved as previewed: the policy changed since, it is refused, and run again, previewed as it is now.
-  await api.roles.set(id, definition, { ...which, policySeq });
+  await api.roles.set(id, definition, { ...which, revision });
   io.out.write(`saved ${what}\n  ${sentence}\n`);
 }
 
@@ -796,12 +796,12 @@ export async function rolesReset(connect: () => CoffreClient, args: string[], io
   if (!role.builtin) throw new UsageError(`${id} is one an Owner made: \`coffre roles remove ${id}\` deletes it`);
   if (!role.edited) return void io.out.write(`${id} is as it ships: nothing to reset\n`);
   const which = { instance: values.instance };
-  const { sentence, policySeq } = await api.roles.previewReset(id, which);
+  const { sentence, revision } = await api.roles.previewReset(id, which);
   if (!values.apply) {
     io.out.write(`${id} back as it ships: ${column(role.default?.permissions ?? [])}, protected: ${column(role.default?.protected ?? [])}\n  ${sentence}\nNothing changed. Re-run with --apply to reset it.\n`);
     return;
   }
-  await api.roles.reset(id, { ...which, policySeq });
+  await api.roles.reset(id, { ...which, revision });
   io.out.write(`reset ${id}, as it ships\n  ${sentence}\n`);
 }
 

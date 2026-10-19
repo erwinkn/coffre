@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { AccessFault } from './access-fault.ts';
 import type { CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 
@@ -221,7 +223,7 @@ export type RefusalCode =
   /** Well-formed, but not something the rules allow: a project role on an environment, a service account with an instance role. */
   | 'invalid'
   /**
-   * A change to the policy weighed from one `policy.change` (`policySeq`)
+   * A change to the policy weighed from one revision of it (`revision`)
    * when another came since: asked again, it is weighed as the policy is now.
    */
   | 'policy_changed'
@@ -474,16 +476,39 @@ export type PolicyChange =
   | { kind: 'instance-role'; role: InstanceRole; definition: RoleDefinition | null }
   | { kind: 'protect'; projectId: string; environmentIds: string[]; protected: boolean };
 
+/**
+ * A policy's revision, as a decision made from it names it: its newest
+ * `policy.change` (null for none), and the slug of each environment it
+ * protects, by id, which a scoped instance role's filters match, and
+ * which a rename or a deletion changes with no `policy.change` of its own
+ * (docs/design/roles.md, "What changes the policy"). Equal revisions decide
+ * alike.
+ *
+ *   57.3f9a0c2e81b4d7a6   change 57, prod protected as `prod`
+ *   57.b20e94d1c6a8f305   change 57, prod renamed `staging`
+ */
+export function policyRevision(seq: number | bigint | null, policy: Pick<Policy, 'protectedIn'>): string {
+  const places = Object.values(policy.protectedIn).flat()
+    .map(({ environmentId, slug }) => `${environmentId}=${slug ?? ''}`)
+    .sort();
+  return `${seq === null ? 'none' : String(seq)}.${createHash('sha256').update(places.join('\n')).digest('hex').slice(0, 16)}`;
+}
+
+/** A revision as `policyRevision` writes it. */
+export const POLICY_REVISION = /^(none|[1-9][0-9]{0,15})\.[0-9a-f]{16}$/;
+
 export type ChangePolicyInput = Correlation & Through & {
   actor: string;
   change: PolicyChange;
   /**
-   * The newest `policy.change` the caller decided from, by its number (null
-   * for none): refused, as invalid, unless it is still the newest, so that a
-   * request carries on from the policy it made (`seq`) only where nothing
-   * came between. Unchecked when absent.
+   * The policy the caller decided from, as its revision
+   * (`policyRevision`): its newest `policy.change` and the rows of the
+   * environments it protects. Refused, `policy_changed`, unless the policy
+   * under the vault's head is still that one, so that a request carries on
+   * from the policy it made (`seq`) only where nothing came between, and a
+   * change previewed is made as previewed. Unchecked when absent.
    */
-  policySeq?: number | null;
+  revision?: string;
 };
 
 /**

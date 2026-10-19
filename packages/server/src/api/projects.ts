@@ -447,7 +447,7 @@ export async function putEnvironment(
         }),
       );
     }
-    // A protected fork's row comes well within the hour the policy keeps its id without one (`UNWRITTEN_FORK_MS`): later,
+    // A protected fork's row comes well within the ten minutes the policy keeps its id without one (`UNWRITTEN_FORK_MS`): later,
     // the policy may have dropped it, and the row would protect it again with no change any request is fenced on.
     if (protectedAt !== undefined && Date.now() - protectedAt > UNWRITTEN_FORK_MS / 2) {
       throw conflict(`${project.slug}/${slug} took too long to fork: fork again`);

@@ -61,6 +61,8 @@ import {
   checkpointVerifier,
   describeAccessFault,
   handsBack,
+  POLICY_REVISION,
+  policyRevision,
   type Access,
   type AccessChange,
   type AccessFault,
@@ -247,7 +249,7 @@ type PolicyEdits = { roles: Record<string, RoleDefinition>; instanceRoles: Parti
 /**
  * A protected environment, with its project's id, what a grant on the whole
  * project reaches of it, and when it was protected, by the vault's clock:
- * an id with no row an hour later is a fork that was never written.
+ * an id with no row ten minutes later is a fork that was never written.
  */
 type ProtectedPlace = { projectId: string; environmentId: string; at: number };
 
@@ -2063,8 +2065,8 @@ class VaultService implements Vault {
   }
 
   changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>> {
-    const { actor, change, policySeq } = input;
-    if (policySeq !== undefined && policySeq !== null && !Number.isSafeInteger(policySeq)) throw new Error('policySeq names a policy.change by its number');
+    const { actor, change, revision } = input;
+    if (revision !== undefined && (typeof revision !== 'string' || !POLICY_REVISION.test(revision))) throw new Error('revision names a policy as policyRevision writes it');
     // Where a protection is, once its rows are found: its project, and its one environment if that has a row yet. A fork's,
     // protected before its row is written, is named by the change alone, as the log's columns name only rows.
     const at: { projectId?: string; environmentId?: string } = {};
@@ -2086,12 +2088,11 @@ class VaultService implements Vault {
       if (acting.status === 'tampered') throw refused('tampered');
       if (acting.status !== 'active') throw refused(acting.status === 'removed' ? 'removed' : 'not_a_member');
       // Under the log's head, as the actor's standing above: two changes at once each start from the one before. One the
-      // caller weighed from the policy as of a change it names starts from that one, or is refused, to be asked again.
+      // caller weighed from a revision of the policy, its newest change and its protected environments' rows, starts
+      // from that one, or is refused, to be asked again: a protected prod renamed since is a policy changed too.
       const newest = await newestVaultSeq(d.tx, POLICY);
-      if (policySeq !== undefined && newest !== (policySeq === null ? null : BigInt(policySeq))) {
-        throw refused('policy_changed');
-      }
       const { policy: before, edits, readable } = await this.#policyAt(d.tx, d.reports, d.at);
+      if (revision !== undefined && policyRevision(newest, before) !== revision) throw refused('policy_changed');
       const owner = acting.live.credentialScope == null && ownsInstance(acting.live);
       // Unreadable, its edits are unknown: a change made from none would erase every protection and role edit the forged
       // rows hide. An Owner of the whole instance alone writes it again, from the roles as they ship and nothing protected.
@@ -3038,7 +3039,7 @@ function readEdits(stored: { policy?: unknown }): PolicyEdits | null {
  * for those deleted since, the project around one's included: a deleted
  * prod protects nothing, and holds nobody back from giving a service
  * account a role on all of its project (`givesService`). A fork's id with
- * no row yet stays, protected before it is written, for an hour: one with
+ * no row yet stays, protected before it is written, ten minutes: one with
  * none after that is a fork refused or abandoned, never written. Each
  * keeps its slug, which a scoped instance role's filters read. The edits
  * keep them all: no write is needed.

@@ -1445,7 +1445,7 @@ export type Api = {
         examples: string[];
       }[];
       sentence: string;
-      policySeq: number | null;
+      revision: string;
     } | {
       role: null | {
         name: string;
@@ -1481,7 +1481,7 @@ export type Api = {
         examples: string[];
       }[];
       sentence: string;
-      policySeq: number | null;
+      revision: string;
     } | {
       role: null | {
         name: string;
@@ -1522,7 +1522,7 @@ export type Api = {
         examples: string[];
       }[];
       sentence: string;
-      policySeq: number | null;
+      revision: string;
     } | {
       role: null | {
         name: string;
@@ -1558,7 +1558,7 @@ export type Api = {
         examples: string[];
       }[];
       sentence: string;
-      policySeq: number | null;
+      revision: string;
     } | {
       role: null | {
         name: string;
@@ -2181,7 +2181,7 @@ export type RoleImpact = {
     examples: string[];
   }[];
   sentence: string;
-  policySeq: number | null;
+  revision: string;
 };
 
 export type RoleView = {
