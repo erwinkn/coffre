@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 (2026-10-19)
+
 - **Protected environments, and roles an Owner edits.** Each role now
   holds permissions in two columns: in an environment that is not
   protected, and in one that is. A person in a protected environment
