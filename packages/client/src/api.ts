@@ -1104,7 +1104,7 @@ export type Api = {
   };
   "GET /audit/verification": {
     input: {
-      from?: unknown;
+      from?: string;
     };
     output: {
       ok: true;
@@ -1112,7 +1112,7 @@ export type Api = {
       entries: number;
       from: number;
       remaining: number;
-      next?: number | null;
+      next?: string | null;
       checkpoint: null | {
         seq: number;
         signedAt: string;

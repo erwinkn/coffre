@@ -468,7 +468,7 @@ export function createClient(options: ClientOptions) {
        * the last. `onStretch` sees each verdict as it comes.
        */
       verifyWhole: async (onStretch: (verdict: RouteOutput<'GET /audit/verification'>) => void = () => {}) => {
-        for (let from: number | 'start' = 'start'; ;) {
+        for (let from = 'start'; ;) {
           const verdict: RouteOutput<'GET /audit/verification'> = await call('GET /audit/verification', {}, { from });
           onStretch(verdict);
           if (!verdict.ok || verdict.next === undefined || verdict.next === null) return verdict;

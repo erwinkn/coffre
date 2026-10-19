@@ -2377,9 +2377,11 @@ class VaultService implements Vault {
       const version = (JSON.parse(entry.metadata) as { tally?: { v?: unknown } } | null)?.tally?.v;
       return typeof version === 'number' && version > TALLY_VERSION;
     };
-    const entry = from === 'newest'
-      ? (await store.latestTallied(db, LOOK_BACK_TALLIES)).find((one) => !newer(one))
-      : (await store.entriesAt(db, [from])).get(from);
+    let entry = from === 'newest' ? await store.latestTallied(db) : (await store.entriesAt(db, [from])).get(from);
+    // One at a time, each as large as the members and grants it may keep: almost always the first is it.
+    for (let back = 1; from === 'newest' && entry !== undefined && newer(entry); back++) {
+      entry = back < LOOK_BACK_TALLIES ? await store.latestTallied(db, entry.seq) : undefined;
+    }
     if (entry === undefined) return from === 'newest' ? FIRST_ENTRY : { ok: false, failedAtSeq: Number(from), reason: 'no checkpoint at this entry' };
     return (await this.#resumeEach(db, [entry]))[0]!;
   }

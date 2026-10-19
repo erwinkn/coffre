@@ -126,12 +126,13 @@ export type AuditVerification =
       remaining: number;
       /**
        * For a stretch of the walk from the first entry (`from` asked for):
-       * the checkpoint the next stretch goes on from, as `from`, or null for
-       * the last, from the newest checkpoint. The whole log is verified only
+       * the checkpoint the next stretch goes on from, as `from`, its entry
+       * and that entry's hash (`9412:3f9a…`), or null for the last, from the
+       * newest checkpoint. The whole log is verified only
        * when the last says `remaining` 0: past the newest checkpoint, a
        * stretch goes no further than one walk, and none goes on from there.
        */
-      next?: number | null;
+      next?: string | null;
       /** The newest prefix the vault signed, which the log still holds; null before the first. */
       checkpoint: { seq: number; signedAt: string } | null;
       /** Key batches at a key service still under way: accounted for once they finish. */
@@ -377,7 +378,7 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
  * `next` says where the next stretch goes on. For whoever reads the whole
  * log (`readsWholeLog`): a part of the chain cannot be verified.
  */
-export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'start' } = {}): Promise<AuditVerification> {
+export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}): Promise<AuditVerification> {
   if (!readsWholeLog(ctx.caller)) {
     throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
   }
@@ -396,7 +397,7 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
       // Where the app's walk starts, where the vault's does, and, for a stretch, the checkpoint it ends at.
       let start: ChainPoint;
       let vaultFrom: number | 'start';
-      let to: { entry: bigint; at: ChainPoint } | null = null;
+      let to: { entry: bigint; at: ChainPoint; hash: string } | null = null;
       if (query.from === undefined) {
         // From the older of where the app's MACs and the vault's tally were last verified to.
         const [own, tallied] = await Promise.all([attested(tx, ctx.chainKey), latestTallied(tx)]);
@@ -405,17 +406,21 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
         start = own.seq <= signed.seq ? own : signed;
         vaultFrom = tallied === null ? 'start' : Number(tallied.entry);
       } else {
-        const anchor = query.from === 'start' ? null : await talliedAt(tx, BigInt(query.from));
-        if (query.from !== 'start' && anchor === null) throw badRequest(`entry ${query.from} is not a checkpoint that keeps a tally`);
-        if (anchor !== null && anchor.checkpoint === null) return failed('vault', BigInt(query.from), UNREADABLE, BigInt(query.from) - 1n);
+        // The checkpoint the stretch before ended at, as it was then, by its entry's hash: what it held to the log
+        // is what this one starts from, not anything put in its place since.
+        const [entry, hash] = query.from === 'start' ? [null, null] : [BigInt(query.from.split(':')[0]!), query.from.split(':')[1]!];
+        const anchor = entry === null ? null : await talliedAt(tx, entry);
+        if (entry !== null && anchor === null) throw badRequest(`entry ${entry} is not a checkpoint that keeps a tally`);
+        if (anchor !== null && anchor.hash !== hash) return failed('app', entry, 'changed since the stretch before held its tally to the log', entry! - 1n);
+        if (anchor !== null && anchor.checkpoint === null) return failed('vault', entry, UNREADABLE, entry! - 1n);
         start = anchor === null ? CHAIN_START : pointOf(anchor.checkpoint!);
-        vaultFrom = query.from;
+        vaultFrom = entry === null ? 'start' : Number(entry);
         // The furthest checkpoint one walk reaches, or the next however far it is; none, and this is the last stretch.
-        const later = await talliedAfter(tx, query.from === 'start' ? -1n : BigInt(query.from), CHAIN_WALK / 2 + 1);
+        const later = await talliedAfter(tx, entry ?? -1n, CHAIN_WALK / 2 + 1);
         const target = later.filter(({ signs }) => signs - start.seq <= CHAIN_WALK).at(-1) ?? later[0];
         const ends = target === undefined ? null : await talliedAt(tx, target.entry);
         if (target !== undefined && ends?.checkpoint === null) return failed('vault', target.entry, UNREADABLE, target.signs);
-        if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends.checkpoint!) };
+        if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends.checkpoint!), hash: ends.hash };
       }
       // Every entry before where it starts still there: one count, and only a log with a gap pays to find where.
       const gap = await missingEntry(tx, start.seq);
@@ -481,7 +486,7 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
     entries: (through ?? -1) + 1,
     from: Number(chain.start.seq + 1n),
     remaining: chain.remaining + (chain.last?.seq ?? -1) - (through ?? -1),
-    ...(query.from === undefined ? {} : { next: chain.to === null ? null : Number(chain.to.entry) }),
+    ...(query.from === undefined ? {} : { next: chain.to === null ? null : `${chain.to.entry}:${chain.to.hash}` }),
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
     ...(verified.pending === undefined ? {} : { pending: verified.pending }),
   };

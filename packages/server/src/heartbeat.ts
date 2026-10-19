@@ -48,6 +48,8 @@ export async function writeAuditHeartbeat(
     const from = verified;
     verified = await db.transaction(async (tx) => {
       const walked = await walkChain(tx, chainKey, from);
+      // Short of the head, it says how far it got, and is no verdict on the rest: the next beat goes on.
+      if (walked.ok && !walked.done) unverified = `verified through entry ${walked.at.seq}, a walk a beat: the rest goes on next time`;
       if (walked.ok) return walked.at;
       broken = { seq: Number(walked.failedAtSeq), reason: walked.reason };
       log.warn({ failedAtSeq: broken.seq, reason: walked.reason }, 'the audit log does not verify from the last heartbeat');

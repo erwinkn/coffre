@@ -247,7 +247,7 @@ test('a log longer than one walk is checked as far as one goes, and walked from 
   assert.ok(caught.ok && caught.remaining === 0, JSON.stringify(caught));
 
   // The walk from the first entry, a request a stretch, each ending at a checkpoint no further than one walk on.
-  const stretches: { from: number; through: number | null; next: number | null | undefined }[] = [];
+  const stretches: { from: number; through: number | null; next: string | null | undefined }[] = [];
   const whole = await root.audit.verifyWhole((stretch) => {
     assert.ok(stretch.ok, JSON.stringify(stretch));
     stretches.push({ from: stretch.from, through: stretch.through, next: stretch.next });
@@ -259,6 +259,10 @@ test('a log longer than one walk is checked as far as one goes, and walked from 
     if (i > 0) assert.equal(stretch.from, stretches[i - 1]!.through! + 1, 'the stretches leave a gap');
   }
   assert.deepEqual(stretches.at(-1)!.next, null);
+  // A stretch goes on from the checkpoint the one before held to the log, as it was: by its entry's hash.
+  const [entry] = stretches[0]!.next!.split(':');
+  const elsewhere = await root.audit.verify({ from: `${entry}:${'0'.repeat(64)}` });
+  assert.deepEqual(!elsewhere.ok && [elsewhere.failedAtSeq, elsewhere.reason], [Number(entry), 'changed since the stretch before held its tally to the log']);
 });
 
 /** The app's newest heartbeats, newest first: how far each says the app verified. */

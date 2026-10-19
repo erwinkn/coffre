@@ -2061,6 +2061,13 @@ export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null
   return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
 }
 
+/** The hash of entry `seq`, hex, or null when there is none. */
+export async function auditHashAt(db: Queryable, seq: bigint): Promise<string | null> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db.select({ hash: auditLog.hash }).from(auditLog).where(eq(auditLog.seq, seq));
+  return row?.hash.toString('hex') ?? null;
+}
+
 /**
  * The vault's newest checkpoint that keeps a tally, and its entry: one
  * written since 0.10.1, which names the last entry of the prefix it signs
@@ -2071,10 +2078,13 @@ export async function latestTallied(db: Queryable): Promise<{ entry: bigint; che
   return row === undefined ? null : { entry: row.seq, checkpoint: signedIn(row.metadata) };
 }
 
-/** The vault's checkpoint at entry `seq`, if one that keeps a tally is there; null for its prefix if it names none. */
-export async function talliedAt(db: Queryable, seq: bigint): Promise<{ checkpoint: Signed | null } | null> {
+/**
+ * The vault's checkpoint at entry `seq`, if one that keeps a tally is
+ * there, with its entry's hash: null for its prefix if it names none.
+ */
+export async function talliedAt(db: Queryable, seq: bigint): Promise<{ checkpoint: Signed | null; hash: string } | null> {
   const [row] = await talliedCheckpoints(db, eq(tablesOf(db).auditLog.seq, seq));
-  return row === undefined ? null : { checkpoint: signedIn(row.metadata) };
+  return row === undefined ? null : { checkpoint: signedIn(row.metadata), hash: row.hash.toString('hex') };
 }
 
 /** The prefix a checkpoint names: its last entry and that entry's hash. */
@@ -2112,14 +2122,14 @@ function talliedWhere(db: Queryable) {
 
 function talliedCheckpoints(db: Queryable, where?: SQL) {
   const { auditLog } = tablesOf(db);
-  return db.select({ seq: auditLog.seq, metadata: auditLog.metadata }).from(auditLog).where(and(...talliedWhere(db), where));
+  return db.select({ seq: auditLog.seq, metadata: auditLog.metadata, hash: auditLog.hash }).from(auditLog).where(and(...talliedWhere(db), where));
 }
 
-/** Up to `limit` of the app's newest heartbeats, whole, newest first: what each says the app had verified. */
+/** Up to `limit` of the app's newest heartbeats, whole, newest first, with the database's clock: what each says the app had verified. */
 export async function newestHeartbeats(db: Queryable, limit: number) {
   const { auditLog } = tablesOf(db);
   const rows = await db
-    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
+    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash, now: clockMillis(db) })
     .from(auditLog)
     .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'audit.heartbeat'), eq(auditLog.decision, 'allow')))
     .orderBy(desc(auditLog.seq))
@@ -2164,9 +2174,9 @@ export async function readiness(db: Queryable, appKey: LogKey): Promise<{
   beat: { seq: bigint; ageSeconds: number; metadata: string; authentic: boolean } | null;
   checkpoint: Checkpoint | null;
 }> {
-  const [[beat], checkpoint, [now]] = await Promise.all([newestHeartbeats(db, 1), latestCheckpoint(db), newestEntry(db, 'app', 'audit.heartbeat')]);
-  if (beat === undefined || now === undefined) return { beat: null, checkpoint };
+  const [[beat], checkpoint] = await Promise.all([newestHeartbeats(db, 1), latestCheckpoint(db)]);
+  if (beat === undefined) return { beat: null, checkpoint };
   // Whether the app wrote it, by its MAC: what it says of the chain counts only then.
   const authentic = verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [appKey] }).ok;
-  return { beat: { seq: beat.seq, ageSeconds: (now.now - now.occurredAt) / 1000, metadata: beat.metadata, authentic }, checkpoint };
+  return { beat: { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000, metadata: beat.metadata, authentic }, checkpoint };
 }

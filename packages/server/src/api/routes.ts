@@ -700,7 +700,7 @@ export const routes = {
   }),
   // From the newest checkpoint; or, with `from`, a stretch of the walk from the first entry (`start`), and on from each `next`.
   ...route('GET /audit/verification', {
-    input: z.object({ from: z.union([z.literal('start'), z.coerce.number().int().min(0)]).optional() }),
+    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,16}:[0-9a-f]{64}$/)]).optional() }),
     run: (ctx, { input }) => verifyAudit(ctx, input),
   }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.

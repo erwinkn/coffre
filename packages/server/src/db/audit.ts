@@ -2,7 +2,7 @@ import { deriveLogKey, GENESIS_HASH, verifyEntries, type LogKey } from '@coffre/
 import type { Queryable, Transaction } from '@coffre/db';
 import { appendEntries, type Appended } from '@coffre/db/log';
 
-import { auditRange, newestHeartbeats } from './queries.ts';
+import { auditHashAt, auditRange, newestHeartbeats } from './queries.ts';
 
 export type AuditEntry = {
   actorType: 'user' | 'service' | 'system';
@@ -119,8 +119,7 @@ export async function walkChain(
   { to, limit = CHAIN_WALK }: { to?: bigint; limit?: number } = {},
 ): Promise<ChainWalk> {
   if (from.seq >= 0n) {
-    const [held] = await auditRange(db, from.seq, 1);
-    if (held?.seq !== from.seq || !held.hash.equals(from.hash)) {
+    if ((await auditHashAt(db, from.seq)) !== from.hash.toString('hex')) {
       return { ok: false, failedAtSeq: from.seq, reason: 'changed since the app last verified the log through it', through: from.seq - 1n };
     }
   }
