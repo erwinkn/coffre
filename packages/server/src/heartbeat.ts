@@ -3,7 +3,7 @@ import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
-import { appendAudit, attested, CHAIN_START, walkChain, type ChainPoint } from './db/audit.ts';
+import { appendAudit, appLogKey, attested, CHAIN_START, walkChain, type ChainPoint } from './db/audit.ts';
 import { readiness } from './db/queries.ts';
 
 export type HeartbeatLogger = {
@@ -40,10 +40,13 @@ export async function writeAuditHeartbeat(
   log: HeartbeatLogger,
 ): Promise<boolean> {
   let verified: ChainPoint = CHAIN_START;
+  // What the walk found, or why it could not run: either keeps readiness red until a walk passes.
   let broken: { seq: number; reason: string } | null = null;
+  let unverified: string | null = null;
   try {
+    verified = await db.transaction((tx) => attested(tx, chainKey), SNAPSHOT);
+    const from = verified;
     verified = await db.transaction(async (tx) => {
-      const from = await attested(tx, chainKey);
       const walked = await walkChain(tx, chainKey, from);
       if (walked.ok) return walked.at;
       broken = { seq: Number(walked.failedAtSeq), reason: walked.reason };
@@ -51,8 +54,9 @@ export async function writeAuditHeartbeat(
       return from;
     }, SNAPSHOT);
   } catch (error) {
-    // The beat is the signal that logging works: it is written all the same, saying nothing new.
-    log.warn({ err: (error as Error).message }, 'the audit log could not be verified from the last heartbeat');
+    // The beat is the signal that logging works: it is written all the same, saying how far the last one verified.
+    unverified = (error as Error).message;
+    log.warn({ err: unverified }, 'the audit log could not be verified from the last heartbeat');
   }
   try {
     await db.transaction((tx) =>
@@ -67,6 +71,7 @@ export async function writeAuditHeartbeat(
             ...(verified.seq < 0n ? {} : { verified: { seq: Number(verified.seq), hash: verified.hash.toString('hex') } }),
             // What the walk found, which readiness shows: the vault's checkpoint signs over the app's entries without their MACs.
             ...(broken === null ? {} : { broken }),
+            ...(unverified === null ? {} : { unverified }),
           },
         },
       ]),
@@ -102,9 +107,10 @@ export type Readiness = {
   /** Whether a checkpoint the vault signed covers that heartbeat. */
   checkpointed: boolean;
   /**
-   * Whether that heartbeat's walk of the chain found it broken: an entry in
-   * the app's name it did not write, which the vault signs over, since it
-   * cannot check the app's MACs. The audit page says where.
+   * Whether that heartbeat's walk of the chain found it broken, or could not
+   * run: an entry in the app's name it did not write is one the vault signs
+   * over, since it cannot check the app's MACs. The audit page says where.
+   * So too a heartbeat in the app's name the app did not write.
    */
   broken: boolean;
 };
@@ -118,11 +124,11 @@ export type Readiness = {
  * a database incident should mark the service unavailable, not trigger a
  * restart loop.
  */
-export async function auditReadiness(db: Database, vault: Vault): Promise<Readiness> {
+export async function auditReadiness(db: Database, vault: Vault, chainKey: Buffer): Promise<Readiness> {
   const unready: Readiness = { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false };
   try {
     if (!(await migrated(db))) return unready;
-    const { beat, checkpoint } = await readiness(db);
+    const { beat, checkpoint } = await readiness(db, appLogKey(chainKey));
     if (beat === null) return unready;
     // Asked each time: after a rotation, the key the vault signed with until then counts only for what came before.
     const key = checkpoint === null ? undefined : (await vault.about()).checkpointKeys[checkpoint.keyId];
@@ -133,7 +139,9 @@ export async function auditReadiness(db: Database, vault: Vault): Promise<Readin
       BigInt(checkpoint.seq) >= beat.seq &&
       (await verifyCheckpoint(checkpoint, key.publicKey));
     const fresh = Number.isFinite(beat.ageSeconds) && beat.ageSeconds <= HEARTBEAT_STALE_AFTER_SECONDS;
-    return { ok: fresh && checkpointed && !beat.broken, heartbeatAgeSeconds: beat.ageSeconds, checkpointed, broken: beat.broken };
+    const said = JSON.parse(beat.metadata) as { broken?: unknown; unverified?: unknown } | null;
+    const broken = !beat.authentic || said?.broken !== undefined || said?.unverified !== undefined;
+    return { ok: fresh && checkpointed && !broken, heartbeatAgeSeconds: beat.ageSeconds, checkpointed, broken };
   } catch {
     return unready;
   }

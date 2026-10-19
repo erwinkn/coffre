@@ -109,7 +109,7 @@ import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIF
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import * as store from './store.ts';
-import { accessDigest, CHECKPOINT, EMPTY_TALLY, TALLY_VERSION, Walk, type TalliedCheckpoint, type Tally } from './tally.ts';
+import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 
 export type VaultOptions = {
@@ -2371,7 +2371,15 @@ class VaultService implements Vault {
    */
   async #resume(db: Queryable, from: 'start' | 'newest' | bigint): Promise<Resumed | Broken> {
     if (from === 'start') return FIRST_ENTRY;
-    const entry = from === 'newest' ? await store.latestTallied(db) : (await store.entriesAt(db, [from])).get(from);
+    // The newest a release this old can read: one rolled back to from a newer release passes over tallies of a
+    // version it does not know, as 0.10.1 passes over 0.10.0's checkpoints, which keep none.
+    const newer = (entry: StoredEntry) => {
+      const version = (JSON.parse(entry.metadata) as { tally?: { v?: unknown } } | null)?.tally?.v;
+      return typeof version === 'number' && version > TALLY_VERSION;
+    };
+    const entry = from === 'newest'
+      ? (await store.latestTallied(db, LOOK_BACK_TALLIES)).find((one) => !newer(one))
+      : (await store.entriesAt(db, [from])).get(from);
     if (entry === undefined) return from === 'newest' ? FIRST_ENTRY : { ok: false, failedAtSeq: Number(from), reason: 'no checkpoint at this entry' };
     return (await this.#resumeEach(db, [entry]))[0]!;
   }
@@ -2417,8 +2425,8 @@ class VaultService implements Vault {
     const keys = since !== null && entry.seq >= since ? logKeys.slice(0, 1) : logKeys;
     const authentic = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys });
     if (!authentic.ok) return withCause(authentic.reason);
-    const read = JSON.parse(entry.metadata) as Partial<TalliedCheckpoint>;
-    if (read.tally?.v !== TALLY_VERSION || read.scrub === undefined || typeof read.seq !== 'number' || BigInt(read.seq) !== entry.relatedSeq) return not;
+    const read = JSON.parse(entry.metadata) as Partial<TalliedCheckpoint> | null;
+    if (read?.tally?.v !== TALLY_VERSION || read.scrub === undefined || typeof read.seq !== 'number' || BigInt(read.seq) !== entry.relatedSeq) return not;
     return read as TalliedCheckpoint;
   }
 
@@ -2587,8 +2595,9 @@ class VaultService implements Vault {
    * another kind since, a wrong KEK, hides none.
    */
   async #standingRefusal(db: Queryable): Promise<{ failedAtSeq?: number | null; reason?: string } | null> {
-    const [refused, signed] = await Promise.all([store.newestRefusal(db, CHECKPOINT, 'log_broken'), store.latestVaultEntry(db, [CHECKPOINT])]);
-    if (refused === undefined || refused.seq < (signed?.seq ?? -1n) || !this.#authentic(refused)) return null;
+    const signed = await store.latestVaultEntry(db, [CHECKPOINT]);
+    const refused = await store.newestRefusal(db, CHECKPOINT, 'log_broken', signed?.seq ?? -1n);
+    if (refused === undefined || !this.#authentic(refused)) return null;
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
@@ -2662,11 +2671,21 @@ class VaultService implements Vault {
       if (to !== null && passed.at(-1)?.seq !== to) {
         return { ok: false, failedAtSeq: Number(to), reason: `a stretch passes no more than ${walks.verify} checkpoints: end one sooner` };
       }
-      const entries = await store.entriesAt(tx, passed.map(({ seq }) => seq));
-      const resumed = await this.#resumeEach(tx, passed.map(({ seq }) => entries.get(seq)!));
-      walk.expect(resumed.map((one, i) => (one.ok
-        ? { entry: one.entry!, through: one.at.seq, tally: one.tally, digest: one.digest }
-        : { entry: passed[i]!.seq, through: passed[i]!.signs, unreadable: one.reason })));
+      // Each one's tally as what the walk must come to, a few at a time, so that members and grants kept whole
+      // in many of them are never all in memory: the digest it keeps of them stands for them.
+      const expected: Expected[] = [];
+      for (let after = from.entry ?? -1n, last = passed.at(-1)?.seq; last !== undefined && after < last; ) {
+        const batch = await store.talliedWithin(tx, after, last, walks.verify + 1);
+        if (batch.length === 0) break;
+        for (const entry of batch) {
+          const read = this.#tallied(entry);
+          expected.push(typeof read === 'string'
+            ? { entry: entry.seq, through: entry.relatedSeq!, unreadable: read }
+            : { entry: entry.seq, through: entry.relatedSeq!, key: expectedKey(read.tally) });
+        }
+        after = batch.at(-1)!.seq;
+      }
+      walk.expect(expected);
       // How far the walk got, the hash there, and whether that is the present: the rows and the key batches
       // are held to the log only when the walk read every entry of the vault's there is.
       let through = from.at.seq;
@@ -2818,6 +2837,9 @@ function timedOut(error: unknown): boolean {
   }
   return false;
 }
+
+/** Checkpoints a vault rolled back to looks back over for a tally of a version it reads: some hours of them. */
+const LOOK_BACK_TALLIES = 64;
 
 /** Where the next rehash of the past goes on from, null for the first entry; or what it found. */
 type Scrubbed = { ok: true; next: Lap | null } | Broken;

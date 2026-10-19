@@ -212,7 +212,7 @@ test("an entry forged in the app's name is found by the next check, though check
     ok: false, through: forged - 1, failedAtSeq: forged, author: 'app', reason: 'not written by the app: its MAC does not match',
   });
   // And readiness turns red: the beat says what its walk found.
-  const ready = await auditReadiness(db.runtime, deps.vault);
+  const ready = await auditReadiness(db.runtime, deps.vault, deps.chainKey);
   assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
 });
 

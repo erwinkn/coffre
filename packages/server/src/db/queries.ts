@@ -1,5 +1,5 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
-import type { Author } from '@coffre/core/audit';
+import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
@@ -2086,7 +2086,9 @@ export type Signed = { seq: number; hash: string };
  * MAC, and the vault names what is wrong with it.
  */
 function signedIn(metadata: string): Signed | null {
-  const { seq, hash } = JSON.parse(metadata) as { seq?: unknown; hash?: unknown };
+  const read = JSON.parse(metadata) as unknown;
+  if (typeof read !== 'object' || read === null) return null;
+  const { seq, hash } = read as { seq?: unknown; hash?: unknown };
   if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return null;
   return { seq, hash };
 }
@@ -2158,13 +2160,13 @@ export async function auditActionCounts(
  * database's clock, so a skewed application server cannot hide a stale
  * one; and the newest checkpoint the vault signed.
  */
-export async function readiness(db: Queryable): Promise<{
-  beat: { seq: bigint; ageSeconds: number; broken: boolean } | null;
+export async function readiness(db: Queryable, appKey: LogKey): Promise<{
+  beat: { seq: bigint; ageSeconds: number; metadata: string; authentic: boolean } | null;
   checkpoint: Checkpoint | null;
 }> {
-  const [[beat], checkpoint] = await Promise.all([newestEntry(db, 'app', 'audit.heartbeat'), latestCheckpoint(db)]);
-  if (beat === undefined) return { beat: null, checkpoint };
-  // Whether the beat's own walk of the chain found it broken (`writeAuditHeartbeat`).
-  const broken = (JSON.parse(beat.metadata) as { broken?: unknown }).broken !== undefined;
-  return { beat: { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000, broken }, checkpoint };
+  const [[beat], checkpoint, [now]] = await Promise.all([newestHeartbeats(db, 1), latestCheckpoint(db), newestEntry(db, 'app', 'audit.heartbeat')]);
+  if (beat === undefined || now === undefined) return { beat: null, checkpoint };
+  // Whether the app wrote it, by its MAC: what it says of the chain counts only then.
+  const authentic = verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [appKey] }).ok;
+  return { beat: { seq: beat.seq, ageSeconds: (now.now - now.occurredAt) / 1000, metadata: beat.metadata, authentic }, checkpoint };
 }

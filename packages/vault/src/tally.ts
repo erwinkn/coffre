@@ -95,7 +95,15 @@ function tallyKey({ accounting, entries, keys, replayFault }: Omit<Tally, 'acces
  * A tally a walk must come to: the one a checkpoint keeps, `entry`, of the
  * prefix through `through`; or why that checkpoint's tally cannot be read.
  */
-export type Expected = { entry: bigint; through: bigint; tally: Tally; digest: string } | { entry: bigint; through: bigint; unreadable: string };
+export type Expected = { entry: bigint; through: bigint; key: string } | { entry: bigint; through: bigint; unreadable: string };
+
+/**
+ * What a walk must come to at a checkpoint, from the tally it keeps: its
+ * members and grants by the digest it keeps of them, never read.
+ */
+export function expectedKey(stored: StoredTally): string {
+  return tallyKey(stored, stored.access.digest);
+}
 
 /**
  * The vault's entries walked, oldest first, each after its MAC was checked,
@@ -113,7 +121,7 @@ export class Walk {
   entries: number;
   /** The vault's log keys, as the log moved through them. */
   keys: readonly string[];
-  /** The checkpoints walked, each to be checked against its signature and the prefix it signed once the walk ends. */
+  /** The checkpoints walked, each to be checked against its signature and the prefix it signed once the walk ends: what it signed, and nothing it keeps beside. */
   readonly checkpoints: { entry: { seq: bigint; keyId: string; relatedSeq: bigint | null }; checkpoint: Checkpoint }[] = [];
 
   /** The tallies the walk must come to as it passes them, oldest first (`expect`). */
@@ -168,7 +176,7 @@ export class Walk {
       const expected = this.#expected.shift()!;
       if (this.mismatch !== null) continue;
       if ('unreadable' in expected) this.mismatch = { entry: expected.entry, reason: expected.unreadable };
-      else if (tallyKey(this.#unaccessed(), this.#accessDigest()) !== tallyKey(expected.tally, expected.digest)) {
+      else if (tallyKey(this.#unaccessed(), this.#accessDigest()) !== expected.key) {
         this.mismatch = { entry: expected.entry, reason: 'the tally this checkpoint keeps does not follow from the log before it' };
       }
     }
@@ -191,7 +199,8 @@ export class Walk {
       this.replayFault ??= apply(this.replayed, entry);
       if (entry.subjectPrincipal !== null) this.newestAccess.set(entry.subjectPrincipal, entry.seq);
     } else if (entry.action === CHECKPOINT) {
-      this.checkpoints.push({ entry: { seq: entry.seq, keyId: entry.keyId, relatedSeq: entry.relatedSeq }, checkpoint: JSON.parse(entry.metadata) as Checkpoint });
+      const { seq, hash, signedAt, keyId, signature } = JSON.parse(entry.metadata) as Checkpoint;
+      this.checkpoints.push({ entry: { seq: entry.seq, keyId: entry.keyId, relatedSeq: entry.relatedSeq }, checkpoint: { seq, hash, signedAt, keyId, signature } });
     }
     return null;
   }

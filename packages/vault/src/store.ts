@@ -527,19 +527,19 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
 }
 
 /**
- * The vault's newest checkpoint that keeps a tally, allowed, or undefined:
+ * The vault's newest checkpoints that keep a tally, allowed, newest first:
  * one written since 0.10.1, which names the last entry of the prefix it
  * signs as related (`related_seq`); those before name none.
  */
-export async function latestTallied(db: Queryable): Promise<StoredEntry | undefined> {
+export async function latestTallied(db: Queryable, limit = 1): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db
+  const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)))
     .orderBy(desc(auditLog.seq))
-    .limit(1);
-  return row === undefined ? undefined : stored([row])[0];
+    .limit(limit);
+  return stored(rows);
 }
 
 /** The vault's newest `audit.checkpoint` entry, signed or refused, or undefined. */
@@ -554,13 +554,31 @@ export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry 
   return row === undefined ? undefined : stored([row])[0];
 }
 
-/** The vault's newest refusal of `action` with `code`, or undefined. */
-export async function newestRefusal(db: Queryable, action: string, code: string): Promise<StoredEntry | undefined> {
+/**
+ * The vault's checkpoints that keep a tally after entry `after` and through
+ * `through`, oldest first, whole: as many as `BATCH_BYTES` of what they say
+ * holds, but always one. A reader asks again after the last.
+ */
+export async function talliedWithin(db: Queryable, after: bigint, through: bigint, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const tallied = and(
+    eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq),
+    gt(auditLog.seq, after), lte(auditLog.seq, through),
+  );
+  const batch = await withinBytes(db, tallied, limit);
+  if (batch === null) return [];
+  const rows = await db.select(entryColumns(db)).from(auditLog)
+    .where(and(tallied, gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to))).orderBy(asc(auditLog.seq));
+  return stored(rows);
+}
+
+/** The vault's newest refusal of `action` with `code` after entry `after`, or undefined: one range of the (author, action, seq) index. */
+export async function newestRefusal(db: Queryable, action: string, code: string, after: bigint): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
   const [row] = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'deny'), eq(auditLog.code, code)))
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), gt(auditLog.seq, after), eq(auditLog.decision, 'deny'), eq(auditLog.code, code)))
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];

@@ -190,7 +190,7 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
   assert.ok(!verdict.ok);
   assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
-  const ready = await auditReadiness(db.runtime, misled.vault);
+  const ready = await auditReadiness(db.runtime, misled.vault, deps.chainKey);
   assert.deepEqual([ready.ok, ready.checkpointed], [false, false]);
   // The right one still reads.
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'sk_test');

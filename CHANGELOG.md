@@ -31,7 +31,15 @@
   first entry, 10,000 entries a beat, since those of 0.10.0 kept no
   tally: on a log longer than that, `/readyz` stays red for a beat or a
   few until they catch up, and the page says how many entries are left.
+  A beat that walks 10,000 entries takes about a second of CPU: on the
+  Workers Free plan it is cut off and the catch-up never ends, so move a
+  deployment with more than a few hundred entries to a paid plan first.
   No migration.
+
+  `/readyz` now also turns red when the beat's own walk of the chain finds
+  it broken, or cannot run: an entry in the app's name the app did not
+  write, which the vault cannot tell, used to show only on the audit
+  page.
 - **Reveals cost less CPU.** On Workers' Free plan an invocation has 10 ms
   of CPU, and a reveal now runs 27 statements instead of 33, and reads
   the same rows however large the log grows: with a vault key in memory,

@@ -675,7 +675,8 @@ the lap where it was and the checkpoint is signed all the same, with a
 warning in the app's log, unless such a refusal stands.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
-minutes old, its walk found the chain whole (`broken` otherwise), and a
+minutes old and the app's, by its MAC, its walk found the chain whole and
+could run (`broken` otherwise), and a
 checkpoint after it carries the vault's signature. A log that stops taking
 writes, a vault that stops signing, a cut in the log, an entry forged in
 the app's name or a wrong vault key all turn it red within one beat; an
@@ -1119,7 +1120,10 @@ Each limit is stated here once; the other documents link to it.
   first beats after an upgrade from 0.10.0, each stretch of `coffre verify
   log`, and a stretch between two checkpoints more than 10,000 entries
   apart, which only checkpoints stopped for a while leave: a stretch ends
-  at a checkpoint, however far. Until the checkpoints catch up, the walk
+  at a checkpoint, however far. On the Free plan the catch-up does not
+  slow down, it stops: each beat is cut off before it signs anything, the
+  next starts over, and `/readyz` stays red. Move a deployment whose log
+  is past a few hundred entries to a paid plan before upgrading. Until the checkpoints catch up, the walk
   from the first entry ends short of the head and says so (`remaining`),
   and `coffre verify log` exits 3 rather than call the log verified.
 - **A change of access writes every member and grant into the log once.**
