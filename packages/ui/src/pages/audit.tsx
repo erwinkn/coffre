@@ -1,6 +1,6 @@
 import { type AuditEntryView } from '@coffre/client';
 import { useState, type ReactNode } from 'react';
-import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
+import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
 import { chainResult, chainUnknown, queries, shownChain, type AuditSearch, type ChainResult } from '../lib/queries';
@@ -37,10 +37,11 @@ export function AuditPage() {
   const search = Route.useSearch();
   const client = useCoffre();
   const { data: result } = useSuspenseQuery(queries.auditEntries(client, search));
-  // Not suspended: the table shows while the log is verified.
-  const verification = useQuery(queries.auditChain(client));
+  // Loaded with the entries: the page arrives with its badge.
+  const verification = useSuspenseQuery(queries.auditChain(client));
   // The walk from the first entry, once someone ran it, beside the check from the newest checkpoint, which
-  // refetches as the page is looked at again: `shownChain` says which the page shows, until the page is left.
+  // the page reuses for `FRESH_MS` and asks again after that, after a change made here, or on Retry:
+  // `shownChain` says which the page shows, until the page is left.
   const [whole, setWhole] = useState<ChainResult | null>(null);
   const chain = shownChain(verification.data, whole);
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
@@ -85,7 +86,14 @@ export function AuditPage() {
         actions={
           // One region for every state, so each change of it is announced.
           <div className="chain-live" aria-live="polite" aria-atomic="true">
-            <ChainStatus chain={chain} walked={walked} walkFailed={walkFailed} onRetry={() => void verification.refetch()} onWalk={() => void walkWhole()} />
+            <ChainStatus
+              chain={chain}
+              walked={walked}
+              walkFailed={walkFailed}
+              retrying={verification.isFetching}
+              onRetry={() => void verification.refetch()}
+              onWalk={() => void walkWhole()}
+            />
           </div>
         }
       />
@@ -393,20 +401,23 @@ function BreakMark() {
  * vouches for everything before, so it is quick however long the log. The
  * walk from the first entry, which checks again what the checkpoints vouch
  * for, is there to ask for, a stretch a request, with how far it has got.
- * Neither is waited for: until a verdict comes the badge says it is
- * verifying, and a check that could not run says so and offers to run
- * again, rather than passing for a broken log.
+ * The check on load is rendered with the page, never a loading state; a
+ * check that could not run says so and offers to run again, rather than
+ * passing for a broken log.
  */
 function ChainStatus({
   chain,
   walked,
   walkFailed,
+  retrying,
   onRetry,
   onWalk,
 }: {
-  chain: ChainResult | undefined;
+  chain: ChainResult;
   walked: { through: number | null } | null;
   walkFailed: string | null;
+  /** The check on load is being asked again. */
+  retrying: boolean;
   onRetry: () => void;
   onWalk: () => void;
 }) {
@@ -415,15 +426,6 @@ function ChainStatus({
       <span className="chain-note" role="status">
         <Spinner size={14} />
         {walked.through === null ? 'Verifying from the first entry…' : `Verified through ${walked.through.toLocaleString('en')}…`}
-      </span>
-    );
-  }
-
-  if (chain === undefined) {
-    return (
-      <span className="chain-note">
-        <Spinner size={14} />
-        Verifying…
       </span>
     );
   }
@@ -454,7 +456,7 @@ function ChainStatus({
             Couldn’t verify
           </button>
         </Toggletip>
-        <button type="button" className="btn btn-sm" onClick={onRetry}>
+        <button type="button" className="btn btn-sm" disabled={retrying} onClick={onRetry}>
           Retry
         </button>
       </div>

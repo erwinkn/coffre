@@ -3,6 +3,7 @@ import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type SQL } from 'driz
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
+import { prepared } from './prepared.ts';
 import { clockMillis, forUpdate } from './dialect.ts';
 
 /**
@@ -99,17 +100,18 @@ export function forgetLogHeads(): void {
  * again in the same transaction is free.
  */
 export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; headHash: Buffer }> {
-  const { auditChainHead } = tablesOf(tx);
-  const [head] = await forUpdate(
-    tx,
-    tx
-      .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash })
-      .from(auditChainHead)
-      .where(eq(auditChainHead.onlyRow, true)),
-  );
+  const [head] = await lockedHead(tx);
   if (head === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
   return head;
 }
+
+const lockedHead = prepared((db) => {
+  const { auditChainHead } = tablesOf(db);
+  return forUpdate(
+    db,
+    db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead).where(eq(auditChainHead.onlyRow, true)),
+  );
+});
 
 /**
  * Append `entries` under `key`. `check`, when given, runs once the head is
@@ -129,12 +131,8 @@ export async function appendEntries(
   // Every append queues here, if its transaction has not already.
   const head = await lockLogHead(tx);
   await check?.(tx);
-  const [{ now }] = await tx.select({ now: clockMillis(tx) }).from(auditChainHead);
-  const [last] = await tx
-    .select({ seq: auditLog.seq, hash: auditLog.hash })
-    .from(auditLog)
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
+  const [{ now }] = await clockNow(tx);
+  const [last] = await lastEntry(tx);
 
   const expected = last === undefined ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
   if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
@@ -187,6 +185,13 @@ export async function appendEntries(
   afterCommit(tx, () => remember(key, written));
   return { seqStart: head.nextSeq, ...written, occurredAt: now };
 }
+
+const clockNow = prepared((db) => db.select({ now: clockMillis(db) }).from(tablesOf(db).auditChainHead));
+
+const lastEntry = prepared((db) => {
+  const { auditLog } = tablesOf(db);
+  return db.select({ seq: auditLog.seq, hash: auditLog.hash }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+});
 
 // --- reading the vault's entries back ---------------------------------------------
 
@@ -293,22 +298,22 @@ export type Authenticity = { authentic: (entry: StoredEntry) => boolean; forged:
 
 /** Up to `limit` of the entries in the vault's name, allowed, of one `action`, before `before` (the newest when undefined), newest first. */
 export async function newestVaultEntries(db: Queryable, action: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.action, action),
-        eq(auditLog.decision, 'allow'),
-        before === undefined ? undefined : lt(auditLog.seq, before),
-      ),
-    )
-    .orderBy(desc(auditLog.seq))
-    .limit(limit);
+  const rows = before === undefined ? await newestEntries(db, { action, limit }) : await entriesBefore(db, { action, limit, before });
   return rows as StoredEntry[];
 }
+
+function vaultEntries(db: Queryable, before?: SQL) {
+  const { auditLog } = tablesOf(db);
+  return db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, sql.placeholder('action')), eq(auditLog.decision, 'allow'), before))
+    .orderBy(desc(auditLog.seq))
+    .limit(sql.placeholder('limit'));
+}
+
+const newestEntries = prepared((db) => vaultEntries(db));
+const entriesBefore = prepared((db) => vaultEntries(db, lt(tablesOf(db).auditLog.seq, sql.placeholder('before'))));
 
 /**
  * The number of the newest entry in the vault's name, allowed, of one
@@ -316,15 +321,19 @@ export async function newestVaultEntries(db: Queryable, action: string, limit: n
  * of what it says, so its MAC is not checked. One indexed read.
  */
 export async function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select({ seq: auditLog.seq })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
+  const [row] = await newestSeq(db, { action });
   return (row?.seq as bigint | undefined) ?? null;
 }
+
+const newestSeq = prepared((db) => {
+  const { auditLog } = tablesOf(db);
+  return db
+    .select({ seq: auditLog.seq })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, sql.placeholder('action')), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(1);
+});
 
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
 export const LOOK_BACK = { page: 32, pages: 32 };

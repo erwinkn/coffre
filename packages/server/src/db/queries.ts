@@ -3,7 +3,7 @@ import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
-import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
@@ -325,21 +325,7 @@ export type PlaceRow = {
  * name an id the log holds.
  */
 export async function places(db: Queryable, { tombstones = false }: { tombstones?: boolean } = {}): Promise<PlaceRow[]> {
-  const { projects, environments, secrets } = tablesOf(db);
-  const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
-  const rows = await db
-    .select({
-      project: projects,
-      environment: environments,
-      secretCount: count(secrets.id),
-    })
-    .from(projects)
-    .leftJoin(environments, and(eq(environments.projectId, projects.id), alive(environments.slug)))
-    .leftJoin(secrets, and(eq(secrets.environmentId, environments.id), isNull(secrets.archivedAt)))
-    .where(alive(projects.slug))
-    .groupBy(projects.id, environments.id)
-    .orderBy(asc(projects.slug), asc(environments.slug));
-
+  const rows = tombstones ? await everyPlace(db) : await livePlaces(db);
   const found: PlaceRow[] = [];
   for (const { project, environment, secretCount } of rows) {
     let place = found.at(-1);
@@ -365,6 +351,27 @@ export async function places(db: Queryable, { tombstones = false }: { tombstones
   }
   return found;
 }
+
+function placeRows(db: Queryable, tombstones: boolean) {
+  const { projects, environments, secrets } = tablesOf(db);
+  const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
+  return db
+    .select({
+      project: projects,
+      environment: environments,
+      secretCount: count(secrets.id),
+    })
+    .from(projects)
+    .leftJoin(environments, and(eq(environments.projectId, projects.id), alive(environments.slug)))
+    .leftJoin(secrets, and(eq(secrets.environmentId, environments.id), isNull(secrets.archivedAt)))
+    .where(alive(projects.slug))
+    .groupBy(projects.id, environments.id)
+    .orderBy(asc(projects.slug), asc(environments.slug));
+}
+
+// What most requests read of the instance, every project and environment: built once (`prepared`).
+const livePlaces = prepared((db) => placeRows(db, false));
+const everyPlace = prepared((db) => placeRows(db, true));
 
 // --- folders --------------------------------------------------------------------
 // One level, for projects and for an environment's secrets, which arrange
@@ -973,12 +980,7 @@ export async function findIdentity(
  * would otherwise keep working for up to a minute.
  */
 export async function findCredential(db: Queryable, chainKey: Buffer, by: { tokenHash: Buffer } | { id: string }) {
-  const { credentials, identities } = tablesOf(db);
-  const [row] = await db
-    .select({ credential: credentials, identity: identities, now: clock(db) })
-    .from(credentials)
-    .leftJoin(identities, eq(identities.id, credentials.identityId))
-    .where('tokenHash' in by ? eq(credentials.tokenHash, by.tokenHash) : eq(credentials.id, by.id));
+  const [row] = 'tokenHash' in by ? await credentialByHash(db, { tokenHash: by.tokenHash }) : await credentialById(db, { id: by.id });
   if (row === undefined) return null;
   verifyAuthRow(chainKey, 'credentials', row.credential);
   if (row.identity !== null) verifyAuthRow(chainKey, 'identities', row.identity);
@@ -998,6 +1000,19 @@ export async function findCredential(db: Queryable, chainKey: Buffer, by: { toke
     now: row.now,
   };
 }
+
+function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL) {
+  const { credentials, identities } = tablesOf(db);
+  return db
+    .select({ credential: credentials, identity: identities, now: clock(db) })
+    .from(credentials)
+    .leftJoin(identities, eq(identities.id, credentials.identityId))
+    .where(by(credentials));
+}
+
+// Every request's credential, by its token's hash: built once (`prepared`).
+const credentialByHash = prepared((db) => credentialRow(db, (credentials) => eq(credentials.tokenHash, sql.placeholder('tokenHash'))));
+const credentialById = prepared((db) => credentialRow(db, (credentials) => eq(credentials.id, sql.placeholder('id'))));
 
 // --- trust bindings -----------------------------------------------------------
 

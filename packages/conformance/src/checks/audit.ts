@@ -57,7 +57,8 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
 /**
  * Verification must reach the stored head, not just some intact prefix:
  * the page's, from the newest checkpoint, and the walk from the first
- * entry, a stretch a request, which ends where it does.
+ * entry, a stretch a request, which ends where it does. And the audit page
+ * is sent with its verdict, rendered by the server, never a badge to come.
  */
 export async function verification(deployment: Deployment, { admin }: People): Promise<string> {
   const anchored = await admin.api.audit.verify();
@@ -74,7 +75,10 @@ export async function verification(deployment: Deployment, { admin }: People): P
     expect(result.through !== null && BigInt(result.through) === BigInt(last.seq), 'verification stopped before the head', { result, head: head.next_seq });
     expect(BigInt(result.entries) === BigInt(head.next_seq), 'verification did not count every entry', result);
   });
-  return `${result.entries} entries verified through the head at ${result.through}`;
+  const page = await admin.browser.fetch('/audit');
+  const html = await page.text();
+  expect(page.status === 200 && html.includes('chain-seal') && !html.includes('Verifying'), 'the audit page was not sent with its verification result', { status: page.status });
+  return `${result.entries} entries verified through the head at ${result.through}, and the audit page sent with its result`;
 }
 
 /**
