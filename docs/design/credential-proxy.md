@@ -236,7 +236,8 @@ TWILIO_TOKEN	v1	admin@acme.example	today
 - **A write says it, every time.** `{ "value": "…", "plain": true }` in
   `PATCH /secrets/…`; any other write is a secret, so writing over a plain
   value without `--plain` makes the key secret again, and that needs only
-  write. Its version and its `secret.write` entry say `plain`. A rollback
+  write. A personal config is the exception (decision 27): there, a write
+  that says nothing keeps the level of the value it replaces. Its version and its `secret.write` entry say `plain`. A rollback
   to a plain version is plain again: that value was shown already. A
   fork's copy keeps it plain.
 - **Making a stored secret plain discloses it**, so it is a reveal and a
@@ -245,11 +246,13 @@ TWILIO_TOKEN	v1	admin@acme.example	today
   A person may only publish a value they can read, and never a
   sensitive one, which nobody reads: they type it again, plain (decision
   17). A service account may.
-- **Never in a personal config.** Its values are bound to their owner
-  by the vault (R8), and a plain value is read without it: a plain write
-  there is refused. Only its owner lists one, so a secret serves them the
-  same. A plain value of the environment it overrides reaches its owner
-  as any reader of that environment.
+- **In a personal config, its owner's alone.** A plain value of
+  `dev@me` lists, inline, to its owner, and to nobody else, by any path:
+  the app's `can()` decides every read of a personal config on its owner,
+  as it does for its secrets, which the vault also binds to them (R8). A
+  plain value has no such binding anywhere, being in the clear: whoever
+  reads the database reads it. A plain value of the environment it
+  overrides reaches its owner as any reader of that environment.
 
 **Values of a person's own (0.9).** A backend that refuses to boot without
 its own keys (a key that seals its local data, its webhooks' HMAC secret,
@@ -277,11 +280,14 @@ coffre: made your own ROOT_ENCRYPTION_KEY, POLICY_SEAL_KEY in backend/local@me, 
   (`coffre set … --generate`, one value: a key pair's half has none
   here), in the environment's list, and not a value of the person's own
   they made sensitive, which stays theirs. The plan names each,
-  `generate: { ROOT_ENCRYPTION_KEY: { recipe, replaces } }`, with the
+  `generate: { ROOT_ENCRYPTION_KEY: { recipe, replaces, sensitivity: 'secret' } }`, with the
   version it read. `coffre run` and `coffre export` make each value by its
   recipe, as `coffre regenerate` does, and write them to the personal
   config with the person's session, an ordinary audited write, then ask for the
-  plan again, which now gives them as that config's own.
+  plan again, which now gives them as that config's own. Each is written
+  the secret the plan says, which the app is given: saying nothing, it
+  would be as sensitive as the key it overrides (decision 27). A CLI
+  before 0.10 says nothing, and its person's app goes without the value.
 - **Once, and once only at a time.** The write replaces the version the
   plan read, or is refused (409). Of two runs at once, one writes, and
   the other, refused, reads the plan again and finds the winner's. The
@@ -1118,18 +1124,29 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     The role is a project role, granted on a project or one of its
     environments; *alternative:* an instance role too, for which 0.10's
     role editor (PR 4) makes Developer's protected column use-only.
-27. **A personal config's own values have the nature of any value
-    (R18, 0.10), but plain.** Its owner, whatever their role, writes every
-    key of `dev@me`, and reads their own secrets; a sensitive one is used,
-    never read, theirs or not. None is plain, which the vault would not
-    bind to its owner (above). An override of a key it inherits,
-    saying nothing, is a secret its owner reads, a sensitive key's
-    included: their own value, which they typed and their app is given
-    (`coffre set market/dev@me/DATABASE_URL` for a local database). One of
-    its own keeps its level, as anywhere (decision 22). What `dev@me`
-    inherits is read as on dev. *Alternative:* an override takes the
-    key's level, sensitive over a sensitive key, which left a person's
-    own local `DATABASE_URL` out of their app.
+27. **A personal config is a partial overlay, and its values have any
+    level (R18, Erwin 2026-10-19).** Each key the owner of `dev@me` sets,
+    whatever their role, overrides dev's or adds one; every other key
+    falls through to dev's, live, read as on dev. Each value of their own
+    is plain, secret or sensitive, as anywhere: they read their plain and
+    secret ones, and a sensitive one, theirs or not, is used, never read.
+    A write that says nothing takes the level of the value the key reads
+    now: dev's for an override (dev's sensitive `DATABASE_URL` gives a
+    sensitive override), then their own (`coffre set … --secret` once, and
+    it stays a secret), plain included, unlike elsewhere, since nobody but
+    them lists it; a generated value is never plain, so a secret. A local
+    `DATABASE_URL` their app is given is said: `coffre set
+    market/dev@me/DATABASE_URL --secret`. A level they choose may be
+    looser than dev's key: they type a new value, so retyping to loosen
+    (decision 22) holds of dev's key, which they never see, not of theirs.
+    Their own value is loosened by a write, as anywhere. A plain value is
+    held to its owner by the app's `can()`, not the vault, as plain values
+    are everywhere (forking.md, section 3). *Alternatives:* a bare
+    override always a secret, as 0.10's first build had it, which hid an
+    inherited plain `REGION` the person overrode; or a plain value in
+    `dev@me` stored sealed and shown as plain, which keeps the vault's
+    binding at the cost of a vault read for each listing, and a plain
+    that behaves unlike plain elsewhere (logged reads, bulk limits).
 
 ## 9. Plan
 

@@ -105,7 +105,9 @@ export const SECTIONS = [
         about: [
           'a value that is no secret, an account id: shown to whoever lists',
           'the environment, and given to its apps as it is; written again',
-          'without --plain, it is a secret again',
+          'without --plain, it is a secret again. In <env>@me, shown to you',
+          'alone, and a value written saying nothing takes the level of the',
+          'key it overrides, then of your own',
         ],
       },
       {

@@ -1114,7 +1114,7 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
 type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; given: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
 
 /** A plan, `GET /use/<project>/<env>`: what the app gets, and what this run is to make of the person's own. */
-type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string }> };
+type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string; sensitivity?: 'secret' }> };
 
 /**
  * Placeholders for the environments named, where the instance has the
@@ -1147,8 +1147,13 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     for (let attempt = 1; Object.keys(plan.generate ?? {}).length > 0; attempt++) {
       if (attempt > 3) fail(`${path}: its keys kept changing while coffre made your own; run again`);
       const mine = `${path.replace(/@me$/, '')}@me`;
-      const patch = Object.assign(Object.create(null) as GeneratedWrite, ...await Promise.all(Object.entries(plan.generate!).map(([key, { recipe, replaces }]) =>
-        regenerateWrite(key, { recipe }, () => replaces))));
+      const writes = await Promise.all(Object.entries(plan.generate!).map(async ([key, { recipe, replaces, sensitivity }]) => {
+        const write = await regenerateWrite(key, { recipe }, () => replaces);
+        // At the level the plan says, a secret the app is given: an instance before 0.10 says none.
+        if (sensitivity !== undefined) for (const entry of Object.values(write)) entry.sensitivity = sensitivity;
+        return write;
+      }));
+      const patch = Object.assign(Object.create(null) as GeneratedWrite, ...writes);
       const wrote = await client(to, undefined, [409]).secrets.set(mine, { ...patch }).then(() => true, (error: unknown) => {
         // Another run wrote first: its value is the one to read. Any other refusal (`too_deep`) is said as it is.
         if (error instanceof CoffreError && error.status === 409 && error.reason === 'stale') return false;

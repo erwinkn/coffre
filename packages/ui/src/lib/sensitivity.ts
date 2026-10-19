@@ -11,21 +11,24 @@ import type { SecretChange } from './secret-edit-batch.ts';
  */
 export const SENSITIVITIES = ['plain', 'secret', 'sensitive'] as const satisfies readonly Sensitivity[];
 
-/**
- * The levels a value may be written at: in a personal config, a secret or
- * sensitive, never plain, which is read without the vault that binds its
- * values to their owner (R8); only its owner lists one anyway.
- */
-export function levelsIn(personal: boolean): readonly Sensitivity[] {
-  return personal ? SENSITIVITIES.filter((level) => level !== 'plain') : SENSITIVITIES;
-}
-
 /** Each level as the page names it, and who it lets see the value. */
 export const LEVELS: Record<Sensitivity, { label: string; hint: string }> = {
   plain: { label: 'Plain', hint: 'Visible to anyone who can see this environment' },
   secret: { label: 'Secret', hint: 'Visible to people whose role can read secrets' },
   sensitive: { label: 'Sensitive', hint: 'Never shown to anyone, Owners included. Used through the proxy or by services' },
 };
+
+/** The levels in your personal config, `dev@me`, whose values nobody else sees, whatever their level. */
+const PERSONAL_LEVELS: Record<Sensitivity, { label: string; hint: string }> = {
+  plain: { label: 'Plain', hint: 'Visible to you alone, as it is' },
+  secret: { label: 'Secret', hint: 'Visible to you alone, when you reveal it' },
+  sensitive: { label: 'Sensitive', hint: 'Never shown, you included. Your app uses it through the proxy' },
+};
+
+/** Each level as a page names it, in your personal config or elsewhere. */
+export function levelsIn(personal: boolean): Record<Sensitivity, { label: string; hint: string }> {
+  return personal ? PERSONAL_LEVELS : LEVELS;
+}
 
 /** Whether `a` lets fewer people see a value than `b`. */
 export function stricter(a: Sensitivity, b: Sensitivity): boolean {
