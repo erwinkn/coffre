@@ -418,8 +418,9 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
         // Named with its hash, it was there for the stretch before: gone now, it was cut. One there by that hash
         // that keeps no tally was never a stretch's end: the request named it, not a walk.
         if (entry !== null && anchor === null) {
-          if ((await auditHashAt(tx, entry)) === hash) throw badRequest(`entry ${entry} is not a checkpoint that keeps a tally`);
-          return failed('app', entry, 'cut since the stretch before held its tally to the log', entry - 1n);
+          const stored = await auditHashAt(tx, entry);
+          if (stored === hash) throw badRequest(`entry ${entry} is not a checkpoint that keeps a tally`);
+          return failed('app', entry, `${stored === null ? 'cut' : 'changed'} since the stretch before held its tally to the log`, entry - 1n);
         }
         if (anchor !== null && anchor.hash !== hash) return failed('app', entry, 'changed since the stretch before held its tally to the log', entry! - 1n);
         if (anchor !== null && anchor.checkpoint === null) return failed('vault', entry, UNREADABLE, entry! - 1n);

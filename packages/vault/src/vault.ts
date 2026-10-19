@@ -2523,6 +2523,10 @@ class VaultService implements Vault {
       const walk = new Walk(walked.tally, walked.digest);
       let { at } = walked;
       if (walked.done) {
+        // Where the snapshot's walk ended still has the hash it found there: what follows links to it.
+        if (!(await carries(d.tx, headOf(at)))) {
+          throw refused('log_broken', { failedAtSeq: Number(at.seq), reason: `the log up to entry ${at.seq} changed while the vault walked it` });
+        }
         const rest = await rehash(d.tx, logKeys, at, walk, {});
         if (!rest.ok) throw refused('log_broken', { failedAtSeq: rest.failedAtSeq, reason: rest.reason });
         const unsigned = await this.#checkpointFault(d.tx, walk.checkpoints);
