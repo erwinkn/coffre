@@ -384,8 +384,9 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
  */
 export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, policySeq: bigint | null, rows: readonly Unsealed[]): Promise<number> {
   // Each with what its role holds now, kept, as one issued now.
-  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, access.policy ?? DEFAULT_POLICY)));
-  return audited({ db, chainKey, caller: { policySeq } }, async (tx, log) => {
+  const policy = access.policy ?? DEFAULT_POLICY;
+  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy)));
+  return audited({ db, chainKey, caller: { policySeq, policy } }, async (tx, log) => {
     const done = { tokens: [] as string[], bindings: [] as string[] };
     for (const row of rows) {
       const changed = row.kind === 'token'

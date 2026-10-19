@@ -1,4 +1,4 @@
-import type { GrantPlace, InstanceRole, Scope } from '@coffre/core/access';
+import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
@@ -282,6 +282,22 @@ export async function environmentPaths(db: Queryable, ids: readonly string[]): P
     .innerJoin(projects, eq(projects.id, environments.projectId))
     .where(and(inArray(environments.id, [...ids]), standing(environments.slug), standing(projects.slug)));
   return new Map(rows.map((row) => [row.id, `${row.project}/${row.environment}`]));
+}
+
+/**
+ * Live environments' slugs by id, as the vault reads them into the policy
+ * (`livePolicy`): one deleted, or of a project deleted, is left out, as
+ * one whose row is not written yet.
+ */
+export async function liveEnvironmentSlugs(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { projects, environments } = tablesOf(db);
+  const rows = await db
+    .select({ id: environments.id, slug: environments.slug })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(and(inArray(environments.id, [...ids]), standing(environments.slug), standing(projects.slug)));
+  return new Map(rows.map((row) => [row.id, row.slug]));
 }
 
 export type PlaceRow = {
@@ -593,17 +609,19 @@ export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, n
 }
 
 /**
- * Every active person, with their instance role, its scope and their live
- * grants, as stored: what weighing a change to the roles reads
- * (`roleImpact`). The vault checks these rows whenever they are used; a
- * display reads them as the database has them.
+ * Every active member, person or service account, with their instance
+ * role, its scope and their live grants, as stored: what weighing a change
+ * to the roles reads (`roleImpact`). A service account is a Member of
+ * everything, whatever its row says, as the vault reads it. The vault
+ * checks these rows whenever they are used; a display reads them as the
+ * database has them.
  */
-export async function peopleHoldings(db: Queryable, now: Date): Promise<{ principal: string; role: InstanceRole; scope: Scope; grants: StoredGrant[] }[]> {
+export async function memberHoldings(db: Queryable, now: Date): Promise<{ principal: string; service: boolean; role: InstanceRole; scope: Scope; grants: StoredGrant[] }[]> {
   const { vaultMembers } = tablesOf(db);
   const [rows, granted] = await Promise.all([
     db.select({ principal: vaultMembers.principal, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
       .from(vaultMembers)
-      .where(and(eq(vaultMembers.status, 'active'), like(vaultMembers.principal, 'user:%')))
+      .where(eq(vaultMembers.status, 'active'))
       .orderBy(asc(vaultMembers.principal)),
     readGrants(db, { liveAt: now.getTime() }),
   ]);
@@ -611,7 +629,11 @@ export async function peopleHoldings(db: Queryable, now: Date): Promise<{ princi
   for (const { principal, projectId, environmentId, role, expiresAt } of granted) {
     byPrincipal.set(principal, [...(byPrincipal.get(principal) ?? []), { projectId, environmentId, role, expiresAt }]);
   }
-  return rows.map((row) => ({ principal: row.principal, ...storedRole(row), grants: byPrincipal.get(row.principal) ?? [] }));
+  return rows.map((row) => {
+    const service = !row.principal.startsWith('user:');
+    const standing = service ? { role: 'member' as const, scope: EVERYWHERE } : storedRole(row);
+    return { principal: row.principal, service, ...standing, grants: byPrincipal.get(row.principal) ?? [] };
+  });
 }
 
 /**

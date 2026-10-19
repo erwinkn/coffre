@@ -291,18 +291,37 @@ or `remove`), and sign-in's own writes, which decide nothing from a
 policy: signing in and out, device login, linking and unlinking
 accounts, connecting and disconnecting an MCP app, a CI run's exchange.
 
+The fence reads two things, each by id: the newest `policy.change`, and
+the rows of the environments the caller's policy protects. The policy
+names those by id, and reads each one's slug, which a scoped instance
+role's filters match, from its row (`livePolicy`), so a protected
+environment renamed, deleted, or written since (a fork's) is a policy
+changed with no entry of its own; `policyStill` reads the rows again and
+answers 409 for it, and nothing that renames or deletes one has to
+remember to say so. What changes the policy, and how the fence sees each,
+is the table below.
+
 A request that changes the policy itself goes on as of its change:
 `protectIds` (packages/server/src/api/roles.ts) asks the vault with the
-caller's `policySeq`, refused unless it is still the newest, as is a role's
-edit (`changeRole`), so one previewed on an older policy is asked again
-rather than applied; and the
+caller's `policySeq`, refused unless it is still the newest; and the
 request's caller then holds the policy it made, as of its own entry. A
+role's edit (`changeRole`) is asked with its preview's: the preview
+answers with the `policySeq` it was weighed from, the confirmation sends
+it back (`?policySeq=`), and the vault refuses it, `policy_changed`, if
+another change came since, so what was confirmed is what is made, or the
+UI weighs it again and asks again, saying why. A
 fork of a protected environment protects its id first and writes on; a
-change in between stops it.
+change in between stops it. Its row comes well within the hour the policy
+keeps an id with none (`UNWRITTEN_FORK_MS`), or the fork is refused: a
+row written later could protect again an id the policy had let go, which
+no request is fenced on.
 
 Tests (packages/server/test/roles.test.ts): "rule 2: a reveal of plain
-values…", "rule 2: a plain value is fenced by a read…", "a role edit
-weighed from a policy another change overtook…".
+values…", "rule 2: a plain value is fenced by a read…", "rule 2: a
+protected environment renamed while a token is given…", "a role edit
+weighed from a policy another change overtook…", "a role edit confirmed
+with its preview…", "a fork of a protected environment whose row would
+come after…", and one per row of the table below.
 
 **Rule 3: a credential never holds more than its issuer held, in either
 column.** Each grant of a scope keeps the columns it resolved to at
@@ -336,10 +355,12 @@ prod protected, then Developer widened to read there
 Ada reads prod; her token still only uses it
 ```
 
-A 0.9 replica reads a scope with columns as no scope, so a credential
-0.10 issues reaches nothing there until a rolling deploy finishes:
-acceptable under R17, nobody running Coffre in production yet. 0.10 reads
-one 0.9 issued as its roles ship.
+A 0.9 app reads a scope with columns as no scope, so a credential 0.10
+issues reaches nothing there until a rolling deploy finishes; a 0.9
+vault refuses it outright (it throws on a grant it does not know, 500),
+so the vault Worker deploys with the app, or first. Acceptable under
+R17, nobody running Coffre in production yet. 0.10 reads one 0.9 issued
+as its roles ship.
 
 Tests (packages/server/test/roles.test.ts): "rule 3: a personal token
 holds no more…", "rule 3: a service token issued under a narrowed
@@ -367,3 +388,29 @@ a whole project…", "rule 4: who reads through a reference…", "a
 reference made before its source was protected…", "a person
 gives a service account a role on a whole project only if…", and "a
 service token weighed before prod was protected…".
+
+### What changes the policy
+
+Each change that can change what a decision made from the policy
+decides, and how the fence (rule 2) sees it: by the newest
+`policy.change` (seq), by the protected environments' rows read again
+by id (rows), or not at all, and why it need not. A change to this list,
+or a new way to make one, comes with its row here and its case in
+packages/server/test/roles.test.ts ("what changes the policy: …"), where
+each is made while Ada gives a token on all of market, a decision rule 4
+weighs in protected prod.
+
+| Change | Fenced by | Why |
+|---|---|---|
+| An environment protected, or unprotected | seq | the vault's `policy.change` |
+| A fork of a protected environment | seq, then rows | its id protected first, its row written after, which the forking request carries on (`rowWritten`) |
+| A role edited, made, put back or deleted; an instance role edited | seq | the vault's `policy.change` |
+| A protected environment renamed | rows | its slug is what a scoped instance role matches |
+| A protected environment deleted, or its project | rows | a deleted one protects nothing |
+| A fork's id dropped, its row never written | none | an id with no row is in no scope (null slug), and protects no place a request names |
+| An environment not protected renamed or made | none | the policy names no other environment; who holds what there is each grant's, at its slug, as the request found it |
+| An environment named again (`name`), archived or restored | none | the policy reads neither |
+| A project renamed | none | scopes, grants and the policy name projects by id |
+| A grant, a member's instance role or its scope changed | none | who holds what, not the policy: the vault decides each change to it under its head (rule 1), and a credential holds at most what its holder holds at each use (section 5) |
+| The policy unreadable (an entry forged or lost) | seq | the closed policy is the newest entry's, read as such; only an unscoped Owner writes it again |
+

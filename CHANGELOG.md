@@ -32,9 +32,13 @@
   neither a role nor its issuer, widened later, widens a credential, and
   a role narrowed narrows each at once. A personal token,
   service token or trust binding issued before 0.10 holds its roles as
-  they ship, whatever an Owner makes of them. During a rolling deploy, a
-  0.9 replica reads a credential 0.10 issued as reaching nothing. A request whose roles or
-  protected environments changed while it ran answers 409, "try again".
+  they ship, whatever an Owner makes of them. Deploy the vault Worker
+  with the app, or first: a 0.9 vault refuses every request on a
+  credential 0.10 issued (500), where a 0.9 app reads it as reaching
+  nothing. A request whose roles or protected environments changed while
+  it ran answers 409 `policy_changed`, "try again", as does a role's edit
+  confirmed with an impact preview (`?policySeq=`) another change
+  overtook.
   The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
   and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and
   `PATCH /api/projects/<p>/<e>` with `{ "protected": true }`. Migration

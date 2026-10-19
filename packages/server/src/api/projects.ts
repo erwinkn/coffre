@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { runsInstance, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
+import { runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
@@ -420,11 +420,14 @@ export async function putEnvironment(
     from,
     parentId = null,
     id = randomUUID(),
+    protectedAt,
   }: {
     from?: string;
     parentId?: string | null;
     /** Its id, made before it is: a fork's, which the vault protects first (`protectIds`), the request going on as of that. */
     id?: string;
+    /** When the vault protected that id, for a fork of a protected environment. */
+    protectedAt?: number;
   } = {},
 ): Promise<{ environment: EnvironmentView; created: boolean }> {
   const { project, environment } = place;
@@ -443,6 +446,11 @@ export async function putEnvironment(
           metadata: { environmentSlug: slug },
         }),
       );
+    }
+    // A protected fork's row comes well within the hour the policy keeps its id without one (`UNWRITTEN_FORK_MS`): later,
+    // the policy may have dropped it, and the row would protect it again with no change any request is fenced on.
+    if (protectedAt !== undefined && Date.now() - protectedAt > UNWRITTEN_FORK_MS / 2) {
+      throw conflict(`${project.slug}/${slug} took too long to fork: fork again`);
     }
     // The parent too: archived or deleted since the fork checked it, it is no parent.
     if (parentId !== null && !(await liveEnvironment(tx, parentId))) {

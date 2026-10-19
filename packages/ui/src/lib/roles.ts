@@ -160,7 +160,10 @@ export function roleNameOf(roles: readonly Pick<RoleView, 'id' | 'name'>[], id: 
  * One place is named, from its examples; more are counted.
  */
 export function impactInWords(line: ImpactLine): string {
-  const people = line.people === 1 ? '1 person' : `${line.people} people`;
+  const people = [
+    line.people > 0 ? (line.people === 1 ? '1 person' : `${line.people} people`) : null,
+    line.services > 0 ? (line.services === 1 ? '1 service account' : `${line.services} service accounts`) : null,
+  ].filter((part) => part !== null).join(' and ');
   const can = line.change === 'widens' ? 'can now' : 'can no longer';
   const wide = projectWide(line.permission);
   const count = wide ? line.projects : line.environments;
@@ -179,7 +182,7 @@ function placeOf(example: string | undefined): string | null {
 
 /** Who an impact line reaches, for its note: `ada@acme.example on market/prod, bo@acme.example on market/prod`. */
 export function impactExamples(line: ImpactLine): string | null {
-  return line.examples.length === 0 ? null : `${line.examples.join(', ')}${line.people > line.examples.length ? ', …' : ''}`;
+  return line.examples.length === 0 ? null : `${line.examples.join(', ')}${line.people + line.services > line.examples.length ? ', …' : ''}`;
 }
 
 /**

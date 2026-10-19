@@ -5,6 +5,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import { liveEnvironmentSlugs } from '../db/queries.ts';
 import { can, newestPolicySeq, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
@@ -160,7 +161,7 @@ export class Refusal extends Error {
  * was turned away is half of what an audit log is for.
  */
 export async function audited<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq'> },
+  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq' | 'policy'> },
   work: (tx: Transaction, log: AuditEntry[]) => Promise<T>,
 ): Promise<T> {
   try {
@@ -192,9 +193,25 @@ export async function audited<T>(
  *   caller loaded, prod not protected (newest change 41)
  *   a Maintainer protects prod                           change 57
  *   the fork's transaction, under the head: 57, not 41   409; asked again, the fork is protected
+ *
+ * The policy names its protected environments by id, and reads each one's
+ * slug, which a scoped instance role's filters match, from its row
+ * (`livePolicy`). So the rows are read again here, by id: a protected
+ * environment renamed, deleted, or written since (a fork's, protected
+ * before its row) is a policy changed, with no entry of its own to say so,
+ * and nothing that renames or deletes one has to remember to write one
+ * (docs/design/roles.md, "What changes the policy").
+ *
+ *   Ada, a Developer of market and Owner of every prod, gives a token on market
+ *   meanwhile prod is renamed staging, which her Owner role does not reach
+ *   her transaction, under the head: staging, not prod   409; asked again, she is refused
  */
-export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq'> }, db: Queryable): Promise<void> {
-  if ((await newestPolicySeq(db)) === ctx.caller.policySeq) return;
+export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq' | 'policy'> }, db: Queryable): Promise<void> {
+  const { policy, policySeq } = ctx.caller;
+  const read = Object.values(policy.protectedIn).flat();
+  const slugs = await liveEnvironmentSlugs(db, read.map((place) => place.environmentId));
+  const moved = read.some(({ environmentId, slug }) => (slugs.get(environmentId) ?? null) !== slug);
+  if (!moved && (await newestPolicySeq(db)) === policySeq) return;
   throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
 }
 

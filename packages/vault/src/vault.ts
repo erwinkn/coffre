@@ -28,6 +28,7 @@ import {
   ROLES,
   runsInstance,
   setsUpServices,
+  UNWRITTEN_FORK_MS,
   type Holdings,
   type InstanceRole,
   type Permission,
@@ -250,8 +251,6 @@ type PolicyEdits = { roles: Record<string, RoleDefinition>; instanceRoles: Parti
  */
 type ProtectedPlace = { projectId: string; environmentId: string; at: number };
 
-/** How long an id protected before its row exists waits for it: a fork in flight writes its row in far less. */
-const UNWRITTEN_FORK_MS = 60 * 60 * 1000;
 
 const NO_EDITS: PolicyEdits = { roles: {}, instanceRoles: {}, protected: [] };
 

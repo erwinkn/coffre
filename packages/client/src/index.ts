@@ -115,6 +115,14 @@ function place(path: string): { project: string; environment: string; key: strin
   return { project, environment, key };
 }
 
+/** A role's change confirmed: an instance role's, and the `policySeq` its preview answered with. */
+type Confirmed = { instance?: boolean; policySeq?: number | null };
+
+/** `?policySeq=57`, `?policySeq=none`, or nothing for a change asked without its preview. */
+function asPreviewed(policySeq: number | null | undefined): string {
+  return policySeq === undefined ? '' : `?policySeq=${policySeq === null ? 'none' : policySeq}`;
+}
+
 export function createClient(options: ClientOptions) {
   const origin = options.url.replace(/\/+$/, '');
   const transport =
@@ -419,17 +427,25 @@ export function createClient(options: ClientOptions) {
         const [method, route] = instance ? address('PUT /instance-roles/:role', { role }) : address('PUT /roles/:role', { role });
         return send(method, `${route}?dryRun=1`, definition) as Promise<RoleImpact>;
       },
-      /** A built-in role edited, or one an Owner makes. */
-      set: (role: string, definition: RouteInput<'PUT /roles/:role'>, { instance = false } = {}) =>
-        (instance ? call('PUT /instance-roles/:role', { role }, definition) : call('PUT /roles/:role', { role }, definition)) as Promise<{ role: RouteOutput<'GET /roles'>['roles'][number] | null }>,
+      /**
+       * A built-in role edited, or one an Owner makes. With its preview's
+       * `policySeq`, made as previewed, or refused (409 `policy_changed`)
+       * if the policy changed since: preview it again.
+       */
+      set: (role: string, definition: RouteInput<'PUT /roles/:role'>, { instance = false, policySeq }: Confirmed = {}) => {
+        const [method, route] = instance ? address('PUT /instance-roles/:role', { role }) : address('PUT /roles/:role', { role });
+        return send(method, `${route}${asPreviewed(policySeq)}`, definition) as Promise<{ role: RouteOutput<'GET /roles'>['roles'][number] | null }>;
+      },
       /** What putting it back as it ships, or deleting one an Owner made, would do; changes nothing. */
       previewReset: (role: string, { instance = false } = {}) => {
         const [method, route] = instance ? address('DELETE /instance-roles/:role', { role }) : address('DELETE /roles/:role', { role });
         return send(method, `${route}?dryRun=1`, undefined) as Promise<RoleImpact>;
       },
-      /** A built-in role back as it ships; one an Owner made, deleted, while no grant names it. */
-      reset: (role: string, { instance = false } = {}) =>
-        (instance ? call('DELETE /instance-roles/:role', { role }) : call('DELETE /roles/:role', { role })) as Promise<{ role: RouteOutput<'GET /roles'>['roles'][number] | null }>,
+      /** A built-in role back as it ships; one an Owner made, deleted, while no grant names it. With its preview's `policySeq`, as `set`. */
+      reset: (role: string, { instance = false, policySeq }: Confirmed = {}) => {
+        const [method, route] = instance ? address('DELETE /instance-roles/:role', { role }) : address('DELETE /roles/:role', { role });
+        return send(method, `${route}${asPreviewed(policySeq)}`, undefined) as Promise<{ role: RouteOutput<'GET /roles'>['roles'][number] | null }>;
+      },
     },
 
     /** The instance's settings, for those who run it: where people set up service accounts themselves. */

@@ -85,7 +85,7 @@ test("a new role's id follows its name, and is checked as the server checks it",
 });
 
 test('an impact reads in words, a single place by its path', () => {
-  const line = { change: 'widens', permission: 'secret.read', protected: true, people: 6, environments: 4, projects: 2, examples: ['ada@acme.example on market/prod'] } as const;
+  const line = { change: 'widens', permission: 'secret.read', protected: true, people: 6, services: 0, environments: 4, projects: 2, examples: ['ada@acme.example on market/prod'] } as const;
   assert.equal(impactInWords(line), '6 people can now read values in 4 protected environments');
   assert.equal(
     impactInWords({ ...line, change: 'narrows', permission: 'secret.write', protected: false, people: 1, environments: 1, examples: ['ada@acme.example on market/dev'] }),
@@ -96,6 +96,8 @@ test('an impact reads in words, a single place by its path', () => {
     '2 people can now manage access on market',
   );
   assert.equal(impactInWords({ ...line, permission: 'environment.manage', protected: false, environments: 0, projects: 3 }), '6 people can now manage environments on 3 projects');
+  assert.equal(impactInWords({ ...line, people: 0, services: 1 }), '1 service account can now read values in 4 protected environments');
+  assert.equal(impactInWords({ ...line, services: 2 }), '6 people and 2 service accounts can now read values in 4 protected environments');
 });
 
 test('protecting is said by what a Developer keeps, or by any role whose columns differ', () => {

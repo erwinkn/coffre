@@ -209,6 +209,14 @@ export type Policy = {
 /** The policy before any Owner edits it: every role as it ships, and no environment protected. */
 export const DEFAULT_POLICY: Policy = { roles: ROLES, instanceRoles: INSTANCE_ROLES, protected: [], protectedIn: {} };
 
+/**
+ * How long the policy keeps an environment's id protected before its row
+ * is written, a fork's in flight, which writes it in far less; one with no
+ * row after that is a fork refused or abandoned. A fork writes its row only
+ * well within it, so no row ever brings back an id the policy dropped.
+ */
+export const UNWRITTEN_FORK_MS = 60 * 60 * 1000;
+
 /** The roles an Owner may not edit: Owner, which holds everything, and the instance's Member, which holds nothing. */
 export const FIXED_ROLES = { roles: ['owner'] as readonly string[], instanceRoles: ['owner', 'member'] as readonly InstanceRole[] };
 

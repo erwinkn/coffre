@@ -329,7 +329,7 @@ test("a credential keeps what its role held when it was issued, both columns: a 
  * it whose input `when` picks: after the request that asked loaded its
  * caller, and before it commits.
  */
-function meanwhileOn(method: 'access' | 'unwrap', when: (input: unknown) => boolean, meanwhile: () => Promise<unknown>): void {
+function meanwhileOn(method: 'access' | 'unwrap' | 'changePolicy', when: (input: unknown) => boolean, meanwhile: () => Promise<unknown>): void {
   const vault = deps.vault;
   let done = false;
   deps.vault = new Proxy(vault, {
@@ -516,4 +516,102 @@ test('rule 2: a plain value is fenced by a read of the newest policy change, whi
     release();
     await writing;
   }
+});
+
+// What changes the policy (docs/design/roles.md, "What changes the policy"): every change that can change what a decision
+// made from it decides, each made while a request decided from the policy before it is in flight. Ada, a Developer of
+// market and an Owner of every prod, gives a Viewer of all of market a token, which she may only as she holds Viewer in
+// protected prod too (rule 4). One the policy is changed by refuses her request, 409 `policy_changed`, by its newest
+// `policy.change` (seq) or by its protected environments' rows (rows), read again by id; one it cannot be changed by
+// commits it.
+const CHANGES: { change: string; by: 'seq' | 'rows' | 'nothing'; make: () => Promise<unknown> }[] = [
+  { change: 'an environment protected', by: 'seq', make: () => maya.environments.protect('market/dev') },
+  { change: 'an environment unprotected', by: 'seq', make: () => root.environments.protect('market/prod', false) },
+  { change: 'a fork of a protected environment, protected before its row', by: 'seq', make: () => root.environments.create('market/prod-next', { from: 'prod', inherit: true }) },
+  { change: 'a role edited', by: 'seq', make: () => root.roles.set('viewer', READS_PROTECTED) },
+  { change: 'a role made', by: 'seq', make: () => root.roles.set('release-manager', { ...READS_PROTECTED, name: 'Release manager' }) },
+  { change: 'an instance role edited', by: 'seq', make: () => root.roles.set('auditor', { name: 'Auditor', description: '', permissions: ['audit.read'], protected: [] }, { instance: true }) },
+  { change: 'a protected environment renamed', by: 'rows', make: () => root.environments.update('market/prod', { slug: 'staging' }) },
+  {
+    change: 'a protected environment deleted',
+    by: 'rows',
+    make: async () => {
+      await root.environments.update('market/prod', { archived: true });
+      await root.environments.delete('market/prod');
+    },
+  },
+  // The policy reads no name but a protected environment's slug, and no archive.
+  { change: 'an environment not protected renamed', by: 'nothing', make: () => root.environments.update('market/dev', { slug: 'development' }) },
+  { change: 'a protected environment named again', by: 'nothing', make: () => root.environments.update('market/prod', { name: 'Production' }) },
+  { change: 'a protected environment archived', by: 'nothing', make: () => root.environments.update('market/prod', { archived: true }) },
+  { change: 'a project renamed: scopes name projects by id', by: 'nothing', make: () => root.projects.update('market', { slug: 'shop' }) },
+  { change: 'an environment made', by: 'nothing', make: () => root.environments.create('market/qa') },
+  // Who holds what is no policy: the vault decides each grant under its head, and a credential holds at most what its
+  // holder holds at each use.
+  { change: "another member's grant changed", by: 'nothing', make: () => root.access.set(VIC, { market: 'developer' }) },
+];
+
+for (const { change, by, make } of CHANGES) {
+  test(`what changes the policy: ${change}, while a token is given, ${by === 'nothing' ? 'leaves it given' : `refuses it (${by})`}`, async () => {
+    await maya.environments.protect('market/prod');
+    await root.members.add(ADA, { role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } });
+    await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
+    meanwhileOn('access', (asked) => asked === ADA, make);
+    const issued = await refusal(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 }));
+    assert.deepEqual(issued, by === 'nothing' ? { status: 200 } : { status: 409, reason: 'policy_changed' });
+  });
+}
+
+test('rule 2: a protected environment renamed while a token is given, out of the reach of the role it was given by, is refused, and asked again, not given', async () => {
+  await maya.environments.protect('market/prod');
+  await root.members.add(ADA, { role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } });
+  await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
+  meanwhileOn('access', (asked) => asked === ADA, () => root.environments.update('market/prod', { slug: 'staging' }));
+  assert.deepEqual(await refusal(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), { status: 409, reason: 'policy_changed' });
+  assert.deepEqual((await root.tokens.list('token:ci-all')).tokens, []);
+  // Asked again: staging, protected, is not prod, and Ada, a Developer there, only uses it.
+  assert.equal(await status(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), 403);
+});
+
+test('a role edit confirmed with its preview is made as previewed, or refused, policy_changed, once another change came between', async () => {
+  const preview = await root.roles.preview('viewer', READS_PROTECTED);
+  assert.equal(preview.sentence, 'Changes what nobody holds');
+  await maya.environments.protect('market/prod');
+  // What the preview said is no longer what it does: Vic would read prod.
+  assert.deepEqual(await refusal(root.roles.set('viewer', READS_PROTECTED, { policySeq: preview.policySeq })), { status: 409, reason: 'policy_changed' });
+  assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, false);
+  const again = await root.roles.preview('viewer', READS_PROTECTED);
+  assert.match(again.sentence, /^Widens secret.read for 1 person on market\/prod, protected/);
+  await root.roles.set('viewer', READS_PROTECTED, { policySeq: again.policySeq });
+  assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, true);
+  // A reset, the same way.
+  const reset = await root.roles.previewReset('viewer');
+  await maya.environments.protect('market/dev');
+  assert.deepEqual(await refusal(root.roles.reset('viewer', { policySeq: reset.policySeq })), { status: 409, reason: 'policy_changed' });
+});
+
+test("a role's impact counts the service accounts it reaches, which hold its first column in a protected environment too", async () => {
+  await maya.environments.protect('market/prod');
+  const narrowed = { name: 'Viewer', description: '', permissions: ['secret.use'], protected: ['secret.use'] } as Parameters<CoffreClient['roles']['set']>[1];
+  const { impact, sentence } = await root.roles.preview('viewer', narrowed);
+  const read = impact.find((line) => line.change === 'narrows' && line.permission === 'secret.read')!;
+  // Vic reads dev; ci, a Viewer of prod, reads prod, as a service account does where it is protected.
+  assert.deepEqual([read.people, read.services], [1, 0]);
+  const there = impact.find((line) => line.change === 'narrows' && line.permission === 'secret.read' && line.protected)!;
+  assert.deepEqual([there.people, there.services, there.examples], [0, 1, [`${CI} on market/prod`]]);
+  assert.match(sentence, /narrows secret.read for 1 service account on market\/prod, protected/);
+});
+
+test('a fork of a protected environment whose row would come after the policy may have let its id go is refused, and nothing is made', async () => {
+  await maya.environments.protect('market/prod');
+  const now = Date.now;
+  meanwhileOn('changePolicy', () => true, async () => {
+    Date.now = () => now() + 31 * 60 * 1000;
+  });
+  try {
+    assert.equal(await status(root.environments.create('market/prod-next', { from: 'prod', inherit: true })), 409);
+  } finally {
+    Date.now = now;
+  }
+  assert.equal((await root.projects.list()).projects[0]!.environments.some((each) => each.slug === 'prod-next'), false);
 });

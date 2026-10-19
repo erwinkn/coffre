@@ -24,7 +24,7 @@ import {
 } from '@coffre/core/access';
 import type { PolicyChange } from '@coffre/core/vault';
 
-import { peopleHoldings, places, roleHolders, type ResolvedPath } from '../db/queries.ts';
+import { memberHoldings, places, roleHolders, type ResolvedPath } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { placeOf } from './caller.ts';
 import { denied, POLICY_CHANGED, Refusal, withRefusals, type ApiContext } from './context.ts';
@@ -66,14 +66,21 @@ export type ImpactLine = {
   /** In protected environments; always false for a project-wide permission. */
   protected: boolean;
   people: number;
+  /** Service accounts it reaches, which hold a role's first column, in a protected environment too. */
+  services: number;
   /** Environments it changes at; 0 for a project-wide permission, which `projects` counts. */
   environments: number;
   projects: number;
-  /** A few of them, `ada@acme.example on market/prod`. */
+  /** A few of them, `ada@acme.example on market/prod`, `service:deploy on market/prod`. */
   examples: string[];
 };
 
-export type RoleImpact = { impact: ImpactLine[]; sentence: string };
+/**
+ * What a change to a role would do, and the policy it was weighed from, by
+ * its newest `policy.change` (null for none): the change, confirmed with
+ * it, is made from that policy or refused (`changeRole`).
+ */
+export type RoleImpact = { impact: ImpactLine[]; sentence: string; policySeq: number | null };
 
 /** What a role definition is sent as. */
 export type RoleInput = { name: string; description: string; permissions: Permission[]; protected: Permission[] };
@@ -144,7 +151,7 @@ export async function changeRole(
   kind: Kind,
   id: string,
   definition: RoleInput | null,
-  { dryRun }: { dryRun: boolean },
+  { dryRun, policySeq = seqOf(ctx.caller.policySeq) }: { dryRun: boolean; policySeq?: number | null },
 ): Promise<RoleImpact | { role: RoleView | null }> {
   return withRefusals(ctx, async () => {
     const change = proposed(ctx, kind, id, definition);
@@ -159,12 +166,13 @@ export async function changeRole(
         );
       }
     }
-    if (dryRun) return roleImpact(ctx, before, after(before, change), change);
+    if (dryRun) return { ...await roleImpact(ctx, before, after(before, change), change), policySeq: seqOf(ctx.caller.policySeq) };
     const result = await ctx.vault.changePolicy({
       actor: formatMember(ctx.caller.principal),
       change,
-      // Weighed, and previewed, from the caller's policy: refused, to be asked again, if another change came since.
-      policySeq: ctx.caller.policySeq === null ? null : Number(ctx.caller.policySeq),
+      // Weighed from the policy its preview was, or else the caller's: refused, to be asked again, if another change came
+      // since. What was confirmed is what is made.
+      policySeq,
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
@@ -217,39 +225,41 @@ function after(policy: Policy, change: Extract<PolicyChange, { kind: 'role' | 'i
 const EXAMPLES = 3;
 
 /**
- * What changing a role would do: for every person it reaches, by a grant
- * naming it or as their instance role, at every place they could hold it,
+ * What changing a role would do: for every person and service account it
+ * reaches, by a grant naming it or as a person's instance role, at every
+ * place they could hold it,
  * what they hold with the policy as it is and as it would be, summed by
  * permission, direction, and whether the environment is protected. A
  * display of the rules (`allows`), from the rows as stored; the vault
  * decides. Personal configs are their owners', and left out.
  */
-async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change: Extract<PolicyChange, { kind: 'role' | 'instance-role' }>): Promise<RoleImpact> {
-  const [people, known] = await Promise.all([peopleHoldings(ctx.db, new Date()), places(ctx.db)]);
-  const lines = new Map<string, { line: Omit<ImpactLine, 'people' | 'environments' | 'projects' | 'examples'>; people: Set<string>; places: Set<string>; projects: Set<string>; examples: string[] }>();
-  const note = (change: ImpactLine['change'], permission: Permission, guarded: boolean, person: string, path: string, project: string) => {
+async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change: Extract<PolicyChange, { kind: 'role' | 'instance-role' }>): Promise<Omit<RoleImpact, 'policySeq'>> {
+  const [members, known] = await Promise.all([memberHoldings(ctx.db, new Date()), places(ctx.db)]);
+  type Lines = { line: Omit<ImpactLine, 'people' | 'services' | 'environments' | 'projects' | 'examples'>; people: Set<string>; services: Set<string>; places: Set<string>; projects: Set<string>; examples: string[] };
+  const lines = new Map<string, Lines>();
+  const note = (change: ImpactLine['change'], permission: Permission, guarded: boolean, member: { principal: string; service: boolean }, path: string, project: string) => {
     const key = `${change} ${permission} ${guarded}`;
-    const entry = lines.get(key) ?? { line: { change, permission, protected: guarded }, people: new Set(), places: new Set(), projects: new Set(), examples: [] };
+    const entry = lines.get(key) ?? { line: { change, permission, protected: guarded }, people: new Set(), services: new Set(), places: new Set(), projects: new Set(), examples: [] };
     lines.set(key, entry);
-    entry.people.add(person);
+    (member.service ? entry.services : entry.people).add(member.principal);
     entry.places.add(path);
     entry.projects.add(project);
-    if (entry.examples.length < EXAMPLES) entry.examples.push(`${person.replace(/^user:/, '')} on ${path}`);
+    if (entry.examples.length < EXAMPLES) entry.examples.push(`${member.principal.replace(/^user:/, '')} on ${path}`);
   };
-  for (const person of people) {
+  for (const person of members) {
     const grants = person.grants.filter((grant) => grantKind(grant) !== null).map(({ projectId, environmentId, role }) => ({ projectId: projectId!, environmentId, role }));
     // A project role reaches only the projects its grants are on; an instance role, every one its scope takes in.
     const reached = change.kind === 'instance-role'
       ? (person.role === change.role ? known : [])
       : known.filter((project) => grants.some((grant) => grant.role === change.role && grant.projectId === project.id));
     if (reached.length === 0) continue;
-    const held: Holdings = { role: person.role, scope: person.scope, grants, credentialScope: null, service: false };
+    const held: Holdings = { role: person.role, scope: person.scope, grants, credentialScope: null, service: person.service };
     const was = { ...held, policy: before };
     const will = { ...held, policy: next };
     const weigh = (permissions: readonly Permission[], place: ReturnType<typeof placeOf>, path: string, project: string, guarded: boolean) => {
       for (const permission of permissions) {
         const [then, now] = [allows(was, permission, place), allows(will, permission, place)];
-        if (then !== now) note(now ? 'widens' : 'narrows', permission, guarded, person.principal, path, project);
+        if (then !== now) note(now ? 'widens' : 'narrows', permission, guarded, person, path, project);
       }
     };
     for (const project of reached) {
@@ -263,9 +273,9 @@ async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change:
   }
   const order = (line: ImpactLine) => [line.change === 'widens' ? 0 : 1, PERMISSIONS.indexOf(line.permission), Number(line.protected)];
   const weighed = [...lines.values()]
-    .map(({ line, people: who, places: where, projects, examples }) => {
+    .map(({ line, people: who, services, places: where, projects, examples }) => {
       const wide = PROJECT_ONLY_PERMISSIONS.includes(line.permission);
-      const impact: ImpactLine = { ...line, people: who.size, environments: wide ? 0 : where.size, projects: projects.size, examples };
+      const impact: ImpactLine = { ...line, people: who.size, services: services.size, environments: wide ? 0 : where.size, projects: projects.size, examples };
       return { impact, only: where.size === 1 ? [...where][0]! : null };
     })
     .sort((a, b) => {
@@ -273,6 +283,15 @@ async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change:
       return x[0]! - y[0]! || x[1]! - y[1]! || x[2]! - y[2]!;
     });
   return { impact: weighed.map(({ impact }) => impact), sentence: impactSentence(weighed) };
+}
+
+/** Whom an impact line reaches: `6 people`, `1 service account`, `2 people and 1 service account`. */
+function whoInWords({ people, services }: Pick<ImpactLine, 'people' | 'services'>): string {
+  const named = [
+    people > 0 ? `${people} ${people === 1 ? 'person' : 'people'}` : null,
+    services > 0 ? `${services} service account${services === 1 ? '' : 's'}` : null,
+  ];
+  return named.filter((part) => part !== null).join(' and ');
 }
 
 /**
@@ -283,7 +302,7 @@ async function roleImpact(ctx: ApiContext, before: Policy, next: Policy, change:
 function impactSentence(weighed: readonly { impact: ImpactLine; only: string | null }[]): string {
   if (weighed.length === 0) return 'Changes what nobody holds';
   const sentence = weighed.map(({ impact: line, only }) => {
-    const people = `${line.people} ${line.people === 1 ? 'person' : 'people'}`;
+    const people = whoInWords(line);
     const wide = PROJECT_ONLY_PERMISSIONS.includes(line.permission);
     const count = wide ? line.projects : line.environments;
     const where = only !== null
@@ -322,7 +341,7 @@ export async function protectIds(ctx: ApiContext, projectId: string, environment
   const result = await ctx.vault.changePolicy({
     actor: formatMember(ctx.caller.principal),
     change: { kind: 'protect', projectId, environmentIds, protected: on },
-    policySeq: ctx.caller.policySeq === null ? null : Number(ctx.caller.policySeq),
+    policySeq: seqOf(ctx.caller.policySeq),
     requestId: ctx.requestId,
     operationId: randomUUID(),
     credentialId: ctx.provenance,
@@ -330,6 +349,24 @@ export async function protectIds(ctx: ApiContext, projectId: string, environment
   });
   if (!result.ok) throw policyRefused(result.refusal);
   return { ...ctx, caller: { ...ctx.caller, policy: result.policy, policySeq: result.seq === null ? null : BigInt(result.seq) } };
+}
+
+/**
+ * The request as of its fork's row, written: the policy reads a protected
+ * id's slug from its row (`livePolicy`), which the request's own later
+ * transactions are fenced on (`policyStill`), as the policy is read now.
+ */
+export function rowWritten(ctx: ApiContext, environmentId: string | undefined, slug: string): ApiContext {
+  const { policy } = ctx.caller;
+  if (environmentId === undefined || !protects(policy, environmentId)) return ctx;
+  const protectedIn = Object.fromEntries(Object.entries(policy.protectedIn).map(([projectId, places]) =>
+    [projectId, places.map((place) => (place.environmentId === environmentId ? { environmentId, slug } : place))]));
+  return { ...ctx, caller: { ...ctx.caller, policy: { ...policy, protectedIn } } };
+}
+
+/** A `policy.change`'s number as the vault is told it. */
+function seqOf(seq: bigint | null): number | null {
+  return seq === null ? null : Number(seq);
 }
 
 /**

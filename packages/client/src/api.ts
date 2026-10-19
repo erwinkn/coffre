@@ -1439,11 +1439,13 @@ export type Api = {
         permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
+        services: number;
         environments: number;
         projects: number;
         examples: string[];
       }[];
       sentence: string;
+      policySeq: number | null;
     } | {
       role: null | {
         name: string;
@@ -1473,11 +1475,13 @@ export type Api = {
         permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
+        services: number;
         environments: number;
         projects: number;
         examples: string[];
       }[];
       sentence: string;
+      policySeq: number | null;
     } | {
       role: null | {
         name: string;
@@ -1512,11 +1516,13 @@ export type Api = {
         permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
+        services: number;
         environments: number;
         projects: number;
         examples: string[];
       }[];
       sentence: string;
+      policySeq: number | null;
     } | {
       role: null | {
         name: string;
@@ -1546,11 +1552,13 @@ export type Api = {
         permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
+        services: number;
         environments: number;
         projects: number;
         examples: string[];
       }[];
       sentence: string;
+      policySeq: number | null;
     } | {
       role: null | {
         name: string;
@@ -2155,6 +2163,7 @@ export type ImpactLine = {
   permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
   protected: boolean;
   people: number;
+  services: number;
   environments: number;
   projects: number;
   examples: string[];
@@ -2166,11 +2175,13 @@ export type RoleImpact = {
     permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
     protected: boolean;
     people: number;
+    services: number;
     environments: number;
     projects: number;
     examples: string[];
   }[];
   sentence: string;
+  policySeq: number | null;
 };
 
 export type RoleView = {

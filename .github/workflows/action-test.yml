@@ -96,7 +96,7 @@ jobs:
       - name: Check other bundled CLI commands on the caller's Node
         run: |
           cli="$RUNNER_TEMP/coffre-action-consumer/node_modules/@coffre/cli/dist/main.js"
-          node "$cli" roles > /dev/null
+          node "$cli" help > /dev/null
           node "$cli" keys --json > /dev/null
           node "$cli" init --node "$RUNNER_TEMP/coffre-action-generated" > /dev/null
       - name: Stop on an environment that lacks its siblings' keys

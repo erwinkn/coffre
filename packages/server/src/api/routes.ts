@@ -105,6 +105,19 @@ const environmentPatch = placePatch.extend({ slug: environmentSlug.optional(), p
 /** `?dryRun=1`: what the call would do, without doing it. Any other query is refused, not ignored. */
 const dryRunFlag = z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict();
 
+/**
+ * A role's change: `?dryRun=1` weighs it, and `?policySeq=57` (or `none`),
+ * its preview's, confirms it as weighed: refused, 409 `policy_changed`, if
+ * the policy changed since.
+ */
+const roleChangeQuery = dryRunFlag.extend({ policySeq: z.string().regex(/^(none|[1-9][0-9]{0,15})$/).optional() }).strict();
+
+function roleChange(query: z.infer<typeof roleChangeQuery>): { dryRun: boolean; policySeq?: number | null } {
+  const dryRun = query.dryRun !== undefined;
+  if (query.policySeq === undefined) return { dryRun };
+  return { dryRun, policySeq: query.policySeq === 'none' ? null : Number(query.policySeq) };
+}
+
 const secretValue = z
   .string()
   .max(64 * 1024)
@@ -565,26 +578,26 @@ export const routes = {
   ...route('GET /roles', { run: (ctx) => listRoles(ctx) }),
   ...route('PUT /roles/:role', {
     input: roleDefinition,
-    query: dryRunFlag,
+    query: roleChangeQuery,
     run: (ctx, { params, input, query }): Promise<RoleImpact | { role: RoleView | null }> =>
-      changeRole(ctx, 'role', params.role, input, { dryRun: query.dryRun !== undefined }),
+      changeRole(ctx, 'role', params.role, input, roleChange(query)),
   }),
   // A built-in role back as it ships; one an Owner made, deleted, while no grant names it (409).
   ...route('DELETE /roles/:role', {
-    query: dryRunFlag,
+    query: roleChangeQuery,
     run: (ctx, { params, query }): Promise<RoleImpact | { role: RoleView | null }> =>
-      changeRole(ctx, 'role', params.role, null, { dryRun: query.dryRun !== undefined }),
+      changeRole(ctx, 'role', params.role, null, roleChange(query)),
   }),
   ...route('PUT /instance-roles/:role', {
     input: roleDefinition,
-    query: dryRunFlag,
+    query: roleChangeQuery,
     run: (ctx, { params, input, query }): Promise<RoleImpact | { role: RoleView | null }> =>
-      changeRole(ctx, 'instance-role', params.role, input, { dryRun: query.dryRun !== undefined }),
+      changeRole(ctx, 'instance-role', params.role, input, roleChange(query)),
   }),
   ...route('DELETE /instance-roles/:role', {
-    query: dryRunFlag,
+    query: roleChangeQuery,
     run: (ctx, { params, query }): Promise<RoleImpact | { role: RoleView | null }> =>
-      changeRole(ctx, 'instance-role', params.role, null, { dryRun: query.dryRun !== undefined }),
+      changeRole(ctx, 'instance-role', params.role, null, roleChange(query)),
   }),
   // The instance's settings: where people set up service accounts themselves.
   ...route('GET /settings', {

@@ -1,5 +1,5 @@
 import { useId, useState } from 'react';
-import type { RoleImpact, RoleView } from '@coffre/client';
+import { CoffreError, type RoleImpact, type RoleView } from '@coffre/client';
 import { definitionProblem, type Permission, type RoleDefinition } from '@coffre/core/access';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -157,8 +157,8 @@ function RoleBadges({ role }: { role: RoleView }) {
 
 type Draft = RoleDefinition & Columns & { id: string };
 
-/** A change asked for, weighed, waiting for its confirmation. */
-type Pending = { action: 'save' | 'reset' | 'delete'; impact: RoleImpact };
+/** A change asked for, weighed, waiting for its confirmation: `again` once the policy it was first weighed from changed. */
+type Pending = { action: 'save' | 'reset' | 'delete'; impact: RoleImpact; again?: boolean };
 
 /**
  * One role's editor, or a new one's: its name, description and grid, and
@@ -212,26 +212,37 @@ function RoleEditor({
   };
 
   /** Ask what an action would do; the confirmation shows it. */
-  function ask(action: Pending['action']) {
+  function ask(action: Pending['action'], again = false) {
     void weigh.run(
       () => (action === 'save' ? coffre.roles.preview(draft.id, definition, { instance }) : coffre.roles.previewReset(draft.id, { instance })),
       {
         affects: [],
         onSuccess: (impact) => {
-          setPending({ action, impact });
+          setPending({ action, impact, again });
           setAsking(true);
         },
       },
     );
   }
 
-  function confirm({ action }: Pending) {
+  /** Do what was confirmed, as it was weighed: the policy changed since, it is weighed again, and asked again. */
+  function confirm({ action, impact }: Pending) {
     const name = action === 'save' ? definition.name : label;
+    const confirmed = { instance, policySeq: impact.policySeq };
     void apply.run(
-      () => (action === 'save' ? coffre.roles.set(draft.id, definition, { instance }) : coffre.roles.reset(draft.id, { instance })),
+      async () => {
+        try {
+          await (action === 'save' ? coffre.roles.set(draft.id, definition, confirmed) : coffre.roles.reset(draft.id, confirmed));
+          return true;
+        } catch (failure) {
+          if (failure instanceof CoffreError && failure.reason === 'policy_changed') return false;
+          throw failure;
+        }
+      },
       {
-        affects: affects.roles(),
-        onSuccess: () => {
+        affects: (saved) => (saved ? affects.roles() : []),
+        onSuccess: (saved) => {
+          if (!saved) return ask(action, true);
           toast.success(
             action === 'delete'
               ? `Deleted the ${name} role`
@@ -425,15 +436,20 @@ function RoleEditor({
   );
 }
 
-/** What a change does, before its lines: whether it reaches anyone now. */
-function impactLead({ action, impact }: Pending): string {
+/** What a change does, before its lines: whether it reaches anyone now, and, weighed again, why. */
+function impactLead(pending: Pending): string {
+  const lead = impactNow(pending);
+  return pending.again === true ? `The roles or protected environments changed since you asked: this is what it does now. ${lead}` : lead;
+}
+
+function impactNow({ action, impact }: Pending): string {
   const logged = 'It is logged, with the role as it was.';
   if (impact.impact.length === 0) {
     return action === 'delete'
       ? `No grant names it, so nobody loses anything. ${logged}`
       : `Nobody holds more or less for it today: it applies to whoever holds the role from now on. ${logged}`;
   }
-  return `It applies at once to everyone the role reaches; tokens issued before keep at most what they held. These count people: service accounts that hold the role change with it too. ${logged}`;
+  return `It applies at once to everyone the role reaches, people and service accounts; tokens issued before keep at most what they held. ${logged}`;
 }
 
 /** A change's impact, line by line, with whom each reaches. */

@@ -6,7 +6,7 @@ import { asking, audited, need, withRefusals, type ApiContext } from './context.
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
-import { protectedFor, protectIds } from './roles.ts';
+import { protectedFor, protectIds, rowWritten } from './roles.ts';
 import { protectedSources, readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
@@ -73,8 +73,9 @@ export async function forkEnvironment(
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
     // From here, as of the protection it made, if any: each transaction below commits only while that is the newest change.
-    const { ctx: forking, id } = await protectedFork(ctx, place, source);
-    const { environment, created } = await putEnvironment(forking, place, slug, { name: input.name }, { from, id });
+    const { ctx: protecting, id, protectedAt } = await protectedFork(ctx, place, source);
+    const { environment, created } = await putEnvironment(protecting, place, slug, { name: input.name }, { from, id, protectedAt });
+    const forking = rowWritten(protecting, id, slug);
     const copies = readable.items.filter((item) => !plan.has(item.key));
     // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
     const opened = await openValues(forking.vault, { ...asking(forking, randomUUID()), purpose: 'copy', keepsSensitive: true }, copies);
@@ -139,8 +140,8 @@ async function inheritFrom(
   if (above === null || above.length >= MAX_PARENTS) {
     throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);
   }
-  const { ctx: forking, id } = await protectedFork(ctx, place, parent);
-  const { environment, created } = await putEnvironment(forking, place, slug, { name }, { from, parentId: parent.environment!.id, id });
+  const { ctx: forking, id, protectedAt } = await protectedFork(ctx, place, parent);
+  const { environment, created } = await putEnvironment(forking, place, slug, { name }, { from, parentId: parent.environment!.id, id, protectedAt });
   return { environment, created, forked: { from, keys: 0, references: 0, copied: [], inherits: true } };
 }
 
@@ -153,10 +154,11 @@ async function inheritFrom(
  * written, and its values copied, only while no policy change came since
  * (`audited`): its source protected meanwhile, the fork would not be.
  */
-async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ ctx: ApiContext; id?: string }> {
+async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ ctx: ApiContext; id?: string; protectedAt?: number }> {
   if (!protectedFor(ctx.caller, source.environment!)) return { ctx };
   const id = place.environment?.id ?? randomUUID();
-  return { ctx: await protectIds(ctx, place.project.id, [id]), id };
+  const protectedAt = Date.now();
+  return { ctx: await protectIds(ctx, place.project.id, [id]), id, protectedAt };
 }
 
 /**
