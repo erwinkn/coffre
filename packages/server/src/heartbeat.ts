@@ -40,12 +40,14 @@ export async function writeAuditHeartbeat(
   log: HeartbeatLogger,
 ): Promise<boolean> {
   let verified: ChainPoint = CHAIN_START;
+  let broken: { seq: number; reason: string } | null = null;
   try {
     verified = await db.transaction(async (tx) => {
       const from = await attested(tx, chainKey);
       const walked = await walkChain(tx, chainKey, from);
       if (walked.ok) return walked.at;
-      log.warn({ failedAtSeq: Number(walked.failedAtSeq), reason: walked.reason }, 'the audit log does not verify from the last heartbeat');
+      broken = { seq: Number(walked.failedAtSeq), reason: walked.reason };
+      log.warn({ failedAtSeq: broken.seq, reason: walked.reason }, 'the audit log does not verify from the last heartbeat');
       return from;
     }, SNAPSHOT);
   } catch (error) {
@@ -63,6 +65,8 @@ export async function writeAuditHeartbeat(
           metadata: {
             source: 'scheduled',
             ...(verified.seq < 0n ? {} : { verified: { seq: Number(verified.seq), hash: verified.hash.toString('hex') } }),
+            // What the walk found, which readiness shows: the vault's checkpoint signs over the app's entries without their MACs.
+            ...(broken === null ? {} : { broken }),
           },
         },
       ]),
@@ -97,19 +101,25 @@ export type Readiness = {
   heartbeatAgeSeconds: number | null;
   /** Whether a checkpoint the vault signed covers that heartbeat. */
   checkpointed: boolean;
+  /**
+   * Whether that heartbeat's walk of the chain found it broken: an entry in
+   * the app's name it did not write, which the vault signs over, since it
+   * cannot check the app's MACs. The audit page says where.
+   */
+  broken: boolean;
 };
 
 /**
  * Readiness: the database migrated, the newest heartbeat under
- * `HEARTBEAT_STALE_AFTER_SECONDS` old, and a checkpoint after it whose
- * signature is the vault's. A heartbeat alone, a checkpoint with no
+ * `HEARTBEAT_STALE_AFTER_SECONDS` old, its walk of the chain whole, and a
+ * checkpoint after it whose signature is the vault's. A heartbeat alone, a checkpoint with no
  * heartbeat, or a refused checkpoint all leave it red, and so does a fresh
  * database until the first pair. Liveness deliberately does not call this:
  * a database incident should mark the service unavailable, not trigger a
  * restart loop.
  */
 export async function auditReadiness(db: Database, vault: Vault): Promise<Readiness> {
-  const unready: Readiness = { ok: false, heartbeatAgeSeconds: null, checkpointed: false };
+  const unready: Readiness = { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false };
   try {
     if (!(await migrated(db))) return unready;
     const { beat, checkpoint } = await readiness(db);
@@ -123,7 +133,7 @@ export async function auditReadiness(db: Database, vault: Vault): Promise<Readin
       BigInt(checkpoint.seq) >= beat.seq &&
       (await verifyCheckpoint(checkpoint, key.publicKey));
     const fresh = Number.isFinite(beat.ageSeconds) && beat.ageSeconds <= HEARTBEAT_STALE_AFTER_SECONDS;
-    return { ok: fresh && checkpointed, heartbeatAgeSeconds: beat.ageSeconds, checkpointed };
+    return { ok: fresh && checkpointed && !beat.broken, heartbeatAgeSeconds: beat.ageSeconds, checkpointed, broken: beat.broken };
   } catch {
     return unready;
   }

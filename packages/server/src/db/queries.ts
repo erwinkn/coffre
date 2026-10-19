@@ -2145,9 +2145,12 @@ export async function auditActionCounts(
  * one; and the newest checkpoint the vault signed.
  */
 export async function readiness(db: Queryable): Promise<{
-  beat: { seq: bigint; ageSeconds: number } | null;
+  beat: { seq: bigint; ageSeconds: number; broken: boolean } | null;
   checkpoint: Checkpoint | null;
 }> {
   const [[beat], checkpoint] = await Promise.all([newestEntry(db, 'app', 'audit.heartbeat'), latestCheckpoint(db)]);
-  return { beat: beat === undefined ? null : { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000 }, checkpoint };
+  if (beat === undefined) return { beat: null, checkpoint };
+  // Whether the beat's own walk of the chain found it broken (`writeAuditHeartbeat`).
+  const broken = (JSON.parse(beat.metadata) as { broken?: unknown }).broken !== undefined;
+  return { beat: { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000, broken }, checkpoint };
 }

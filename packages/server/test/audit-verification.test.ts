@@ -7,7 +7,7 @@ import { appendEntries, BATCH_BYTES, LogHeadMismatch, withinBytes } from '@coffr
 import { and, desc, eq, lte, or } from 'drizzle-orm';
 
 import { appendAudit, CHAIN_WALK, type AuditEntry } from '../src/db/audit.ts';
-import { writeAuditHeartbeat } from '../src/heartbeat.ts';
+import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
@@ -211,6 +211,18 @@ test("an entry forged in the app's name is found by the next check, though check
   assert.deepEqual(await root.audit.verify(), {
     ok: false, through: forged - 1, failedAtSeq: forged, author: 'app', reason: 'not written by the app: its MAC does not match',
   });
+  // And readiness turns red: the beat says what its walk found.
+  const ready = await auditReadiness(db.runtime, deps.vault);
+  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
+});
+
+test('a walk that ends at its last entry on its budget checks the stored head all the same', async () => {
+  assert.equal((await root.me()).instanceRole, 'owner');
+  const [{ nextSeq }] = await db.owner.select().from(auditChainHead);
+  await write(CHAIN_WALK - Number(nextSeq));
+  await db.owner.update(auditChainHead).set({ headHash: Buffer.alloc(32, 0x42) });
+  const result = await root.audit.verify();
+  assert.deepEqual(!result.ok && [result.failedAtSeq, result.author, result.reason], [CHAIN_WALK, 'app', 'the recomputed head does not match the stored chain head']);
 });
 
 test('a log longer than one walk is checked as far as one goes, and walked from its first entry a stretch at a time', async () => {

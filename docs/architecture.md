@@ -672,10 +672,11 @@ all the same, with a warning in the app's log; but a refusal stands until
 the rehash that found it runs again and passes.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
-minutes old and a checkpoint after it carries the vault's signature. A log
-that stops taking writes, a vault that stops signing, a cut in the log or a
-wrong vault key all turn it red within one beat; an entry edited in place,
-within one lap. There is no heartbeat table.
+minutes old, its walk found the chain whole (`broken` otherwise), and a
+checkpoint after it carries the vault's signature. A log that stops taking
+writes, a vault that stops signing, a cut in the log, an entry forged in
+the app's name or a wrong vault key all turn it red within one beat; an
+entry edited in place, within one lap. There is no heartbeat table.
 
 `GET /api/audit/verification` (those who read the whole log), which the
 audit page calls on every visit, checks the log from where the last checks
@@ -1140,8 +1141,8 @@ Each limit is stated here once; the other documents link to it.
   entries and member rows, grants included, besides reading every value.
 - **A replaced vault key stays configured to verify the past, and can't vouch for
   anything after the rotation.** What the vault wrote under the key an old
-  vault key stands for verifies only while that vault key is in `previousKeks`, and the
-  log is checked from its first entry once an hour. After the
+  vault key stands for verifies only while that vault key is in `previousKeks`, and
+  `coffre verify log` walks the log from its first entry. After the
   rotation, nothing under its keys counts, so a vault key replaced because it
   leaked forges nothing new; what was forged with it before verifies like
   the rest. The app key, `APP_KEY`, and with KMS the vault's

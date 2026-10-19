@@ -59,7 +59,8 @@ export async function rehash(
   let at = from;
   for (let left = limit; ; ) {
     if (to !== undefined && at.seq >= to) return { ok: true, at, done: true };
-    if (left <= 0) return { ok: true, at, done: false };
+    // Out of entries to walk, it is done if there are none left to: a walk that ends at its budget's last read one more.
+    if (left <= 0) return { ok: true, at, done: !(await entriesFrom(db, at.seq + 1n, 1)).some((entry) => to === undefined || entry.seq <= to) };
     let batch = await entriesFrom(db, at.seq + 1n, Math.min(VERIFY_BATCH, left));
     if (to !== undefined) batch = batch.filter((entry) => entry.seq <= to);
     if (batch.length === 0) return { ok: true, at, done: to === undefined };
@@ -113,7 +114,7 @@ export async function ownEntries(
   { to, limit = Infinity }: { to?: bigint; limit?: number },
 ): Promise<{ ok: true; at: bigint; done: boolean } | Broken> {
   for (let left = limit; ; ) {
-    if (left <= 0) return { ok: true, at: after, done: false };
+    if (left <= 0) return { ok: true, at: after, done: !(await vaultEntriesAfter(db, after, 1)).some((entry) => to === undefined || entry.seq <= to) };
     let batch = await vaultEntriesAfter(db, after, Math.min(VERIFY_BATCH, left));
     if (to !== undefined) batch = batch.filter((entry) => entry.seq <= to);
     if (batch.length === 0) return { ok: true, at: after, done: true };

@@ -2195,6 +2195,38 @@ test("a stretch holds each tally to the walk as it stood at that tally's prefix,
   assert.ok(whole.ok, JSON.stringify(whole));
 });
 
+test('an app older than 0.10.1, which names no `from`, gets an ok only for the whole of its head', async () => {
+  const w = await world();
+  await reads(5);
+  const [head] = await store.vaultPage(db.owner, undefined, 1);
+  const upTo = { seq: Number(head!.seq), hash: head!.hash.toString('hex') };
+  const short = await openLocalVault(db.vault, configure(), { walks: { verify: 3 } });
+  const legacy = await short.verifyLog({ upTo });
+  assert.ok(!legacy.ok && /update the app/.test(legacy.reason), JSON.stringify(legacy));
+  // Naming where it starts, a caller takes `through` for what it is.
+  const current = await short.verifyLog({ upTo, from: 'start' });
+  assert.ok(current.ok && current.through! < upTo.seq, JSON.stringify(current));
+  // A walk whose budget ends at the last entry is done, and holds the rows to it.
+  const exact = await openLocalVault(db.vault, configure(), { walks: { verify: 6 } });
+  assert.deepEqual(await exact.verifyLog({ upTo, from: 'start' }), { ok: true, entries: 6, through: upTo.seq });
+  void w;
+});
+
+test('a stretch ends no further than the checkpoints one call holds it to', async () => {
+  const w = await world();
+  const signed: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    await reads(1);
+    const checkpoint = await w.vault.checkpoint();
+    assert.ok(checkpoint.ok);
+    signed.push(checkpoint.checkpoint.seq + 1);
+  }
+  const short = await openLocalVault(db.vault, configure(), { walks: { verify: 2 } });
+  const far = await short.verifyLog({ from: 'start', to: signed.at(-1)! });
+  assert.deepEqual(!far.ok && [far.failedAtSeq, far.reason], [signed.at(-1), 'a stretch passes no more than 2 checkpoints: end one sooner']);
+  assert.equal((await short.verifyLog({ from: 'start', to: signed[1]! })).ok, true);
+});
+
 test('a verification counts the prefix it resumes from: an entry cut before the newest checkpoint is found', async () => {
   const w = await world();
   await reads(10);

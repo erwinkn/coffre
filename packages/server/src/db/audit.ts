@@ -127,7 +127,8 @@ export async function walkChain(
   let at = from;
   for (let left = limit; ; ) {
     if (to !== undefined && at.seq >= to) return { ok: true, at, done: true };
-    if (left <= 0) return { ok: true, at, done: false };
+    // Out of entries to walk, it is done if there are none left to: a walk that ends at its budget's last read one more.
+    if (left <= 0) return { ok: true, at, done: !(await auditRange(db, at.seq + 1n, 1)).some((row) => to === undefined || row.seq <= to) };
     let batch = await auditRange(db, at.seq + 1n, Math.min(BATCH, left));
     if (to !== undefined) batch = batch.filter((row) => row.seq <= to);
     if (batch.length === 0) return { ok: true, at, done: to === undefined };

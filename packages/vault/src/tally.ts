@@ -73,15 +73,19 @@ export function accessDigest(access: AccessTally): string {
  * from one release to the next.
  */
 export function sameTally(a: Tally, b: Tally): boolean {
-  const unworded = ({ accounting, ...rest }: Tally) => ({ ...rest, accounting: { ...accounting, fault: accounting.fault?.failedAtSeq ?? null } });
-  return canonical(unworded(a)) === canonical(unworded(b));
+  return tallyKey(a, accessDigest(a.access)) === tallyKey(b, accessDigest(b.access));
+}
+
+/** What `sameTally` compares: the members and grants by their digest, which a stretch passing many checkpoints computes once a change. */
+function tallyKey({ accounting, entries, keys, replayFault }: Omit<Tally, 'access'>, digest: string): string {
+  return canonical({ entries, keys, replayFault, accounting: { ...accounting, fault: accounting.fault?.failedAtSeq ?? null }, access: digest });
 }
 
 /**
  * A tally a walk must come to: the one a checkpoint keeps, `entry`, of the
  * prefix through `through`; or why that checkpoint's tally cannot be read.
  */
-export type Expected = { entry: bigint; through: bigint; tally: Tally } | { entry: bigint; through: bigint; unreadable: string };
+export type Expected = { entry: bigint; through: bigint; tally: Tally; digest: string } | { entry: bigint; through: bigint; unreadable: string };
 
 /**
  * The vault's entries walked, oldest first, each after its MAC was checked,
@@ -106,6 +110,17 @@ export class Walk {
   #expected: Expected[] = [];
   /** The first it did not come to, and why. */
   mismatch: { entry: bigint; reason: string } | null = null;
+  /** The digest of the members and grants as the walk has them, until an access entry changes them. */
+  #digest: string | null = null;
+
+  #accessDigest(): string {
+    return (this.#digest ??= accessDigest(this.tally().access));
+  }
+
+  /** The tally but for its members and grants, which `#accessDigest` stands for. */
+  #unaccessed(): Omit<Tally, 'access'> {
+    return { entries: this.entries, keys: [...this.keys], accounting: this.accounting.state(), replayFault: this.replayFault };
+  }
 
   constructor(from: Tally) {
     this.accounting = new KeyAccounting(from.accounting);
@@ -143,7 +158,7 @@ export class Walk {
       const expected = this.#expected.shift()!;
       if (this.mismatch !== null) continue;
       if ('unreadable' in expected) this.mismatch = { entry: expected.entry, reason: expected.unreadable };
-      else if (!sameTally(this.tally(), expected.tally)) {
+      else if (tallyKey(this.#unaccessed(), this.#accessDigest()) !== tallyKey(expected.tally, expected.digest)) {
         this.mismatch = { entry: expected.entry, reason: 'the tally this checkpoint keeps does not follow from the log before it' };
       }
     }
@@ -162,6 +177,7 @@ export class Walk {
     this.accounting.add(entry);
     if (entry.decision !== 'allow') return null;
     if (ACCESS.has(entry.action)) {
+      this.#digest = null;
       this.replayFault ??= apply(this.replayed, entry);
       if (entry.subjectPrincipal !== null) this.newestAccess.set(entry.subjectPrincipal, entry.seq);
     } else if (entry.action === CHECKPOINT) {

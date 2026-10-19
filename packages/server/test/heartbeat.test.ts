@@ -148,7 +148,7 @@ test('an empty log has nothing to checkpoint, and logs nothing for it', async ()
   assert.equal(refused.refusal.code, 'invalid');
   assert.deepEqual(await entries(), []);
   assert.equal(await latestCheckpoint(db.owner), null);
-  assert.deepEqual(await auditReadiness(db.runtime, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false });
+  assert.deepEqual(await auditReadiness(db.runtime, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false });
 });
 
 test('readiness accepts a recent beat and rejects a stale one', async () => {
@@ -183,5 +183,5 @@ test('readiness rejects a database without the expected Drizzle schema prefix', 
   // The migrations count, in Drizzle's array row mode: none applied.
   const query = async () => ({ rows: [[0]], fields: [] });
   const empty = createDatabase({ query, connect: async () => ({ query, release: () => {} }) } as never);
-  assert.deepEqual(await auditReadiness(empty, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false });
+  assert.deepEqual(await auditReadiness(empty, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false });
 });

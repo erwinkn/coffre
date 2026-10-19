@@ -422,6 +422,10 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
       if (!walked.ok) return failed('app', walked.failedAtSeq, walked.reason, walked.through);
       // Whether it ends at the hash the checkpoint signed is the vault's to say, once it has checked its own entries.
       const { at } = walked;
+      // A log that runs past its head is broken wherever the walk stopped.
+      if (at.seq >= head.nextSeq) {
+        return failed('app', head.nextSeq, `the log runs to seq ${at.seq + 1n} but the chain head only expects ${head.nextSeq}`, head.nextSeq - 1n);
+      }
       if (to === null && walked.done) {
         if (at.seq + 1n !== head.nextSeq) {
           const missing = head.nextSeq - at.seq - 1n;

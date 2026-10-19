@@ -99,7 +99,7 @@ import {
   type WrappedKey,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
+import { isUniqueViolation, isUnreachable, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, missingEntry, newestAuthentic, newestVaultSeq, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
@@ -2479,7 +2479,8 @@ class VaultService implements Vault {
       try {
         scrub = await this.#db.transaction((tx) => this.#scrub(tx, walked.from), SNAPSHOT);
       } catch (error) {
-        if (error instanceof TypeError || error instanceof RangeError || error instanceof ReferenceError || error instanceof SyntaxError) throw error;
+        // Only the database not answering, or a statement it gave up on: anything else is coffre's to fix.
+        if (!isUnreachable(error) && !timedOut(error)) throw error;
         stalled = `the rehash of the past did not run, and goes on where it was next time: ${(error as Error).message}`;
       }
     }
@@ -2634,15 +2635,19 @@ class VaultService implements Vault {
       }
       const gap = await missingEntry(tx, from.at.seq);
       if (gap !== null) return { ok: false, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
+      // Every checkpoint after it whose prefix the walk may pass, a stretch's end among them, signed while
+      // the app walked or not: each tally is held to the walk where it gets there (`Walk.expect`).
       const walk = new Walk(from.tally);
-      if (to !== null) {
-        const passed = (await store.talliedAfter(tx, from.entry ?? -1n, walks.verify + 1)).filter(({ seq }) => seq <= to);
-        const entries = await store.entriesAt(tx, passed.map(({ seq }) => seq));
-        const resumed = await this.#resumeEach(tx, passed.map(({ seq }) => entries.get(seq)!));
-        walk.expect(resumed.map((one, i) => (one.ok
-          ? { entry: one.entry!, through: one.at.seq, tally: one.tally }
-          : { entry: passed[i]!.seq, through: passed[i]!.signs, unreadable: one.reason })));
+      const later = await store.talliedAfter(tx, from.entry ?? -1n, walks.verify + 1);
+      const passed = later.filter(({ seq }) => to === null || seq <= to);
+      if (to !== null && passed.at(-1)?.seq !== to) {
+        return { ok: false, failedAtSeq: Number(to), reason: `a stretch passes no more than ${walks.verify} checkpoints: end one sooner` };
       }
+      const entries = await store.entriesAt(tx, passed.map(({ seq }) => seq));
+      const resumed = await this.#resumeEach(tx, passed.map(({ seq }) => entries.get(seq)!));
+      walk.expect(resumed.map((one, i) => (one.ok
+        ? { entry: one.entry!, through: one.at.seq, tally: one.tally, digest: one.digest }
+        : { entry: passed[i]!.seq, through: passed[i]!.signs, unreadable: one.reason })));
       // How far the walk got, the hash there, and whether that is the present: the rows and the key batches
       // are held to the log only when the walk read every entry of the vault's there is.
       let through = from.at.seq;
@@ -2658,6 +2663,10 @@ class VaultService implements Vault {
         // this one's. The app's head bounds what is verified; the vault's own walk, what the rows meet.
         const own = await ownEntries(tx, logKeys, from.at.seq, walk, ends === null ? { limit: walks.verify } : { to: ends });
         if (!own.ok) return own;
+        // An app older than 0.10.1 names no `from`, and takes an ok for the whole of `upTo`: it gets one only for that.
+        if (!own.done && input.from === undefined) {
+          return { ok: false, failedAtSeq: null, reason: `the vault verifies no more than ${walks.verify} of its entries a call, and its checkpoints are catching up: update the app` };
+        }
         [through, reached, present] = [own.done ? BigInt(upTo.seq) : own.at, upTo.hash, own.done && ends === null];
       }
       walk.finish(ends ?? through);
@@ -2677,6 +2686,7 @@ class VaultService implements Vault {
       if (rememberedHead !== null && !holds(rememberedHead)) {
         return { ok: false, failedAtSeq: rememberedHead.seq, reason: 'changed since the vault last verified it' };
       }
+      if (walk.mismatch !== null) return { ok: false, failedAtSeq: Number(walk.mismatch.entry), reason: walk.mismatch.reason };
       if (ends !== null) {
         // The walk ends at the prefix the stretch's checkpoint signed, by its hash too: a chain made again from before it is not.
         const end = await this.#resume(tx, to!);
@@ -2684,7 +2694,6 @@ class VaultService implements Vault {
         if ((upTo === null && through !== ends) || headOf(end.at).hash !== reached) {
           return { ok: false, failedAtSeq: Number(to), reason: `the log up to entry ${ends} is not the prefix this checkpoint signed: it was rewritten` };
         }
-        if (walk.mismatch !== null) return { ok: false, failedAtSeq: Number(walk.mismatch.entry), reason: walk.mismatch.reason };
         return { ok: true, entries: walk.entries, through: Number(ends) };
       }
       // The newest checkpoint refused as the log broken, since the one the walk starts from: what it found,
@@ -2778,6 +2787,14 @@ type Resumed = {
   carrier: bigint | null;
   scrub: Position | null;
 };
+
+/** Whether a statement was cancelled for taking too long: Postgres's `query_canceled`, a statement timeout among them. */
+function timedOut(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if ((cause as { code?: unknown }).code === '57014') return true;
+  }
+  return false;
+}
 
 /** Where the next rehash of the past goes on from, null for the first entry; or what it found. */
 type Scrubbed = { ok: true; next: Position | null } | Broken;
