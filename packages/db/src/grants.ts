@@ -18,6 +18,7 @@ import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { tablesOf, type Queryable } from './database.ts';
+import { prepared } from './prepared.ts';
 import { tombstone, truth } from './dialect.ts';
 import { entryColumns, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
 
@@ -46,19 +47,23 @@ export async function readGrants(
   db: Queryable,
   filter: { principal?: string; liveAt?: number } = {},
 ): Promise<GrantRow[]> {
+  // A member's grants, which every check reads, built once (`prepared`); any other filter, as asked.
+  const rows = filter.principal !== undefined && filter.liveAt === undefined
+    ? await grantsOf(db, { principal: filter.principal })
+    : await grantRows(db, filter.principal === undefined ? undefined : eq(tablesOf(db).vaultGrants.principal, filter.principal), filter.liveAt);
+  return rows.map(({ grant, environmentProjectId }) => ({ ...grant, projectId: grant.projectId ?? environmentProjectId }));
+}
+
+function grantRows(db: Queryable, principal: SQL | undefined, liveAt?: number) {
   const { vaultGrants, environments } = tablesOf(db);
-  const rows = await db
+  return db
     .select({ grant: vaultGrants, environmentProjectId: environments.projectId })
     .from(vaultGrants)
     .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
-    .where(
-      and(
-        filter.principal === undefined ? undefined : eq(vaultGrants.principal, filter.principal),
-        filter.liveAt === undefined ? undefined : or(isNull(vaultGrants.expiresAt), gt(vaultGrants.expiresAt, filter.liveAt)),
-      ),
-    );
-  return rows.map(({ grant, environmentProjectId }) => ({ ...grant, projectId: grant.projectId ?? environmentProjectId }));
+    .where(and(principal, liveAt === undefined ? undefined : or(isNull(vaultGrants.expiresAt), gt(vaultGrants.expiresAt, liveAt))));
 }
+
+const grantsOf = prepared((db) => grantRows(db, eq(tablesOf(db).vaultGrants.principal, sql.placeholder('principal'))));
 
 /** Add a grant; an environment's row names only the environment. */
 export async function insertGrant(db: Queryable, grant: GrantRow): Promise<void> {
@@ -300,23 +305,31 @@ export function newestAccess(db: Queryable, principal: string, check: Authentici
 
 /** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */
 export async function accessEntriesAbout(db: Queryable, principal: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
+  const rows = before === undefined ? await newestAccessEntries(db, { principal, limit }) : await accessEntriesBefore(db, { principal, limit, before });
+  return rows as StoredEntry[];
+}
+
+function accessEntries(db: Queryable, before?: SQL) {
   const { auditLog } = tablesOf(db);
-  const rows = await db
+  return db
     .select(entryColumns(db))
     .from(auditLog)
     .where(
       and(
         eq(auditLog.author, 'vault'),
-        eq(auditLog.subjectPrincipal, principal),
+        eq(auditLog.subjectPrincipal, sql.placeholder('principal')),
         inArray(auditLog.action, [...ACCESS_ACTIONS]),
         eq(auditLog.decision, 'allow'),
-        before === undefined ? undefined : lt(auditLog.seq, before),
+        before,
       ),
     )
     .orderBy(desc(auditLog.seq))
-    .limit(limit);
-  return rows as StoredEntry[];
+    .limit(sql.placeholder('limit'));
 }
+
+// What every check of a member reads first, built once (`prepared`).
+const newestAccessEntries = prepared((db) => accessEntries(db));
+const accessEntriesBefore = prepared((db) => accessEntries(db, lt(tablesOf(db).auditLog.seq, sql.placeholder('before'))));
 
 /**
  * Up to `limit` of the vault's reports that `principal`'s row was changed

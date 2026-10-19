@@ -642,7 +642,8 @@ export class SigninService {
       }
       row = await findCredential(db, chainKey, { tokenHash });
       // Before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
-      const policySeq = row === null ? null : await newestPolicySeq(db);
+      // Read only for a row that may need one, which no session and no token sealed since 0.5 does.
+      const policySeq = row !== null && row.kind === 'service' && row.scope === null ? await newestPolicySeq(db) : null;
       if (row !== null) access = await this.#deps.vault.access(row.principal);
       // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {

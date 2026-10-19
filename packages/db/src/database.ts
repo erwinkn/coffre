@@ -162,3 +162,5 @@ export function own<T extends Table>(db: Queryable, table: T): T {
   if (found === undefined) throw new Error(`no table ${getTableName(table)} in this database`);
   return found as T;
 }
+
+export { prepared } from './prepared.ts';
