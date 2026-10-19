@@ -554,6 +554,18 @@ export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry 
   return row === undefined ? undefined : stored([row])[0];
 }
 
+/** The vault's newest refusal of `action` with `code`, or undefined. */
+export async function newestRefusal(db: Queryable, action: string, code: string): Promise<StoredEntry | undefined> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'deny'), eq(auditLog.code, code)))
+    .orderBy(desc(auditLog.seq))
+    .limit(1);
+  return row === undefined ? undefined : stored([row])[0];
+}
+
 /** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */
 export async function talliedAfter(db: Queryable, after: bigint, limit: number): Promise<{ seq: bigint; signs: bigint }[]> {
   const { auditLog } = tablesOf(db);

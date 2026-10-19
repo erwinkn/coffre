@@ -16,8 +16,8 @@
   checkpoint signed, pins it, and one count of the log's index finds an
   entry cut. An entry edited in place, its hash left as it was, is what
   that leaves, so each checkpoint also rehashes 100 entries of the past in
-  turn, round and round, some 6 ms of a cold Worker's CPU: found within
-  one lap, about 6 hours for a log of 7,000 entries and 3½ days for
+  turn, in laps, some 6 ms of a cold Worker's CPU: found within two laps
+  at most, a lap about 6 hours for a log of 7,000 entries and 3½ days for
   100,000, where the hourly recomputation from the first entry found it
   within the hour but needed a second of CPU at 10,000 entries. `coffre
   verify log` finds it at once; run it on a schedule to narrow that.

@@ -48,10 +48,23 @@ export type AccessTally = {
  * when it changed since the tally resumed from; otherwise the entry names
  * the checkpoint entry that holds it (`at`). Either way with its digest.
  */
-export type StoredTally = Omit<Tally, 'access'> & { access: { digest: string } & ({ at: number } | AccessTally) };
+export type StoredTally = Omit<Tally, 'access'> & { v: typeof TALLY_VERSION; access: { digest: string } & ({ at: number } | AccessTally) };
 
-/** A checkpoint as the vault's entry holds it: the signed prefix, its tally, and where the next one's rehash of the past goes on (`scrub`), null for the first entry. */
-export type TalliedCheckpoint = Checkpoint & { tally: StoredTally; scrub: LogHead | null };
+/**
+ * What a tally keeps, as 0.10.1 wrote it. A release that keeps more, or
+ * less, writes another version, and compares a tally of this one on what
+ * this one kept: a walk from the first entry passes every tally ever
+ * written, and an honest one must still match.
+ */
+export const TALLY_VERSION = 1;
+
+/**
+ * A checkpoint as the vault's entry holds it: the signed prefix, its
+ * tally, and the lap of the rehash of the past under way (`scrub`): the
+ * prefix it rehashes to, signed when the lap began, and the last entry it
+ * rehashed. Null between laps.
+ */
+export type TalliedCheckpoint = Checkpoint & { tally: StoredTally; scrub: { at: LogHead; end: LogHead } | null };
 
 /** Before the first entry. */
 export const EMPTY_TALLY: Tally = {
@@ -68,15 +81,12 @@ export function accessDigest(access: AccessTally): string {
 }
 
 /**
- * Whether two tallies say the same, whatever order their maps were built
- * in. A fault is the same where it was found: the words for it may change
- * from one release to the next.
+ * What two tallies are compared by, so that they match whatever order
+ * their maps were built in: the members and grants by their digest, which
+ * a stretch passing many checkpoints computes once a change; and a fault by
+ * where it was found, since the words for it may change from one release
+ * to the next.
  */
-export function sameTally(a: Tally, b: Tally): boolean {
-  return tallyKey(a, accessDigest(a.access)) === tallyKey(b, accessDigest(b.access));
-}
-
-/** What `sameTally` compares: the members and grants by their digest, which a stretch passing many checkpoints computes once a change. */
 function tallyKey({ accounting, entries, keys, replayFault }: Omit<Tally, 'access'>, digest: string): string {
   return canonical({ entries, keys, replayFault, accounting: { ...accounting, fault: accounting.fault?.failedAtSeq ?? null }, access: digest });
 }

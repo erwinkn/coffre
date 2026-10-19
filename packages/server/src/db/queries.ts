@@ -2066,15 +2066,29 @@ export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null
  * written since 0.10.1, which names the last entry of the prefix it signs
  * as related. A verification goes on from it.
  */
-export async function latestTallied(db: Queryable): Promise<{ entry: bigint; checkpoint: Checkpoint } | null> {
+export async function latestTallied(db: Queryable): Promise<{ entry: bigint; checkpoint: Signed | null } | null> {
   const [row] = await talliedCheckpoints(db).orderBy(desc(tablesOf(db).auditLog.seq)).limit(1);
-  return row === undefined ? null : { entry: row.seq, checkpoint: JSON.parse(row.metadata) as Checkpoint };
+  return row === undefined ? null : { entry: row.seq, checkpoint: signedIn(row.metadata) };
 }
 
-/** The vault's checkpoint at entry `seq`, if one that keeps a tally is there. */
-export async function talliedAt(db: Queryable, seq: bigint): Promise<Checkpoint | null> {
+/** The vault's checkpoint at entry `seq`, if one that keeps a tally is there; null for its prefix if it names none. */
+export async function talliedAt(db: Queryable, seq: bigint): Promise<{ checkpoint: Signed | null } | null> {
   const [row] = await talliedCheckpoints(db, eq(tablesOf(db).auditLog.seq, seq));
-  return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
+  return row === undefined ? null : { checkpoint: signedIn(row.metadata) };
+}
+
+/** The prefix a checkpoint names: its last entry and that entry's hash. */
+export type Signed = { seq: number; hash: string };
+
+/**
+ * What a checkpoint's entry says it signed, or null when it says nothing
+ * that could be: the app reads it before the vault checks the entry by its
+ * MAC, and the vault names what is wrong with it.
+ */
+function signedIn(metadata: string): Signed | null {
+  const { seq, hash } = JSON.parse(metadata) as { seq?: unknown; hash?: unknown };
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return null;
+  return { seq, hash };
 }
 
 /** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */

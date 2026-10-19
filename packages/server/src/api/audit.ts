@@ -1,5 +1,5 @@
 import { readsWholeLog, runsInstance } from '@coffre/core/access';
-import { describeAccessFault, type Checkpoint, type LogVerification } from '@coffre/core/vault';
+import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry } from '@coffre/db/log';
 
@@ -17,6 +17,7 @@ import {
   talliedAfter,
   talliedAt,
   type AuditFilter,
+  type Signed,
 } from '../db/queries.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
@@ -399,19 +400,22 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
       if (query.from === undefined) {
         // From the older of where the app's MACs and the vault's tally were last verified to.
         const [own, tallied] = await Promise.all([attested(tx, ctx.chainKey), latestTallied(tx)]);
-        const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint);
+        if (tallied !== null && tallied.checkpoint === null) return failed('vault', tallied.entry, UNREADABLE, tallied.entry - 1n);
+        const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint!);
         start = own.seq <= signed.seq ? own : signed;
         vaultFrom = tallied === null ? 'start' : Number(tallied.entry);
       } else {
         const anchor = query.from === 'start' ? null : await talliedAt(tx, BigInt(query.from));
         if (query.from !== 'start' && anchor === null) throw badRequest(`entry ${query.from} is not a checkpoint that keeps a tally`);
-        start = anchor === null ? CHAIN_START : pointOf(anchor);
+        if (anchor !== null && anchor.checkpoint === null) return failed('vault', BigInt(query.from), UNREADABLE, BigInt(query.from) - 1n);
+        start = anchor === null ? CHAIN_START : pointOf(anchor.checkpoint!);
         vaultFrom = query.from;
         // The furthest checkpoint one walk reaches, or the next however far it is; none, and this is the last stretch.
         const later = await talliedAfter(tx, query.from === 'start' ? -1n : BigInt(query.from), CHAIN_WALK / 2 + 1);
         const target = later.filter(({ signs }) => signs - start.seq <= CHAIN_WALK).at(-1) ?? later[0];
         const ends = target === undefined ? null : await talliedAt(tx, target.entry);
-        if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends) };
+        if (target !== undefined && ends?.checkpoint === null) return failed('vault', target.entry, UNREADABLE, target.signs);
+        if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends.checkpoint!) };
       }
       // Every entry before where it starts still there: one count, and only a log with a gap pays to find where.
       const gap = await missingEntry(tx, start.seq);
@@ -483,8 +487,11 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
   };
 }
 
+/** Why a check stops at a checkpoint whose entry names no prefix: the vault never wrote it so. */
+const UNREADABLE = "not a checkpoint of the vault's that keeps a tally: it names no prefix it signed";
+
 /** Where a checkpoint's prefix ends, as a walk of the chain names it. */
-function pointOf(checkpoint: Checkpoint): ChainPoint {
+function pointOf(checkpoint: Signed): ChainPoint {
   return { seq: BigInt(checkpoint.seq), hash: Buffer.from(checkpoint.hash, 'hex') };
 }
 

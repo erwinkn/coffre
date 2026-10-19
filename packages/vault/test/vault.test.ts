@@ -1711,7 +1711,7 @@ test('a checkpoint signs the log up to its last entry, in an entry of its own', 
   // Its entry names the last entry it signs as related, and keeps its tally beside the signature.
   const kept = entries.at(-1)!;
   assert.deepEqual([kept.action, signedOf(kept.detail), kept.detail.relatedSeq], ['audit.checkpoint', first.checkpoint, String(first.checkpoint.seq)]);
-  assert.deepEqual(Object.keys(kept.detail.tally as object).sort(), ['access', 'accounting', 'entries', 'keys', 'replayFault']);
+  assert.deepEqual(Object.keys(kept.detail.tally as object).sort(), ['access', 'accounting', 'entries', 'keys', 'replayFault', 'v']);
 
   // Nothing new signs nothing new.
   assert.deepEqual(await w.vault.checkpoint(), first);
@@ -2055,7 +2055,7 @@ test('a checkpoint refuses to sign over entries cut from the middle of the log (
   assert.match(String((await vaultLog(w)).at(-1)!.detail.reason), /^sequence gap: expected seq \d+/, 'it names the gap');
 });
 
-test('an entry edited in place behind the newest checkpoint is found by the rehash of the past, within one lap', async () => {
+test('an entry edited in place behind the newest checkpoint is found by the rehash of the past, within its lap', async () => {
   // Two entries of the past rehashed a checkpoint, so that a lap over this log takes several.
   const w = await world({}, { walks: { scrub: 2 } });
   for (const name of ['ada', 'bob', 'cy', 'di']) await member(w, `user:${name}@acme.example`, [[w.dev, 'viewer']]);
@@ -2081,11 +2081,40 @@ test('an entry edited in place behind the newest checkpoint is found by the reha
       // And every verification says so from then on, though it reads nothing before the newest checkpoint.
       const told = await w.vault.verifyLog({});
       assert.deepEqual(!told.ok && [told.failedAtSeq, told.reason], [Number(edited), 'the last checkpoint was refused: hash does not match the entry']);
+      // A refusal of another kind after it, a vault with the wrong KEK, hides nothing.
+      await wrapped(w, await w.secret(w.dev));
+      const wrong = await fresh();
+      // It finds its KEK wrong at its first key work, as here, where it checks its key.
+      await wrong.keyChecks();
+      const misled = await wrong.checkpoint();
+      assert.equal(!misled.ok && misled.refusal.code, 'wrong_kek');
+      assert.deepEqual(await w.vault.verifyLog({}), told);
       break;
     }
   }
   // Two entries a beat from the first, so the edit is found at the beat whose stretch holds it, not before.
   assert.deepEqual(laps, [...Array(Number(edited) / 2 | 0).fill(true), false]);
+});
+
+test('a lap of the rehash of the past ends where it began to, so a log growing faster than it still gets back to its start', async () => {
+  const w = await world({}, { walks: { scrub: 2 } });
+  for (const name of ['ada', 'bob', 'cy']) await member(w, `user:${name}@acme.example`, [[w.dev, 'viewer']]);
+  assert.ok((await w.vault.checkpoint()).ok);
+  // The first lap begins, and rehashes entries 0 and 1; then entry 0 is edited, behind it.
+  await reads(1);
+  assert.ok((await w.vault.checkpoint()).ok);
+  await rewrite(0n, 'in place');
+  // Five entries a beat, where the rehash takes two: a lap that ran to the newest prefix would never end.
+  let beats = 0;
+  for (; beats < 40; beats++) {
+    await reads(5);
+    const next = await w.vault.checkpoint();
+    if (!next.ok) {
+      assert.deepEqual([(await vaultLog(w)).at(-1)!.detail.failedAtSeq, (await vaultLog(w)).at(-1)!.detail.reason], [0, 'hash does not match the entry']);
+      break;
+    }
+  }
+  assert.ok(beats < 40, 'the rehash of the past never got back to entry 0');
 });
 
 /** Reads in the vault's name, as the vault logs them, many at once. */

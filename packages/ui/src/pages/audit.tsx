@@ -43,15 +43,19 @@ export function AuditPage() {
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
   const queryClient = useQueryClient();
   const [walked, setWalked] = useState<{ through: number | null } | null>(null);
+  const [walkFailed, setWalkFailed] = useState<string | null>(null);
   const walkWhole = async () => {
     setWalked({ through: null });
+    setWalkFailed(null);
     let verdict: ChainResult;
     try {
       verdict = chainResult(await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through })), true);
     } catch (error) {
       verdict = chainUnknown(error);
     }
-    queryClient.setQueryData(queries.auditChain(client).queryKey, verdict);
+    // A walk that could not run says nothing of the log: the verdict from the newest checkpoint stands.
+    if (verdict.integrity === 'unknown') setWalkFailed(verdict.problem);
+    else if (verdict.integrity !== 'owners-only') queryClient.setQueryData(queries.auditChain(client).queryKey, verdict);
     setWalked(null);
   };
   const { decision, actorId } = search;
@@ -78,7 +82,7 @@ export function AuditPage() {
         actions={
           // One region for every state, so each change of it is announced.
           <div className="chain-live" aria-live="polite" aria-atomic="true">
-            <ChainStatus chain={chain} walked={walked} onRetry={() => void verification.refetch()} onWalk={() => void walkWhole()} />
+            <ChainStatus chain={chain} walked={walked} walkFailed={walkFailed} onRetry={() => void verification.refetch()} onWalk={() => void walkWhole()} />
           </div>
         }
       />
@@ -393,11 +397,13 @@ function BreakMark() {
 function ChainStatus({
   chain,
   walked,
+  walkFailed,
   onRetry,
   onWalk,
 }: {
   chain: ChainResult | undefined;
   walked: { through: number | null } | null;
+  walkFailed: string | null;
   onRetry: () => void;
   onWalk: () => void;
 }) {
@@ -486,6 +492,14 @@ function ChainStatus({
         >
           <button type="button" className="chain-note" role="status">
             {chain.remaining.toLocaleString('en')} newer {chain.remaining === 1 ? 'entry' : 'entries'} to verify
+          </button>
+        </Toggletip>
+      )}
+      {walkFailed !== null && (
+        <Toggletip align="end" label={`coffre could not walk the whole log: ${walkFailed}. The verdict beside it, from the newest checkpoint, stands.`}>
+          <button type="button" className="chain-flag chain-flag-warn">
+            <AlertTriangle size={14} />
+            Whole log not checked
           </button>
         </Toggletip>
       )}

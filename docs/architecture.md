@@ -661,22 +661,25 @@ checkpoint signed it, and its hash pins it since: a rewrite chained again
 changes the hash the next checkpoint finds, and a cut changes the count.
 What it leaves is an entry edited in place, its stored hash left as it
 was. So each checkpoint also rehashes 100 entries of the past, a hash an
-entry and nothing else, from where the last one stopped to the newest
-checkpoint's prefix, then from the first entry again: some 6 ms of a cold
-Worker's CPU. Where it stopped is kept in the checkpoint it signs. An entry
-edited in place is refused within one lap, the log's length over 100
-beats, and from then on every verification says so, by the refused
-checkpoint, though none reads that far back itself. A rehash the database
-fails leaves the stretch for the next beat, and the checkpoint is signed
-all the same, with a warning in the app's log; but a refusal stands until
-the rehash that found it runs again and passes.
+entry and nothing else, some 6 ms of a cold Worker's CPU, in laps: a lap
+runs from the first entry to the prefix the newest checkpoint signed when
+it began, and the next to the prefix signed then. Where a lap stands, and
+where it ends, is kept in the checkpoint it signs. An entry edited in
+place is refused within two laps at most, each the length of the log when
+it began over 100 beats, however fast the log grows meanwhile; from then
+on every verification says so, by the refused checkpoint, though none
+reads that far back itself. The refusal stands, through refusals of other
+kinds after it, until a checkpoint is signed, which takes the check that
+found it running again and passing. A rehash the database fails leaves
+the lap where it was and the checkpoint is signed all the same, with a
+warning in the app's log, unless such a refusal stands.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old, its walk found the chain whole (`broken` otherwise), and a
 checkpoint after it carries the vault's signature. A log that stops taking
 writes, a vault that stops signing, a cut in the log, an entry forged in
 the app's name or a wrong vault key all turn it red within one beat; an
-entry edited in place, within one lap. There is no heartbeat table.
+entry edited in place, within two laps. There is no heartbeat table.
 
 `GET /api/audit/verification` (those who read the whole log), which the
 audit page calls on every visit, checks the log from where the last checks
@@ -1092,9 +1095,9 @@ Each limit is stated here once; the other documents link to it.
   checkpoints and verifications start from the newest tally and read
   nothing before it, so the log as it now is verifies no better. The
   checkpoint whose stretch of the past holds 812 rehashes it and refuses,
-  and the audit page shows it broken from then on: within one lap of 100
-  entries a beat, about 6 hours for a log of 7,000 entries, and 3½ days
-  for 100,000. `coffre verify log` finds it at once; run it on a schedule
+  and the audit page shows it broken from then on: within two laps of 100
+  entries a beat at most, a lap about 6 hours for a log of 7,000 entries,
+  and 3½ days for 100,000. `coffre verify log` finds it at once; run it on a schedule
   to bound the window.
 
   Everything else is found at the next checkpoint, within five minutes:
@@ -1119,6 +1122,10 @@ Each limit is stated here once; the other documents link to it.
   at a checkpoint, however far. Until the checkpoints catch up, the walk
   from the first entry ends short of the head and says so (`remaining`),
   and `coffre verify log` exits 3 rather than call the log verified.
+- **A change of access writes every member and grant into the log once.**
+  The first checkpoint after it keeps them whole, and the others name it:
+  an instance with thousands of grants, changed every few minutes, grows
+  its log by their size each time.
 - **Key operations' identities are checked against those still under way.**
   The walk from the first entry used to refuse a key operation's identity
   seen twice anywhere in the log. A tally keeps the batches still open, not
