@@ -61,39 +61,50 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   prod is now. `coffre run`, `export` and `get` ask again once, after a
   short pause; the UI's confirmations ask the person again.
 - **A reference takes its value and nature from its source, and its
-  permissions from where it lives** (Erwin, 2026-10-19). Reading or using
-  `market/dev/DATABASE_URL`, a reference to `market/prod/DATABASE_URL`, is
-  decided by the reader's grants on dev alone, whatever their credential,
-  and whether prod is protected or not: a Viewer of dev reads it, and
-  `market/prod` itself stays theirs only if they hold it. Its nature is
-  the source's value's: a reference to a sensitive key is use-only in dev,
-  for everyone; to a secret, read by dev's readers; to a plain value,
-  plain. The source is weighed once, when someone makes or repoints the
-  reference: its maker holds there what the source's nature asks, as any
-  direct access there would, protection included (to list a plain value,
-  to read a secret, to use a sensitive one), decided by the vault under
-  the head (rule 1, `reference`). After that the reference works on its
-  own: its maker losing their grant, or its source being protected, does
-  not stop it. **The tradeoff:** making a reference hands its source's
-  value to whoever reads where it is held. Protecting prod does not take
-  back what references made before already lend; ending the reference
-  does (`coffre references`, or deleting the key).
-- **Its nature is the source's, live** (Erwin, 2026-10-19): prod's
-  `API_KEY` made a secret again, dev's reference to it is a secret, read by
-  dev's readers; made sensitive, it is use-only in dev. So what keeps a
-  reference from lending a value nobody who may read it chose to lend is
-  on the write side, at the source. Typing a value lends that value, which
-  its writer has seen; tightening the current one (plain to secret,
-  secret to sensitive) narrows who reads it. Every other way to put a
-  value behind a key, checked:
+  permissions from where it lives** (Erwin, 2026-10-19, R20, R23).
+  Reading or using `market/dev/DATABASE_URL`, a reference to
+  `market/prod/DATABASE_URL`, is decided by the reader's grants on dev
+  alone, whatever their credential, and whether prod is protected or not:
+  a Viewer of dev reads it, and `market/prod` itself stays theirs only if
+  they hold it. Its nature is the source's current value's, live: a
+  reference to a sensitive key is use-only in dev, for everyone; to a
+  secret, read by dev's readers; to a plain value, plain. Made a secret
+  again at the source, it is a secret in dev; made sensitive, use-only.
+  Nothing about the source is checked when it is read.
+- **A value is made live only by whoever could have read it, or typed it.**
+  That is what keeps a reference from lending a value nobody who may read
+  it chose to lend, with no lookup of references and no race between them:
+  - Making or repointing a reference takes reading its source, whatever
+    its nature, and using it too where it is sensitive, as any direct
+    access there would, protection included. The vault decides it under
+    its head (rule 1, `reference`), the app saying so first.
+  - Bringing an old version back (`restore`), or unarchiving a key (a
+    fork's override served again included), takes the right to read what
+    comes back: reading a secret, using a sensitive one (which nobody
+    reads: using it is all anyone could have done with it), writing alone
+    for a plain one, shown to its writers already. A restore is decided by
+    the vault under its head (`rewrap`'s `needs`), an unarchive by the app
+    under the head; neither asks whether a reference reads the key.
+  - Typing a value, and tightening a key's nature (plain to secret, secret
+    to sensitive), take writing alone: what is written is what its writer
+    has seen, or reaches fewer.
 
-  | Path | What it does to a key a live reference reads |
-  |---|---|
-  | Restore an old version | Takes at the key what the old value's nature asks, as making a reference to it would: to list a plain value, to read a secret, to use a sensitive one. Decided by the vault under its head (`rewrap`'s `needs`), the app saying so first. Ada, who writes and uses a protected prod, types a plain value over `API_KEY`, refers dev to it, and cannot bring the secret back. |
-  | Archive or unarchive the key; reset or un-reset a fork's override | Archiving and resetting are refused while a live reference reads the key (`refuseIfRead`), and no reference is made to an archived key: none reads one brought back. |
-  | Rename the key, or make another under its name | A reference is bound to its source key's id, sealed by the vault: renamed, it reads the same key; another made under the old name is another key. |
-  | Delete the key, or its environment | Breaks the reference: nothing is read through it again. |
-  | Fork into an environment | Writes into a new or empty one, which no live reference reads. |
+  ```
+  Ada uses and writes a protected prod, and reads dev
+  she types a plain value over prod's API_KEY; an Owner refers dev to it
+  she restores the secret it replaced            refused: she never read it
+  she sends a restore and a reference at once     both refused, in any order
+  ```
+
+  **The cost:** a writer who cannot read prod can no longer roll a secret
+  back there; they type a new value. **The tradeoff:** making a reference
+  hands its source's value to whoever reads where it is held; protecting
+  prod later does not take back what references made before already lend
+  (R22, the Owner's choice, comes after this); ending the reference does
+  (`coffre references`, or deleting the key). A reference is bound to its
+  source key's id, sealed by the vault: renamed, it reads the same key;
+  another made under the old name is another key. Archiving or resetting
+  a key a live reference reads is refused, as before (so none breaks).
 - **When the vault cannot read its own policy**, only entries forged in
   its name within reach, no role holds anything, a service account's
   neither, but Owner, which holds everything: a narrowing hidden by forged

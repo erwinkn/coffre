@@ -895,11 +895,13 @@ async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: strin
   // Live or not: a write ends the reference it replaces before it commits, and the value it writes is still the one that
   // reference read. A reference ended otherwise, or to a source archived meanwhile, is held as its source is too.
   const sourceOf = (holder: string) => references.get(holder)?.source?.currentVersionId ?? undefined;
-  const sensitive = await sensitiveVersions(db, [...references.keys()].flatMap((holder) => sourceOf(holder) ?? []));
+  const sources = [...references.keys()].flatMap((holder) => sourceOf(holder) ?? []);
+  const [sensitive, plainSources] = await Promise.all([sensitiveVersions(db, sources), plainVersions(db, sources)]);
+  // A reference's nature is its source's, plain included (R23).
   const throughReference = (holder: string): Sensitivity | null | undefined => {
     if (!references.has(holder)) return undefined;
     const source = sourceOf(holder);
-    return source === undefined ? null : sensitive.has(source) ? 'sensitive' : 'secret';
+    return source === undefined ? null : sensitive.has(source) ? 'sensitive' : plainSources.has(source) ? 'plain' : 'secret';
   };
   return new Map(keys.map((key): [string, Sensitivity | null] => {
     const mine = own(key);
@@ -1071,13 +1073,12 @@ async function referenceTargets(
       throw new Refusal(notFound(why), denied(ctx, 'secret.reference', 'unknown_source', { ...environment, operationId, metadata: { key, source: ref } }));
     }
     if (found.environment.owner !== null) throw refused(key, `${ref} is in a personal config, which no reference reads`, 'personal');
-    // Making one hands its source's value to whoever reads here: its maker holds there what the source's nature asks, as
-    // the vault decides. To list a plain value, to read a secret, to use a sensitive one.
+    // Making one hands its source's value to whoever reads here, whatever its nature becomes: its maker reads it there,
+    // and uses a sensitive one, which nobody reads, as the vault decides.
     const at = placeOf(found.project, found.environment);
+    need(ctx, 'secret.read', at, 'secret.reference', { operationId, metadata: { key, source: ref } });
     const version = found.secret.currentVersionId === null ? [] : [found.secret.currentVersionId];
-    const [sensitive, plainValue] = await Promise.all([sensitiveVersions(ctx.db, version), plainVersions(ctx.db, version)]);
-    const asked = sensitive.size > 0 ? 'secret.use' : plainValue.size > 0 && !can(ctx.caller, 'secret.read', at) ? 'secret.use' : 'secret.read';
-    need(ctx, asked, at, 'secret.reference', { operationId, metadata: { key, source: ref } });
+    if ((await sensitiveVersions(ctx.db, version)).size > 0) need(ctx, 'secret.use', at, 'secret.reference', { operationId, metadata: { key, source: ref } });
     return { key, secretId: found.secret.id };
   }));
   const holders = refs.map(({ key }) => prepared.get(key)?.id ?? randomUUID());
@@ -1241,6 +1242,8 @@ export async function patchSecret(
     if (archiving && archived) {
       await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
     }
+    // Unarchived, its value is live again: made so only by whoever could have read it (`madeLive`).
+    if (archiving && !archived) madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, secret.id), 'secret.unarchive', { metadata: { key: secret.key } });
     if (renaming || archiving) {
       try {
         await update(tx, secrets, { id: secret.id }, {
@@ -1392,6 +1395,8 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
       await update(tx, secrets, { id: row.id }, { archivedAt: new Date() });
       log.push(allowed(ctx, 'secret.reset', { ...where, metadata: { key: row.key, from: held.from.slug } }));
     } else {
+      // Its own value live again: made so only by whoever could have read it (`madeLive`).
+      madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, row.id), 'secret.unarchive', { metadata: { key: row.key } });
       await update(tx, secrets, { id: row.id }, { archivedAt: null });
       log.push(allowed(ctx, 'secret.unarchive', { ...where, metadata: { key: row.key } }));
       await endRemovals(ctx, tx, log, place, environment, [row.key], null);
@@ -1458,6 +1463,28 @@ export async function listVersions(
  * opens. The vault wraps its data key again under the current key, which
  * takes a write grant and never opens the value.
  */
+/**
+ * Whoever makes a value live that they did not type, an old version brought
+ * back or a key unarchived, could have read it: a secret by reading it here,
+ * a sensitive one, which nobody reads, by using it, a plain one by writing,
+ * as it was shown to them. Whatever reads the key next, a reference to it
+ * included, then reads what they could.
+ */
+/** A key's nature as its row has it, archived or not: its own value's, or its reference's source's; null for none. */
+async function natureOfRow(db: Queryable, environmentId: string, secretId: string): Promise<Sensitivity | null> {
+  const [row] = await secretHeads(db, environmentId, { id: secretId });
+  if (row?.current != null) return sensitivityOf(row.current);
+  const source = (await currentReferences(db, [secretId])).get(secretId)?.source?.currentVersionId;
+  if (source == null) return null;
+  const [sensitive, plainValue] = await Promise.all([sensitiveVersions(db, [source]), plainVersions(db, [source])]);
+  return sensitive.size > 0 ? 'sensitive' : plainValue.size > 0 ? 'plain' : 'secret';
+}
+
+function madeLive(ctx: ApiContext, place: ResolvedPath, nature: Sensitivity | null, action: string, details: Parameters<typeof need>[4]): void {
+  if (nature === null || nature === 'plain') return;
+  need(ctx, nature === 'sensitive' ? 'secret.use' : 'secret.read', placeOf(place.project, place.environment), action, details);
+}
+
 export async function restoreVersion(
   ctx: ApiContext,
   place: ResolvedPath,
@@ -1495,14 +1522,8 @@ export async function restoreVersion(
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
     const level = foundSensitive ? 'sensitive' : sensitivityOf(target);
-    // An old value brought back into a key a live reference reads is read next where that reference lives: the restorer
-    // holds here what its nature asks, as making a reference to it would (to list a plain value, to read a secret, to
-    // use a sensitive one). The vault decides it again under its head.
-    if (target.id !== prepared.currentVersionId && (await readersOf(ctx.db, [secret.id])).length > 0) {
-      const at = placeOf(place.project, place.environment);
-      const asked = level === 'sensitive' || (level === 'plain' && !can(ctx.caller, 'secret.read', at)) ? 'secret.use' : 'secret.read';
-      need(ctx, asked, at, 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion, referenced: true } });
-    }
+    // An old value is made live only by whoever could have read it (`madeLive`), as the vault decides again.
+    if (target.id !== prepared.currentVersionId) madeLive(ctx, place, sensitivityOf(target), 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
     if (!rewrapped.ok) {
       throw vaultRefusal(ctx, rewrapped.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });

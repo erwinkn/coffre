@@ -1000,19 +1000,13 @@ class VaultService implements Vault {
           const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
           return items.map(({ secret }) => (secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null));
         },
-        // An old value brought back, not the current one, into a key a live reference reads: whoever reads where the
-        // reference lives reads it next, so it takes at the key what its nature asks, as making a reference to it would.
-        // To list a plain value, to read a secret, to use a sensitive one. Typing a value, or tightening the current one,
-        // takes no more than writing (R20).
+        // An old value brought back, not the current one, is made live by whoever could have read it: a secret by its
+        // readers, a sensitive one, which nobody reads, by those who use it, a plain one by any writer, as it was shown
+        // to them. Whatever reads the key next, a reference to it included, then reads what its restorer could. Typing a
+        // value, or tightening the current one, takes no more than writing.
         needs: async (db) => {
-          const restored = items.map(({ secret }) => ({ secretId: secret.secretId, from: sources.get(secret)!.id }));
-          const lent = await store.restoredIntoReferenced(db, restored);
-          return items.map(({ secret }, i) => {
-            const nature = lent[i];
-            if (nature === null) return null;
-            if (secret.sensitive === true) return ['secret.use'] as const;
-            return nature === 'plain' ? ['secret.read', 'secret.use'] as const : ['secret.read'] as const;
-          });
+          const restored = await store.restoredNatures(db, items.map(({ secret }) => ({ secretId: secret.secretId, from: sources.get(secret)!.id })));
+          return restored.map((nature) => (nature === 'secret' ? ['secret.read'] as const : nature === 'sensitive' ? ['secret.use'] as const : null));
         },
       },
       (contextOf) =>
@@ -1370,14 +1364,12 @@ class VaultService implements Vault {
         if (source.secretId === item.holder.secretId) return 'invalid';
         // A personal config's values are bound to its owner: no reference holds one, nor reads one.
         if (environments.get(item.holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
-        // Making one hands its source's value to whoever reads the holder: its maker holds at the source, as any direct
-        // access there would, what the source's nature asks. To list a plain value, to read a secret, to use a sensitive one.
+        // Making one hands its source's value to whoever reads the holder, whatever its nature becomes: its maker reads
+        // it at the source, as any direct access there, and, for a sensitive one, which nobody reads, uses it there too.
         const at = placeIn(source, environments);
-        const holds = (permission: Permission) => refuses(reader, permission, at, gone(source));
-        const nature = natures.get(source.secretId) ?? 'secret';
-        const sourceRefusal = nature === 'plain' ? (holds('secret.read') === null ? null : holds('secret.use'))
-          : holds(nature === 'sensitive' ? 'secret.use' : 'secret.read');
-        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder)) ?? sourceRefusal;
+        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder))
+          ?? refuses(reader, 'secret.read', at, gone(source))
+          ?? (natures.get(source.secretId) === 'sensitive' ? refuses(reader, 'secret.use', at, gone(source)) : null);
       });
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));

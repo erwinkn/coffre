@@ -43,16 +43,16 @@
   it ran answers 409 `policy_changed`, "try again", as does a role's edit
   confirmed with an impact preview (`?revision=`) another change
   overtook. A reference takes its value and nature (plain, secret,
-  sensitive) from its source, and its permissions from where it lives:
-  whoever reads `market/dev` reads dev's reference into a protected
+  sensitive) from its source, live, and its permissions from where it
+  lives: whoever reads `market/dev` reads dev's reference into a protected
   `market/prod`, and a reference to a sensitive key is use-only there.
-  Making one takes, at its source, what that nature asks (to list a plain
-  value, to read a secret, to use a sensitive one); after that it works on
-  its own, prod protected later or not, so making one hands the value to
-  dev's readers. Its nature follows the source's, live; bringing an old
-  value back into a key a reference reads (`coffre restore`) takes, there,
-  what that value's nature asks, so no write-only path lends a secret its
-  writer never read. A reference to a plain value is plain, no longer secret.
+  Making or repointing one takes reading its source, and using it where
+  it is sensitive; a reference to a plain value is plain, no longer
+  secret. A value is made live only by whoever could have read it, or
+  typed it: restoring an old version, or unarchiving a key, takes reading
+  a secret there, using a sensitive one, writing alone for a plain one. A
+  writer who cannot read prod no longer rolls a secret back there; they
+  type a new value.
   The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
   and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and
   `PATCH /api/projects/<p>/<e>` with `{ "protected": true }`. Migration

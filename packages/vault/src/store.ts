@@ -505,34 +505,24 @@ export async function natures(db: Queryable, secretIds: readonly string[]): Prom
 }
 
 /**
- * For each version a rewrap would bring back into its secret, whether that
- * is an old value, not the secret's current one, into a secret a live
- * reference reads, and if so, the version's nature as stored, plain or
- * not: null otherwise. A reference lives from its vault-sealed
- * `reference.create`, which names its source in `also`, to its
- * `reference.end`.
+ * For each version a rewrap would bring back into its secret, its nature
+ * as stored when it is an old value, not the secret's current one; null
+ * for the current one, which a mark wraps again with no value changing.
  */
-export async function restoredIntoReferenced(
+export async function restoredNatures(
   db: Queryable,
   items: readonly { secretId: string; from: string }[],
-): Promise<('plain' | 'secret' | null)[]> {
+): Promise<('plain' | 'secret' | 'sensitive' | null)[]> {
   if (items.length === 0) return [];
-  const { secrets, secretVersions, auditLog } = tablesOf(db);
-  const ids = [...new Set(items.map((item) => item.secretId))];
-  const postgres = engineOf(db) === 'postgres';
-  const named = postgres ? sql<string>`(((${auditLog.metadata})::jsonb -> 'also') ->> 'secretId')` : sql<string>`json_extract(${auditLog.metadata}, '$.also.secretId')`;
-  const [current, made, versions] = await Promise.all([
-    db.select({ id: secrets.id, version: secrets.currentVersionId }).from(secrets).where(inArray(secrets.id, ids)),
-    db.select({ seq: auditLog.seq, secretId: named }).from(auditLog)
-      .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.create'), eq(auditLog.decision, 'allow'), inArray(named, ids))),
-    db.select({ id: secretVersions.id, plain: truth(isNotNull(secretVersions.plaintext)) }).from(secretVersions)
+  const { secrets, secretVersions } = tablesOf(db);
+  const [current, versions] = await Promise.all([
+    db.select({ id: secrets.id, version: secrets.currentVersionId }).from(secrets).where(inArray(secrets.id, [...new Set(items.map((item) => item.secretId))])),
+    db.select({ id: secretVersions.id, sensitive: secretVersions.sensitive, plain: truth(isNotNull(secretVersions.plaintext)) }).from(secretVersions)
       .where(inArray(secretVersions.id, [...new Set(items.map((item) => item.from))])),
   ]);
-  const ended = await endedReferences(db, made.map((row) => row.seq));
-  const lent = new Set(made.filter((row) => !ended.has(row.seq)).map((row) => row.secretId));
   const currentOf = new Map(current.map((row) => [row.id, row.version]));
-  const plain = new Map(versions.map((row) => [row.id, Boolean(row.plain)]));
-  return items.map(({ secretId, from }) => (currentOf.get(secretId) === from || !lent.has(secretId) ? null : plain.get(from) === true ? 'plain' : 'secret'));
+  const natureOf = new Map(versions.map((row) => [row.id, Boolean(row.sensitive) ? 'sensitive' as const : Boolean(row.plain) ? 'plain' as const : 'secret' as const]));
+  return items.map(({ secretId, from }) => (currentOf.get(secretId) === from ? null : natureOf.get(from) ?? 'secret'));
 }
 
 /** The vault's newest entry of any of these actions, allowed, or undefined. */

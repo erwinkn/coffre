@@ -508,40 +508,88 @@ test("a reference takes its value and nature from its source and its permissions
   assert.equal((await ciDev.secrets.reveal('market/dev')).values.DATABASE_URL, 'prod-key');
 });
 
-test("a reference to a sensitive source is use-only where it lives, a plain one plain, and making one takes what the source's nature asks there", async () => {
+test("a reference to a sensitive source is use-only where it lives, a plain one plain; making one takes reading its source, and using a sensitive one", async () => {
   await maya.environments.protect('market/prod');
   await root.secrets.set('market/prod', { STRIPE_KEY: { value: 'sk_live_0123456789', sensitivity: 'sensitive' }, REGION: { value: 'eu-west-3', plain: true } });
-  // Ada, a Developer of market, uses prod, and reads none of it: she refers to what she uses, never to a secret she does not read.
-  assert.equal(await status(ada.secrets.set('market/dev', { PROD_API: { ref: 'market/prod/API_KEY' } })), 403);
-  await ada.secrets.set('market/dev', { STRIPE_KEY: { ref: 'market/prod/STRIPE_KEY' }, REGION: { ref: 'market/prod/REGION' } });
+  // Ada, a Developer of market, uses prod, and reads none of it: she refers to nothing of it, a plain value she lists included.
+  for (const key of ['API_KEY', 'STRIPE_KEY', 'REGION']) {
+    assert.deepEqual(await refusal(ada.secrets.set('market/dev', { [`FROM_${key}`]: { ref: `market/prod/${key}` } })), { status: 403, reason: 'missing_secret_read' }, key);
+  }
+  // An Owner reads prod, and uses its sensitive key: their references are dev's to read as their natures say.
+  await root.secrets.set('market/dev', { STRIPE_KEY: { ref: 'market/prod/STRIPE_KEY' }, REGION: { ref: 'market/prod/REGION' } });
   const listed = new Map((await vic.secrets.list('market/dev')).keys.map((key) => [key.key, key]));
   assert.deepEqual([listed.get('STRIPE_KEY')!.sensitivity, listed.get('STRIPE_KEY')!.readable], ['sensitive', false]);
   assert.deepEqual([listed.get('REGION')!.sensitivity, listed.get('REGION')!.value], ['plain', 'eu-west-3']);
-  // Vic, a Viewer of dev, reads dev: the plain one as it is, the sensitive one no person reads.
   const read = await vic.secrets.reveal('market/dev');
   assert.equal(read.values.REGION, 'eu-west-3');
   assert.equal(read.values.STRIPE_KEY, undefined);
   assert.ok(read.sensitive.includes('STRIPE_KEY'));
   assert.equal(await status(vic.secrets.reveal('market/dev/STRIPE_KEY')), 403);
 });
-
-test("an old value brought back into a key a reference reads takes what its nature asks there: no write-only path lends a secret its writer never read", async () => {
+test("a value is made live only by whoever could have read it, or typed it: a write-only restore of a secret is refused, a reference to it or not", async () => {
   await maya.environments.protect('market/prod');
-  // Ada, a Developer of market, uses and writes prod, and reads dev. A reference to prod's secret takes reading it.
-  assert.equal(await status(ada.secrets.set('market/dev', { LEAK: { ref: 'market/prod/API_KEY' } })), 403);
-  // A value she types, plain, she may lend; the secret it replaced, brought back by a restore, she may not.
+  // Ada, a Developer of market, uses and writes prod, and reads dev. She types a plain value over prod's secret; an Owner,
+  // who reads prod, refers dev to it.
   await ada.secrets.set('market/prod', { API_KEY: { value: 'placeholder', plain: true } });
-  await ada.secrets.set('market/dev', { LEAK: { ref: 'market/prod/API_KEY' } });
+  await root.secrets.set('market/dev', { LEAK: { ref: 'market/prod/API_KEY' } });
+  // The secret it replaced, brought back, would be read through dev: Ada never read it, and may not.
   assert.deepEqual(await refusal(ada.secrets.restore('market/prod/API_KEY', 1)), { status: 403, reason: 'missing_secret_read' });
   assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, 'placeholder');
-  // The plain value she typed, brought back, she may: listing it is what lending it takes.
+  // A plain value she typed, brought back, she may.
   await ada.secrets.set('market/prod', { API_KEY: { value: 'placeholder-2', plain: true } });
   await ada.secrets.restore('market/prod/API_KEY', 2);
   assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, 'placeholder');
-  // An Owner, who reads prod, brings the secret back: it flows through, and dev's secret readers read it, as R20 says.
+  // An Owner, who reads prod, brings the secret back: it flows through, a secret dev's readers read.
   await root.secrets.restore('market/prod/API_KEY', 1);
   assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, 'prod-key');
-  assert.equal((await vic.secrets.list('market/dev')).keys.find((key) => key.key === 'LEAK')!.sensitivity, 'secret');
+  // With no reference at all, the same: Ada types over dev's own secret in prod and cannot roll it back; she types again.
+  await root.secrets.set('market/prod', { DB_PASSWORD: 'prod-db' });
+  await ada.secrets.set('market/prod', { DB_PASSWORD: 'mine' });
+  assert.deepEqual(await refusal(ada.secrets.restore('market/prod/DB_PASSWORD', 1)), { status: 403, reason: 'missing_secret_read' });
+  // A sensitive one she uses: she may bring back what she could have used.
+  await root.secrets.set('market/prod', { STRIPE_KEY: { value: 'sk_live_0123456789', sensitivity: 'sensitive' } });
+  await ada.secrets.set('market/prod', { STRIPE_KEY: { value: 'sk_live_mine', sensitivity: 'sensitive' } });
+  await ada.secrets.restore('market/prod/STRIPE_KEY', 1);
+});
+
+test("an override in a personal config of a key that is a reference to a plain value is plain, as the key it overlays is", async () => {
+  await root.secrets.set('market/prod', { REGION: { value: 'eu-west-3', plain: true } });
+  await root.secrets.set('market/dev', { REGION: { ref: 'market/prod/REGION' } });
+  await root.secrets.set('market/dev@me', { REGION: 'local-region' });
+  const mine = (await root.secrets.list('market/dev@me')).keys.find((key) => key.key === 'REGION')!;
+  assert.deepEqual([mine.sensitivity, mine.value], ['plain', 'local-region']);
+});
+
+test("a restore and a reference asked at once lend nothing their asker could not read, in either order", async () => {
+  await maya.environments.protect('market/prod');
+  await ada.secrets.set('market/prod', { API_KEY: { value: 'placeholder', plain: true } });
+  // Neither asks what anyone else did: each takes reading prod, which Ada does not.
+  const [restored, referred] = await Promise.all([
+    refusal(ada.secrets.restore('market/prod/API_KEY', 1)),
+    refusal(ada.secrets.set('market/dev', { LEAK: { ref: 'market/prod/API_KEY' } })),
+  ]);
+  assert.deepEqual([restored.status, referred.status], [403, 403]);
+  assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, undefined);
+});
+
+test("a key unarchived is made live only by whoever could have read it: a secret by its readers, a plain one by those who retire it", async () => {
+  await maya.environments.protect('market/prod');
+  await root.secrets.set('market/prod', { REGION: { value: 'eu-west-3', plain: true } });
+  for (const key of ['API_KEY', 'REGION']) await root.secrets.update(`market/prod/${key}`, { archived: true });
+  // Maya, a Maintainer, retires keys in a protected prod, and reads none of it.
+  assert.deepEqual(await refusal(maya.secrets.update('market/prod/API_KEY', { archived: false })), { status: 403, reason: 'missing_secret_read' });
+  await maya.secrets.update('market/prod/REGION', { archived: false });
+  await root.secrets.update('market/prod/API_KEY', { archived: false });
+  assert.equal((await root.secrets.reveal('market/prod')).values.API_KEY, 'prod-key');
+  // A fork's override reset to its parent's, then served again: the same, by a Contributor, who writes and reads nothing.
+  await root.environments.create('market/dev-next', { from: 'dev', inherit: true });
+  await root.secrets.set('market/dev-next', { API_KEY: 'override' });
+  await root.secrets.inherit('market/dev-next/API_KEY', true);
+  await root.members.add('user:carl@acme.example');
+  await root.access.set('user:carl@acme.example', { market: 'contributor' });
+  const carl = clientFor(deps, 'carl@acme.example');
+  assert.deepEqual(await refusal(carl.secrets.inherit('market/dev-next/API_KEY', false)), { status: 403, reason: 'missing_secret_read' });
+  await root.secrets.inherit('market/dev-next/API_KEY', false);
 });
 
 test("a reference binds to its source key, not its name: renamed, the key is still read through it; another made under the old name is not", async () => {

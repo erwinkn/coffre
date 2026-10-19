@@ -134,32 +134,31 @@ test("a reference reads by its holder's grants alone: its source protected after
   assert.equal(await read(w, BO, via).then((result) => result.ok || result.refusal.code), true);
 });
 
-test("making a reference takes, at its source, what the source's nature asks, as any access there: to read a secret, to use a sensitive one, to list a plain one", async () => {
+test("making a reference takes reading its source, whatever its nature, and using a sensitive one", async () => {
   const w = await world();
   const { secrets, secretVersions } = tablesOf(db.owner);
-  // Protected, market/prod gives Ada, its Viewer, use alone: she refers to none of its secrets.
+  // Protected, market/prod gives Ada, its Viewer, use alone: she refers to nothing of it.
   assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: true } })).ok);
-  const ask = () => w.vault.reference({ principal: ADA, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });
+  const ask = (principal = ADA) => w.vault.reference({ principal, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });
   assert.equal(await ask().then((result) => result.ok || result.refusal.code), 'no_grant');
-  // Its value made sensitive, which nobody reads: using it is what a reference to it lends, and Ada uses it.
+  // Sensitive, which she uses: still not, as she reads none of it.
   const sensitive = { ...w.source, version: 2, sensitive: true };
   const wrapped = await w.vault.wrap({ principal: ROOT, items: [{ secret: sensitive, key: randomBytes(32).toString('base64') }] });
   assert.ok(wrapped.ok);
   const [{ secretVersionId }] = await storedVersions(db.owner, [{ secret: sensitive, wrapped: wrapped.wrapped[0] }]);
   await db.owner.update(secrets).set({ currentVersionId: secretVersionId, currentVersion: 2 }).where(eq(secrets.id, w.source.secretId));
-  assert.equal(await ask().then((result) => result.ok || result.refusal.code), true);
-  // Plain, it lends what listing it shows, and Ada lists it.
+  assert.equal(await ask().then((result) => result.ok || result.refusal.code), 'no_grant');
+  // Plain, which she lists: still not.
   const [row] = await db.owner.select().from(secretVersions).where(eq(secretVersions.id, secretVersionId));
   const plainId = randomUUID();
   await db.owner.insert(secretVersions).values({ ...row!, id: plainId, version: 3, sensitive: false, plaintext: 'eu-west-3' });
   await db.owner.update(secrets).set({ currentVersionId: plainId, currentVersion: 3 }).where(eq(secrets.id, w.source.secretId));
-  assert.equal(await ask().then((result) => result.ok || result.refusal.code), true);
+  assert.equal(await ask().then((result) => result.ok || result.refusal.code), 'no_grant');
+  assert.equal(await ask(ROOT).then((result) => result.ok || result.refusal.code), true);
 });
-
-test("a rewrap that brings an old value back into a key a live reference reads takes what the value's nature asks there; the current one takes writing alone", async () => {
+test("a rewrap that brings an old value back takes what could have read it: a secret, its reading; the current one, writing alone", async () => {
   const w = await world();
   const { secrets } = tablesOf(db.owner);
-  await made(w, ROOT);
   // A second value, current now; Wes writes and uses market/prod, protected, and reads none of it.
   const second = { ...w.source, version: 2 };
   const wrapped = await w.vault.wrap({ principal: ROOT, items: [{ secret: second, key: randomBytes(32).toString('base64') }] });
@@ -171,7 +170,7 @@ test("a rewrap that brings an old value back into a key a live reference reads t
   assert.ok((await w.vault.setAccess({ actor: ROOT, principal: WES, changes: [{ projectId: w.market.project, environmentId: w.market.prod, role: 'developer', expiresAt: null }] })).ok);
   assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: true } })).ok);
   const rewrap = (principal: string, secretVersionId: string) => w.vault.rewrap({ principal, items: [{ secret: { ...w.source, version: 3 }, secretVersionId }] });
-  // The first value back: billing's readers would read it next, a secret Wes never read.
+  // The first value back: a secret Wes never read, whoever reads the key next.
   const back = await rewrap(WES, w.secretVersionId);
   assert.equal(back.ok || back.refusal.code, 'no_grant');
   // The current one again, as a mark does: no value changes hands.
