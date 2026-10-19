@@ -1000,6 +1000,20 @@ class VaultService implements Vault {
           const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
           return items.map(({ secret }) => (secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null));
         },
+        // An old value brought back, not the current one, into a key a live reference reads: whoever reads where the
+        // reference lives reads it next, so it takes at the key what its nature asks, as making a reference to it would.
+        // To list a plain value, to read a secret, to use a sensitive one. Typing a value, or tightening the current one,
+        // takes no more than writing (R20).
+        needs: async (db) => {
+          const restored = items.map(({ secret }) => ({ secretId: secret.secretId, from: sources.get(secret)!.id }));
+          const lent = await store.restoredIntoReferenced(db, restored);
+          return items.map(({ secret }, i) => {
+            const nature = lent[i];
+            if (nature === null) return null;
+            if (secret.sensitive === true) return ['secret.use'] as const;
+            return nature === 'plain' ? ['secret.read', 'secret.use'] as const : ['secret.read'] as const;
+          });
+        },
       },
       (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
@@ -1095,6 +1109,11 @@ class VaultService implements Vault {
        * once the log's head is locked, before its entries append.
        */
       vet?: (db: Queryable) => Promise<(RefusalCode | null)[]>;
+      /**
+       * Any one of which each secret takes besides `permission`, where it
+       * is, read in the decision and again under the head; none for null.
+       */
+      needs?: (db: Queryable) => Promise<(readonly Permission[] | null)[]>;
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
@@ -1130,9 +1149,16 @@ class VaultService implements Vault {
       const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
       owners.clear();
       for (const [id, environment] of environments) if (environment.owner !== null) owners.set(id, ownerKey(environment.owner));
+      const needs = call.needs === undefined ? [] : await call.needs(d.tx);
       const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
         const personal = personalRefusal(reader, principal, call.permission, secret, at[i]!, environments);
         if (personal !== undefined) return personal;
+        const also = needs[i];
+        if (also != null) {
+          const place = placeIn(at[i]!, environments);
+          const refused = also.map((permission) => refuses(reader, permission, place, gone(secret) || gone(at[i]!)));
+          if (refused.every((code) => code !== null)) return refused[0]!;
+        }
         // Through a reference, the holder's grants decide, its source's never: a reference takes its value and nature
         // (a sensitive one stays use-only) from its source, and its permissions from where it lives. Its maker held what
         // the source's nature asks when it was made (`reference`).

@@ -1495,6 +1495,14 @@ export async function restoreVersion(
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
     const level = foundSensitive ? 'sensitive' : sensitivityOf(target);
+    // An old value brought back into a key a live reference reads is read next where that reference lives: the restorer
+    // holds here what its nature asks, as making a reference to it would (to list a plain value, to read a secret, to
+    // use a sensitive one). The vault decides it again under its head.
+    if (target.id !== prepared.currentVersionId && (await readersOf(ctx.db, [secret.id])).length > 0) {
+      const at = placeOf(place.project, place.environment);
+      const asked = level === 'sensitive' || (level === 'plain' && !can(ctx.caller, 'secret.read', at)) ? 'secret.use' : 'secret.read';
+      need(ctx, asked, at, 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion, referenced: true } });
+    }
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
     if (!rewrapped.ok) {
       throw vaultRefusal(ctx, rewrapped.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });

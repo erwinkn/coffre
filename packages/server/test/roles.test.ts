@@ -525,6 +525,33 @@ test("a reference to a sensitive source is use-only where it lives, a plain one 
   assert.equal(await status(vic.secrets.reveal('market/dev/STRIPE_KEY')), 403);
 });
 
+test("an old value brought back into a key a reference reads takes what its nature asks there: no write-only path lends a secret its writer never read", async () => {
+  await maya.environments.protect('market/prod');
+  // Ada, a Developer of market, uses and writes prod, and reads dev. A reference to prod's secret takes reading it.
+  assert.equal(await status(ada.secrets.set('market/dev', { LEAK: { ref: 'market/prod/API_KEY' } })), 403);
+  // A value she types, plain, she may lend; the secret it replaced, brought back by a restore, she may not.
+  await ada.secrets.set('market/prod', { API_KEY: { value: 'placeholder', plain: true } });
+  await ada.secrets.set('market/dev', { LEAK: { ref: 'market/prod/API_KEY' } });
+  assert.deepEqual(await refusal(ada.secrets.restore('market/prod/API_KEY', 1)), { status: 403, reason: 'missing_secret_read' });
+  assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, 'placeholder');
+  // The plain value she typed, brought back, she may: listing it is what lending it takes.
+  await ada.secrets.set('market/prod', { API_KEY: { value: 'placeholder-2', plain: true } });
+  await ada.secrets.restore('market/prod/API_KEY', 2);
+  assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, 'placeholder');
+  // An Owner, who reads prod, brings the secret back: it flows through, and dev's secret readers read it, as R20 says.
+  await root.secrets.restore('market/prod/API_KEY', 1);
+  assert.equal((await vic.secrets.reveal('market/dev')).values.LEAK, 'prod-key');
+  assert.equal((await vic.secrets.list('market/dev')).keys.find((key) => key.key === 'LEAK')!.sensitivity, 'secret');
+});
+
+test("a reference binds to its source key, not its name: renamed, the key is still read through it; another made under the old name is not", async () => {
+  await root.secrets.set('market/dev', { FROM_PROD: { ref: 'market/prod/API_KEY' } });
+  await root.secrets.rename('market/prod/API_KEY', 'PROD_KEY');
+  assert.equal((await vic.secrets.reveal('market/dev')).values.FROM_PROD, 'prod-key');
+  await root.secrets.set('market/prod', { API_KEY: 'another-value' });
+  assert.equal((await vic.secrets.reveal('market/dev')).values.FROM_PROD, 'prod-key');
+});
+
 test('a role edit weighed from a policy another change overtook is refused, policy_changed, to be asked again, rather than applied', async () => {
   // The Owner previewed Viewer reading in protected environments with nothing protected; prod is protected before it is saved.
   meanwhileOn('access', (asked) => asked === `user:${ROOT}`, () => maya.environments.protect('market/prod'));

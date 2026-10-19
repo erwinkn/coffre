@@ -156,6 +156,30 @@ test("making a reference takes, at its source, what the source's nature asks, as
   assert.equal(await ask().then((result) => result.ok || result.refusal.code), true);
 });
 
+test("a rewrap that brings an old value back into a key a live reference reads takes what the value's nature asks there; the current one takes writing alone", async () => {
+  const w = await world();
+  const { secrets } = tablesOf(db.owner);
+  await made(w, ROOT);
+  // A second value, current now; Wes writes and uses market/prod, protected, and reads none of it.
+  const second = { ...w.source, version: 2 };
+  const wrapped = await w.vault.wrap({ principal: ROOT, items: [{ secret: second, key: randomBytes(32).toString('base64') }] });
+  assert.ok(wrapped.ok);
+  const [{ secretVersionId: current }] = await storedVersions(db.owner, [{ secret: second, wrapped: wrapped.wrapped[0] }]);
+  await db.owner.update(secrets).set({ currentVersionId: current, currentVersion: 2 }).where(eq(secrets.id, w.source.secretId));
+  const WES = 'user:wes@acme.example';
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: WES })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: WES, changes: [{ projectId: w.market.project, environmentId: w.market.prod, role: 'developer', expiresAt: null }] })).ok);
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: true } })).ok);
+  const rewrap = (principal: string, secretVersionId: string) => w.vault.rewrap({ principal, items: [{ secret: { ...w.source, version: 3 }, secretVersionId }] });
+  // The first value back: billing's readers would read it next, a secret Wes never read.
+  const back = await rewrap(WES, w.secretVersionId);
+  assert.equal(back.ok || back.refusal.code, 'no_grant');
+  // The current one again, as a mark does: no value changes hands.
+  assert.equal((await rewrap(WES, current)).ok, true);
+  // An Owner, who reads prod, brings it back.
+  assert.equal((await rewrap(ROOT, w.secretVersionId)).ok, true);
+});
+
 test('making a reference takes read on the source and write on the holder, by your own grants', async () => {
   const w = await world();
   const ask = (principal: string) => w.vault.reference({ principal, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });

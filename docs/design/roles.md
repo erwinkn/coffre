@@ -78,6 +78,22 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   value to whoever reads where it is held. Protecting prod does not take
   back what references made before already lend; ending the reference
   does (`coffre references`, or deleting the key).
+- **Its nature is the source's, live** (Erwin, 2026-10-19): prod's
+  `API_KEY` made a secret again, dev's reference to it is a secret, read by
+  dev's readers; made sensitive, it is use-only in dev. So what keeps a
+  reference from lending a value nobody who may read it chose to lend is
+  on the write side, at the source. Typing a value lends that value, which
+  its writer has seen; tightening the current one (plain to secret,
+  secret to sensitive) narrows who reads it. Every other way to put a
+  value behind a key, checked:
+
+  | Path | What it does to a key a live reference reads |
+  |---|---|
+  | Restore an old version | Takes at the key what the old value's nature asks, as making a reference to it would: to list a plain value, to read a secret, to use a sensitive one. Decided by the vault under its head (`rewrap`'s `needs`), the app saying so first. Ada, who writes and uses a protected prod, types a plain value over `API_KEY`, refers dev to it, and cannot bring the secret back. |
+  | Archive or unarchive the key; reset or un-reset a fork's override | Archiving and resetting are refused while a live reference reads the key (`refuseIfRead`), and no reference is made to an archived key: none reads one brought back. |
+  | Rename the key, or make another under its name | A reference is bound to its source key's id, sealed by the vault: renamed, it reads the same key; another made under the old name is another key. |
+  | Delete the key, or its environment | Breaks the reference: nothing is read through it again. |
+  | Fork into an environment | Writes into a new or empty one, which no live reference reads. |
 - **When the vault cannot read its own policy**, only entries forged in
   its name within reach, no role holds anything, a service account's
   neither, but Owner, which holds everything: a narrowing hidden by forged
