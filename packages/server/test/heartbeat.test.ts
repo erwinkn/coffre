@@ -1,11 +1,13 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { deriveLogKey, sealEntry, type StoredEntry } from '@coffre/core/audit';
 import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
+import { appendEntries } from '@coffre/db/log';
 import { asc, desc, eq } from 'drizzle-orm';
 
-import { appendAudit } from '../src/db/audit.ts';
+import { appendAudit, appLogKey } from '../src/db/audit.ts';
 import { latestCheckpoint } from '../src/db/queries.ts';
 import { auditReadiness, HEARTBEAT_STALE_AFTER_SECONDS, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { openTestDatabase, resetDatabase, testVault } from './api-fixture.ts';
@@ -27,14 +29,17 @@ function entries() {
 
 /** Moves the newest beat `seconds` into the past. Readiness reads its date, not its chain. */
 async function beatAgo(seconds: number) {
-  const [beat] = await db.owner
-    .select({ seq: auditLog.seq })
+  const [beat] = (await db.owner
+    .select()
     .from(auditLog)
     .where(eq(auditLog.action, 'audit.heartbeat'))
     .orderBy(desc(auditLog.seq))
-    .limit(1);
+    .limit(1)) as StoredEntry[];
+  // Sealed again under the app's key, as if the app had written it then: readiness believes only the app's beats.
+  const aged = { ...beat!, occurredAt: Date.now() - seconds * 1000 };
+  const { mac, hash } = sealEntry(appLogKey(chainKey), aged.prevHash, aged);
   await withLogUnlocked(db.owner, (owner) =>
-    owner.update(auditLog).set({ occurredAt: Date.now() - seconds * 1000 }).where(eq(auditLog.seq, beat.seq)),
+    owner.update(auditLog).set({ occurredAt: aged.occurredAt, mac, hash }).where(eq(auditLog.seq, beat!.seq)),
   );
 }
 
@@ -54,7 +59,7 @@ test('a beat is an app entry, and the vault checkpoints it in an entry of its ow
   assert.deepEqual(JSON.parse(logged[1].metadata), checkpoint);
   assert.equal(await verifyCheckpoint(checkpoint!, publicKey), true);
 
-  const ready = await auditReadiness(db.runtime, vault);
+  const ready = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(ready.ok, true);
   assert.equal(ready.checkpointed, true);
   assert.ok(ready.heartbeatAgeSeconds! < 60);
@@ -94,7 +99,7 @@ test('a rewritten entry is never signed over, and readiness goes red', async () 
   const refused = (await entries()).find((row) => row.decision === 'deny' && row.action === 'audit.checkpoint');
   assert.equal(refused?.code, 'log_broken');
 
-  const ready = await auditReadiness(db.runtime, vault);
+  const ready = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(ready.ok, false);
   assert.equal(ready.checkpointed, false);
 });
@@ -112,21 +117,21 @@ test('a beat the vault did not checkpoint leaves readiness red', async (t) => {
   assert.equal(written, false);
   assert.equal(warning, 'audit checkpoint failed');
   assert.deepEqual((await entries()).map((row) => row.action), ['audit.heartbeat']);
-  const ready = await auditReadiness(db.runtime, vault);
+  const ready = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(ready.ok, false);
   assert.equal(ready.checkpointed, false);
 });
 
 test('readiness trusts only a checkpoint the vault signed', async () => {
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  assert.equal((await auditReadiness(db.runtime, vault)).ok, true);
+  assert.equal((await auditReadiness(db.runtime, vault, chainKey)).ok, true);
   // A checkpoint entry with another signature, as anyone who can write the database could make.
   const [, signed] = await entries();
   const forged = { ...JSON.parse(signed.metadata), signature: Buffer.alloc(64, 7).toString('base64') };
   await withLogUnlocked(db.owner, (owner) =>
     owner.update(auditLog).set({ metadata: JSON.stringify(forged) }).where(eq(auditLog.seq, signed.seq)),
   );
-  const ready = await auditReadiness(db.runtime, vault);
+  const ready = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(ready.ok, false);
   assert.equal(ready.checkpointed, false);
 });
@@ -138,8 +143,8 @@ test('readiness counts a checkpoint under a key the vault replaced only over a p
   // The vault as after a rotation at entry `until`: the key that signed this checkpoint is one it replaced.
   const rotatedAt = (until: number) =>
     ({ about: async () => ({ checkpointKeys: { [checkpoint.keyId]: { publicKey, until } }, rootAdmins: [] }) }) as unknown as Vault;
-  assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq + 1))).ok, true);
-  assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq))).checkpointed, false);
+  assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq + 1), chainKey)).ok, true);
+  assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq), chainKey)).checkpointed, false);
 });
 
 test('an empty log has nothing to checkpoint, and logs nothing for it', async () => {
@@ -148,22 +153,22 @@ test('an empty log has nothing to checkpoint, and logs nothing for it', async ()
   assert.equal(refused.refusal.code, 'invalid');
   assert.deepEqual(await entries(), []);
   assert.equal(await latestCheckpoint(db.owner), null);
-  assert.deepEqual(await auditReadiness(db.runtime, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false });
+  assert.deepEqual(await auditReadiness(db.runtime, vault, chainKey), { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false });
 });
 
 test('readiness accepts a recent beat and rejects a stale one', async () => {
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   await beatAgo(12);
-  const recent = await auditReadiness(db.runtime, vault);
+  const recent = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(recent.ok, true);
   assert.ok(Math.abs(recent.heartbeatAgeSeconds! - 12) < 5);
 
   // A Cron run that fires a few seconds late is not a logging failure.
   await beatAgo(307);
-  assert.equal((await auditReadiness(db.runtime, vault)).ok, true);
+  assert.equal((await auditReadiness(db.runtime, vault, chainKey)).ok, true);
 
   await beatAgo(HEARTBEAT_STALE_AFTER_SECONDS + 60);
-  const stale = await auditReadiness(db.runtime, vault);
+  const stale = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(stale.ok, false);
   assert.equal(stale.checkpointed, true);
   assert.ok(stale.heartbeatAgeSeconds! > HEARTBEAT_STALE_AFTER_SECONDS);
@@ -174,7 +179,7 @@ test('a checkpoint before the newest beat does not cover it', async () => {
   await db.runtime.transaction((tx) =>
     appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'audit.heartbeat', decision: 'allow' }]),
   );
-  const ready = await auditReadiness(db.runtime, vault);
+  const ready = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(ready.ok, false);
   assert.equal(ready.checkpointed, false);
 });
@@ -183,5 +188,17 @@ test('readiness rejects a database without the expected Drizzle schema prefix', 
   // The migrations count, in Drizzle's array row mode: none applied.
   const query = async () => ({ rows: [[0]], fields: [] });
   const empty = createDatabase({ query, connect: async () => ({ query, release: () => {} }) } as never);
-  assert.deepEqual(await auditReadiness(empty, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false });
+  assert.deepEqual(await auditReadiness(empty, vault, chainKey), { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false });
+});
+
+test('readiness believes only a beat the app wrote', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+  assert.equal((await auditReadiness(db.runtime, vault, chainKey)).ok, true);
+  // A newer beat in the app's name under another key, as whoever can append rows could write one to hide what the last found.
+  await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('app', Buffer.alloc(32, 9)), [
+    { actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{"source":"scheduled"}' },
+  ]));
+  assert.ok((await vault.checkpoint()).ok);
+  const ready = await auditReadiness(db.runtime, vault, chainKey);
+  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
 });

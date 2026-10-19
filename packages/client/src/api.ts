@@ -1103,11 +1103,16 @@ export type Api = {
     };
   };
   "GET /audit/verification": {
-    input: undefined;
+    input: {
+      from?: string;
+    };
     output: {
       ok: true;
       through: number | null;
       entries: number;
+      from: number;
+      remaining: number;
+      next?: string | null;
       checkpoint: null | {
         seq: number;
         signedAt: string;

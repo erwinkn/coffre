@@ -7,19 +7,48 @@ type Item = { item: number; secretId: string; version: number; subject: string }
 type ParsedIntent = { intentId: string; operation: string; expiresAt: number; keys: Item[] };
 /** An outcome entry: one item of its intent, or several, for a read logged once per place. */
 type ParsedOutcome = { intentId: string; relatedSeq: bigint; items: Item[] };
-type Intent = ParsedIntent & { entry: StoredEntry; seen: Set<number> };
+type Intent = ParsedIntent & { seq: bigint; actor: string; seen: Set<number> };
 type Accounting = { ok: true; pending: number } | Extract<LogVerification, { ok: false }>;
+type Broken = Extract<Accounting, { ok: false }>;
+
+/** A key batch still under way, as a checkpoint keeps it: its intent's entry, and the items whose outcomes are logged. */
+export type OpenIntent = { seq: number; intentId: string; operation: string; expiresAt: number; actor: string; keys: Item[]; seen: number[] };
+
+/** Where the accounting stands, as a checkpoint keeps it: the batches still open, and the first fault, once found. */
+export type AccountingState = { intents: OpenIntent[]; fault: { failedAtSeq: number; reason: string } | null };
 
 /**
  * Every key operation's intent and its outcomes, entry by entry, oldest
- * first, as the full check reads the vault's entries (`add`); then what is
- * still open (`result`). The chain can hold while a process died between an
+ * first, as a walk reads the vault's entries (`add`); then what is still
+ * open (`result`). The chain can hold while a process died between an
  * intent and its outcomes: only a missed deadline is a fault.
+ *
+ * A walk resumes from a checkpoint's `state()`: the batches open there, and
+ * nothing of those that closed. So an intent's identity is checked against
+ * those still open and those since, not every one the log ever held: a
+ * closed batch takes no more outcomes in any case, since each names its
+ * intent's entry.
  */
 export class KeyAccounting {
   readonly #intents = new Map<bigint, Intent>();
   readonly #ids = new Set<string>();
-  #fault: Extract<Accounting, { ok: false }> | null = null;
+  #fault: Broken | null = null;
+
+  constructor(from: AccountingState = { intents: [], fault: null }) {
+    for (const { seq, seen, ...open } of from.intents) {
+      this.#intents.set(BigInt(seq), { ...open, seq: BigInt(seq), seen: new Set(seen) });
+      this.#ids.add(open.intentId);
+    }
+    this.#fault = from.fault === null ? null : { ok: false, ...from.fault };
+  }
+
+  /** Where it stands, to resume from: the batches open, oldest first. */
+  state(): AccountingState {
+    const intents = [...this.#intents.values()]
+      .sort((a, b) => (a.seq < b.seq ? -1 : 1))
+      .map(({ seq, seen, ...open }) => ({ ...open, seq: Number(seq), seen: [...seen].sort((a, b) => a - b) }));
+    return { intents, fault: this.#fault === null ? null : { failedAtSeq: this.#fault.failedAtSeq!, reason: this.#fault.reason } };
+  }
 
   add(entry: StoredEntry): void {
     if (this.#fault !== null || entry.author !== 'vault') return;
@@ -31,7 +60,7 @@ export class KeyAccounting {
       if (typeof parsed === 'string') return broken(parsed);
       if (this.#ids.has(parsed.intentId)) return broken('key intent repeats an operation identity');
       this.#ids.add(parsed.intentId);
-      if (parsed.keys.length > 0) this.#intents.set(entry.seq, { ...parsed, entry, seen: new Set() });
+      if (parsed.keys.length > 0) this.#intents.set(entry.seq, { ...parsed, seq: entry.seq, actor: entry.actor, seen: new Set() });
     } else if (KEY_ACTIONS.has(entry.action) && entry.relatedSeq !== null) {
       // An outcome names its intent; a key released with no service to call has none.
       const parsed = parseOutcome(entry);
@@ -42,7 +71,7 @@ export class KeyAccounting {
         if (intent === undefined || key === undefined || intent.seen.has(outcome.item)) {
           return broken('key outcome does not identify one item of its intent');
         }
-        if (parsed.intentId !== intent.intentId || entry.actor !== intent.entry.actor || entry.action !== intent.operation) {
+        if (parsed.intentId !== intent.intentId || entry.actor !== intent.actor || entry.action !== intent.operation) {
           return broken('key outcome belongs to another operation');
         }
         if (outcome.secretId !== key.secretId || outcome.version !== key.version || outcome.subject !== key.subject) {
@@ -51,7 +80,7 @@ export class KeyAccounting {
         intent.seen.add(outcome.item);
       }
       // Completed batches need no state, and another outcome for one is a duplicate.
-      if (intent !== undefined && intent.seen.size === intent.keys.length) this.#intents.delete(intent.entry.seq);
+      if (intent !== undefined && intent.seen.size === intent.keys.length) this.#intents.delete(intent.seq);
     }
   }
 
@@ -65,7 +94,7 @@ export class KeyAccounting {
       const missing = intent.keys.length - intent.seen.size;
       return `key intent ${intent.intentId} is overdue: ${missing} of ${intent.keys.length} outcomes missing`;
     }).join('; ');
-    return { ok: false, failedAtSeq: Number(overdue[0]!.entry.seq), reason };
+    return { ok: false, failedAtSeq: Number(overdue[0]!.seq), reason };
   }
 }
 

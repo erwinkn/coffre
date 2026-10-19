@@ -11,7 +11,7 @@ import { appendOnlyLifted, entryFields, restoreRow, transaction } from './storag
 
 /** Leave one old signature invalid, reseal the chain, and make later checkpoints valid. */
 export async function earlierCheckpoint(deployment: Deployment, { admin }: People): Promise<string> {
-  expect((await admin.api.audit.verify()).ok, 'the log does not verify before checkpoint tampering');
+  expect((await admin.api.audit.verifyWhole()).ok, 'the log does not verify before checkpoint tampering');
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
     const rows = await sql.query('SELECT * FROM audit_log ORDER BY seq');
     const signed = rows.filter((row) => row.author === 'vault' && row.action === 'audit.checkpoint' && row.decision === 'allow');
@@ -49,7 +49,8 @@ export async function earlierCheckpoint(deployment: Deployment, { admin }: Peopl
         }
         await restoreRow(sql, 'audit_chain_head', { ...head, head_hash: previous }, 'only_row');
       });
-      const result = await admin.api.audit.verify();
+      // The page's check goes on from the newest checkpoint, valid: the walk from the first entry reads them all.
+      const result = await admin.api.audit.verifyWhole();
       expect(!result.ok && result.author === 'vault' && result.failedAtSeq === Number(signed[0].seq)
         && result.reason === 'a checkpoint the vault did not sign', 'a valid later checkpoint hid an invalid earlier one', result);
     } finally {
@@ -60,6 +61,6 @@ export async function earlierCheckpoint(deployment: Deployment, { admin }: Peopl
       keys.app.fill(0); keys.vault.fill(0); seed.fill(0);
     }
   }));
-  expect((await admin.api.audit.verify()).ok, 'restoring the signed prefixes did not restore verification');
+  expect((await admin.api.audit.verifyWhole()).ok, 'restoring the signed prefixes did not restore verification');
   return 'an invalid earlier checkpoint was caught despite valid MACs and a valid later checkpoint';
 }

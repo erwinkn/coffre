@@ -1,5 +1,5 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { and, asc, desc, eq, lt, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
@@ -260,6 +260,33 @@ export async function withinBytes(
   }
   if (count === 0) return null;
   return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count };
+}
+
+/**
+ * The first entry missing from the log up to `seq`, and the one found in
+ * its place, or null when every one is there. Seqs are the primary key, so
+ * a stretch is whole exactly when its count is its length: one pass over
+ * the key's index, never the entries. Only a log with a gap pays for more,
+ * a count per halving to find where.
+ *
+ *   entries 0..9, 4 cut:  { expected: 4n, found: 5n }
+ */
+export async function missingEntry(db: Queryable, seq: bigint): Promise<{ expected: bigint; found: bigint | null } | null> {
+  const { auditLog } = tablesOf(db);
+  const whole = async (to: bigint) => {
+    const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, 0n), lte(auditLog.seq, to)));
+    return BigInt(n) === to + 1n;
+  };
+  if (seq < 0n || (await whole(seq))) return null;
+  // The first stretch from 0 that is not whole ends at the missing entry.
+  let [low, high] = [0n, seq];
+  while (low < high) {
+    const middle = (low + high) / 2n;
+    if (await whole(middle)) low = middle + 1n;
+    else high = middle;
+  }
+  const [next] = await db.select({ seq: auditLog.seq }).from(auditLog).where(gt(auditLog.seq, low)).orderBy(asc(auditLog.seq)).limit(1);
+  return { expected: low, found: (next?.seq as bigint | undefined) ?? null };
 }
 
 /**

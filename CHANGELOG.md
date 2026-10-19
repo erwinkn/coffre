@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- **The audit log is verified from its last checkpoint, not its first
+  entry.** Opening the audit page re-verified every entry, in the app and
+  in the vault: on a Workers deployment with 7,000 entries that was 1.2
+  seconds of CPU a visit, past the Free plan's limit, and it grew with
+  the log. Each checkpoint now keeps, beside its signature, the tally of
+  the prefix it signs: the vault's keys in order, the key batches under
+  way, who is a member and what they hold. Each heartbeat says how far
+  the app verified its own entries. The page's check, and each
+  checkpoint, start from those and read what was written since: on
+  Node, a log of 100,000 entries went from 6 seconds of CPU to some 10
+  milliseconds. Nothing before is read again: its hash, which the newest
+  checkpoint signed, pins it, and one count of the log's index finds an
+  entry cut. An entry edited in place, its hash left as it was, is what
+  that leaves, so each checkpoint also rehashes 100 entries of the past in
+  turn, in laps, some 6 ms of a cold Worker's CPU: found within two laps
+  at most, a lap about 6 hours for a log of 7,000 entries and 3½ days for
+  100,000, where the hourly recomputation from the first entry found it
+  within the hour but needed a second of CPU at 10,000 entries. `coffre
+  verify log` finds it at once; run it on a schedule to narrow that.
+
+  `coffre verify log`, and the page's new **Verify whole log**, still walk
+  the log from its first entry, 10,000 entries a request, and check each
+  checkpoint's tally against the log before it
+  (`GET /api/audit/verification?from=start`, then each `next`).
+
+  After the upgrade, the first checkpoints sign the log again from its
+  first entry, 10,000 entries a beat, since those of 0.10.0 kept no
+  tally: on a log longer than that, `/readyz` stays red for a beat or a
+  few until they catch up, and the page says how many entries are left.
+  A beat that walks 10,000 entries takes about a second of CPU: on the
+  Workers Free plan it is cut off and the catch-up never ends. Even
+  caught up, a beat and the audit page's check each take some 10 ms of
+  CPU on Node, an estimated 25 on a Worker, more than the Free plan's 10,
+  as 0.10.0's beat already did: run 0.10.1 on a paid plan, and move there
+  before upgrading. No migration.
+
+  `/readyz` now also turns red when the beat's own walk of the chain finds
+  it broken, or cannot run: an entry in the app's name the app did not
+  write, which the vault cannot tell, used to show only on the audit
+  page.
 - **Reveals cost less CPU.** On Workers' Free plan an invocation has 10 ms
   of CPU, and a reveal now runs 27 statements instead of 33, and reads
   the same rows however large the log grows: with a vault key in memory,
