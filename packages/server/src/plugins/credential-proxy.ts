@@ -378,14 +378,16 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   const covering = (keys: readonly string[]) => [...proxy.credentials.values()].filter((credential) => credential.keys.every((key) => keys.includes(key)));
   // What the read resolved, for what `coffre run` generates below.
   let resolved: Parameters<PickKeys>[1] = [];
+  let personal = false;
   // One read, which opens what the app holds as it is, chosen from the rows it opens: a sensitive value is never one,
   // and the vault refuses the read if it were.
   const held = await coffre.use(handle, {
     path: readOf(proxy, path),
     purpose: 'expose',
     logged: { plan: true },
-    keys: (_environment, rows) => {
+    keys: (environment, rows) => {
       resolved = rows;
+      personal = environment.personal;
       const using = covering(rows.map((row) => row.key));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key), ...[...proxy.signers.values()].map((signer) => signer.key)]);
       // What the proxy fills in itself, a tunnel's URL or a signer's handle, never the value the environment holds; and a
@@ -443,6 +445,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   const generates = (key: string) => making === 'all' || (making?.includes(key) ?? false);
   for (const row of making === undefined ? [] : resolved) {
     if (covered.has(row.key) || row.recipe === null || row.versionId === null || recipeProblem(row.recipe) !== null || !generates(row.key)) continue;
+    // The person's own value, made sensitive: theirs, which the app goes without, never made again over it (R18).
+    if (personal && !row.inherited && row.sensitive) continue;
     generate[row.key] = { recipe: row.recipe, replaces: row.versionId };
   }
   return answer({

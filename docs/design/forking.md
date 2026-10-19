@@ -44,7 +44,8 @@ market/dev    DATABASE_URL=postgres://dev    STRIPE_KEY=sk_test_1
   the parent's. The vault and the key formats don't change for overlays.
   The vault gains one log label, `through`, which decides nothing.
 - **A personal config is readable by its owner alone,** instance Owners
-  included. The vault enforces it by binding the owner into each wrapped
+  included, and its sensitive values by nobody, its owner included (R18).
+  The vault enforces it by binding the owner into each wrapped
   data key, so a forged database row fails to decrypt instead of granting
   access.
 - **Status.** Erwin agreed to the three recommendations below (no
@@ -227,7 +228,7 @@ derived, not copied, so a move in prod shows in every fork at once.
 **A key is archived in the parent.** Inheriting stops, as archived keys
 are not live. A fork's override of it stays, and now reads as an
 addition. A fork's removal of it does nothing, and the page shows it as
-"removed · prod dropped it", which Restore cleans up. So it is when a
+"removed here · prod dropped it too", which Restore cleans up. So it is when a
 parent between them removes the key itself.
 
 **The parent is archived or deleted.** Archiving an environment that live
@@ -423,7 +424,7 @@ database/
   DATABASE_POOL  ••••••••   from prod                                v2   prod · 1 Oct
 EU_REGION        ••••••••                                            v1   cy   3 Oct
 STRIPE_KEY       ••••••••   from prod                                v2   prod · 2 Oct  Rotate
-SENTRY_DSN       removed   ·  prod has it                                              Restore
+SENTRY_DSN       removed here  ·  not inherited from prod                                Restore
 ```
 
 - An **inherited** row is muted, with "from prod" linking to the parent's
@@ -456,7 +457,7 @@ SENTRY_DSN       removed   ·  prod has it                                      
 
 ```sh
 coffre fork market/prod prod-eu --inherit          # a fork that inherits
-coffre list market/prod-eu                         # each key: (from prod), (overrides prod), (removed: prod has it)
+coffre list market/prod-eu                         # each key: (from prod), (overrides prod), (removed here: not inherited from prod)
 coffre set market/prod-eu/DATABASE_URL             # an override, prompted as ever
 coffre remove market/prod-eu/SENTRY_DSN            # does without prod's key; --undo inherits it again
 coffre reset market/prod-eu/DATABASE_URL           # back to prod's, its own kept; --undo serves it again

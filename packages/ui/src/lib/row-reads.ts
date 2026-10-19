@@ -62,3 +62,15 @@ export function rowReads(state: RowReads, action: RowReadsAction): RowReads {
 export function revealToggleDisabled(state: RowReads, shown: Reveal | null): boolean {
   return shown === null && state.revealing;
 }
+
+/**
+ * The value an edit starts from: a plain one as listed, one the caller reads
+ * as `read` opens it, or none, the editor opening empty to replace it: a
+ * sensitive value, a parent's they do not read, or a read refused or failed,
+ * whose reason the row says. It always opens: writing a value takes no read
+ * of the one it replaces.
+ */
+export async function valueToEdit(row: { value: string | null; readable: boolean }, read: () => Promise<string | null>): Promise<string | null> {
+  if (row.value !== null) return row.value;
+  return row.readable ? read() : null;
+}

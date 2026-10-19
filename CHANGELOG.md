@@ -109,6 +109,21 @@
   bob@acme.example --role contributor --env prod`. What a person gets is
   the narrower of their role and the key: a sensitive key is only ever
   used. Migration `0013_contributor_role` widens the grants' role check.
+- **`<env>@me` is its owner's to edit, whatever their role, and its own
+  values have the nature of any value.** On 0.9 with `people:
+  'stand-ins'`, the page's Override and Edit opened nothing on a value
+  its person could not read, an Owner's `backend/local@me` included:
+  each edit read the value first, and gave up, unsaid, when the read was
+  refused. An edit now opens empty, to replace the value, wherever it is
+  not read: a sensitive value, a parent's its person does not read, or a
+  read that failed, which the row says. A personal config's values may
+  now be sensitive too: its owner reads their own secrets, and a
+  sensitive one, theirs or not, is used and never read, its owner
+  included. None is plain, which the vault would not bind to its owner. An override of a key it inherits, saying
+  nothing, is still a secret its owner reads; the page offers each
+  level. A fork's removed key now reads `removed here: not
+  inherited from dev`, or `dev dropped it too`, in `coffre list` and on
+  the page.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output
