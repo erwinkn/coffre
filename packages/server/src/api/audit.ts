@@ -1,29 +1,28 @@
 import { readsWholeLog, runsInstance } from '@coffre/core/access';
-import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
-import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
+import { describeAccessFault, type Checkpoint, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
+import { missingEntry } from '@coffre/db/log';
 
-import { actorParts, appLogKey } from '../db/audit.ts';
+import { actorParts, appLogKey, attested, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
 import {
   auditActionCounts,
   auditHead,
   auditPage,
-  auditRange,
   exchangesOf,
   personalTokensOf,
   latestCheckpoint,
+  latestTallied,
   places,
   resolvePath,
+  talliedAfter,
+  talliedAt,
   type AuditFilter,
 } from '../db/queries.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
-import { forbidden, notFound } from './errors.ts';
+import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
-
-/** Entries the full check reads at once, at most, and no more than `BATCH_BYTES` of what they say (`auditRange`): within a Worker's memory, and few round trips. */
-const VERIFY_BATCH = 10_000;
 
 export type AuditEntryView = {
   seq: number;
@@ -112,6 +111,24 @@ export type AuditVerification =
       /** The last entry both authors verified, each its own by its key: "verified through 5170". */
       through: number | null;
       entries: number;
+      /**
+       * The first entry this check read: what came before it was verified by
+       * the checks the checkpoints and heartbeats record, and is pinned by the
+       * hash the newest checkpoint signed. 0 for a check from the first entry.
+       */
+      from: number;
+      /**
+       * Entries after `through` this check did not reach, no more than one
+       * walk a request: 0 once the checkpoints keep up with the log, as they
+       * do but after an upgrade from 0.10.0, for a beat or a few.
+       */
+      remaining: number;
+      /**
+       * For a stretch of the walk from the first entry (`from` asked for):
+       * the checkpoint the next stretch goes on from, as `from`, or null once
+       * it reached the head.
+       */
+      next?: number | null;
       /** The newest prefix the vault signed, which the log still holds; null before the first. */
       checkpoint: { seq: number; signedAt: string } | null;
       /** Key batches at a key service still under way: accounted for once they finish. */
@@ -332,17 +349,32 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
 }
 
 /**
- * Check the whole log: the app here, every link and hash and its own
- * entries' MACs, from the first entry to the head, in one read-only
- * snapshot so appends made meanwhile cannot look like tampering; then the
- * vault, its own entries by its key over the same entries, every checkpoint
- * against the prefix it signed, its key batches accounted for, and the
- * members and grants replayed. Anyone who can insert a row can link it to
- * the chain, so an entry whose author did not write it fails one check or
- * the other. For whoever reads the whole log (`readsWholeLog`): a part of
- * the chain cannot be verified.
+ * Check the log from where the last checks left off: the app here, every
+ * link and hash and its own entries' MACs, from the newest point both its
+ * heartbeats and the vault's checkpoints vouch for, to the head, in one
+ * read-only snapshot so appends made meanwhile cannot look like tampering;
+ * then the vault, its own entries by its key over the same entries, every
+ * checkpoint among them against the prefix it signed, its key batches
+ * accounted for, and the members and grants replayed on from its newest
+ * checkpoint's tally. Anyone who can insert a row can link it to the chain,
+ * so an entry whose author did not write it fails one check or the other.
+ * What came before is pinned by the hash the newest checkpoint signed, and
+ * every entry of it is there, by one count of the log's index.
+ *
+ * So a check reads what was written since the last beat, five minutes'
+ * worth, however long the log, and never more than one walk
+ * (`CHAIN_WALK`): `remaining` says what it left for the checkpoints to
+ * catch up with.
+ *
+ * With `from`, a stretch of the walk from the first entry instead, which
+ * checks again what the checkpoints vouch for: from the first entry, or
+ * the checkpoint the stretch before ended at, through the furthest
+ * checkpoint one walk reaches, the newest once within reach, whose tally the
+ * vault's walk must come to; then from the newest to the head, as above.
+ * `next` says where the next stretch goes on. For whoever reads the whole
+ * log (`readsWholeLog`): a part of the chain cannot be verified.
  */
-export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
+export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'start' } = {}): Promise<AuditVerification> {
   if (!readsWholeLog(ctx.caller)) {
     throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
   }
@@ -358,69 +390,91 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
     async (tx) => {
       const head = await auditHead(tx);
       if (head === null) return failed('app', 0, 'audit_chain_head is missing, so the length of the log cannot be established', null);
-      let previousHash = GENESIS_HASH;
-      let nextSequence = 0n;
-      let entries = 0;
-      for (;;) {
-        const batch = await auditRange(tx, nextSequence, VERIFY_BATCH);
-        if (batch.length === 0) break;
-        // From the first entry, each batch carrying on from the one before:
-        // the numbers, the links, the hashes, and the app's MACs. The
-        // vault's entries only by their place: the vault checks their MACs
-        // over the same entries, below, and its key never leaves it.
-        const result = verifyEntries(batch, {
-          startSeq: nextSequence,
-          startPrevHash: previousHash,
-          keys: [appLogKey(ctx.chainKey)],
-          chainOnly: ['vault'],
-        });
-        if (!result.ok) {
-          // Verified through the entry read before the faulty one: with a gap, not the seq before it.
-          const at = batch.findIndex((row) => row.seq === result.failedAtSeq);
-          return failed('app', result.failedAtSeq, result.reason, at > 0 ? batch[at - 1].seq : nextSequence - 1n);
+      // Where the app's walk starts, where the vault's does, and, for a stretch, the checkpoint it ends at.
+      let start: ChainPoint;
+      let vaultFrom: number | 'start';
+      let to: { entry: bigint; at: ChainPoint } | null = null;
+      if (query.from === undefined) {
+        // From the older of where the app's MACs and the vault's tally were last verified to.
+        const [own, tallied] = await Promise.all([attested(tx, ctx.chainKey), latestTallied(tx)]);
+        const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint);
+        start = own.seq <= signed.seq ? own : signed;
+        vaultFrom = tallied === null ? 'start' : Number(tallied.entry);
+        // Every entry before it still there: one count, and only a log with a gap pays to find where.
+        const gap = await missingEntry(tx, start.seq);
+        if (gap !== null) return failed('app', gap.found, `sequence gap: expected seq ${gap.expected}, found ${gap.found}`, gap.expected - 1n);
+      } else {
+        const anchor = query.from === 'start' ? null : await talliedAt(tx, BigInt(query.from));
+        if (query.from !== 'start' && anchor === null) throw badRequest(`entry ${query.from} is not a checkpoint that keeps a tally`);
+        start = anchor === null ? CHAIN_START : pointOf(anchor);
+        vaultFrom = query.from;
+        // The furthest checkpoint one walk reaches, or the next however far it is; none, and this is the last stretch.
+        const later = await talliedAfter(tx, query.from === 'start' ? -1n : BigInt(query.from), CHAIN_WALK / 2 + 1);
+        const target = later.filter(({ signs }) => signs - start.seq <= CHAIN_WALK).at(-1) ?? later[0];
+        const ends = target === undefined ? null : await talliedAt(tx, target.entry);
+        if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends) };
+      }
+      const walked = await walkChain(tx, ctx.chainKey, start, to === null ? {} : { to: to.at.seq, limit: Infinity });
+      if (!walked.ok) return failed('app', walked.failedAtSeq, walked.reason, walked.through);
+      // Whether it ends at the hash the checkpoint signed is the vault's to say, once it has checked its own entries.
+      const { at } = walked;
+      if (to === null && walked.done) {
+        if (at.seq + 1n !== head.nextSeq) {
+          const missing = head.nextSeq - at.seq - 1n;
+          return failed(
+            'app',
+            at.seq + 1n,
+            missing > 0n
+              ? `the log ends at seq ${at.seq + 1n} but the chain head expects ${head.nextSeq}: ${missing} ${missing === 1n ? 'entry has' : 'entries have'} been removed from the end`
+              : `the log runs to seq ${at.seq + 1n} but the chain head only expects ${head.nextSeq}`,
+            at.seq,
+          );
         }
-        entries += result.entries;
-        previousHash = result.head;
-        nextSequence = result.nextSeq;
+        if (!at.hash.equals(head.headHash)) return failed('app', at.seq + 1n, 'the recomputed head does not match the stored chain head', at.seq);
       }
-      if (nextSequence !== head.nextSeq) {
-        const missing = head.nextSeq - nextSequence;
-        return failed(
-          'app',
-          nextSequence,
-          missing > 0n
-            ? `the log ends at seq ${nextSequence} but the chain head expects ${head.nextSeq}: ${missing} ${missing === 1n ? 'entry has' : 'entries have'} been removed from the end`
-            : `the log runs to seq ${nextSequence} but the chain head only expects ${head.nextSeq}`,
-          nextSequence - 1n,
-        );
-      }
-      if (!previousHash.equals(head.headHash)) {
-        return failed('app', nextSequence, 'the recomputed head does not match the stored chain head', nextSequence - 1n);
-      }
-      const last = nextSequence === 0n ? null : { seq: Number(nextSequence - 1n), hash: previousHash.toString('hex') };
-      // In the same snapshot: the newest checkpoint of the prefix just verified, which the vault checks below.
-      return { ok: true as const, entries, last, checkpoint: await latestCheckpoint(tx) };
+      return {
+        ok: true as const,
+        start,
+        last: at.seq < 0n ? null : { seq: Number(at.seq), hash: at.hash.toString('hex') },
+        remaining: Number(head.nextSeq - 1n - at.seq),
+        vaultFrom,
+        to,
+        // In the same snapshot: the newest checkpoint, which the vault checks below.
+        checkpoint: await latestCheckpoint(tx),
+      };
     },
     SNAPSHOT,
   );
   if (!chain.ok) return chain;
 
-  // The vault's entries by its key, up to the entry the app verified to:
-  // only then is every entry of the prefix authenticated, by its author.
-  const verified = await named(ctx, await ctx.vault.verifyLog({ upTo: chain.last }));
+  // The vault's entries by its key, over the same stretch, up to the entry the app verified to: only then is
+  // every entry of it authenticated, by its author.
+  const verified = await named(ctx, await ctx.vault.verifyLog({
+    upTo: chain.last,
+    from: chain.vaultFrom,
+    ...(chain.to === null ? {} : { to: Number(chain.to.entry) }),
+  }));
   const { checkpoint } = chain;
   if (!verified.ok) {
-    // The app verified the chain whole, so the vault's fault is at the entry it names, or in no entry at all.
+    // The app verified the chain over the stretch, so the vault's fault is at the entry it names, or in no entry at all.
     const last = chain.last === null ? null : BigInt(chain.last.seq);
     return failed('vault', verified.failedAtSeq, verified.reason, verified.failedAtSeq === null ? last : BigInt(verified.failedAtSeq) - 1n);
   }
   return {
     ok: true,
     through: chain.last?.seq ?? null,
-    entries: chain.entries,
+    entries: (chain.last?.seq ?? -1) + 1,
+    from: Number(chain.start.seq + 1n),
+    remaining: chain.remaining,
+    ...(query.from === undefined ? {} : { next: chain.to === null ? null : Number(chain.to.entry) }),
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
     ...(verified.pending === undefined ? {} : { pending: verified.pending }),
   };
+}
+
+/** Where a checkpoint's prefix ends, as a walk of the chain names it. */
+function pointOf(checkpoint: Checkpoint): ChainPoint {
+  return { seq: BigInt(checkpoint.seq), hash: Buffer.from(checkpoint.hash, 'hex') };
 }
 
 /**

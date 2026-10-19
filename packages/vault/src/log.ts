@@ -2,7 +2,8 @@ import { deriveLogKey, GENESIS_HASH, verifyEntries, type LogKey, type StoredEntr
 import type { LogHead, LogVerification } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 
-import { entriesFrom, hashAt } from './store.ts';
+import { entriesFrom, hashAt, vaultEntriesAfter } from './store.ts';
+import type { Walk } from './tally.ts';
 
 /**
  * The vault's half of the one audit log: its entries are the ones it
@@ -21,83 +22,107 @@ export function vaultLogKey(signingKey: Uint8Array): LogKey {
   return deriveLogKey('vault', signingKey);
 }
 
-/**
- * How far this process has verified the chain: every entry before
- * `nextSeq`, the last of which has `hash`, with `vaultEntries` of the
- * vault's among them, written under `vaultKeys`, in the order the log moved
- * through them (`forward`). In memory only: the database cannot vouch for
- * itself.
- */
-export type Anchor = { nextSeq: bigint; hash: Buffer; vaultEntries: number; vaultKeys: readonly string[] };
+/** Where a walk of the log stands: the last entry it covered, -1 before the first, and that entry's hash. */
+export type Position = { seq: bigint; hash: Buffer };
 
-/** Before the first entry: nothing verified yet. */
-export const UNVERIFIED: Anchor = { nextSeq: 0n, hash: GENESIS_HASH, vaultEntries: 0, vaultKeys: [] };
+/** Before the first entry. */
+export const START: Position = { seq: -1n, hash: GENESIS_HASH };
 
-/** The further of two anchors, when two calls verified at once. */
-export function further(a: Anchor, b: Anchor): Anchor {
-  return b.nextSeq > a.nextSeq ? b : a;
+/** The further of two positions, when two calls walked at once. */
+export function further(a: Position, b: Position): Position {
+  return b.seq > a.seq ? b : a;
 }
 
 /** Entries read at once, at most, and no more than `BATCH_BYTES` of what they say: well within a Worker's memory, and a fifth of the round trips of 1000. */
 export const VERIFY_BATCH = 5000;
 
-type Verified = { verification: LogVerification; anchor: Anchor };
+type Broken = Extract<LogVerification, { ok: false }>;
 
 /**
- * Check the chain, a batch in memory at a time, and return where it is now
- * verified to. Three parts:
+ * Walk the chain on from `from`, a batch in memory at a time, through `to`
+ * or the log's last entry, and no more than `limit` entries: every link and
+ * hash recomputed, each of the vault's entries by its MAC, its keys moving
+ * only forward, and each fed to `walk`. Where it got to, and whether that
+ * is as far as it was to go: a walk cut short by `limit` goes on from there
+ * another time.
  *
- * - `shown`, the page a reader is looking at: each entry against its own
- *   hash and MAC;
- * - `anchor`, the head at the last check: still there, unchanged. A rewrite
- *   of anything before it, chained again to hide, changes its hash;
- * - every entry after the anchor, or from the first.
- *
- * So a view rehashes only what is new since the last one. What it leaves
- * out is an entry before the anchor edited in place, not chained again, and
- * not on the page: a full check, which starts from `UNVERIFIED`, finds that,
- * as does the first view after a start, which has no anchor. `onBatch` sees
- * each batch once it has verified, for checks that read the same entries.
+ * It takes `from` as given: whether the log still holds it is the caller's
+ * to check, with the other heads it must hold, in one read.
  */
-export async function verifyChain(
+export async function rehash(
   db: Queryable,
   logKeys: readonly LogKey[],
-  shown: readonly StoredEntry[],
-  anchor: Anchor,
-  onBatch: (batch: readonly StoredEntry[]) => void = () => {},
-): Promise<Verified> {
-  const broken = (failedAtSeq: bigint, reason: string): Verified => ({
-    verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason: withCause(reason) },
-    anchor,
-  });
-  const keys = { keys: logKeys, chainOnly: ['app' as const] };
-
-  for (const row of [...shown].sort((a, b) => (a.seq < b.seq ? -1 : 1))) {
-    const result = verifyEntries([row], { ...keys, startSeq: row.seq, startPrevHash: row.prevHash });
-    if (!result.ok) return broken(result.failedAtSeq, result.reason);
+  from: Position,
+  walk: Walk,
+  { to, limit = Infinity }: { to?: bigint; limit?: number },
+): Promise<{ ok: true; at: Position; done: boolean } | Broken> {
+  let at = from;
+  for (let left = limit; ; ) {
+    if (to !== undefined && at.seq >= to) return { ok: true, at, done: true };
+    if (left <= 0) return { ok: true, at, done: false };
+    let batch = await entriesFrom(db, at.seq + 1n, Math.min(VERIFY_BATCH, left));
+    if (to !== undefined) batch = batch.filter((entry) => entry.seq <= to);
+    if (batch.length === 0) return { ok: true, at, done: to === undefined };
+    const result = verifyEntries(batch, { keys: logKeys, chainOnly: ['app'], startSeq: at.seq + 1n, startPrevHash: at.hash });
+    if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
+    const moved = forward(batch, walk.keys, logKeys[0]!.keyId);
+    if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
+    walk.keys = moved.keys;
+    for (const entry of batch) if (entry.author === 'vault') walk.add(entry);
+    at = { seq: result.nextSeq - 1n, hash: result.head };
+    left -= batch.length;
   }
+}
 
-  if (anchor.nextSeq > 0n && !(await hashAt(db, anchor.nextSeq - 1n))?.equals(anchor.hash)) {
-    return broken(anchor.nextSeq - 1n, 'changed since the vault last verified it');
-  }
-
-  let verified = anchor;
-  for (;;) {
-    const batch = await entriesFrom(db, verified.nextSeq, VERIFY_BATCH);
+/**
+ * The chain again from `from`, through `to` and no more than `limit`
+ * entries: each hash recomputed from its entry and each link checked, and
+ * nothing else, so a stretch costs a hash an entry. What a checkpoint does
+ * in the background to the prefixes signed before (`#scrub` in vault.ts):
+ * each entry's MAC was checked when it was signed over, and its hash pins
+ * it since, so all that can change behind a signed prefix and keep the
+ * chain is an entry edited in place, its stored hash left, which its hash
+ * finds.
+ */
+export async function relink(db: Queryable, from: Position, to: bigint, limit: number): Promise<{ ok: true; at: Position } | Broken> {
+  let at = from;
+  while (at.seq < to && limit > 0) {
+    const batch = (await entriesFrom(db, at.seq + 1n, Math.min(VERIFY_BATCH, limit))).filter((entry) => entry.seq <= to);
     if (batch.length === 0) break;
-    const result = verifyEntries(batch, { ...keys, startSeq: verified.nextSeq, startPrevHash: verified.hash });
-    if (!result.ok) return broken(result.failedAtSeq, result.reason);
-    const moved = forward(batch, verified.vaultKeys, logKeys[0].keyId);
-    if ('failedAtSeq' in moved) return broken(moved.failedAtSeq, moved.reason);
-    onBatch(batch);
-    verified = {
-      nextSeq: result.nextSeq,
-      hash: result.head,
-      vaultEntries: verified.vaultEntries + result.authenticated,
-      vaultKeys: moved.keys,
-    };
+    const result = verifyEntries(batch, { keys: [], chainOnly: ['app', 'vault'], startSeq: at.seq + 1n, startPrevHash: at.hash });
+    if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: result.reason };
+    at = { seq: result.nextSeq - 1n, hash: result.head };
+    limit -= batch.length;
   }
-  return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
+  return { ok: true, at };
+}
+
+/**
+ * The vault's own entries after `after` through `to`, oldest first: each
+ * against its own hash, and by its MAC, over the link it names, its keys
+ * moving only forward, each fed to `walk`. The links between entries are
+ * the caller's to recompute, as the app does over the same stretch.
+ */
+export async function ownEntries(
+  db: Queryable,
+  logKeys: readonly LogKey[],
+  after: bigint,
+  to: bigint,
+  walk: Walk,
+): Promise<{ ok: true } | Broken> {
+  for (;;) {
+    const batch = (await vaultEntriesAfter(db, after, VERIFY_BATCH)).filter((entry) => entry.seq <= to);
+    if (batch.length === 0) return { ok: true };
+    for (const entry of batch) {
+      const result = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: logKeys });
+      if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
+    }
+    const moved = forward(batch, walk.keys, logKeys[0]!.keyId);
+    if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
+    walk.keys = moved.keys;
+    for (const entry of batch) walk.add(entry);
+    after = batch[batch.length - 1]!.seq;
+  }
 }
 
 /**

@@ -122,15 +122,20 @@ export interface Vault {
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
-   * the vault's, if the chain recomputes, the vault's entries by their MACs,
-   * and the prefix the last checkpoint signed is still there. The first
-   * checkpoint of each hour recomputes from the first entry; the others
-   * resume from the prefix the last one signed, which the vault recomputed
-   * itself, while it still has every entry and ends at the hash it signed.
-   * The vault reads the log itself: it takes nobody's word
-   * for where it ends, or for what came before. It checks every
-   * member's row too, as `access` would, and logs a `vault.tampered` for
-   * each one changed around it: lists read rows without asking the vault.
+   * the vault's, if the chain recomputes from the last checkpoint, the
+   * vault's entries by their MACs, and that checkpoint's prefix is still
+   * there, whole. The entry keeps the checkpoint's tally beside it: what a
+   * walk from the first entry has gathered by the prefix's end (the
+   * vault's keys, its key batches under way, who is a member and what they
+   * hold), so that the next checkpoint, and every verification, go on from
+   * there and read only what is new. A log longer than one walk, as after
+   * an upgrade from 0.10.0, is signed a stretch a call, behind its head,
+   * until the checkpoints catch up. Each call also rehashes a stretch of
+   * what was signed before, round and round, which an entry edited in place
+   * fails. The vault reads the log itself: it takes nobody's word for where
+   * it ends, or for what came before. It checks every member's row too, as
+   * `access` would, and logs a `vault.tampered` for each one changed around
+   * it: lists read rows without asking the vault.
    */
   checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>>;
   /**
@@ -159,13 +164,18 @@ export interface Vault {
    */
   keyChecks(): Promise<KeyChecks>;
   /**
-   * Check the whole log: the vault's entries by their MACs, every
-   * checkpoint against the prefix it signed, the key batches accounted for,
-   * and replay it to see that who is a member, and what they hold, follow
-   * from it. The links and hashes of the chain are the caller's to
-   * recompute through `upTo`, as the app does first; with none, the vault
-   * recomputes them all itself. A verdict and nothing else, so anyone may
-   * ask; the app asks for those who read the whole log (`readsWholeLog`).
+   * Check the log from a checkpoint's tally, the newest unless `from`
+   * names another, or the first entry: the vault's entries since by their
+   * MACs, every checkpoint among them against the prefix it signed, the key
+   * batches accounted for, and the members and grants replayed on from the
+   * tally to see that the rows follow. With `to`, a later checkpoint, the
+   * walk stops at the prefix it signed and must come to the tally it keeps:
+   * a stretch of the whole log, walked from the first entry a stretch at a
+   * time. The links and hashes of the chain are the caller's to recompute
+   * through `upTo`, as the app does first; with none, the vault recomputes
+   * them itself, no further than one walk. A verdict and nothing else, so
+   * anyone may ask; the app asks for those who read the whole log
+   * (`readsWholeLog`).
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
@@ -542,19 +552,35 @@ export type VerifyLogInput = {
    * The last entry the app verified, every link and hash up to it
    * recomputed and its own entries checked by its key: the vault checks the
    * log still holds it, so between them both authors' entries are
-   * authenticated over the same prefix, and the vault leaves the links to
+   * authenticated over the same stretch, and the vault leaves the links to
    * the app.
    */
   upTo?: LogHead | null;
+  /**
+   * Where the vault's walk starts: the seq of one of its `audit.checkpoint`
+   * entries that keeps a tally, or `start`, the first entry. The newest
+   * such checkpoint when absent, and a vault older than 0.10.1 walks from
+   * the first entry whatever it says.
+   */
+  from?: number | 'start';
+  /**
+   * A later checkpoint's entry, whose prefix `upTo` is: the walk ends
+   * there, and must come to the tally it keeps. The members' rows and the
+   * key batches are as they are now, not then, so only a walk without one
+   * holds them to the log.
+   */
+  to?: number;
 };
 
 /**
- * Whether the vault's log holds, with the number of entries in it. On a
- * failure, the entry where it breaks, or null when the chain holds but the
- * members and grants do not follow from it. Then `fault` says which, as
- * facts the app can word with names: `reason` has only ids.
- * Full checks report live key batches in `pending`; overdue ones fail.
+ * Whether the vault's log holds, with the number of its entries through
+ * where the walk ended, `through`: `upTo`, the prefix `to` signed, or as
+ * far as one walk goes. On a failure, the entry where it breaks, or null
+ * when the chain holds but the members and grants do not follow from it.
+ * Then `fault` says which, as facts the app can word with names: `reason`
+ * has only ids. A walk that ends at the present reports live key batches in
+ * `pending`; overdue ones fail.
  */
 export type LogVerification =
-  | { ok: true; entries: number; pending?: number }
+  | { ok: true; entries: number; pending?: number; through?: number }
   | { ok: false; failedAtSeq: number | null; reason: string; fault?: AccessFault };

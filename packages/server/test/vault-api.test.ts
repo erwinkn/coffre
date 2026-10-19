@@ -318,7 +318,16 @@ test('a read put on someone else and chained again fails: the vault wrote it, an
   await db.owner.update(auditChainHead).set({ headHash: previous });
 
   const read = rows.find((row) => row.action === 'secret.read')!;
+  // The page's check starts where the beat's walk ended, the read: its hash is not the one the beat verified.
   assert.deepEqual(await root.audit.verify(), {
+    ok: false,
+    through: Number(read.seq) - 1,
+    failedAtSeq: Number(read.seq),
+    author: 'app',
+    reason: 'changed since the app last verified the log through it',
+  });
+  // The walk from the first entry says why: the app's entries verify, sealed anew, and the vault's do not.
+  assert.deepEqual(await root.audit.verifyWhole(), {
     ok: false,
     through: Number(read.seq) - 1,
     failedAtSeq: Number(read.seq),

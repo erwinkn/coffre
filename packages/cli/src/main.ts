@@ -1824,17 +1824,26 @@ async function verify(args: string[]): Promise<void> {
   }
 }
 
-/** The whole audit log, verified by the app and the vault, for whoever reads it whole. */
+/**
+ * The whole audit log, verified by the app and the vault from its first
+ * entry, a stretch a request, for whoever reads it whole: what the audit
+ * page's check, which goes on from the newest checkpoint, takes on trust.
+ */
 async function verifyLog(): Promise<void> {
-  const result = await client().audit.verify();
+  const shown = process.stderr.isTTY;
+  const result = await client().audit.verifyWhole((stretch) => {
+    if (shown && stretch.ok && typeof stretch.next === 'number') process.stderr.write(`\rverified through entry ${stretch.through}…`);
+  });
+  if (shown) process.stderr.write('\r\x1b[K');
 
   if (result.ok) {
-    const through = result.through === null ? 'empty' : `verified through entry ${result.through}`;
+    const through = result.through === null ? 'empty' : `verified from the first entry through entry ${result.through}`;
     const signed = result.checkpoint === null
       ? 'no checkpoint signed yet'
       : `last checkpoint: entry ${result.checkpoint.seq}, signed ${result.checkpoint.signedAt}`;
     const pending = result.pending === undefined ? '' : `${result.pending} key operations still under way\n`;
-    process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
+    const remaining = result.remaining > 0 ? `${result.remaining} newer entries not verified yet: the checkpoints are catching up with the log\n` : '';
+    process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}${remaining}`);
     return;
   }
   const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;

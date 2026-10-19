@@ -2062,6 +2062,56 @@ export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null
 }
 
 /**
+ * The vault's newest checkpoint that keeps a tally, and its entry: one
+ * written since 0.10.1, which names the last entry of the prefix it signs
+ * as related. A verification goes on from it.
+ */
+export async function latestTallied(db: Queryable): Promise<{ entry: bigint; checkpoint: Checkpoint } | null> {
+  const [row] = await talliedCheckpoints(db).orderBy(desc(tablesOf(db).auditLog.seq)).limit(1);
+  return row === undefined ? null : { entry: row.seq, checkpoint: JSON.parse(row.metadata) as Checkpoint };
+}
+
+/** The vault's checkpoint at entry `seq`, if one that keeps a tally is there. */
+export async function talliedAt(db: Queryable, seq: bigint): Promise<Checkpoint | null> {
+  const [row] = await talliedCheckpoints(db, eq(tablesOf(db).auditLog.seq, seq));
+  return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
+}
+
+/** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */
+export async function talliedAfter(db: Queryable, after: bigint, limit: number): Promise<{ entry: bigint; signs: bigint }[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select({ entry: auditLog.seq, signs: auditLog.relatedSeq })
+    .from(auditLog)
+    .where(and(...talliedWhere(db), gt(auditLog.seq, after)))
+    .orderBy(asc(auditLog.seq))
+    .limit(limit);
+  return rows.map(({ entry, signs }) => ({ entry, signs: signs! }));
+}
+
+function talliedWhere(db: Queryable) {
+  const { auditLog } = tablesOf(db);
+  return [eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)];
+}
+
+function talliedCheckpoints(db: Queryable, where?: SQL) {
+  const { auditLog } = tablesOf(db);
+  return db.select({ seq: auditLog.seq, metadata: auditLog.metadata }).from(auditLog).where(and(...talliedWhere(db), where));
+}
+
+/** Up to `limit` of the app's newest heartbeats, whole, newest first: what each says the app had verified. */
+export async function newestHeartbeats(db: Queryable, limit: number) {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'audit.heartbeat'), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
+}
+
+/**
  * How many entries of each of `actions` match `filter`, but for its
  * exclusions and limit, from `fromSeq` on: one grouped count. Both authors
  * are named so that the log's (author, action, seq) index serves it, a

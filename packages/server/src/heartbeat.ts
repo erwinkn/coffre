@@ -1,8 +1,9 @@
 import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
+import { SNAPSHOT } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
-import { appendAudit } from './db/audit.ts';
+import { appendAudit, attested, CHAIN_START, walkChain, type ChainPoint } from './db/audit.ts';
 import { readiness } from './db/queries.ts';
 
 export type HeartbeatLogger = {
@@ -10,19 +11,27 @@ export type HeartbeatLogger = {
 };
 
 /**
- * Logging-failure detection.
+ * Logging-failure detection, and the app's half of the log's checkpoints.
  *
  * CDR (EU) 2024/1774 Art 12(2)(e) requires "measures to detect a failure of
  * logging systems". This is not box-ticking: Infisical's audit queue returned
  * early and dropped every entry, silently, and nobody noticed until someone
  * went looking for logs that were never there.
  *
- * The scheduled job appends an `audit.heartbeat` entry, then asks the vault
- * to checkpoint the log, which signs every entry up to the newest, the beat
- * included, in an `audit.checkpoint` entry of its own. `/readyz` passes only
- * while the newest beat is recent and a checkpoint covers it: a log that
- * stopped taking writes, or a vault that stopped signing, turns it red
- * within one missed beat, which a monitor turns into a page.
+ * The scheduled job first verifies the chain from where the last beat left
+ * off: every link and hash, and the app's own entries by its key, which
+ * only the app holds. Then it appends an `audit.heartbeat` entry that says
+ * how far that got (`verified`), and asks the vault to checkpoint the log,
+ * which signs every entry up to the newest, the beat included, in an
+ * `audit.checkpoint` entry of its own. A verification starts from both:
+ * the app's MACs from the newest beat's `verified`, the vault's from its
+ * newest checkpoint (`verifyAudit`). A walk that finds a fault leaves
+ * `verified` where it was, so the next verification finds it again.
+ *
+ * `/readyz` passes only while the newest beat is recent and a checkpoint
+ * covers it: a log that stopped taking writes, or a vault that stopped
+ * signing, turns it red within one missed beat, which a monitor turns into
+ * a page.
  */
 export async function writeAuditHeartbeat(
   db: Database,
@@ -30,6 +39,19 @@ export async function writeAuditHeartbeat(
   vault: Vault,
   log: HeartbeatLogger,
 ): Promise<boolean> {
+  let verified: ChainPoint = CHAIN_START;
+  try {
+    verified = await db.transaction(async (tx) => {
+      const from = await attested(tx, chainKey);
+      const walked = await walkChain(tx, chainKey, from);
+      if (walked.ok) return walked.at;
+      log.warn({ failedAtSeq: Number(walked.failedAtSeq), reason: walked.reason }, 'the audit log does not verify from the last heartbeat');
+      return from;
+    }, SNAPSHOT);
+  } catch (error) {
+    // The beat is the signal that logging works: it is written all the same, saying nothing new.
+    log.warn({ err: (error as Error).message }, 'the audit log could not be verified from the last heartbeat');
+  }
   try {
     await db.transaction((tx) =>
       appendAudit(tx, chainKey, [
@@ -38,7 +60,10 @@ export async function writeAuditHeartbeat(
           actorId: 'coffre-scheduler',
           action: 'audit.heartbeat',
           decision: 'allow',
-          metadata: { source: 'scheduled' },
+          metadata: {
+            source: 'scheduled',
+            ...(verified.seq < 0n ? {} : { verified: { seq: Number(verified.seq), hash: verified.hash.toString('hex') } }),
+          },
         },
       ]),
     );

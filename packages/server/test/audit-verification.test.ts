@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto';
 
 import { deriveLogKey, entryHash } from '@coffre/core/audit';
 import { appendEntries, BATCH_BYTES, LogHeadMismatch, withinBytes } from '@coffre/db/log';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, lte, or } from 'drizzle-orm';
 
-import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
+import { appendAudit, CHAIN_WALK, type AuditEntry } from '../src/db/audit.ts';
+import { writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
@@ -157,3 +158,111 @@ test('audit verification reports live key operations without calling the log bro
   assert.equal(overdue.author, 'vault');
   assert.match(overdue.reason, /overdue/);
 });
+
+/** The scheduled beat, as the Cron trigger runs it: the app's walk, its heartbeat, then the vault's checkpoint. */
+async function beat(warned: string[] = []): Promise<void> {
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, { warn: (_, message) => warned.push(message) }), true);
+}
+
+/** Reads in the vault's name, as the vault logs them. */
+async function reads(entries: number): Promise<void> {
+  const vaultKey = deriveLogKey('vault', deps.vault.signingKey);
+  await db.owner.transaction((tx) => appendEntries(tx, vaultKey, Array.from({ length: entries }, () => ({
+    actor: 'user:root@acme.example', action: 'secret.read', decision: 'allow' as const, metadata: '{"purpose":"reveal"}',
+  }))));
+}
+
+test('the page checks what was written since the last beat, and only the walk from the first entry reads what came before', async () => {
+  assert.equal((await root.me()).instanceRole, 'owner');
+  await write(300);
+  await reads(50);
+  await beat();
+  await write(5);
+  await reads(5);
+  const [{ verified }] = await heartbeats();
+  // Everything the beat verified, both authors' (but for the vault's access entries, which every request reads),
+  // edited in place, its hash left as it was: whoever reads the log as it is sees another actor.
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ actor: 'system:edited' })
+    .where(and(lte(auditLog.seq, BigInt(verified!.seq)), or(eq(auditLog.author, 'app'), eq(auditLog.action, 'secret.read')))));
+
+  // The check goes on from where the beat's walk ended, and the vault's from its checkpoint after it: neither
+  // reads an entry before, so neither finds the edits.
+  const [head] = await db.owner.select().from(auditChainHead);
+  const page = await root.audit.verify();
+  assert.deepEqual(page.ok && [page.from, page.through, page.remaining], [verified!.seq + 1, Number(head.nextSeq) - 1, 0], JSON.stringify(page));
+  // The walk from the first entry reads them all, and fails at the first.
+  const whole = await root.audit.verifyWhole();
+  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.author, whole.reason], [1, 'app', 'hash does not match the entry']);
+});
+
+test("an entry forged in the app's name is found by the next check, though checkpoints sign over it", async () => {
+  await write(3);
+  await beat();
+  await forgeAppEntry();
+  const forged = Number((await db.owner.select().from(auditChainHead))[0].nextSeq) - 1;
+  await write(1);
+  // The beat's walk finds it and leaves its `verified` where it was; the vault, which checks only its own
+  // MACs, signs over it. So the page's check starts before it, and finds it.
+  const warned: string[] = [];
+  await beat(warned);
+  assert.deepEqual(warned, ['the audit log does not verify from the last heartbeat']);
+  const [newest, previous] = await heartbeats();
+  assert.deepEqual(newest.verified, previous.verified);
+  assert.deepEqual(await root.audit.verify(), {
+    ok: false, through: forged - 1, failedAtSeq: forged, author: 'app', reason: 'not written by the app: its MAC does not match',
+  });
+});
+
+test('a log longer than one walk is checked as far as one goes, and walked from its first entry a stretch at a time', async () => {
+  assert.equal((await root.me()).instanceRole, 'owner');
+  await write(12_000);
+  // No beat yet, as after an upgrade from 0.10.0: the check starts at the first entry, and stops one walk on.
+  const [{ nextSeq }] = await db.owner.select().from(auditChainHead);
+  const first = await root.audit.verify();
+  assert.deepEqual(first.ok && [first.from, first.through, first.remaining], [0, CHAIN_WALK - 1, Number(nextSeq) - CHAIN_WALK], JSON.stringify(first));
+
+  // Beats catch up, a checkpoint each, signed a walk at a time; then more is written, and beaten.
+  for (let i = 0; i < 3; i++) await beat();
+  await write(6_000);
+  await beat();
+  await beat();
+  const caught = await root.audit.verify();
+  assert.ok(caught.ok && caught.remaining === 0, JSON.stringify(caught));
+
+  // The walk from the first entry, a request a stretch, each ending at a checkpoint no further than one walk on.
+  const stretches: { from: number; through: number | null; next: number | null | undefined }[] = [];
+  const whole = await root.audit.verifyWhole((stretch) => {
+    assert.ok(stretch.ok, JSON.stringify(stretch));
+    stretches.push({ from: stretch.from, through: stretch.through, next: stretch.next });
+  });
+  assert.ok(whole.ok && whole.remaining === 0 && whole.through === caught.through, JSON.stringify(whole));
+  assert.ok(stretches.length >= 3, JSON.stringify(stretches));
+  for (const [i, stretch] of stretches.entries()) {
+    assert.ok(stretch.through! - stretch.from < CHAIN_WALK, `stretch ${i} is longer than one walk: ${JSON.stringify(stretch)}`);
+    if (i > 0) assert.equal(stretch.from, stretches[i - 1]!.through! + 1, 'the stretches leave a gap');
+  }
+  assert.deepEqual(stretches.at(-1)!.next, null);
+});
+
+/** The app's newest heartbeats, newest first: how far each says the app verified. */
+async function heartbeats(): Promise<{ seq: bigint; verified?: { seq: number; hash: string } }[]> {
+  const rows = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'audit.heartbeat')).orderBy(desc(auditLog.seq));
+  return rows.map((row) => ({ seq: row.seq, ...(JSON.parse(row.metadata) as { verified?: { seq: number; hash: string } }) }));
+}
+
+/** An entry in the app's name, with a MAC made up, linked after the log's last as anyone could. */
+async function forgeAppEntry(): Promise<void> {
+  const [head] = await db.owner.select().from(auditChainHead);
+  const fields = {
+    seq: head.nextSeq, author: 'app' as const, keyId: deriveLogKey('app', deps.chainKey).keyId, occurredAt: Date.now(),
+    actor: 'user:root@acme.example', action: 'secret.write', decision: 'allow', code: null, subjectPrincipal: null,
+    projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null,
+    sourceIp: null, relatedSeq: null, metadata: '{}',
+  };
+  const mac = Buffer.alloc(32, 0x41);
+  const hash = entryHash(head.headHash, fields, mac);
+  await db.owner.transaction(async (tx) => {
+    await tx.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+    await tx.update(auditChainHead).set({ nextSeq: fields.seq + 1n, headHash: hash });
+  });
+}

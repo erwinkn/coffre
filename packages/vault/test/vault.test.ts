@@ -19,11 +19,11 @@ import {
   type KeyOperation,
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
-import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
-import { appendEntries, BATCH_BYTES, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
-import { and, asc, desc, eq, gt, gte, sql } from 'drizzle-orm';
+import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
+import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
@@ -135,6 +135,12 @@ function versionItems(items: { secret: SecretRef; wrapped: WrappedKey }[]) {
 /** The vault's entries, oldest first, as stored in the log. */
 async function vaultLog(_w?: World) {
   return (await store.vaultPage(db.owner, undefined, 200)).map(entryView).reverse();
+}
+
+/** What a checkpoint's entry says its signature covers, without the tally it keeps beside it. */
+function signedOf(detail: Record<string, unknown>): Checkpoint {
+  const { seq, hash, signedAt, keyId, signature } = detail as Checkpoint;
+  return { seq, hash, signedAt, keyId, signature };
 }
 
 /** What an append-only refusal looks like through Drizzle, which wraps the database's error. */
@@ -1653,7 +1659,8 @@ test('a log of large entries is checked whole and signed, a batch of it in memor
   const verified = await fresh.verifyLog({});
   const { auditLog } = tablesOf(db.owner);
   const written = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.author, 'vault'));
-  assert.deepEqual(verified, { ok: true, entries: written.length }, 'the check stopped short of the last entry');
+  const through = Math.max(...written.map(({ seq }) => Number(seq)));
+  assert.deepEqual(verified, { ok: true, entries: written.length, through }, 'the check stopped short of the last entry');
   const signed = await fresh.checkpoint();
   assert.ok(signed.ok, JSON.stringify(signed));
   const [head] = await store.vaultPage(db.owner, undefined, 1);
@@ -1680,7 +1687,10 @@ test('a checkpoint signs the log up to its last entry, in an entry of its own', 
   assert.equal(await verifyCheckpoint(first.checkpoint, publicKey), true);
   assert.equal(await verifyCheckpoint({ ...first.checkpoint, hash: 'b'.repeat(64) }, publicKey), false);
   const entries = await vaultLog(w);
-  assert.deepEqual([entries.at(-1)!.action, entries.at(-1)!.detail], ['audit.checkpoint', first.checkpoint]);
+  // Its entry names the last entry it signs as related, and keeps its tally beside the signature.
+  const kept = entries.at(-1)!;
+  assert.deepEqual([kept.action, signedOf(kept.detail), kept.detail.relatedSeq], ['audit.checkpoint', first.checkpoint, String(first.checkpoint.seq)]);
+  assert.deepEqual(Object.keys(kept.detail.tally as object).sort(), ['access', 'accounting', 'entries', 'keys', 'replayFault']);
 
   // Nothing new signs nothing new.
   assert.deepEqual(await w.vault.checkpoint(), first);
@@ -1688,7 +1698,7 @@ test('a checkpoint signs the log up to its last entry, in an entry of its own', 
   await member(w, BOB, []);
   const next = await w.vault.checkpoint();
   assert.ok(next.ok && next.checkpoint.seq > first.checkpoint.seq);
-  assert.deepEqual((await signed()).at(-1)?.detail, next.checkpoint);
+  assert.deepEqual(signedOf((await signed()).at(-1)!.detail), next.checkpoint);
 
   // Each is an entry of the log, and as append-only.
   await assert.rejects(db.owner.delete(auditLog).where(eq(auditLog.action, 'audit.checkpoint')), appendOnly);
@@ -1734,14 +1744,14 @@ test("given the app's head, the vault checks its own entries and leaves the chai
   const last = rows.at(-1)!;
   const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
   const own = rows.filter((row) => row.author === 'vault').length;
-  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: own });
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: own, through: upTo.seq });
 
   // The app's entry edited in place, its hash left as it was: the chain no longer recomputes. Given the app's head,
   // which the app only reports once it has recomputed every link through it, that is the app's to find, and the
   // vault's own entries still hold. Without one, nobody else rehashed the chain, and the vault does.
   const app = rows.find((row) => row.author === 'app')!;
   await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: 'system:edited' }).where(eq(auditLog.seq, app.seq)));
-  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: own });
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: own, through: upTo.seq });
   const alone = await w.vault.verifyLog({});
   assert.deepEqual(!alone.ok && [alone.failedAtSeq, alone.reason], [Number(app.seq), 'hash does not match the entry']);
 
@@ -1759,7 +1769,7 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   const [last] = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))).slice(-1) as StoredEntry[];
   const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
   // Root made an Owner, as the deployment names them, and Ada's admission.
-  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 2 });
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 2, through: upTo.seq });
   assert.deepEqual(await w.vault.verifyLog({ upTo: { ...upTo, hash: 'f'.repeat(64) } }), {
     ok: false,
     failedAtSeq: upTo.seq,
@@ -2000,16 +2010,8 @@ test('a grant written around the vault while it removes a member goes with the r
   assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
 });
 
-const HOUR = 60 * 60 * 1000;
-
-/** A clock offset that puts the vault in the middle of the hour, so that a test's checkpoints all fall in one. */
-function midHour(): number {
-  return HOUR / 2 - (Date.now() % HOUR);
-}
-
 test('a checkpoint refuses to sign over entries cut from the middle of the log (review R1b)', async () => {
   const w = await world();
-  w.clock.offset = midHour();
   const { auditLog, vaultGrants, vaultMembers } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'developer']]);
   // Mallory keeps Ada's row and grants from before her removal.
@@ -2026,34 +2028,134 @@ test('a checkpoint refuses to sign over entries cut from the middle of the log (
     await owned.insert(vaultGrants).values(keptGrants);
   });
   await wrapped(w, await w.secret(w.prod));
-  // Within the hour too: the prefix the last checkpoint signed is short of entries, so this one recomputes from entry 0.
+  // The prefix the last checkpoint signed is short of entries: one count of its index finds it, and where.
   const checkpoint = await w.vault.checkpoint();
   assert.equal(!checkpoint.ok && checkpoint.refusal.code, 'log_broken', 'a checkpoint signed over a log with entries cut from its middle');
   assert.match(String((await vaultLog(w)).at(-1)!.detail.reason), /^sequence gap: expected seq \d+/, 'it names the gap');
 });
 
-test('an entry edited in place before the last checkpoint is refused by the hour\'s full recomputation', async () => {
+test('an entry edited in place behind the newest checkpoint is found by the rehash of the past, within one lap', async () => {
+  // Two entries of the past rehashed a checkpoint, so that a lap over this log takes several.
+  const w = await world({}, { walks: { scrub: 2 } });
+  for (const name of ['ada', 'bob', 'cy', 'di']) await member(w, `user:${name}@acme.example`, [[w.dev, 'viewer']]);
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok);
+  // An entry near the end of what it signed, edited in place, its hash left as it was.
+  const edited = BigInt(signed.checkpoint.seq - 1);
+  await rewrite(edited, 'in place');
+
+  // Every check goes on from the newest checkpoint's tally, and reads nothing before it but its hash, which is
+  // still there: none of them finds the edit. The walk from the first entry, asked for, does at once.
+  const whole = await w.vault.verifyLog({ from: 'start' });
+  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.reason], [Number(edited), 'hash does not match the entry']);
+  const laps: boolean[] = [];
+  for (let beat = 0; beat < signed.checkpoint.seq; beat++) {
+    assert.equal((await w.vault.verifyLog({})).ok, true, 'a verification read the past');
+    await member(w, `user:p${beat}@acme.example`, []);
+    const next = await w.vault.checkpoint();
+    laps.push(next.ok);
+    if (!next.ok) {
+      assert.equal(next.refusal.code, 'log_broken');
+      assert.deepEqual([(await vaultLog(w)).at(-1)!.detail.failedAtSeq, (await vaultLog(w)).at(-1)!.detail.reason], [Number(edited), 'hash does not match the entry']);
+      break;
+    }
+  }
+  // Two entries a beat from the first, so the edit is found at the beat whose stretch holds it, not before.
+  assert.deepEqual(laps, [...Array(Number(edited) / 2 | 0).fill(true), false]);
+});
+
+/** Reads in the vault's name, as the vault logs them, many at once. */
+async function reads(entries: number) {
+  await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, Array.from({ length: entries }, () => ({
+    actor: ROOT, action: 'secret.read', decision: 'allow' as const, metadata: '{"purpose":"reveal"}',
+  }))));
+}
+
+test('checkpoints and checks go on from the newest tally, and read nothing before it but its hash', async () => {
+  await world();
+  await reads(300);
+  const signed = await (await fresh()).checkpoint();
+  assert.ok(signed.ok);
+  await reads(5);
+  // Every read the checkpoint signed edited in place, its hash left as it was.
+  const { auditLog } = tablesOf(db.owner);
+  await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: BOB })
+    .where(and(eq(auditLog.action, 'secret.read'), lte(auditLog.seq, BigInt(signed.checkpoint.seq)))));
+
+  // A vault that walks no more than the checkpoint's entry and the five since, rehashing nothing of the past,
+  // verifies the log to its head, and signs it.
+  const bounded = await openLocalVault(db.vault, configure(), { walks: { verify: 6, checkpoint: 6, scrub: 0 } });
+  const [head] = await store.vaultPage(db.owner, undefined, 1);
+  const verified = await bounded.verifyLog({});
+  assert.deepEqual(verified.ok && verified.through, Number(head!.seq), JSON.stringify(verified));
+  const next = await bounded.checkpoint();
+  assert.ok(next.ok && next.checkpoint.seq === Number(head!.seq), JSON.stringify(next));
+  // The walk from the first entry reads it all.
+  const whole = await bounded.verifyLog({ from: 'start' });
+  assert.deepEqual(!whole.ok && whole.reason, 'hash does not match the entry');
+});
+
+test('a log no checkpoint kept a tally of, as 0.10.0 left it, is signed again from its first entry, a walk a call', async () => {
+  await world();
+  await reads(250);
+  const vault = await openLocalVault(db.vault, configure(), { walks: { checkpoint: 100, verify: 100 } });
+  // A check goes as far as one walk.
+  const partial = await vault.verifyLog({});
+  assert.deepEqual(partial.ok && partial.through, 99);
+  const signed: number[] = [];
+  for (let call = 0; call < 5; call++) {
+    const checkpoint = await vault.checkpoint();
+    assert.ok(checkpoint.ok, JSON.stringify(checkpoint));
+    signed.push(checkpoint.checkpoint.seq);
+    const [newest] = await store.vaultPage(db.owner, undefined, 1);
+    if (checkpoint.checkpoint.seq === Number(newest!.seq) - 1) break;
+  }
+  // A walk a call, behind the head, until it reaches it: then it signs every entry before its own.
+  assert.deepEqual(signed.slice(0, 2), [99, 199]);
+  assert.equal(signed.length, 3);
+  const caught = await vault.verifyLog({});
+  assert.ok(caught.ok, JSON.stringify(caught));
+});
+
+test("a tally rewritten by a holder of the vault's key is found by the walk from the first entry", async () => {
   const w = await world();
-  w.clock.offset = midHour();
   await member(w, ADA, [[w.dev, 'viewer']]);
   assert.ok((await w.vault.checkpoint()).ok);
-  await rewrite(1n, 'in place');
   await member(w, BOB, [[w.dev, 'viewer']]);
-
-  // Within the hour, a checkpoint resumes from the prefix the last one signed: its hash and every entry are there.
-  // It extends the chain the vault recomputed before the edit, so the log as it now is verifies no better.
-  assert.ok((await w.vault.checkpoint()).ok);
-  const check = await w.vault.verifyLog({});
-  assert.deepEqual(!check.ok && [check.failedAtSeq, check.reason], [1, 'hash does not match the entry'], 'a full check finds it at once');
-
-  // The hour's first checkpoint recomputes from entry 0 and refuses, as every one after it does.
-  w.clock.offset += HOUR;
-  for (const attempt of ['first', 'next']) {
-    await member(w, attempt === 'first' ? 'user:cy@acme.example' : 'user:di@acme.example', []);
-    const refused = await w.vault.checkpoint();
-    assert.equal(!refused.ok && refused.refusal.code, 'log_broken', `the ${attempt} checkpoint of the hour signed over an entry edited in place`);
-  }
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok);
+  const entry = BigInt(signed.checkpoint.seq + 1);
+  // One more entry than the log holds, its digest kept as it was: the members and grants are as they were.
+  await rewriteMetadata(entry, (metadata) => ({ ...metadata, tally: { ...metadata.tally as object, entries: 99 } }));
+  const whole = await w.vault.verifyLog({ from: 'start', to: Number(entry) });
+  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.reason], [Number(entry), 'the tally this checkpoint keeps does not follow from the log before it']);
+  // Members and grants changed, but not their digest: the tally is refused wherever a walk starts from it.
+  await rewriteMetadata(entry, (metadata) => {
+    const tally = metadata.tally as { access: { members: unknown[] } };
+    return { ...metadata, tally: { ...tally, access: { ...tally.access, members: [] } } };
+  });
+  const resumed = await w.vault.verifyLog({});
+  assert.deepEqual(!resumed.ok && [resumed.failedAtSeq, resumed.reason], [Number(entry), "its tally's members and grants do not match their digest"]);
 });
+
+/** Change entry `seq`'s metadata, then chain the log again from there and seal the vault's entries under its key: what a holder of it could. */
+async function rewriteMetadata(seq: bigint, change: (metadata: Record<string, unknown>) => Record<string, unknown>) {
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  const entries = (await db.owner.select().from(auditLog).where(gte(auditLog.seq, seq)).orderBy(asc(auditLog.seq))) as StoredEntry[];
+  await withLogUnlocked(db.owner, async (owned) => {
+    let prevHash = entries[0]!.prevHash;
+    for (const entry of entries) {
+      const metadata = entry.seq === seq ? JSON.stringify(change(JSON.parse(entry.metadata) as Record<string, unknown>)) : entry.metadata;
+      const changed = { ...entry, metadata, prevHash };
+      const mac = entry.author === 'vault' ? entryMac(VAULT_KEY.key, prevHash, changed) : entry.mac;
+      const hash = entryHash(prevHash, changed, mac);
+      await owned.update(auditLog).set({ metadata, prevHash, mac, hash }).where(eq(auditLog.seq, entry.seq));
+      prevHash = hash;
+    }
+    await owned.update(auditChainHead).set({ headHash: prevHash });
+  });
+  forgetLogHeads();
+}
 
 test('a checkpoint finds a row changed around the vault before its member asks for anything', async () => {
   const w = await world();
@@ -2284,11 +2386,10 @@ test('a KEK rotation moves the log and every member row to the new key at the fi
 
   // Without the old KEK, what its key signed no longer verifies: it must stay configured.
   const forgot = await configured(placed, { kek: next });
-  const verdict = await forgot.vault.verifyLog({});
+  const verdict = await forgot.vault.verifyLog({ from: 'start' });
   assert.ok(!verdict.ok);
   assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
-  // Within the hour, its checkpoints resume past the rotation, under the key it holds; the hour's full recomputation refuses.
-  forgot.clock.offset = HOUR;
+  // Nor does a checkpoint go on from a tally it keeps in an entry the old key wrote.
   const refused = await forgot.vault.checkpoint();
   assert.equal(!refused.ok && refused.refusal.code, 'log_broken');
 });
@@ -2610,7 +2711,7 @@ for (const overdue of [false, true]) {
       assert.match(verification.reason, /overdue/);
     } else {
       // Root made an Owner, as the deployment names them, and the intent.
-      assert.deepEqual(verification, { ok: true, entries: 2, pending: 1 });
+      assert.deepEqual(verification, { ok: true, entries: 2, through: Number(appended.seqStart), pending: 1 });
     }
   });
 }

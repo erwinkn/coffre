@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **The audit log is verified from its last checkpoint, not its first
+  entry.** Opening the audit page re-verified every entry, in the app and
+  in the vault: on a Workers deployment with 7,000 entries that was 1.2
+  seconds of CPU a visit, past the Free plan's limit, and it grew with
+  the log. Each checkpoint now keeps, beside its signature, the tally of
+  the prefix it signs: the vault's keys in order, the key batches under
+  way, who is a member and what they hold. Each heartbeat says how far
+  the app verified its own entries. The page's check, and each
+  checkpoint, start from those and read what was written since: on
+  Node, a log of 100,000 entries went from 6 seconds of CPU to some 10
+  milliseconds. Nothing before is read again: its hash, which the newest
+  checkpoint signed, pins it, and one count of the log's index finds an
+  entry cut. An entry edited in place, its hash left as it was, is what
+  that leaves, so each checkpoint also rehashes 1,000 entries of the past
+  in turn, round and round: found within one lap, 35 minutes for a log of
+  7,000 entries, where it was within the hour.
+
+  `coffre verify log`, and the page's new **Verify whole log**, still walk
+  the log from its first entry, 10,000 entries a request, and check each
+  checkpoint's tally against the log before it
+  (`GET /api/audit/verification?from=start`, then each `next`).
+
+  After the upgrade, the first checkpoints sign the log again from its
+  first entry, 10,000 entries a beat, since those of 0.10.0 kept no
+  tally: on a log longer than that, `/readyz` stays red for a beat or a
+  few until they catch up, and the page says how many entries are left.
+  No migration.
+
+
 ## 0.10.0 (2026-10-19)
 
 - **Protected environments, and roles an Owner edits.** Each role now

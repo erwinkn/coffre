@@ -47,9 +47,9 @@ moves to the key it derives from the new vault key: it seals every member row
 again under it, and writes a `key.rotate` entry, its first under that key.
 Entries and checkpoints name the key they were signed under. The old vault key
 still opens what it wrapped, and still verifies what the vault wrote before
-the rotation, so it stays configured for good: the log is checked from its
-first entry at every checkpoint, and without the old vault key, the old entries no
-longer verify and `/readyz` turns red.
+the rotation, so it stays configured for good: without it, the old entries no
+longer verify, `coffre verify log` fails, and so does a checkpoint that
+starts from a tally written under it.
 
 A replaced vault key stays configured to verify the past, and can't vouch for
 anything after the rotation. An entry, a member row or a checkpoint under

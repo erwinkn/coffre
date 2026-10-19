@@ -319,8 +319,9 @@ export const queries = {
 
   /**
    * Whether the log holds: verified on every visit, and never waited for.
-   * It re-reads the whole log, so it takes as long as the log is long; the
-   * page shows the entries first and the verdict when it comes.
+   * It reads what was written since the newest checkpoint, so it takes as
+   * long as five minutes of the log, however long the log; the page shows
+   * the entries first and the verdict when it comes.
    */
   auditChain: (client: CoffreClient) =>
     queryOptions({ queryKey: [...keys.audit, 'chain'], staleTime: 0, queryFn: () => verifyChain(client) }),
@@ -348,30 +349,47 @@ export const queries = {
  */
 async function verifyChain(client: CoffreClient) {
   try {
-    const result = await client.audit.verify();
-    return result.ok
-      ? {
-          integrity: 'intact' as const,
-          through: result.through,
-          entries: result.entries,
-          checkpoint: result.checkpoint,
-          pending: result.pending ?? 0,
-        }
-      : {
-          integrity: 'broken' as const,
-          through: result.through,
-          failedAtSeq: result.failedAtSeq,
-          author: result.author,
-          reason: result.reason,
-        };
+    return chainResult(await client.audit.verify(), false);
   } catch (error) {
-    const status = statusOf(error);
-    if (status === 403) return { integrity: 'owners-only' as const };
-    return {
-      integrity: 'unknown' as const,
-      problem: status === undefined ? 'the request never got an answer' : `the request failed with HTTP ${status}`,
-    };
+    return chainUnknown(error);
   }
+}
+
+/**
+ * A verdict as the page shows it: `whole` when it comes from the walk
+ * from the first entry, which someone asked for, not from the newest
+ * checkpoint's.
+ */
+export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean) {
+  return result.ok
+    ? {
+        integrity: 'intact' as const,
+        whole,
+        through: result.through,
+        entries: result.entries,
+        // A server older than 0.10.1 checked from the first entry, and reached the head.
+        from: result.from ?? 0,
+        remaining: result.remaining ?? 0,
+        checkpoint: result.checkpoint,
+        pending: result.pending ?? 0,
+      }
+    : {
+        integrity: 'broken' as const,
+        through: result.through,
+        failedAtSeq: result.failedAtSeq,
+        author: result.author,
+        reason: result.reason,
+      };
+}
+
+/** Why the log's verdict is not known: closed to the caller, or no answer. */
+export function chainUnknown(error: unknown) {
+  const status = statusOf(error);
+  if (status === 403) return { integrity: 'owners-only' as const };
+  return {
+    integrity: 'unknown' as const,
+    problem: status === undefined ? 'the request never got an answer' : `the request failed with HTTP ${status}`,
+  };
 }
 
 export type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
