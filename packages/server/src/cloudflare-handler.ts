@@ -4,14 +4,23 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
+import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
+import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { fetchTransport } from './workloads/transport.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
-/** What the app Worker's `createCoffre(env => …)` returns. */
-export type WorkersConfig = CoffreConfig & { database: PostgresDatabase };
+/**
+ * What the app Worker's `createCoffre(env => …)` returns. `sockets`, the
+ * Durable Object binding whose class is `coffre.Sockets`, hosts plugins'
+ * WebSockets, the credential proxy's database tunnel: without it, they are
+ * refused.
+ */
+export type WorkersConfig = CoffreConfig & { database: PostgresDatabase; sockets?: SocketsNamespace };
+
+export type { SocketsNamespace };
 
 /** The part of the Workers `ExecutionContext` coffre uses. */
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };
@@ -25,6 +34,14 @@ export type CoffreWorker<Env> = {
   request(env: Env, ctx: WaitUntil): CoffreContext;
   /** coffre's scheduled job, the Worker's `scheduled`. */
   scheduled(controller: unknown, env: Env, ctx: WaitUntil): Promise<void>;
+  /**
+   * A WebSocket a plugin takes, sent on to its Durable Object; null for any
+   * other request, which Start answers: `coffre.upgrade(request, env) ??
+   * handler.fetch(…)`.
+   */
+  upgrade(request: Request, env: Env): Promise<Response> | null;
+  /** The Durable Object class `sockets` binds, which the Worker exports: `export const CoffreSockets = coffre.Sockets`. */
+  Sockets: ReturnType<typeof socketsObject<Env>>;
 };
 
 /**
@@ -37,13 +54,18 @@ export type CoffreWorker<Env> = {
 export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): CoffreWorker<Env> {
   const configs = new WeakMap<object, { config: WorkersConfig; resolved: ResolvedConfig }>();
 
-  function runtimeFor(env: Env, ctx: WaitUntil) {
+  function configured(env: Env) {
     let entry = configs.get(env as object);
     if (entry === undefined) {
       const config = configure(env);
       entry = { config, resolved: resolveConfig(config) };
       configs.set(env as object, entry);
     }
+    return entry;
+  }
+
+  function runtimeFor(env: Env, ctx: WaitUntil) {
+    const entry = configured(env);
     const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
     const left: Promise<unknown>[] = [];
     const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport(), (promise) => {
@@ -78,5 +100,18 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       close(ran);
       await ran;
     },
+    upgrade(request, env) {
+      if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return null;
+      const { config, resolved } = configured(env);
+      if (!takesSocket(request, resolved.plugins)) return null;
+      if (config.sockets === undefined) return Promise.resolve(new Response('this deployment hosts no WebSockets: its configuration names no sockets binding', { status: 501 }));
+      return forwardSocket(request, config.sockets);
+    },
+    // The object's coffre lasts as long as it does: its database client opens with a query and closes once idle.
+    Sockets: socketsObject<Env>((env, state) => {
+      const { config, resolved } = configured(env);
+      const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
+      return createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise));
+    }),
   };
 }

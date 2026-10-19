@@ -48,16 +48,26 @@ export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
   #busy = 0;
   /** What waits for the client to be idle: `end`. */
   readonly #idle: (() => void)[] = [];
+  /** How long the client may sit idle before it closes, or null: closed by `end` alone. */
+  readonly #closeIdleMs: number | null;
+  #idleTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(connectionString: string) {
+  /**
+   * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
+   * now and then: the client closes once it has been idle that long, and
+   * the next query connects again.
+   */
+  constructor(connectionString: string, options: { closeIdleMs?: number } = {}) {
     if (connectionString.trim().length === 0) {
       throw new Error('Hyperdrive returned an empty connection string');
     }
     this.#connectionString = connectionString;
+    this.#closeIdleMs = options.closeIdleMs ?? null;
   }
 
   readonly query: pg.Pool['query'] = (async (...args: unknown[]) => {
     this.#busy += 1;
+    clearTimeout(this.#idleTimer);
     try {
       const client = await this.#connected();
       return await new Promise((resolve, reject) => {
@@ -72,6 +82,7 @@ export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
   /** The client, for a transaction: held from now until `release`. */
   async connect(): Promise<Pick<pg.PoolClient, 'query'> & { release: () => void }> {
     this.#busy += 1;
+    clearTimeout(this.#idleTimer);
     let client: pg.Client;
     try {
       client = await this.#connected();
@@ -100,6 +111,7 @@ export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
 
   /** Close the client once nothing waits on it: what a Worker hands `waitUntil` when the call is done. */
   async end(): Promise<void> {
+    clearTimeout(this.#idleTimer);
     while (this.#busy > 0) {
       await new Promise<void>((resolve) => this.#idle.push(resolve));
     }
@@ -123,7 +135,9 @@ export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
   /** One query or transaction done: once none is left, what waits for the client to be idle goes on. */
   #done(): void {
     this.#busy -= 1;
-    if (this.#busy === 0) for (const resolve of this.#idle.splice(0)) resolve();
+    if (this.#busy > 0) return;
+    for (const resolve of this.#idle.splice(0)) resolve();
+    if (this.#closeIdleMs !== null && this.#client !== null) this.#idleTimer = setTimeout(() => void this.end(), this.#closeIdleMs);
   }
 
   /** The call's client, connecting it the first time. One that fails is dropped: the next query connects again. */

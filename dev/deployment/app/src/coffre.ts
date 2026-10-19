@@ -5,7 +5,8 @@
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
 import { createCoffre, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
-import type { RateLimiter, Vault } from '@coffre/server/cloudflare';
+import type { RateLimiter, SocketsNamespace, Vault } from '@coffre/server/cloudflare';
+import { credentialProxy, postgres as tunnel } from '@coffre/server/plugins/credential-proxy';
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
 
 export type Env = {
@@ -24,6 +25,8 @@ export type Env = {
   MCP_PER_SOURCE: RateLimiter;
   MCP_PER_CONNECTION: RateLimiter;
   MCP_TOTAL: RateLimiter;
+  /** The Durable Object that hosts the tunnel's WebSockets, `CoffreSockets` (src/server.ts). */
+  SOCKETS: SocketsNamespace;
 };
 
 // Behind a tunnel, the dev IdP is known by its public URL, as its issuer and in
@@ -88,7 +91,11 @@ export const coffre = createCoffre((env: Env) => {
     auditChainKey: env.COFFRE_APP_KEY,
     // coffre as a Vault KV v2 mount, read only, at /v1 (routes/v1.$.ts): `VAULT_ADDR=http://127.0.0.1:3000
     // VAULT_TOKEN=<a service token> vault kv get secret/market/prod` (docs/design/plugins.md).
-    plugins: [vaultKv()],
+    // The credential proxy's database tunnel at /use (routes/use.$.ts), its WebSockets in the SOCKETS Durable Object:
+    // `coffre run market/dev -- psql "$DATABASE_URL"`. Local databases are plain TCP on loopback, which only
+    // insecureUpstreams reaches.
+    plugins: [vaultKv(), credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true })],
+    sockets: env.SOCKETS,
   };
 });
 

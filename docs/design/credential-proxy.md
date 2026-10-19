@@ -760,14 +760,55 @@ works, and tests hold both. On Workers, where calls land on different
 isolates, the map would live in a Durable Object.
 
 **Not yet:**
-- *Workers.* The tunnel's code is platform-neutral, but only Node's
-  `upgrade` is wired. Workers take an inbound WebSocket (`WebSocketPair`)
-  and open TCP with `connect()` from `cloudflare:sockets` (`startTls()`
-  for Postgres's upgrade), so the adapter is about 40 lines. It needs a
-  check on a deployed Worker first: see section 7.
+- *Workers, shipped.* A prototype runs in `pnpm dev` (below); it needs
+  a check on a deployed Worker first: see section 7.
 - *The privileged-role warning* (section 6): reading `rolsuper` and
   `rolcreaterole` after login, before the app's first query.
 - *Minted short-lived logins* (W108), which replace the shared password.
+
+**Workers: one Durable Object per run and database (prototype).** A
+Worker's invocation is no place for a connection that lasts an hour, and
+a cancel request comes on a connection of its own, which could land in
+any isolate. So the Worker only routes: `coffre.upgrade(request, env)`
+sends a WebSocket a plugin takes to a Durable Object named by a digest of
+its path and its bearer, `sha256("/use/market/dev/db\nBearer
+coffre_use_…")`. That is one `coffre run`'s connections to one database:
+the same group a Node process checks as one. There the plugin admits it
+exactly as on Node (`socket-admission.ts`: the migration door, then the
+proxy's own checks and its `credential.use` entry), and the session runs
+the same `tunnel()`, with TCP out through `cloudflare:sockets`
+(`cloudflare-sockets.ts`). The object holds nothing an instance decides:
+access, the vault and the log are reached through the plugin's context,
+by a coffre of the object's own whose database client opens with a query
+and closes a second after (`closeIdleMs`).
+
+A walk-through. `coffre run market/dev -- psql "$DATABASE_URL"`: psql
+connects to the run's listener, which opens `wss://…/use/market/dev/db`
+with the handle; the Worker sends it to object `9f3c…`, which checks the
+handle, opens the URL (one `secret.read` and one `credential.use`), logs in
+with SCRAM, and swaps the database's `BackendKeyData` (pid 4242, its
+secret) for a random key of its own. Ctrl-C: psql opens a second
+connection with a `CancelRequest` for that key; the listener carries it
+with the same handle, to the same path, so to the same object `9f3c…`,
+whose map has the key, and which sends the database its real one. No key
+names an object and none needs to: the bearer already does. The handle is
+revoked: the group's check, a timer in the object, gets a refusal within
+`recheckSeconds` and ends both sockets of every session; the next
+connection is refused at admission.
+
+The deployment opts in, in code (`dev/deployment` does):
+
+```ts
+// app/src/coffre.ts: plugins: [credentialProxy({ … tunnels: { db: postgres('DATABASE_URL') } })], sockets: env.SOCKETS
+// app/src/server.ts
+export default { fetch: (request, env, ctx) => coffre.upgrade(request, env) ?? handler.fetch(request, { context: coffre.request(env, ctx) }) };
+export const CoffreSockets = coffre.Sockets;
+// app/wrangler.jsonc
+"durable_objects": { "bindings": [{ "name": "SOCKETS", "class_name": "CoffreSockets" }] },
+"migrations": [{ "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] }]
+```
+
+Without `sockets`, a WebSocket under `/use` gets 501; Node is unchanged.
 
 **Shaped placeholders.** Some clients check their key before they send it.
 DFNS's SDK decodes its token's middle part on every request, to read the
@@ -1129,11 +1170,42 @@ Workers take (`WebSocketPair`), and an outbound TCP connection, which
 documented and general, and Hyperdrive is not involved: the tunnel
 connects to the database's public address, as any TCP client would. The
 limits: `connect()` reaches public addresses only (no private network
-without Cloudflare Tunnel), port 25 is blocked, and a Worker invocation
-has a CPU budget and up to six simultaneous open connections, so a session
-with many parallel connections should stay on Node or a Durable Object
-holding the sockets. To be checked on a deployed Worker in PR 3. Locally,
-workerd's `connect()` behaves the same, but Cloudflare's network does not.
+without Cloudflare Tunnel) and port 25 is blocked. The tunnel runs in a
+Durable Object (section 5); what the prototype found, locally under
+workerd and in Cloudflare's documentation:
+
+- *Six connections.* Cloudflare counts, per invocation, the connections
+  still *waiting for their first answer* (a `fetch` before its headers, a
+  `connect()` before it opens), and queues the seventh rather than
+  refusing it; an open socket no longer counts. So a pool of ten opens
+  six at once, then four. Locally, twelve connections of one run, one
+  object, all opened within 0.2 s and ran together. To confirm on
+  Cloudflare: a throwaway Worker whose Durable Object opens twelve
+  `connect()` sockets to a public Postgres, holds them a minute, and
+  reports when each opened.
+- *Hibernation* saves nothing here. It frees an object whose WebSockets
+  are idle, but an open TCP socket to Postgres cannot survive it, and the
+  group's check is a timer. An object holding a run's connections is in
+  memory, billed as 128 MB of duration, for as long as they are open:
+  450 GB-s an hour, about $0.0056 an hour past the paid plan's 400,000
+  GB-s a month; the free plan's 13,000 GB-s a day is 29 hours of runs.
+  One object per run, not per connection: a pool of ten costs one.
+- *STARTTLS* works: `startTls()` with no options, which checks the
+  certificate against the host `connect()` dialled. workerd refuses
+  `expectedServerHostname` ("unsupported"). Locally, TLS 1.3 to a
+  Postgres whose certificate a test CA signed (given to workerd with
+  `SSL_CERT_FILE`), and a refusal when dialled by an address its
+  certificate does not name.
+- *Eviction and deploys* end every session: a deploy restarts every
+  object and disconnects its WebSockets, and an evicted object's TCP
+  sockets are gone. The app's driver sees its connections drop, as when a
+  database restarts, and its pool connects again, through a new object.
+  `vite dev`'s reload swaps the module in place and keeps them.
+- *Cost.* Measured with `vite dev`, one psql session of 20,000 one-row
+  queries: 175 µs of workerd's main thread per query (one message each
+  way, the JavaScript and the I/O together), 0.45 ms a query against
+  0.08 ms direct; 110 MB read in 2 s of its CPU. An object is one thread:
+  a run's connections share about 5,000 queries a second.
 
 **Cloudflare Access.** The proxy's callers are apps and the CLI, not
 browsers, and a handle is not an Access identity. So `/use/*` needs an

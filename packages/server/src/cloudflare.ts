@@ -35,6 +35,7 @@ export {
   postgres,
   type CoffreWorker,
   type PostgresDatabase,
+  type SocketsNamespace,
   type WaitUntil,
   type WorkersConfig,
 } from './cloudflare-handler.ts';
