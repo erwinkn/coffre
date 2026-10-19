@@ -2159,6 +2159,22 @@ test("a checkpoint's tally rewritten in the middle of a stretch is found there, 
   assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.reason], [first.checkpoint.seq + 1, 'the tally this checkpoint keeps does not follow from the log before it']);
 });
 
+test("a stretch holds each tally to the walk as it stood at that tally's prefix, the vault's keys included", async () => {
+  // The app's entry first, as on a deployment whose first beat comes before anyone signs in: the first checkpoint
+  // signs it with no key of the vault's yet, and the vault's entries after it, in the same batch, bring one.
+  await db.owner.transaction((tx) =>
+    appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }]),
+  );
+  const vault = await fresh();
+  const first = await vault.checkpoint();
+  assert.ok(first.ok && first.checkpoint.seq === 0, JSON.stringify(first));
+  await reads(3);
+  const second = await vault.checkpoint();
+  assert.ok(second.ok);
+  const whole = await vault.verifyLog({ from: 'start', to: second.checkpoint.seq + 1 });
+  assert.ok(whole.ok, JSON.stringify(whole));
+});
+
 test('a verification counts the prefix it resumes from: an entry cut before the newest checkpoint is found', async () => {
   const w = await world();
   await reads(10);

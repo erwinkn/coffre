@@ -65,10 +65,10 @@ export async function rehash(
     if (batch.length === 0) return { ok: true, at, done: to === undefined };
     const result = verifyEntries(batch, { keys: logKeys, chainOnly: ['app'], startSeq: at.seq + 1n, startPrevHash: at.hash });
     if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
-    const moved = forward(batch, walk.keys, logKeys[0]!.keyId);
-    if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
-    walk.keys = moved.keys;
-    for (const entry of batch) if (entry.author === 'vault') walk.add(entry);
+    for (const entry of batch) {
+      const moved = entry.author === 'vault' ? walk.add(entry, logKeys[0]!.keyId) : null;
+      if (moved !== null) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
+    }
     at = { seq: result.nextSeq - 1n, hash: result.head };
     left -= batch.length;
   }
@@ -121,10 +121,10 @@ export async function ownEntries(
       const result = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: logKeys });
       if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
     }
-    const moved = forward(batch, walk.keys, logKeys[0]!.keyId);
-    if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
-    walk.keys = moved.keys;
-    for (const entry of batch) walk.add(entry);
+    for (const entry of batch) {
+      const moved = walk.add(entry, logKeys[0]!.keyId);
+      if (moved !== null) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
+    }
     after = batch[batch.length - 1]!.seq;
     left -= batch.length;
   }

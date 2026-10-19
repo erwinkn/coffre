@@ -4,6 +4,7 @@ import type { StoredEntry } from '@coffre/core/audit';
 import type { AccessFault, Checkpoint, LogHead } from '@coffre/core/vault';
 
 import { KeyAccounting, type AccountingState } from './accounting.ts';
+import { forward } from './log.ts';
 import { apply, placeKey, type LoggedMember, type Replayed } from './replay.ts';
 import { ACCESS_ACTIONS, type GrantRow } from './store.ts';
 
@@ -148,17 +149,25 @@ export class Walk {
     }
   }
 
-  add(entry: StoredEntry): void {
+  /**
+   * One of the vault's entries, its MAC checked, in the log's order: a
+   * fault when it is under a key the vault had moved past (`forward`).
+   */
+  add(entry: StoredEntry, current: string): { failedAtSeq: bigint; reason: string } | null {
     this.#reach(entry.seq);
+    const moved = forward([entry], this.keys, current);
+    if ('failedAtSeq' in moved) return moved;
+    this.keys = moved.keys;
     this.entries += 1;
     this.accounting.add(entry);
-    if (entry.decision !== 'allow') return;
+    if (entry.decision !== 'allow') return null;
     if (ACCESS.has(entry.action)) {
       this.replayFault ??= apply(this.replayed, entry);
       if (entry.subjectPrincipal !== null) this.newestAccess.set(entry.subjectPrincipal, entry.seq);
     } else if (entry.action === CHECKPOINT) {
       this.checkpoints.push({ entry: { seq: entry.seq, keyId: entry.keyId, relatedSeq: entry.relatedSeq }, checkpoint: JSON.parse(entry.metadata) as Checkpoint });
     }
+    return null;
   }
 
   /** Where the walk stands, to resume from. */
