@@ -76,7 +76,7 @@ function bearer(token: string): CoffreClient {
   return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
 }
 
-type Plan = { environment: string; env: Record<string, string>; left: string[]; generate?: Record<string, { recipe: string; replaces: string }> };
+type Plan = { environment: string; env: Record<string, string>; left: string[]; generate?: Record<string, { recipe: string; replaces: string; sensitivity: 'secret' }> };
 
 async function planFor(path: string, handle: string): Promise<Plan> {
   const response = await route(`/use/${path}`, { headers: { authorization: `Bearer ${handle}` } });
@@ -91,15 +91,19 @@ test('the plan names what a recipe made and the app would go without; a run writ
   const handle = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;
   const ids = await versionIds('market/local');
   const first = await planFor('market/local', handle);
-  // Neither a typed key, nor one its person reads, plain or a credential's: those reach the app, or have no recipe.
+  // Neither a typed key, nor one its person reads, plain or a credential's: those reach the app, or have no recipe. Each
+  // a secret, which the app is given: saying nothing, the person's own value would be as sensitive as the key it overrides.
   assert.deepEqual(first.generate, {
-    SEAL_KEY: { recipe: 'bytes:32:hex', replaces: ids.SEAL_KEY },
-    WEBHOOK_SECRET: { recipe: 'bytes:24:base62', replaces: ids.WEBHOOK_SECRET },
+    SEAL_KEY: { recipe: 'bytes:32:hex', replaces: ids.SEAL_KEY, sensitivity: 'secret' },
+    WEBHOOK_SECRET: { recipe: 'bytes:24:base62', replaces: ids.WEBHOOK_SECRET, sensitivity: 'secret' },
   });
   assert.deepEqual(first.left, ['SEAL_KEY', 'TYPED', 'WEBHOOK_SECRET']);
 
   // As `coffre run` writes them, with the person's session, into their personal config.
-  const write = { SEAL_KEY: { value: 'a'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: ids.SEAL_KEY! }, WEBHOOK_SECRET: { value: 'devs-own-webhook-0123', generated: { recipe: 'bytes:24' }, replaces: ids.WEBHOOK_SECRET! } };
+  const write = {
+    SEAL_KEY: { value: 'a'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: ids.SEAL_KEY!, sensitivity: 'secret' as const },
+    WEBHOOK_SECRET: { value: 'devs-own-webhook-0123', generated: { recipe: 'bytes:24' }, replaces: ids.WEBHOOK_SECRET!, sensitivity: 'secret' as const },
+  };
   // Two runs at once: one writes, the other is refused, and reads the plan again.
   const raced = await Promise.allSettled([dev.secrets.set('market/local@me', write), dev.secrets.set('market/local@me', { ...write, SEAL_KEY: { ...write.SEAL_KEY, value: 'b'.repeat(64) } })]);
   assert.deepEqual(raced.map((each) => each.status).sort(), ['fulfilled', 'rejected']);
@@ -126,7 +130,7 @@ test("a person's own generated value they made sensitive is theirs: never made a
   const dev = bearer(await sessionFor(DEV));
   const handle = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;
   const ids = await versionIds('market/local');
-  await dev.secrets.set('market/local@me', { SEAL_KEY: { value: 'c'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: ids.SEAL_KEY! } });
+  await dev.secrets.set('market/local@me', { SEAL_KEY: { value: 'c'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: ids.SEAL_KEY!, sensitivity: 'secret' } });
   await dev.secrets.set('market/local@me', { SEAL_KEY: { sensitivity: 'sensitive' } });
   const plan = await planFor('market/local', handle);
   assert.equal(plan.environment, 'market/local@me');
@@ -134,6 +138,10 @@ test("a person's own generated value they made sensitive is theirs: never made a
   assert.ok(plan.left.includes('SEAL_KEY'));
   // WEBHOOK_SECRET, local's sensitive value it inherits, is still made the person's own.
   assert.ok(plan.generate?.WEBHOOK_SECRET !== undefined);
+  // Written saying nothing, as a CLI before 0.10 writes it, it is as sensitive as local's: the person's own, left out the same.
+  await dev.secrets.set('market/local@me', { WEBHOOK_SECRET: { value: 'devs-own-webhook-0123', generated: { recipe: 'bytes:24' }, replaces: ids.WEBHOOK_SECRET! } });
+  const after = await planFor('market/local', handle);
+  assert.deepEqual([after.generate?.WEBHOOK_SECRET, after.left.includes('WEBHOOK_SECRET')], [undefined, true]);
 });
 
 test("a person's use of a generating environment reads their personal config: their own key is the one sent", async () => {

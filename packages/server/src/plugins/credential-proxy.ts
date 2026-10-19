@@ -439,15 +439,16 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   }
   // What the app would go without and a recipe made, in an environment the deployment generates for: `coffre run`
   // makes each a value of the person's own, in their personal config, replacing the version read here, so that of
-  // two runs at once one writes and the other reads what it wrote.
+  // two runs at once one writes and the other reads what it wrote. Each is written a secret, which the app is given: saying
+  // nothing, an override takes the level of the key it overrides, sensitive here (decision 27).
   const making = proxy.generate.get(path.replace(/@me$/, ''));
-  const generate: Record<string, { recipe: string; replaces: string }> = {};
+  const generate: Record<string, { recipe: string; replaces: string; sensitivity: 'secret' }> = {};
   const generates = (key: string) => making === 'all' || (making?.includes(key) ?? false);
   for (const row of making === undefined ? [] : resolved) {
     if (covered.has(row.key) || row.recipe === null || row.versionId === null || recipeProblem(row.recipe) !== null || !generates(row.key)) continue;
     // The person's own value, made sensitive: theirs, which the app goes without, never made again over it (R18).
     if (personal && !row.inherited && row.sensitive) continue;
-    generate[row.key] = { recipe: row.recipe, replaces: row.versionId };
+    generate[row.key] = { recipe: row.recipe, replaces: row.versionId, sensitivity: 'secret' };
   }
   return answer({
     environment: held.environment.path,

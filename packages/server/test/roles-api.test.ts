@@ -230,7 +230,7 @@ test('writing to an archived key requires an explicit restore', async () => {
   await root.secrets.update('market/prod/API_KEY', { archived: false });
   assert.deepEqual(
     (await root.secrets.set('market/prod', { API_KEY: 'rotated' })).keys,
-    { API_KEY: { version: 2 } },
+    { API_KEY: { version: 2, sensitivity: 'secret' } },
   );
   assert.equal((await root.secrets.reveal('market/prod/API_KEY')).values.API_KEY, 'rotated');
 });

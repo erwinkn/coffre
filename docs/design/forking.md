@@ -47,7 +47,14 @@ market/dev    DATABASE_URL=postgres://dev    STRIPE_KEY=sk_test_1
   included, and its sensitive values by nobody, its owner included (R18).
   The vault enforces it by binding the owner into each wrapped
   data key, so a forged database row fails to decrypt instead of granting
-  access.
+  access. A plain value, which is in the clear by being plain, is held to
+  its owner by the app's rule alone (section 3).
+- **A personal config is a partial overlay.** Each key its owner sets is
+  theirs, over its environment's key or beside it; every other key falls
+  through to the environment's, live. Each value of its own is plain,
+  secret or sensitive, as anywhere: written saying nothing, it takes the
+  level of the value the key reads now (0.10, decision 27 in
+  credential-proxy.md).
 - **Status.** Erwin agreed to the three recommendations below (no
   lending, owner-only personal configs, explicit `@me`). Forks that
   inherit shipped first, as 0.7's first PR; personal configs second, with
@@ -318,8 +325,9 @@ dev, deciding on dev's place. So losing dev also loses her personal dev,
 and a scope or a grant on the personal environment itself means nothing.
 Values in a personal config are typically the person's own (their
 sandbox API key, their local database). Nobody else needs them, and an
-Owner who could read them would just be one more way they leak. What
-others see:
+Owner who could read them would just be one more way they leak. That
+holds whatever a value's level: Ada's plain `REGION=eu-west-1` lists to
+her, inline, and to nobody else. What others see:
 
 - The project's maintainers (`environment.manage`) see that personal
   configs exist: who owns one, its parent, its key names, and when
@@ -400,7 +408,14 @@ needs no new sealed state:
 
 A forged `owner` column now fails to decrypt instead of granting: Bo as
 owner computes Bo's AAD, which isn't the one Ada's keys were wrapped
-under. A cleared column fails the same way. A forged `parent_id` could
+under. A plain value is the exception, as anywhere (0.10): it is stored
+in the clear beside its ciphertext and read without the vault, so the
+app's `can()` alone holds it to Ada, the one door every read goes through
+(the list, `get`, `export`, the proxy's plan, history, versions, dry
+runs and MCP); whoever reads the database reads it, as they read every
+plain value. That is what plain means: no secret, the person's own
+`REGION` or local host. A value nobody else should see in a dump is a
+secret. A cleared column fails the same way. A forged `parent_id` could
 only let Ada read her own values after losing the parent, which is the
 mildest case. And rolling back to 0.6, whose vault knows nothing of
 owners, fails closed: it unwraps without the owner and gets an

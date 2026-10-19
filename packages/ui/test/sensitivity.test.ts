@@ -75,7 +75,11 @@ test("a save shows at once who reads each value: a secret written over one its w
   assert.deepEqual(Object.fromEntries(shown.map((entry) => [entry.key, entry.readable])), { NEW: false, API_KEY: false, WEBHOOK: true, REGION: false });
 });
 
-test('a personal config offers a secret and sensitive, never plain, which the vault would not bind to its owner', () => {
-  assert.deepEqual(levelsIn(true), ['secret', 'sensitive']);
-  assert.deepEqual(levelsIn(false), ['plain', 'secret', 'sensitive']);
+test('a personal config offers every level, each said to be seen by its owner alone, but sensitive, seen by nobody', () => {
+  const personal = levelsIn(true);
+  assert.deepEqual(Object.keys(personal), ['plain', 'secret', 'sensitive']);
+  assert.match(personal.plain.hint, /you alone/);
+  assert.match(personal.secret.hint, /you alone/);
+  assert.match(personal.sensitive.hint, /Never shown, you included/);
+  assert.match(levelsIn(false).plain.hint, /anyone who can see this environment/);
 });

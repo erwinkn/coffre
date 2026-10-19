@@ -312,6 +312,7 @@ export type Api = {
       keys: {
         [key: string]: {
           version: number;
+          sensitivity: "plain" | "secret" | "sensitive";
         } | {
           archived: true;
         } | {
@@ -2318,6 +2319,7 @@ export type SetResult = {
   keys: {
     [key: string]: {
       version: number;
+      sensitivity: "plain" | "secret" | "sensitive";
     } | {
       archived: true;
     } | {
