@@ -746,18 +746,40 @@ test("a handle keeps what its person reads and uses at each place, both columns:
   assert.deepEqual(developer.plan.left, ['WEBHOOK_SECRET']);
 });
 
-test("a handle reaches the source of a reference its environment holds, as its person does: an Owner's reads one in a protected prod through dev", async () => {
+test("a handle made for dev reads a reference into a protected prod through dev, as its person does, and reaches nothing else of prod", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789', MAPS_KEY: 'maps+prod/key=0123456789' });
+  await root.secrets.set('market/dev', { WEBHOOK_SECRET: { ref: 'market/prod/WEBHOOK_SECRET' } });
+  await root.environments.protect('market/prod');
+  const made = await bearer(await sessionFor(ROOT)).handles.create({ label: 'run', paths: ['market/dev'] });
+  // Made for dev, it holds dev alone: the source is weighed on its person, an Owner, who reads prod.
+  assert.deepEqual(made.scope, { 'market/dev': 'viewer' });
+  const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(((await response.json()) as { env: Record<string, string> }).env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
+  // Prod itself, its plan or a credential of it, is no place the handle was made for.
+  const sent = received.length;
+  assert.equal((await route('/use/market/prod', { headers: { authorization: `Bearer ${made.token}` } })).status, 403);
+  assert.equal((await route(`/use/market/prod/maps/geocode?address=paris&key=${made.token}`)).status, 403);
+  assert.equal(received.length, sent, 'nothing reached an upstream');
+});
+
+test("a reference into a protected prod lends nothing to whoever does not read or use prod, whatever reads dev", async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789' });
   await root.secrets.set('market/dev', { WEBHOOK_SECRET: { ref: 'market/prod/WEBHOOK_SECRET' } });
   await root.environments.protect('market/prod');
-  const made = await bearer(await sessionFor(ROOT)).handles.create({ label: 'run', paths: ['market/dev'] });
-  // Made for dev, it holds prod too, as its Owner reads it: the vault asks for that at a protected source.
-  assert.equal(made.scope['market/prod'], 'viewer');
+  await root.members.add('user:dee@acme.example');
+  await root.access.set('user:dee@acme.example', { 'market/dev': 'viewer' });
+  const made = await bearer(await sessionFor('dee@acme.example')).handles.create({ label: 'run', paths: ['market/dev'] });
   const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
   assert.equal(response.status, 200, await response.clone().text());
-  assert.equal(((await response.json()) as { env: Record<string, string> }).env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
+  const plan = (await response.json()) as { env: Record<string, string>; left: string[] };
+  // Not handed, not used: neither its value nor a placeholder for it.
+  assert.equal(plan.env.WEBHOOK_SECRET, undefined);
+  assert.ok(!JSON.stringify(plan).includes('whsec_prod'), JSON.stringify(plan));
 });
 
 test("a reference into a protected prod is left out of a plan for whoever only uses prod, and the rest of dev is handed back", async () => {

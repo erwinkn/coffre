@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { environmentSecrets, fileSecrets, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
+import { environmentSecrets, fileSecrets, liveEnvironment, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -73,7 +73,7 @@ export async function forkEnvironment(
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
 
     // From here, as of the protection it made, if any: each transaction below commits only while that is the newest change.
-    const { ctx: protecting, id, protectedAt } = await protectedFork(ctx, place, source);
+    const { ctx: protecting, id, protectedAt } = await protectedFork(ctx, place, source, slug, false);
     const { environment, created } = await putEnvironment(protecting, place, slug, { name: input.name }, { from, id, protectedAt });
     const forking = rowWritten(protecting, id, slug);
     const copies = readable.items.filter((item) => !plan.has(item.key));
@@ -140,7 +140,7 @@ async function inheritFrom(
   if (above === null || above.length >= MAX_PARENTS) {
     throw conflict(`${place.project.slug}/${from} already inherits from ${MAX_PARENTS} environments: fork one higher up`);
   }
-  const { ctx: forking, id, protectedAt } = await protectedFork(ctx, place, parent);
+  const { ctx: forking, id, protectedAt } = await protectedFork(ctx, place, parent, slug, true);
   const { environment, created } = await putEnvironment(forking, place, slug, { name }, { from, parentId: parent.environment!.id, id, protectedAt });
   return { environment, created, forked: { from, keys: 0, references: 0, copied: [], inherits: true } };
 }
@@ -153,9 +153,17 @@ async function inheritFrom(
  * the id. One left unprotected, as its source was for the caller, is
  * written, and its values copied, only while no policy change came since
  * (`audited`): its source protected meanwhile, the fork would not be.
+ * What would refuse its row is checked first, as its row's transaction
+ * checks it again: a fork refused there leaves an id protected with no row
+ * for a while, and a change every request in flight is fenced on.
  */
-async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath): Promise<{ ctx: ApiContext; id?: string; protectedAt?: number }> {
+async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath, slug: string, inherits: boolean): Promise<{ ctx: ApiContext; id?: string; protectedAt?: number }> {
   if (!protectedFor(ctx.caller, source.environment!)) return { ctx };
+  if (place.environment === null) {
+    if ((await resolvePath(ctx.db, { project: place.project.slug, environment: slug }))?.environment != null) throw conflict(`an environment named "${slug}" already exists`);
+    if (place.project.archivedAt !== null) throw conflict(`${place.project.slug} is archived; restore it before adding environments`);
+  }
+  if (inherits && !(await liveEnvironment(ctx.db, source.environment!.id))) throw conflict(`${place.project.slug}/${source.environment!.slug} was archived or deleted meanwhile: it is no parent`);
   const id = place.environment?.id ?? randomUUID();
   const protectedAt = Date.now();
   return { ctx: await protectIds(ctx, place.project.id, [id]), id, protectedAt };

@@ -66,7 +66,8 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   to `market/prod/DATABASE_URL` made before prod was protected, would let
   every Developer read prod through dev. Where the source is protected, the
   vault asks a person for the permission at the source too, in their
-  protected column, and refuses otherwise; the app says so first, the key
+  protected column, on their own standing, whatever credential they read
+  with (its scope governs the holder), and refuses otherwise; the app says so first, the key
   unreadable with why, so a whole environment's read refuses rather than
   go without it, and the listing says it is not readable. The reference
   stays, and reads again once prod is unprotected. A service account
@@ -350,10 +351,13 @@ now stores both columns (R17): personal tokens and handles
 (`personalScope`), a handle keeping at each place what its person holds
 there of reading and using, in each column, so an Owner's reads a
 protected prod as they do. A handle reaches the environments it is made
-for, those they inherit from, and the sources of the references they
-hold, each as its person does there: an app given one for `market/dev`
-that holds a reference into `market/prod` uses prod through the proxy as
-its person may, never more; service tokens and trust bindings (`issuedScope`), a
+for and those they inherit from, nothing else. A credential's scope
+governs where a reference is held; at a protected source, the reference
+is weighed on its person's own standing (`readsThrough`, and the vault's
+`#keys`), never widened by the scope and never narrowed by it: an app
+given a handle for `market/dev`, whose person reads `market/prod`, reads
+dev's reference into prod, that one key, and `/use/market/prod` refuses
+it; an Owner's token on `market/dev` reads all of dev. Service tokens and trust bindings (`issuedScope`), a
 binding replaced or its keys replaced (no more than it held before, nor
 than two it replaces held at one place, `narrowest`, and weighed by what
 it keeps: a role widened since neither widens it nor stops it), and the scopes

@@ -1118,7 +1118,8 @@ class VaultService implements Vault {
     // Each personal config's owner, hashed, by environment, as the decision read them: what its keys' contexts bind.
     const owners = new Map<string, string>();
     const check = async (d: Decision) => {
-      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), call.input);
+      const person = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
+      const reader = through(person, call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
       // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
       // matches the slug there, and a place deleted on either side opens for none.
@@ -1136,8 +1137,10 @@ class VaultService implements Vault {
         const held = refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
         // Through a reference into a protected environment, a person holds their protected column at its source too: one
         // made before prod was protected lends prod's values to nobody who reads the holder. A service account reads on.
+        // Weighed on the person's own standing, not their credential's: its scope governs the holder, where it was made
+        // to reach, and a reference lends no more of the source than this one key.
         const source = placeIn(secret, environments);
-        return held ?? (at[i] !== secret && guarded(reader.live, source) ? refuses(reader, call.permission, source, false) : null);
+        return held ?? (at[i] !== secret && guarded(person.live, source) ? refuses(person, call.permission, source, false) : null);
       });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));

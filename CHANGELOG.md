@@ -20,9 +20,11 @@
   nobody's access changes on upgrade. Only an Owner of the whole
   instance unprotects one (`coffre environments unprotect`), and a fork
   of a protected environment, a copy or one that inherits, is protected
-  before its row exists. Settings › Roles, or `coffre roles set`,
-  `reset` and `remove`, lets an Owner of the whole instance edit any
-  role but Owner and the instance's Member, and make
+  before its row exists. Forking one takes reading it there, as any fork
+  takes reading its source: as they ship, an Owner forks a protected
+  prod, and a Maintainer or a Developer does not. Settings › Roles, or
+  `coffre roles set`, `reset` and `remove`, lets an Owner of the whole
+  instance edit any role but Owner and the instance's Member, and make
   custom ones (`release-manager`), granted as any is and deleted once no
   grant names one; each change is previewed in words first ("Widens
   secret.read for 6 people on 4 protected environments") and logged as

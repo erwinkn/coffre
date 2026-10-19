@@ -363,9 +363,13 @@ export function unreadParents(
  * decides. A reference made before prod was protected lends prod's values
  * to nobody who does not read them in prod; it reads again once prod is
  * unprotected. A service account holds its normal column there, and reads on.
+ * Weighed on the person's own standing, not their credential's: a token's
+ * scope governs the holder it was made to reach, and a reference lends no
+ * more of the source than its one key, as the vault decides (`#keys`).
  */
 export function readsThrough(holder: Holdings, source: Place, anyOf: readonly Permission[] = ['secret.read']): boolean {
-  return !guarded(holder, source) || anyOf.some((permission) => allows(holder, permission, source));
+  const person: Holdings = { ...holder, credentialScope: null };
+  return !guarded(person, source) || anyOf.some((permission) => allows(person, permission, source));
 }
 
 /**

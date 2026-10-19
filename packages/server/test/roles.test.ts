@@ -354,6 +354,17 @@ function meanwhileOn(method: 'access' | 'unwrap' | 'changePolicy', when: (input:
   });
 }
 
+test('a fork of a protected environment refused for its row protects nothing first: no id kept, no change for requests in flight', async () => {
+  await maya.environments.protect('market/prod');
+  const changes = async () => (await actions()).filter((action) => action === 'policy.change allow').length;
+  const before = await changes();
+  // Its slug taken, or its parent archived (not found as a source): refused before the vault protects anything.
+  assert.equal(await status(root.environments.create('market/dev', { from: 'prod', inherit: true })), 409);
+  await root.environments.update('market/prod', { archived: true });
+  assert.equal(await status(root.environments.create('market/prod-next', { from: 'prod', inherit: true })), 404);
+  assert.equal(await changes(), before);
+});
+
 test('a fork decided while its source was not protected, which commits once it is, is refused: protected, or not made', async () => {
   // Prod protected once Maya's request has loaded her, before her fork that inherits is written: nothing is made.
   meanwhileOn('access', (asked) => asked === MAYA, () => root.environments.protect('market/prod'));
@@ -437,6 +448,20 @@ test('rule 3: a personal token holds no more than its person held when it was is
   assert.equal(await status(bearer(token.token).secrets.reveal('market/prod')), 403, 'her token does not');
   assert.equal(await status(bearer(token.token).secrets.reveal('market/dev')), 200);
   assert.deepEqual((await storedScopeOf(token.id))[0]!.permissions, { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] });
+});
+
+test("rule 3: a personal token on dev reads a reference into a protected prod as its person does, and nothing else of prod", async () => {
+  await root.secrets.set('market/dev', { FROM_PROD: { ref: 'market/prod/API_KEY' } });
+  await maya.environments.protect('market/prod');
+  const token = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  // The Owner reads prod: their token, made for dev, reads all of dev, the reference included.
+  const read = await bearer(token.token).secrets.reveal('market/dev');
+  assert.equal(read.values.FROM_PROD, 'prod-key');
+  assert.equal(await status(bearer(token.token).secrets.reveal('market/prod')), 403, 'prod itself is no place it reaches');
+  // A Developer of market only uses prod: her token on dev is refused the reference, as she is.
+  const hers = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  assert.equal(await status(bearer(hers.token).secrets.reveal('market/dev')), 409);
+  assert.equal(await status(ada.secrets.reveal('market/dev')), 409);
 });
 
 test('rule 3: a service token issued under a narrowed role keeps it when the role is put back as it ships', async () => {
