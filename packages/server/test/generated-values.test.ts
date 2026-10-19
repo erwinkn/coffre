@@ -122,6 +122,20 @@ test('the plan names what a recipe made and the app would go without; a run writ
   assert.deepEqual(writes.map((entry) => [entry.metadata.key, entry.metadata.recipe]).sort(), [['SEAL_KEY', 'bytes:32:hex'], ['WEBHOOK_SECRET', 'bytes:24:base62']]);
 });
 
+test("a person's own generated value they made sensitive is theirs: never made again, and the app goes without it (R18)", async () => {
+  const dev = bearer(await sessionFor(DEV));
+  const handle = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;
+  const ids = await versionIds('market/local');
+  await dev.secrets.set('market/local@me', { SEAL_KEY: { value: 'c'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: ids.SEAL_KEY! } });
+  await dev.secrets.set('market/local@me', { SEAL_KEY: { sensitivity: 'sensitive' } });
+  const plan = await planFor('market/local', handle);
+  assert.equal(plan.environment, 'market/local@me');
+  assert.equal(plan.generate?.SEAL_KEY, undefined);
+  assert.ok(plan.left.includes('SEAL_KEY'));
+  // WEBHOOK_SECRET, local's sensitive value it inherits, is still made the person's own.
+  assert.ok(plan.generate?.WEBHOOK_SECRET !== undefined);
+});
+
 test("a person's use of a generating environment reads their personal config: their own key is the one sent", async () => {
   const dev = bearer(await sessionFor(DEV));
   const handle = (await dev.handles.create({ label: 'coffre run market/local', paths: ['market/local'] })).token;

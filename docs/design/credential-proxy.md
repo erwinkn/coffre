@@ -274,7 +274,8 @@ coffre: made your own ROOT_ENCRYPTION_KEY, POLICY_SEAL_KEY in backend/local@me, 
 - **What gets one.** A key the app would go without (none of the
   credentials', and no value it is given: a sensitive one), whose current value a recipe made
   (`coffre set … --generate`, one value: a key pair's half has none
-  here), in the environment's list. The plan names each,
+  here), in the environment's list, and not a value of the person's own
+  they made sensitive, which stays theirs. The plan names each,
   `generate: { ROOT_ENCRYPTION_KEY: { recipe, replaces } }`, with the
   version it read. `coffre run` and `coffre export` make each value by its
   recipe, as `coffre regenerate` does, and write them to the personal
