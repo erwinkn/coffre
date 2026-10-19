@@ -79,8 +79,8 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
     async coffre(args: string[], input?: string) {
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_')));
       Object.assign(env, { COFFRE_STATE_DIR: home, HOME: home });
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: 10_000 });
-      if (input !== undefined) child.stdin!.end(input);
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000 });
+      child.stdin.end(input ?? '');
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
