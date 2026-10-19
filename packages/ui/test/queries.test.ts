@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CoffreError, type CoffreClient } from '@coffre/client';
-import { QueryObserver, type QueryClient } from '@tanstack/react-query';
+import { dehydrate, hydrate, QueryObserver, type QueryClient } from '@tanstack/react-query';
 
 import {
   affects,
@@ -169,10 +169,11 @@ test('a tab sends nobody away on a stale no: a service account added back opens 
   assert.equal(await tabOpens(shows), true);
 });
 
-test('the audit log and its verification are read on every visit', () => {
+test('the audit log is read on every visit, and its verification once with the page', () => {
   const { client } = fakeClient();
   assert.equal(queries.auditEntries(client, {}).staleTime, 0);
-  assert.equal(queries.auditChain(client).staleTime, 0);
+  assert.equal(queries.auditChain(client).staleTime, undefined);
+  assert.equal(queries.auditChain(client).refetchOnMount, false);
 });
 
 test('the audit page loads its entries and its verification together, and a check that fails does not fail the load', async () => {
@@ -209,6 +210,39 @@ test('the audit page loads its entries and its verification together, and a chec
     throw new CoffreError(403, 'forbidden', 'forbidden');
   });
   assert.equal(refused.chain?.integrity, 'owners-only');
+});
+
+test('the audit page verifies once an arrival: not again on mount, nor for a filter change', async () => {
+  let verified = 0;
+  const coffre = {
+    audit: {
+      list: async () => ({ entries: [] }),
+      verify: async () => {
+        verified++;
+        return { ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null };
+      },
+    },
+  } as unknown as CoffreClient;
+
+  // The server renders the page, the browser takes its cache and mounts it.
+  const server = createQueryClient();
+  await loadAudit(server, coffre, {});
+  const browser = createQueryClient();
+  hydrate(browser, dehydrate(server));
+  const stop = onScreen(browser, queries.auditChain(coffre));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  stop();
+  assert.equal(verified, 1);
+
+  // A filter, and a hover over its link, within the window the page is fresh for.
+  await loadAudit(browser, coffre, { decision: 'deny', detail: '1' });
+  await loadAudit(browser, coffre, { actorId: 'ada@acme.example' });
+  assert.equal(verified, 1);
+
+  // A change made here marks it stale, so the next visit verifies again.
+  await refresh(browser, affects.sessions());
+  await loadAudit(browser, coffre, {});
+  assert.equal(verified, 2);
 });
 
 test('every change marks the audit log and its verification stale', async () => {

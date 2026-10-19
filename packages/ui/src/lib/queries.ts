@@ -17,9 +17,10 @@ import type { DirectoryPrincipal, GrantRow, Me, ProjectSummary } from '../shared
  * names what it touches (`affects`), so your own changes always show.
  * Someone else's change shows within that window. Nothing is decided on a
  * cached read: the server authorizes every call, so a stale screen can offer
- * an action the server then refuses, never grant one. The audit log and the
- * chain's verification are the exception, read fresh on every visit: their
- * whole point is to be current.
+ * an action the server then refuses, never grant one. The audit log is the
+ * exception, read fresh on every visit: its whole point is to be current.
+ * The chain's verification is read once a visit like the rest, and again
+ * after any change made here.
  */
 export const FRESH_MS = 10_000;
 
@@ -318,13 +319,15 @@ export const queries = {
     }),
 
   /**
-   * Whether the log holds: verified on every visit, and rendered with the
-   * page. It reads what was written since the newest checkpoint, so it takes
-   * as long as five minutes of the log, however long the log. It never
-   * rejects: a check that could not run is its verdict (`unknown`).
+   * Whether the log holds: verified with each visit, and rendered with the
+   * page, the loader's read to carry to the browser: it is not asked again on
+   * mount, and not for a filter change or a hover, which `FRESH_MS` covers.
+   * It reads what was written since the newest checkpoint, so it takes as
+   * long as five minutes of the log, however long the log. It never rejects:
+   * a check that could not run is its verdict (`unknown`).
    */
   auditChain: (client: CoffreClient) =>
-    queryOptions({ queryKey: [...keys.audit, 'chain'], staleTime: 0, queryFn: () => verifyChain(client) }),
+    queryOptions({ queryKey: [...keys.audit, 'chain'], refetchOnMount: false, queryFn: () => verifyChain(client) }),
   /** What deleting `market` or `market/prod` would take, asked afresh each time it is shown. */
   deletion: (client: CoffreClient, path: string) =>
     queryOptions({
