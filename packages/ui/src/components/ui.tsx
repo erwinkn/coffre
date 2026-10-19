@@ -431,12 +431,17 @@ const RELATIVE_STEPS: [limit: number, divisor: number, unit: Intl.RelativeTimeFo
   [Infinity, 31536000, 'year'],
 ];
 
+/** One formatter per style, made once: making one costs more than a row of a page renders around it. */
+const RELATIVE = {
+  long: new Intl.RelativeTimeFormat('en', { numeric: 'auto', style: 'long' }),
+  narrow: new Intl.RelativeTimeFormat('en', { numeric: 'auto', style: 'narrow' }),
+};
+
 function relative(iso: string, now: number, style: 'long' | 'narrow' = 'long'): string {
   const delta = (new Date(iso).getTime() - now) / 1000;
   const magnitude = Math.abs(delta);
   const [, divisor, unit] = RELATIVE_STEPS.find(([limit]) => magnitude < limit)!;
-  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto', style });
-  return formatter.format(Math.round(delta / divisor), unit);
+  return RELATIVE[style].format(Math.round(delta / divisor), unit);
 }
 
 /** A UTC time as the log writes it: `2026-10-17 08:45:13`, to the millisecond when `precise`. */
