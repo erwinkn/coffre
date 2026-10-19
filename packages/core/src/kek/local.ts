@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createSecretKey, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
 import type { SecretContext } from '../context.ts';
 import { encodeAad } from '../context.ts';
 import { checkOperation } from './cancellation.ts';
@@ -21,13 +21,14 @@ export class LocalKekProvider implements KekProvider {
   readonly keyId: string;
   readonly keyVersion: string;
 
-  readonly #kek: Buffer;
+  /** Imported once: a raw key would be imported again for every key it wraps or opens. */
+  readonly #kek: KeyObject;
 
   constructor(kek: Buffer, keyId: string, keyVersion: string = '1') {
     if (kek.length !== KEK_BYTES) {
       throw new Error(`a local vault key must be ${KEK_BYTES} bytes, got ${kek.length}`);
     }
-    this.#kek = kek;
+    this.#kek = createSecretKey(kek);
     this.keyId = keyId;
     this.keyVersion = keyVersion;
   }

@@ -5,7 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
 import { DEFAULT_POLICY, EVERYWHERE } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
-import * as schema from '@coffre/db/schema';
+import { createDatabase } from '@coffre/db';
 
 import { answer } from './start-fixture.ts';
 import { CredentialUncheckable } from '../src/api/signin.ts';
@@ -38,7 +38,13 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
 }
 
 /** A database that holds no `policy.change`: all a request reads of it before the vault says who called. */
-const noPolicyChanges = { _: { fullSchema: schema }, select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }) }) };
+/** A database whose every query finds nothing: no policy has changed. */
+const noPolicyChanges = createDatabase({
+  query: (async () => ({ rows: [] })) as never,
+  connect: async () => {
+    throw new Error('no transaction here');
+  },
+});
 
 const root: Principal = {
   type: 'user',

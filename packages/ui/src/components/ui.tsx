@@ -356,6 +356,22 @@ export function ConfirmButton({
   );
 }
 
+const hydrated = () => true;
+const serverRender = () => false;
+const unchanging = () => () => {};
+
+/**
+ * Whether a dialog's root is drawn: always once the page is the browser's,
+ * which closes it with its animation; on the server and while hydrating,
+ * only when it is open. Closed, a dialog draws nothing, so the page's HTML
+ * is the same either way, and the server skips a root per dialog: four in
+ * each row of an environment's table. Its trigger is elsewhere, so mounting
+ * it after hydration remounts nothing else.
+ */
+function useHydrated(open: boolean): boolean {
+  return useSyncExternalStore(unchanging, hydrated, serverRender) || open;
+}
+
 /**
  * The same confirmation, opened from something that is not a trigger.
  *
@@ -368,6 +384,7 @@ export function ConfirmDialog({
   onOpenChange,
   ...confirm
 }: ConfirmProps & { open: boolean; onOpenChange: (open: boolean) => void }) {
+  if (!useHydrated(open)) return null;
   return (
     <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <ConfirmContent {...confirm} />
@@ -397,6 +414,7 @@ export function Modal({
   children: ReactNode;
 }) {
   const { portal } = usePreferences();
+  if (!useHydrated(open)) return null;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal container={portal}>

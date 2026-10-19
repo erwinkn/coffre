@@ -52,6 +52,17 @@
   went from 33 to 25 ms of CPU, everything the runtime does for it
   included. `pnpm bench:workers` and `pnpm bench:node` measure each hot
   path, cold and warm.
+- **Every request's hot queries are built once.** The caller check, the
+  credential lookup, the vault's reads of a member, their grants and the
+  newest entries, and the log's head are built once per process or
+  isolate and run with new values each time (`prepared` in `@coffre/db`),
+  rather than rebuilt by Drizzle at every call. A request on a session or
+  a token no longer reads the newest policy change twice: only a token
+  of 0.4 still waiting for its scope needs the second read. The vault's
+  local key is imported once, not for every key it opens.
+- **Closed dialogs cost the server nothing.** A dialog's root is drawn
+  on the server only when it is open, and mounted once the page has
+  hydrated; the HTML is the same.
 - **Pages with times render with less CPU.** A relative time ("3 hours
   ago") made a new formatter each time it was shown; it reuses one. The
   audit page's render costs about a quarter less.
