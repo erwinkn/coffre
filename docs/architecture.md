@@ -1126,9 +1126,9 @@ Each limit is stated here once; the other documents link to it.
   is past a few hundred entries to a paid plan before upgrading. Even a
   beat with nothing to catch up, its walk of five minutes of the log, the
   heartbeat, the checkpoint and its 100 entries of the past, takes some
-  10 ms of CPU on Node and about 25 on a Worker: more than the Free plan
-  allows, as 0.10.0's beat already did, and the page's check about the
-  same. Until the checkpoints catch up, the walk
+  10 ms of CPU on Node, an estimated 25 on a Worker by the incident's
+  ratio: more than the Free plan allows, as 0.10.0's beat already did, and
+  the page's check about the same. Run 0.10.1 on a paid plan. Until the checkpoints catch up, the walk
   from the first entry ends short of the head and says so (`remaining`),
   and `coffre verify log` exits 3 rather than call the log verified.
 - **A change of access writes every member and grant into the log once.**

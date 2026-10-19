@@ -6,6 +6,7 @@ import { missingEntry } from '@coffre/db/log';
 import { actorParts, appLogKey, attested, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
 import {
   auditActionCounts,
+  auditHashAt,
   auditHead,
   auditPage,
   exchangesOf,
@@ -21,7 +22,7 @@ import {
 } from '../db/queries.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
-import { badRequest, forbidden, notFound } from './errors.ts';
+import { forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
 
@@ -403,6 +404,10 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
         const [own, tallied] = await Promise.all([attested(tx, ctx.chainKey), latestTallied(tx)]);
         if (tallied !== null && tallied.checkpoint === null) return failed('vault', tallied.entry, UNREADABLE, tallied.entry - 1n);
         const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint!);
+        // The prefix it says it signed still there, or the checkpoint is what is wrong, not the entry it names.
+        if (tallied !== null && (await auditHashAt(tx, signed.seq)) !== tallied.checkpoint!.hash) {
+          return failed('vault', tallied.entry, `the log up to entry ${signed.seq} is not the prefix this checkpoint signed`, signed.seq - 1n);
+        }
         start = own.seq <= signed.seq ? own : signed;
         vaultFrom = tallied === null ? 'start' : Number(tallied.entry);
       } else {
@@ -410,7 +415,8 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
         // is what this one starts from, not anything put in its place since.
         const [entry, hash] = query.from === 'start' ? [null, null] : [BigInt(query.from.split(':')[0]!), query.from.split(':')[1]!];
         const anchor = entry === null ? null : await talliedAt(tx, entry);
-        if (entry !== null && anchor === null) throw badRequest(`entry ${entry} is not a checkpoint that keeps a tally`);
+        // Named with its hash, it was there for the stretch before: gone now, it was cut.
+        if (entry !== null && anchor === null) return failed('app', entry, 'cut since the stretch before held its tally to the log', entry - 1n);
         if (anchor !== null && anchor.hash !== hash) return failed('app', entry, 'changed since the stretch before held its tally to the log', entry! - 1n);
         if (anchor !== null && anchor.checkpoint === null) return failed('vault', entry, UNREADABLE, entry! - 1n);
         start = anchor === null ? CHAIN_START : pointOf(anchor.checkpoint!);
@@ -431,6 +437,10 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
       if (!walked.ok) return failed('app', walked.failedAtSeq, walked.reason, walked.through);
       // Whether it ends at the hash the checkpoint signed is the vault's to say, once it has checked its own entries.
       const { at } = walked;
+      // A stretch that ran out of entries before its checkpoint's prefix found them missing.
+      if (to !== null && !walked.done) {
+        return failed('app', at.seq + 1n, `sequence gap: expected seq ${at.seq + 1n}, found none before entry ${to.at.seq}`, at.seq);
+      }
       // A log that runs past its head is broken wherever the walk stopped.
       if (at.seq >= head.nextSeq) {
         return failed('app', head.nextSeq, `the log runs to seq ${at.seq + 1n} but the chain head only expects ${head.nextSeq}`, head.nextSeq - 1n);

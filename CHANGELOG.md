@@ -32,9 +32,11 @@
   tally: on a log longer than that, `/readyz` stays red for a beat or a
   few until they catch up, and the page says how many entries are left.
   A beat that walks 10,000 entries takes about a second of CPU: on the
-  Workers Free plan it is cut off and the catch-up never ends, so move a
-  deployment with more than a few hundred entries to a paid plan first.
-  No migration.
+  Workers Free plan it is cut off and the catch-up never ends. Even
+  caught up, a beat and the audit page's check each take some 10 ms of
+  CPU on Node, an estimated 25 on a Worker, more than the Free plan's 10,
+  as 0.10.0's beat already did: run 0.10.1 on a paid plan, and move there
+  before upgrading. No migration.
 
   `/readyz` now also turns red when the beat's own walk of the chain finds
   it broken, or cannot run: an entry in the app's name the app did not

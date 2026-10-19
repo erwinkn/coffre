@@ -22,6 +22,7 @@ import { EVERYWHERE, type Scope } from '@coffre/core/access';
 import { checkpointMessage, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
+import { SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
 
@@ -2115,6 +2116,56 @@ test('a lap of the rehash of the past ends where it began to, so a log growing f
     }
   }
   assert.ok(beats < 40, 'the rehash of the past never got back to entry 0');
+});
+
+test('a rehash of the past the database fails leaves its lap where it was, and the checkpoint is signed all the same, saying why', async () => {
+  const w = await world({}, { walks: { scrub: 2 } });
+  await reads(10);
+  assert.ok((await w.vault.checkpoint()).ok);
+  await reads(1);
+  assert.ok((await w.vault.checkpoint()).ok);
+  const lap = async () => (await vaultLog(w)).filter((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow').at(-1)!.detail.scrub;
+  const before = await lap();
+  assert.notEqual(before, null);
+  await reads(1);
+  // The database drops the connection under the rehash's own snapshot, the second a checkpoint opens.
+  let snapshots = 0;
+  const failing = new Proxy(db.vault, {
+    get(target, key, receiver) {
+      if (key !== 'transaction') return Reflect.get(target, key, receiver) as unknown;
+      return (work: never, options?: unknown) => (options === SNAPSHOT && ++snapshots === 2
+        ? Promise.reject(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }))
+        : target.transaction(work, options as never));
+    },
+  });
+  const vault = await openLocalVault(failing, configure(), { walks: { scrub: 2 } });
+  const signed = await vault.checkpoint();
+  assert.ok(signed.ok && /the rehash of the past did not run/.test(signed.warning ?? ''), JSON.stringify(signed));
+  assert.deepEqual(await lap(), before);
+});
+
+test("a tally whose members and grants are kept nowhere is refused wherever a walk would read it", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const first = await w.vault.checkpoint();
+  assert.ok(first.ok);
+  await reads(1);
+  const second = await w.vault.checkpoint();
+  assert.ok(second.ok);
+  await reads(1);
+  const third = await w.vault.checkpoint();
+  assert.ok(third.ok);
+  // The second keeps its members and grants in an entry that holds none, its digest kept: a stretch passing it finds
+  // that, as a walk resuming from it would.
+  await rewriteMetadata(BigInt(second.checkpoint.seq + 1), (metadata) => {
+    const tally = metadata.tally as { access: { digest: string } };
+    return { ...metadata, tally: { ...tally, access: { digest: tally.access.digest, at: 0 } } };
+  });
+  const vault = await fresh();
+  const whole = await vault.verifyLog({ from: 'start', to: third.checkpoint.seq + 1 });
+  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.reason], [second.checkpoint.seq + 1, 'its tally keeps its members and grants in entry 0, which holds none']);
+  const resumed = await vault.verifyLog({ from: second.checkpoint.seq + 1 });
+  assert.deepEqual(!resumed.ok && [resumed.failedAtSeq, resumed.reason], [second.checkpoint.seq + 1, 'its tally keeps its members and grants in entry 0, which holds none']);
 });
 
 /** Reads in the vault's name, as the vault logs them, many at once. */

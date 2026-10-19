@@ -1832,7 +1832,7 @@ async function verify(args: string[]): Promise<void> {
 async function verifyLog(): Promise<void> {
   const shown = process.stderr.isTTY;
   const result = await client().audit.verifyWhole((stretch) => {
-    if (shown && stretch.ok && typeof stretch.next === 'number') process.stderr.write(`\rverified through entry ${stretch.through}…`);
+    if (shown && stretch.ok && typeof stretch.next === 'string') process.stderr.write(`\rverified through entry ${stretch.through}…`);
   });
   if (shown) process.stderr.write('\r\x1b[K');
 

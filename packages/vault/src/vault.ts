@@ -109,7 +109,7 @@ import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIF
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import * as store from './store.ts';
-import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
+import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 
 export type VaultOptions = {
@@ -2374,7 +2374,7 @@ class VaultService implements Vault {
     // The newest a release this old can read: one rolled back to from a newer release passes over tallies of a
     // version it does not know, as 0.10.1 passes over 0.10.0's checkpoints, which keep none.
     const newer = (entry: StoredEntry) => {
-      const version = (JSON.parse(entry.metadata) as { tally?: { v?: unknown } } | null)?.tally?.v;
+      const version = (metadataOf(entry) as { tally?: { v?: unknown } } | null)?.tally?.v;
       return typeof version === 'number' && version > TALLY_VERSION;
     };
     let entry = from === 'newest' ? await store.latestTallied(db) : (await store.entriesAt(db, [from])).get(from);
@@ -2406,7 +2406,7 @@ class VaultService implements Vault {
         access = holder.tally.access;
       }
       const kept = { members: access.members, grants: access.grants, newest: access.newest };
-      if (accessDigest(kept) !== read.tally.access.digest) return broken("its tally's members and grants do not match their digest");
+      if (keptDigest(access) !== read.tally.access.digest) return broken("its tally's members and grants do not match their digest");
       return {
         ok: true,
         entry: entry.seq,
@@ -2427,7 +2427,7 @@ class VaultService implements Vault {
     const keys = since !== null && entry.seq >= since ? logKeys.slice(0, 1) : logKeys;
     const authentic = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys });
     if (!authentic.ok) return withCause(authentic.reason);
-    const read = JSON.parse(entry.metadata) as Partial<TalliedCheckpoint> | null;
+    const read = metadataOf(entry) as Partial<TalliedCheckpoint> | null;
     if (read?.tally?.v !== TALLY_VERSION || read.scrub === undefined || typeof read.seq !== 'number' || BigInt(read.seq) !== entry.relatedSeq) return not;
     return read as TalliedCheckpoint;
   }
@@ -2675,15 +2675,34 @@ class VaultService implements Vault {
       }
       // Each one's tally as what the walk must come to, a few at a time, so that members and grants kept whole
       // in many of them are never all in memory: the digest it keeps of them stands for them.
+      // Each one's members and grants are as its digest says, kept whole in it or in the earlier checkpoint it
+      // names, each such checkpoint read once: what a walk resuming from it would find.
+      const holding = new Map<bigint, string | null>();
+      const carried = async (carrier: bigint): Promise<string | null> => {
+        if (!holding.has(carrier)) {
+          const entry = (await store.entriesAt(tx, [carrier])).get(carrier);
+          const read = entry === undefined ? 'missing' : this.#tallied(entry);
+          holding.set(carrier, typeof read === 'string' || 'at' in read.tally.access ? null : keptDigest(read.tally.access));
+        }
+        return holding.get(carrier)!;
+      };
       const expected: Expected[] = [];
       for (let after = from.entry ?? -1n, last = passed.at(-1)?.seq; last !== undefined && after < last; ) {
         const batch = await store.talliedWithin(tx, after, last, walks.verify + 1);
         if (batch.length === 0) break;
         for (const entry of batch) {
           const read = this.#tallied(entry);
-          expected.push(typeof read === 'string'
-            ? { entry: entry.seq, through: entry.relatedSeq!, unreadable: read }
-            : { entry: entry.seq, through: entry.relatedSeq!, key: expectedKey(read.tally) });
+          const point = { entry: entry.seq, through: entry.relatedSeq! };
+          if (typeof read === 'string') {
+            expected.push({ ...point, unreadable: read });
+            continue;
+          }
+          const { access } = read.tally;
+          if (!('at' in access)) holding.set(entry.seq, keptDigest(access));
+          const kept = 'at' in access ? (BigInt(access.at) < entry.seq ? await carried(BigInt(access.at)) : null) : holding.get(entry.seq)!;
+          expected.push(kept === access.digest
+            ? { ...point, key: expectedKey(read.tally) }
+            : { ...point, unreadable: kept === null ? `its tally keeps its members and grants in entry ${'at' in access ? access.at : entry.seq}, which holds none` : "its tally's members and grants do not match their digest" });
         }
         after = batch.at(-1)!.seq;
       }
@@ -2859,6 +2878,18 @@ export type Walks = { checkpoint: number; scrub: number; verify: number };
  * and 55 cold, beside two reads: 100 entries keep it near 6 ms a beat.
  */
 const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
+
+/** The digest of the members and grants a checkpoint keeps whole, beside the digest it says they have. */
+function keptDigest({ members, grants, newest }: AccessTally): string {
+  return accessDigest({ members, grants, newest });
+}
+
+/** Each checkpoint entry's metadata, parsed once however many times it is asked about: one may hold every member and grant. */
+const parsed = new WeakMap<StoredEntry, unknown>();
+function metadataOf(entry: StoredEntry): unknown {
+  if (!parsed.has(entry)) parsed.set(entry, JSON.parse(entry.metadata));
+  return parsed.get(entry);
+}
 
 /** A head, as an entry keeps it, as a walk goes on from it. */
 function positionOf(head: LogHead): Position {
