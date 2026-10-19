@@ -3,7 +3,8 @@
 // environment, reads with no `secret.read` and no vault call, and reaches a
 // person's app as it is, a credential's key included. A value is a secret
 // unless its write says otherwise, so writing over a plain one without saying
-// so makes it a secret again. Making a stored secret plain is a reveal of it,
+// so makes it a secret again, but in a personal config, an overlay whose
+// values its owner alone sees. Making a stored secret plain is a reveal of it,
 // which a sensitive value refuses a person, then a plain write of what it
 // showed.
 import test, { after, before } from 'node:test';
@@ -136,14 +137,16 @@ test('making a sensitive value plain is a reveal first, which no person has; a s
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_TOKEN, null);
 });
 
-test('a personal config holds no plain value: one is read without the vault, which binds its values to their owner', async () => {
+test("a personal config's plain value lists to its owner alone, and an override saying nothing over a plain key is plain", async () => {
   const dev = clientFor(deps, DEV);
-  const refused = await refusal(dev.secrets.set('market/dev@me', { MINE: { value: 'mine', plain: true } }));
-  assert.equal(refused.status, 400);
-  assert.match(refused.message, /personal config: the vault binds its values to their owner, so none is plain/);
-  // Its owner sees dev's plain values through it, as dev's reader.
-  await dev.secrets.set('market/dev@me', { MINE: 'mine-0123456789' });
-  assert.equal((await valuesIn(dev, 'market/dev@me')).TWILIO_SID, SID);
+  await dev.secrets.set('market/dev@me', { MINE: { value: 'mine', plain: true }, REGION: 'eu-west-1' });
+  assert.deepEqual(await valuesIn(dev, 'market/dev@me'), { MINE: 'mine', REGION: 'eu-west-1', TWILIO_SID: SID, TWILIO_TOKEN: null });
+  // Read as any plain value is, with no vault call; and by nobody else, by any path (personal-overlay.test.ts).
+  const reads = (await entries('secret.read')).length;
+  assert.deepEqual((await dev.secrets.reveal('market/dev@me/MINE')).values, { MINE: 'mine' });
+  assert.equal((await entries('secret.read')).length, reads);
+  const [config] = await db.owner.select().from(environments).where(eq(environments.owner, `user:${DEV}`));
+  assert.equal((await refusal(root.secrets.list(`market/${config!.slug}`))).status, 403);
 });
 
 test("a fork's inherited plain value shows only to a reader of the parent, and a copy keeps it plain", async () => {

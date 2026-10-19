@@ -71,21 +71,35 @@
   bob@acme.example --role contributor --env prod`. What a person gets is
   the narrower of their role and the key: a sensitive key is only ever
   used. Migration `0013_contributor_role` widens the grants' role check.
-- **`<env>@me` is its owner's to edit, whatever their role, and its own
-  values have the nature of any value.** On 0.9 with `people:
-  'stand-ins'`, the page's Override and Edit opened nothing on a value
-  its person could not read, an Owner's `backend/local@me` included:
-  each edit read the value first, and gave up, unsaid, when the read was
-  refused. An edit now opens empty, to replace the value, wherever it is
-  not read: a sensitive value, a parent's its person does not read, or a
-  read that failed, which the row says. A personal config's values may
-  now be sensitive too: its owner reads their own secrets, and a
-  sensitive one, theirs or not, is used and never read, its owner
-  included. None is plain, which the vault would not bind to its owner. An override of a key it inherits, saying
-  nothing, is still a secret its owner reads; the page offers each
-  level. A fork's removed key now reads `removed here: not
-  inherited from dev`, or `dev dropped it too`, in `coffre list` and on
-  the page.
+- **`<env>@me` is a partial overlay, its owner's to edit whatever their
+  role, and its own values may be plain, secret or sensitive.** Each key
+  its owner sets is theirs, over the environment's key or beside it, and
+  every other key falls through to the environment's, live. A value of
+  their own takes any level, `coffre set --plain|--secret|--sensitive` or
+  the page's picker, as anywhere: they read their plain and secret ones,
+  a plain one listed inline, and a sensitive one, theirs or not, is used
+  and never read, its owner included. Nobody else sees any of them, plain
+  ones included, Owners and the project's Maintainers included: they see
+  key names, and may delete it. A write that says nothing takes the level
+  of the value the key reads now: the environment's for an override, so
+  `coffre set market/dev@me/DATABASE_URL` over a sensitive
+  `DATABASE_URL` is sensitive (say `--secret` for a local database your
+  app is given), then your own; `coffre set` says so, and each key of
+  `PATCH /secrets/…`'s answer now names its `sensitivity` beside its
+  `version`. A plain value there is in the clear in
+  the database, as every plain value is: the vault binds a personal
+  config's secrets and sensitive values to their owner, and the app's
+  rule alone holds a plain one to them. `coffre run`'s values of a
+  person's own under `generate` are written as the secrets the plan says;
+  a CLI before 0.10 writes them sensitive, and its app goes without them.
+  On 0.9 with `people: 'stand-ins'`, the page's Override and Edit opened
+  nothing on a value its person could not read, an Owner's
+  `backend/local@me` included: each edit read the value first, and gave
+  up, unsaid, when the read was refused. An edit now opens empty, to
+  replace the value, wherever it is not read: a sensitive value, a
+  parent's its person does not read, or a read that failed, which the row
+  says. A fork's removed key now reads `removed here: not inherited from
+  dev`, or `dev dropped it too`, in `coffre list` and on the page.
 - **Breaking: stand-ins are now called placeholders.** What a person's
   app holds in place of a key, the opaque handle or a shaped one, is a
   placeholder in the docs, the pages, `coffre run`'s output

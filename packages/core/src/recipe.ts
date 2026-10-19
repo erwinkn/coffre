@@ -225,10 +225,10 @@ export async function generate(recipe: Recipe): Promise<Generated> {
 
 /**
  * What a write of generated values sends, by key: each value with how it
- * was made, and for a regenerate the version it replaces, which the server
- * holds it to.
+ * was made, for a regenerate the version it replaces, which the server
+ * holds it to, and who sees it, where the write says.
  */
-export type GeneratedWrite = Record<string, { value: string; generated: Generation; replaces?: string }>;
+export type GeneratedWrite = Record<string, { value: string; generated: Generation; replaces?: string; sensitivity?: 'secret' | 'sensitive' }>;
 
 /**
  * A value made by the recipe for `key`, as a write sends it, and for a key

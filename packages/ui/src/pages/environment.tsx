@@ -23,7 +23,7 @@ import type {
   Sensitivity,
 } from '../shared/models';
 import { canRevealSecrets } from '../lib/capabilities';
-import { LEVELS, levelsIn, markable, stricter, waitsForValue } from '../lib/sensitivity';
+import { LEVELS, levelsIn, markable, SENSITIVITIES, stricter, waitsForValue } from '../lib/sensitivity';
 import {
   companionsOf,
   hasSecretEditConflict,
@@ -1318,11 +1318,12 @@ function SecretRow({
   // A plain value is no secret: listed as it is, shown inline and copied with no read.
   const rowPlain = entry.value !== null;
   // Who sees its value now, and who will once the edit is saved. In a personal config, an override of a key it inherits
-  // starts as a secret, its owner's own value, which they read and their app is given, as the API writes one that says nothing (R18).
-  const rowLevel = personal && inherited ? 'secret' : entry.sensitivity;
+  // starts at that key's level, as the API writes one that says nothing (decision 27).
+  const rowLevel = entry.sensitivity;
   const level = change.sensitivity ?? rowLevel ?? 'secret';
-  // More visible than it is: the value is typed again, never shown and kept.
-  const loosening = rowLevel !== null && stricter(rowLevel, level);
+  // More visible than it is: the value is typed again, never shown and kept. Not an override in your personal config,
+  // a value of your own, which nobody else sees: what it inherits stays as it is.
+  const loosening = !(personal && inherited) && rowLevel !== null && stricter(rowLevel, level);
   const from = () => ({ start: editBase?.value ?? '', level: rowLevel });
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
@@ -1504,9 +1505,9 @@ function SecretRow({
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
               {generated !== null && <RecipeMark generated={generated} />}
-              {rowPlain && <span className="tag" title={LEVELS.plain.hint}>Plain</span>}
+              {rowPlain && <span className="tag" title={levelsIn(personal && own).plain.hint}>Plain</span>}
               {sensitive && (
-                <span className="tag" title={LEVELS.sensitive.hint}>
+                <span className="tag" title={levelsIn(personal && own).sensitive.hint}>
                   <Lock size={11} aria-hidden />
                   Sensitive
                 </span>
@@ -1795,11 +1796,11 @@ function SecretRow({
                       <Menu.Separator className="menu-sep" />
                       <Menu.RadioGroup value={entry.sensitivity} onValueChange={(next: Sensitivity) => chooseLevel(next)}>
                         <Menu.GroupLabel className="menu-label">Who sees it</Menu.GroupLabel>
-                        {levelsIn(personal).map((each) => (
+                        {SENSITIVITIES.map((each) => (
                           <Menu.RadioItem key={each} value={each} className="menu-item menu-item-level" closeOnClick>
                             <span className="menu-item-text">
-                              {LEVELS[each].label}
-                              <span className="menu-item-hint">{LEVELS[each].hint}</span>
+                              {levelsIn(personal)[each].label}
+                              <span className="menu-item-hint">{levelsIn(personal)[each].hint}</span>
                             </span>
                             <Menu.RadioItemIndicator className="menu-check">
                               <Check size={14} />
@@ -2165,8 +2166,8 @@ function SensitivityField({
   /** The key it is for, naming the group. */
   name: string;
   value: Sensitivity;
-  /** Those it may be written at (`levelsIn`). */
-  levels: readonly Sensitivity[];
+  /** Each level as it is named here (`levelsIn`). */
+  levels: Record<Sensitivity, { label: string; hint: string }>;
   disabled: boolean;
   onChange: (level: Sensitivity) => void;
 }) {
@@ -2175,7 +2176,7 @@ function SensitivityField({
   return (
     <div className="edit-note sensitivity-field">
       <div className="segmented segmented-sm" role="radiogroup" aria-label={`Who sees ${name}`} aria-describedby={`${id}-hint`}>
-        {levels.map((level) => (
+        {SENSITIVITIES.map((level) => (
           <label key={level} onPointerEnter={() => setPointed(level)} onPointerLeave={() => setPointed(null)}>
             <input
               type="radio"
@@ -2186,11 +2187,11 @@ function SensitivityField({
               disabled={disabled}
               onChange={() => onChange(level)}
             />
-            {LEVELS[level].label}
+            {levels[level].label}
           </label>
         ))}
       </div>
-      <span id={`${id}-hint`}>{LEVELS[pointed ?? value].hint}</span>
+      <span id={`${id}-hint`}>{levels[pointed ?? value].hint}</span>
     </div>
   );
 }
@@ -2223,7 +2224,7 @@ function DraftRow({
   /** The current version of a key in this environment, for a companion's note. */
   versionOf: (key: string) => number | null;
   saveReady: boolean;
-  /** In your personal config, `dev@me`: no value of it plain (`levelsIn`). */
+  /** In your personal config, `dev@me`, whose values are your own. */
   personal: boolean;
 }) {
   const [touched, setTouched] = useState(false);

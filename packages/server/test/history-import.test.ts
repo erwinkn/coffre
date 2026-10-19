@@ -139,7 +139,7 @@ test('restoring adds a version holding the old value, and writes continue forwar
   assert.deepEqual(await root.secrets.restore('market/dev/API_KEY', 1), { key: 'API_KEY', version: 4 });
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'first');
   assert.equal(await versionCount(), 4);
-  assert.deepEqual((await root.secrets.set('market/dev', { API_KEY: 'fifth' })).keys.API_KEY, { version: 5 });
+  assert.deepEqual((await root.secrets.set('market/dev', { API_KEY: 'fifth' })).keys.API_KEY, { version: 5, sensitivity: 'secret' });
 });
 
 test('a restore is audited with both versions, and refused without write permission', async () => {
