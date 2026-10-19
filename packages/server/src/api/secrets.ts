@@ -624,11 +624,6 @@ export async function setSecrets(
     const sensitivity = askedSensitivity(value);
     return sensitivity === undefined ? [] : [[key, sensitivity] as const];
   }));
-  // A personal config holds only its owner's secrets (R8), which they read: none is plain there, nor sensitive.
-  const unlike = [...asked.values()].find((sensitivity) => sensitivity !== 'secret');
-  if (unlike !== undefined && place.environment!.owner !== null) {
-    throw badRequest(`${place.project.slug}/${personalName(place)} is a personal config: its values are its owner's alone, which they read, never ${unlike}`);
-  }
   const writes = Object.entries(patch).flatMap(([key, value]): [string, string][] =>
     typeof value === 'string' ? [[key, value]] : value !== null && 'value' in value ? [[key, value.value]] : []);
   const marks = Object.entries(patch).flatMap(([key, value]) => (isMark(value) ? [{ key, to: value.sensitivity }] : []));
@@ -651,11 +646,9 @@ export async function setSecrets(
     // Who sees each key's value now (`levelsAt`), which the transaction resolves again under the head.
     const levels = await levelsAt(ctx.db, place, environment.environmentId, keysIn);
     const levelNow = (key: string): Sensitivity | null => levels.get(key) ?? null;
-    for (const key of keysIn) if (levelNow(key) === 'sensitive') sticky.add(key);
+    for (const [key, level] of await stickyLevels(ctx.db, place, environment.environmentId, keysIn, levels)) if (level === 'sensitive') sticky.add(key);
     // A write that says nothing is a secret, and sensitive where the key is: never looser than it was, but for plain, said each time.
-    // A personal config's own value is a secret over a sensitive one it configures too: its owner reads what they wrote (R8).
-    const personal = place.environment!.owner !== null;
-    const levelOf = (key: string): Sensitivity => asked.get(key) ?? (!personal && sticky.has(key) ? 'sensitive' : 'secret');
+    const levelOf = (key: string): Sensitivity => asked.get(key) ?? (sticky.has(key) ? 'sensitive' : 'secret');
     const refuseArchived = (key: string, row: { id: string }) => new Refusal(
       conflict(`${key} is archived; unarchive it before writing a new version`),
       denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
@@ -769,7 +762,8 @@ export async function setSecrets(
       // Each written key's level again under the head, what its entry says it was. A write that says nothing takes it: a
       // value written or marked, a reference made, retargeted or ended, here or in a parent, since it was prepared, is prepared again.
       const previous = items.length === 0 ? new Map<string, Sensitivity | null>() : await levelsAt(tx, place, environment.environmentId, items.map(({ key }) => key));
-      const loosened = items.filter(({ key, secret }) => !asked.has(key) && !personal && previous.get(key) === 'sensitive' && secret.sensitive !== true);
+      const holds = await stickyLevels(tx, place, environment.environmentId, items.map(({ key }) => key), previous);
+      const loosened = items.filter(({ key, secret }) => !asked.has(key) && holds.get(key) === 'sensitive' && secret.sensitive !== true);
       // Found so, it stays so: the attempt that prepares again keeps it sensitive, whatever its source is by then.
       for (const { key } of loosened) sticky.add(key);
       if (loosened.length > 0) throw new PrepareAgain();
@@ -865,11 +859,18 @@ export async function setSecrets(
  * a fork, the level of what it inherits, a parent's reference resolved the
  * same way. Null for a key with nothing to read, a reference's with no
  * source value. Read in `db`: a transaction's resolves it as the write
- * commits.
+ * commits. Not `inheriting`, a key's own level alone, null for one it
+ * only inherits.
  */
-async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: string, keys: readonly string[]): Promise<Map<string, Sensitivity | null>> {
+async function levelsAt(
+  db: Queryable,
+  place: ResolvedPath,
+  environmentId: string,
+  keys: readonly string[],
+  { inheriting = true }: { inheriting?: boolean } = {},
+): Promise<Map<string, Sensitivity | null>> {
   const heads = new Map((await secretHeads(db, environmentId, { keys: [...keys] })).map((row) => [row.key, row]));
-  const inherited = await inheritedOf(db, place);
+  const inherited = inheriting ? await inheritedOf(db, place) : null;
   const passedDown = (key: string) => (inherited?.removed.has(key) ? undefined : inherited?.held.get(key)?.row);
   const own = (key: string) => {
     const row = heads.get(key);
@@ -900,6 +901,22 @@ async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: strin
     if (held.current !== null) return [key, sensitivityOf(held.current)];
     return [key, throughReference(held.id) ?? null];
   }));
+}
+
+/**
+ * The level a write that says nothing keeps: the key's (`levels`, as
+ * `levelsAt` read them). In a personal config, only its owner's own
+ * value's: over a key it inherits, theirs is a secret they read, which
+ * their app is given, a sensitive key's included (R18).
+ */
+async function stickyLevels(
+  db: Queryable,
+  place: ResolvedPath,
+  environmentId: string,
+  keys: readonly string[],
+  levels: Map<string, Sensitivity | null>,
+): Promise<Map<string, Sensitivity | null>> {
+  return place.environment!.owner === null ? levels : levelsAt(db, place, environmentId, keys, { inheriting: false });
 }
 
 /** What a `secret.write` entry says of who sees the value: as 0.9 said plain, and what it was when that changed. */

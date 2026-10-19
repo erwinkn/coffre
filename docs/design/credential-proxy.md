@@ -245,9 +245,10 @@ TWILIO_TOKEN	v1	admin@acme.example	today
   A person may only publish a value they can read, and never a
   sensitive one, which nobody reads: they type it again, plain (decision
   17). A service account may.
-- **Never in a personal config.** Its values are its owner's alone (R8):
-  a plain write there is refused. A plain value of the environment it
-  overrides reaches its owner as any reader of that environment.
+- **In a personal config, its owner's alone** (R8, R18): only its owner
+  lists a personal config, so a plain value there reaches nobody else.
+  A plain value of the environment it overrides reaches its owner as any
+  reader of that environment.
 
 **Values of a person's own (0.9).** A backend that refuses to boot without
 its own keys (a key that seals its local data, its webhooks' HMAC secret,
@@ -1115,6 +1116,17 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     The role is a project role, granted on a project or one of its
     environments; *alternative:* an instance role too, for which 0.10's
     role editor (PR 4) makes Developer's protected column use-only.
+27. **A personal config's own values have the nature of any value
+    (R18, 0.10).** Its owner, whatever their role, writes every key of
+    `dev@me`, and reads their own plain and secret values; a sensitive one
+    is used, never read, theirs or not. An override of a key it inherits,
+    saying nothing, is a secret its owner reads, a sensitive key's
+    included: their own value, which they typed and their app is given
+    (`coffre set market/dev@me/DATABASE_URL` for a local database). One of
+    its own keeps its level, as anywhere (decision 22). What `dev@me`
+    inherits is read as on dev. *Alternative:* an override takes the
+    key's level, sensitive over a sensitive key, which left a person's
+    own local `DATABASE_URL` out of their app.
 
 ## 9. Plan
 
