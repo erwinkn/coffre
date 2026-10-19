@@ -321,8 +321,11 @@ export const routes = {
     action: 'environment.update',
     run: async (ctx, { place, input }) => {
       const { protected: guarded, ...patch } = input;
-      // The vault's to change, before the patch's transaction: none stays open across a vault call. The patch goes on as of it.
-      return patchEnvironment(guarded === undefined ? ctx : await protectEnvironment(ctx, place, guarded), place, patch);
+      if (guarded === undefined) return patchEnvironment(ctx, place, patch);
+      // The vault's to change, with no transaction of the app's open across it: so asked alone, never with a rename or an
+      // archive whose refusal would leave the protection changed and the rest not.
+      if (Object.keys(patch).length > 0) throw badRequest('protect or unprotect an environment on its own, not with other changes');
+      return patchEnvironment(await protectEnvironment(ctx, place, guarded), place, {});
     },
   }),
   ...route('DELETE /projects/:project/:environment', {

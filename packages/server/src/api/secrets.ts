@@ -1474,7 +1474,9 @@ export async function listVersions(
 async function natureOfRow(db: Queryable, environmentId: string, secretId: string): Promise<Sensitivity | null> {
   const [row] = await secretHeads(db, environmentId, { id: secretId });
   if (row?.current != null) return sensitivityOf(row.current);
-  const source = (await currentReferences(db, [secretId])).get(secretId)?.source?.currentVersionId;
+  // A reference ended or broken brings nothing back: only a live one reads its source.
+  const reference = (await currentReferences(db, [secretId])).get(secretId);
+  const source = reference?.state === 'live' ? reference.source?.currentVersionId : undefined;
   if (source == null) return null;
   const [sensitive, plainValue] = await Promise.all([sensitiveVersions(db, [source]), plainVersions(db, [source])]);
   return sensitive.size > 0 ? 'sensitive' : plainValue.size > 0 ? 'plain' : 'secret';

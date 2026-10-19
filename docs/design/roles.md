@@ -246,7 +246,7 @@ GET    /api/roles                     every role and instance role: both columns
 PUT    /api/roles/<role>              { name, description, permissions, protected }: an edit, or a new role
 DELETE /api/roles/<role>              a built-in role as it ships again; one an Owner made, deleted (409 while granted)
 PUT    /api/instance-roles/<role>     the same, for an instance role; DELETE resets it
-PATCH  /api/projects/<p>/<e>          { "protected": true }: managing its environments; false: an Owner of the whole instance
+PATCH  /api/projects/<p>/<e>          { "protected": true }, on its own: managing its environments; false: an Owner of the whole instance
 ```
 
 `?dryRun=1` on a `PUT` or `DELETE` answers what the change would do, and

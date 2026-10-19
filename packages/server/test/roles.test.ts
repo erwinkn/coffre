@@ -560,6 +560,13 @@ test("an override in a personal config of a key that is a reference to a plain v
   assert.deepEqual([mine.sensitivity, mine.value], ['plain', 'local-region']);
 });
 
+test("protecting or unprotecting an environment is asked on its own: never with a change whose refusal would leave it half done", async () => {
+  await maya.environments.protect('market/prod');
+  assert.equal(await status(root.environments.update('market/prod', { protected: false, slug: 'dev' } as never)), 400);
+  assert.equal(await protectedOf(root, 'market/prod'), true);
+  assert.equal(await status(ada.secrets.reveal('market/prod')), 403);
+});
+
 test("a restore and a reference asked at once lend nothing their asker could not read, in either order", async () => {
   await maya.environments.protect('market/prod');
   await ada.secrets.set('market/prod', { API_KEY: { value: 'placeholder', plain: true } });
@@ -590,6 +597,11 @@ test("a key unarchived is made live only by whoever could have read it: a secret
   const carl = clientFor(deps, 'carl@acme.example');
   assert.deepEqual(await refusal(carl.secrets.inherit('market/dev-next/API_KEY', false)), { status: 403, reason: 'missing_secret_read' });
   await root.secrets.inherit('market/dev-next/API_KEY', false);
+  // A key that was a reference, broken since, brings nothing back: whoever retires it unarchives it.
+  await root.secrets.set('market/prod', { LINK: { ref: 'market/dev/API_KEY' } });
+  await root.references.break('market/prod/LINK');
+  await root.secrets.update('market/prod/LINK', { archived: true });
+  await maya.secrets.update('market/prod/LINK', { archived: false });
 });
 
 test("a reference binds to its source key, not its name: renamed, the key is still read through it; another made under the old name is not", async () => {
