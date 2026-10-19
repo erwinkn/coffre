@@ -624,6 +624,11 @@ export async function setSecrets(
     const sensitivity = askedSensitivity(value);
     return sensitivity === undefined ? [] : [[key, sensitivity] as const];
   }));
+  // A personal config's values are bound to its owner by the vault (R8), which a plain value, read without it, is not: none
+  // is plain there. Only its owner lists one, so a secret serves them the same.
+  if (place.environment!.owner !== null && [...asked.values()].includes('plain')) {
+    throw badRequest(`${place.project.slug}/${personalName(place)} is a personal config: the vault binds its values to their owner, so none is plain; write it as a secret, which only they read`);
+  }
   const writes = Object.entries(patch).flatMap(([key, value]): [string, string][] =>
     typeof value === 'string' ? [[key, value]] : value !== null && 'value' in value ? [[key, value.value]] : []);
   const marks = Object.entries(patch).flatMap(([key, value]) => (isMark(value) ? [{ key, to: value.sensitivity }] : []));

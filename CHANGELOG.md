@@ -79,9 +79,9 @@
   refused. An edit now opens empty, to replace the value, wherever it is
   not read: a sensitive value, a parent's its person does not read, or a
   read that failed, which the row says. A personal config's values may
-  now be plain or sensitive too: its owner reads their own plain and
-  secret values, and a sensitive one, theirs or not, is used and never
-  read, its owner included. An override of a key it inherits, saying
+  now be sensitive too: its owner reads their own secrets, and a
+  sensitive one, theirs or not, is used and never read, its owner
+  included. None is plain, which the vault would not bind to its owner. An override of a key it inherits, saying
   nothing, is still a secret its owner reads; the page offers each
   level. A fork's removed key now reads `removed here: not
   inherited from dev`, or `dev dropped it too`, in `coffre list` and on

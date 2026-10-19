@@ -499,8 +499,8 @@ test("an app before 0.10 copies no sensitive value for a fork: the vault opens o
 
 /**
  * `local@me` (R18), its parent a fork of dev, as Equisafe's `backend/local@me`: its owner, whatever their role, overrides
- * every key; their own value is read as its own level says, plain and secret by them, sensitive by nobody; and what it
- * inherits is read as on the parent.
+ * every key; their own value is read as its own level says, a secret by them, sensitive by nobody, plain never, which the
+ * vault would not bind to them; and what it inherits is read as on the parent.
  */
 async function personalOfFork(email: string, role: 'owner' | 'developer' | 'contributor') {
   await root.environments.create('market/local', { from: 'dev', inherit: true });
@@ -527,12 +527,16 @@ for (const [email, role] of [[ROOT, 'owner'], [DEV, 'developer'], ['contributor@
       REGION: ['inherited', 'plain', true],
       WEBHOOK: ['inherited', 'secret', reads],
     });
-    // Over a sensitive key, as `coffre set` writes it, saying nothing: the person's own value, a secret they read; as the
-    // page writes each, with who sees it: sensitive, plain, a secret.
+    // None of its values is plain: a plain value is read without the vault, which binds them to their owner (R8).
+    const plain = await refusal(person.secrets.set('market/local@me', { REGION: { value: `${role}-region`, sensitivity: 'plain' } }));
+    assert.equal(plain.status, 400);
+    assert.match(plain.message, /market\/local@me is a personal config: the vault binds its values to their owner, so none is plain/);
+    // Over a sensitive key and a plain one, as `coffre set` writes them, saying nothing: the person's own values, secrets
+    // they read; as the page writes each, with who sees it: sensitive, a secret.
     await person.secrets.set('market/local@me', {
       API_KEY: `sk_test_${role}_0123456789`,
       DB_PASSWORD: { value: `db_${role}_0123456789`, sensitivity: 'sensitive' },
-      REGION: { value: `${role}-region`, sensitivity: 'plain' },
+      REGION: `${role}-region`,
       WEBHOOK: { value: `whsec_${role}_0123456789`, sensitivity: 'secret' },
       MINE: { value: `mine_${role}_0123456789`, sensitivity: 'sensitive' },
     });
@@ -540,12 +544,12 @@ for (const [email, role] of [[ROOT, 'owner'], [DEV, 'developer'], ['contributor@
       API_KEY: ['overridden', 'secret', true],
       DB_PASSWORD: ['overridden', 'sensitive', false],
       MINE: ['own', 'sensitive', false],
-      REGION: ['overridden', 'plain', true],
+      REGION: ['overridden', 'secret', true],
       WEBHOOK: ['overridden', 'secret', true],
     });
     assert.deepEqual((await person.secrets.reveal('market/local@me/API_KEY')).values, { API_KEY: `sk_test_${role}_0123456789` });
     assert.deepEqual((await person.secrets.reveal('market/local@me/WEBHOOK')).values, { WEBHOOK: `whsec_${role}_0123456789` });
-    assert.equal((await person.secrets.list('market/local@me')).keys.find((entry) => entry.key === 'REGION')!.value, `${role}-region`);
+    assert.deepEqual((await person.secrets.reveal('market/local@me/REGION')).values, { REGION: `${role}-region` });
     // Their own sensitive values are used, never read: by the app and by the vault.
     for (const key of ['DB_PASSWORD', 'MINE']) {
       const refused = await refusal(person.secrets.reveal(`market/local@me/${key}`));

@@ -136,16 +136,14 @@ test('making a sensitive value plain is a reveal first, which no person has; a s
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_TOKEN, null);
 });
 
-test("a personal config's plain value is listed to its owner alone, who lists it (R18)", async () => {
+test('a personal config holds no plain value: one is read without the vault, which binds its values to their owner', async () => {
   const dev = clientFor(deps, DEV);
-  await dev.secrets.set('market/dev@me', { MINE: { value: 'mine', plain: true } });
-  assert.equal((await valuesIn(dev, 'market/dev@me')).MINE, 'mine');
+  const refused = await refusal(dev.secrets.set('market/dev@me', { MINE: { value: 'mine', plain: true } }));
+  assert.equal(refused.status, 400);
+  assert.match(refused.message, /personal config: the vault binds its values to their owner, so none is plain/);
   // Its owner sees dev's plain values through it, as dev's reader.
+  await dev.secrets.set('market/dev@me', { MINE: 'mine-0123456789' });
   assert.equal((await valuesIn(dev, 'market/dev@me')).TWILIO_SID, SID);
-  // Nobody else lists it, an Owner included: by its own path, `market/dev@me` is their own.
-  const { configs } = await root.environments.personal('market');
-  const slug = configs.find((config) => config.owner === `user:${DEV}`)!.slug;
-  assert.equal((await refusal(root.secrets.list(`market/${slug}`))).status, 403);
 });
 
 test("a fork's inherited plain value shows only to a reader of the parent, and a copy keeps it plain", async () => {

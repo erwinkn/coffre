@@ -23,7 +23,7 @@ import type {
   Sensitivity,
 } from '../shared/models';
 import { canRevealSecrets } from '../lib/capabilities';
-import { LEVELS, markable, SENSITIVITIES, stricter, waitsForValue } from '../lib/sensitivity';
+import { LEVELS, levelsIn, markable, stricter, waitsForValue } from '../lib/sensitivity';
 import {
   companionsOf,
   hasSecretEditConflict,
@@ -729,6 +729,7 @@ function EnvironmentLedger({
                     key={draft.id}
                     draft={draft}
                     existingVersion={versionOf(draft.key)}
+                    personal={personal}
                     disabled={false}
                     onChange={(patch) =>
                       setDrafts((rows) =>
@@ -1565,6 +1566,7 @@ function SecretRow({
                   <SensitivityField
                     name={change.key.trim() === '' ? entry.key : change.key.trim()}
                     value={level}
+                    levels={levelsIn(personal)}
                     disabled={disabled}
                     // A value made plain is typed by hand: it drops the recipe of one generated.
                     onChange={(next) => onPatch({
@@ -1793,7 +1795,7 @@ function SecretRow({
                       <Menu.Separator className="menu-sep" />
                       <Menu.RadioGroup value={entry.sensitivity} onValueChange={(next: Sensitivity) => chooseLevel(next)}>
                         <Menu.GroupLabel className="menu-label">Who sees it</Menu.GroupLabel>
-                        {SENSITIVITIES.map((each) => (
+                        {levelsIn(personal).map((each) => (
                           <Menu.RadioItem key={each} value={each} className="menu-item menu-item-level" closeOnClick>
                             <span className="menu-item-text">
                               {LEVELS[each].label}
@@ -2156,12 +2158,15 @@ function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays
 function SensitivityField({
   name,
   value,
+  levels,
   disabled,
   onChange,
 }: {
   /** The key it is for, naming the group. */
   name: string;
   value: Sensitivity;
+  /** Those it may be written at (`levelsIn`). */
+  levels: readonly Sensitivity[];
   disabled: boolean;
   onChange: (level: Sensitivity) => void;
 }) {
@@ -2170,7 +2175,7 @@ function SensitivityField({
   return (
     <div className="edit-note sensitivity-field">
       <div className="segmented segmented-sm" role="radiogroup" aria-label={`Who sees ${name}`} aria-describedby={`${id}-hint`}>
-        {SENSITIVITIES.map((level) => (
+        {levels.map((level) => (
           <label key={level} onPointerEnter={() => setPointed(level)} onPointerLeave={() => setPointed(null)}>
             <input
               type="radio"
@@ -2206,6 +2211,7 @@ function DraftRow({
   onSave,
   versionOf,
   saveReady,
+  personal,
 }: {
   draft: SecretDraft;
   existingVersion: number | null;
@@ -2217,6 +2223,8 @@ function DraftRow({
   /** The current version of a key in this environment, for a companion's note. */
   versionOf: (key: string) => number | null;
   saveReady: boolean;
+  /** In your personal config, `dev@me`: no value of it plain (`levelsIn`). */
+  personal: boolean;
 }) {
   const [touched, setTouched] = useState(false);
   const trimmed = draft.key.trim();
@@ -2281,6 +2289,7 @@ function DraftRow({
               <SensitivityField
                 name={trimmed === '' ? 'the new secret' : trimmed}
                 value={draft.sensitivity}
+                levels={levelsIn(personal)}
                 disabled={disabled}
                 // A value made plain is typed by hand: it drops the recipe of one generated.
                 onChange={(sensitivity) => onChange(sensitivity === 'plain' ? { sensitivity, companion: undefined, recipe: undefined } : { sensitivity })}
