@@ -685,6 +685,10 @@ test('roles set says what the change would do and saves it only with --apply, ke
   // Saved as previewed, from the policy its preview was weighed from.
   assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'PUT /roles/developer?dryRun=1', 'PUT /roles/developer?revision=57.3f9a0c2e81b4d7a6']);
   assert.match(applied.written.out, /^saved developer: /);
+  // Its first column narrowed alone, the kept protected column narrows with it.
+  const narrowed = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
+  await manage.rolesSet(narrowed.connect, ['developer', '--permissions', 'use'], narrowed.io);
+  assert.deepEqual(narrowed.calls[1]!.body, { name: 'Developer', description: '', permissions: ['secret.use'], protected: ['secret.use'] });
   // A new role holds nothing it is not given; an instance role is one that ships.
   const made = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
   await manage.rolesSet(made.connect, ['qa', '--name', 'QA', '--permissions', 'use'], made.io);

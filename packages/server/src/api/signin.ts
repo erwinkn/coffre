@@ -43,6 +43,7 @@ import { callerFrom, newestPolicySeq, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
+import { readableValues } from './references.ts';
 import {
   issuedScope,
   managedAccount,
@@ -1035,6 +1036,17 @@ export class SigninService {
       places.set(`${path.project}/${path.environment}`, place?.environment == null || allows(holder, 'secret.read', at(place)));
       const named = { environmentId: place?.environment?.id, personal: raw.endsWith('@me') };
       if (named.environmentId != null && !madeFor.some((made) => made.environmentId === named.environmentId && made.personal === named.personal)) madeFor.push({ environmentId: named.environmentId, personal: named.personal });
+      // Each source a reference here lends, its own or inherited, as a parent is: the vault asks a person for their permission
+      // at a protected one too (`#keys`), so a handle with none there would be refused what its person reads through it.
+      if (place?.environment != null) {
+        const { items } = await readableValues(this.#deps.db, place, { projectId: place.project.id, environmentId: place.environment.id });
+        for (const { source, secret } of items) {
+          if (source === undefined) continue;
+          const reads = allows(holder, 'secret.read', source);
+          const where = secret.path.slice(0, secret.path.lastIndexOf('/'));
+          if (reads || allows(holder, 'secret.use', source)) places.set(where, reads || places.get(where) === true);
+        }
+      }
       for (let depth = 0; place?.environment?.parentSlug != null && depth < MAX_PARENTS; depth += 1) {
         place = await resolvePath(this.#deps.db, { project: path.project, environment: place.environment.parentSlug });
         if (place?.environment == null) break;

@@ -217,20 +217,24 @@ PATCH  /api/projects/<p>/<e>          { "protected": true }: managing its enviro
 
 `?dryRun=1` on a `PUT` or `DELETE` answers what the change would do, and
 writes nothing: each person reached by a grant of the role, or holding it
-as their instance role, weighed at every place they could hold it, with
-the role as it is and as it would be:
+as their instance role, and each service account reached by a grant,
+weighed at every place they could hold it, with the role as it is and as
+it would be, and the policy's revision it was weighed from:
 
 ```json
 {
   "impact": [
     { "change": "widens", "permission": "secret.read", "protected": true,
-      "people": 6, "environments": 4, "projects": 2, "examples": ["ada@acme.example on market/prod"] }
+      "people": 6, "services": 0, "environments": 4, "projects": 2, "examples": ["ada@acme.example on market/prod"] }
   ],
-  "sentence": "Widens secret.read for 6 people on 4 protected environments"
+  "sentence": "Widens secret.read for 6 people on 4 protected environments",
+  "revision": "57.3f9a0c2e81b4d7a6"
 }
 ```
 
-A project-wide permission counts `projects` and no environments. Projects
+`?revision=57.3f9a0c2e81b4d7a6` on the same `PUT` or `DELETE` makes it
+as weighed, or answers 409 `policy_changed` if the policy changed since
+(section 8, rule 2). A project-wide permission counts `projects` and no environments. Projects
 and environments say `protected` where they are listed (`GET
 /api/projects`, `GET /api/secrets/<p>/<e>`), a personal config as the
 environment it is a config of.

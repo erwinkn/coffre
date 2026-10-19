@@ -221,11 +221,12 @@ function RoleEditor({
   /**
    * Ask what an action would do; the confirmation shows it, for what was
    * weighed. One the grid changed under while it was weighed is weighed
-   * again, as the grid is now.
+   * again, as the grid is now. Busy until it has its answer, the weighing
+   * again included.
    */
-  function ask(action: Pending['action'], again = false) {
+  function ask(action: Pending['action'], again = false): Promise<void> {
     const asked = latest.current;
-    void weigh.run(
+    return weigh.run(
       () => (action === 'save' ? coffre.roles.preview(asked.id, asked.definition, { instance }) : coffre.roles.previewReset(asked.id, { instance })),
       {
         affects: [],
@@ -253,7 +254,8 @@ function RoleEditor({
         }
       },
       {
-        affects: (saved) => (saved ? affects.roles() : []),
+        // Saved or overtaken, the roles are read again: grants and edits as they are now.
+        affects: affects.roles(),
         onSuccess: (saved) => {
           if (!saved) return ask(action, true);
           toast.success(
@@ -294,7 +296,7 @@ function RoleEditor({
         className="form"
         onSubmit={(event) => {
           event.preventDefault();
-          ask('save');
+          void ask('save');
         }}
       >
         {editable && (
@@ -391,7 +393,7 @@ function RoleEditor({
           {editable && role !== null && (role.builtin ? role.edited : true) && (
             <div className="role-editor-aside">
               {role.builtin ? (
-                <button className="btn" type="button" disabled={busy} onClick={() => ask('reset')}>
+                <button className="btn" type="button" disabled={busy} onClick={() => void ask('reset')}>
                   <RotateBack size={14} />
                   Reset to default
                 </button>
@@ -401,7 +403,7 @@ function RoleEditor({
                   type="button"
                   disabled={busy || granted}
                   aria-describedby={granted ? `${ids.name}-granted` : undefined}
-                  onClick={() => ask('delete')}
+                  onClick={() => void ask('delete')}
                 >
                   <Trash size={14} />
                   Delete…

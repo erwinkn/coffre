@@ -762,11 +762,13 @@ export async function rolesSet(connect: () => CoffreClient, args: string[], io: 
   const listed = await api.roles.list();
   const current = (values.instance ? listed.instanceRoles : listed.roles).find((role) => role.id === id);
   if (current === undefined && values.instance) throw new UsageError(`no instance role "${id}": an Owner makes project roles`);
+  const permissions = (values.permissions === undefined ? current?.permissions ?? [] : permissionsFrom(values.permissions, '--permissions')) as Permissions;
   const definition = {
     name: values.name ?? current?.name ?? id,
     description: values.description ?? current?.description ?? '',
-    permissions: (values.permissions === undefined ? current?.permissions ?? [] : permissionsFrom(values.permissions, '--permissions')) as Permissions,
-    protected: (values.protected === undefined ? current?.protected ?? [] : permissionsFrom(values.protected, '--protected')) as Permissions,
+    permissions,
+    // Kept, the protected column holds no more than the other: `--permissions use` narrows both.
+    protected: (values.protected === undefined ? (current?.protected ?? []).filter((permission) => permissions.includes(permission)) : permissionsFrom(values.protected, '--protected')) as Permissions,
   };
   const which = { instance: values.instance };
   const { sentence, revision } = await api.roles.preview(id, definition, which);

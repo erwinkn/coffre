@@ -540,6 +540,15 @@ const CHANGES: { change: string; by: 'seq' | 'rows' | 'nothing'; make: () => Pro
       await root.environments.delete('market/prod');
     },
   },
+  {
+    // Another project's: deleting market itself would leave the account nothing to hold, refused before any fence.
+    change: "a protected environment's project deleted",
+    by: 'rows',
+    make: async () => {
+      await root.projects.update('billing', { archived: true });
+      await root.projects.delete('billing');
+    },
+  },
   // The policy reads no name but a protected environment's slug, and no archive.
   { change: 'an environment not protected renamed', by: 'nothing', make: () => root.environments.update('market/dev', { slug: 'development' }) },
   { change: 'a protected environment named again', by: 'nothing', make: () => root.environments.update('market/prod', { name: 'Production' }) },
@@ -554,6 +563,9 @@ const CHANGES: { change: string; by: 'seq' | 'rows' | 'nothing'; make: () => Pro
 for (const { change, by, make } of CHANGES) {
   test(`what changes the policy: ${change}, while a token is given, ${by === 'nothing' ? 'leaves it given' : `refuses it (${by})`}`, async () => {
     await maya.environments.protect('market/prod');
+    await root.projects.create('billing');
+    await root.environments.create('billing/prod');
+    await root.environments.protect('billing/prod');
     await root.members.add(ADA, { role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } });
     await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
     meanwhileOn('access', (asked) => asked === ADA, make);

@@ -281,9 +281,10 @@ function once(request: Request): Promise<Response> {
 }
 
 /**
- * A read of values (`get`, `run`, `export`), asked again once, a moment
- * later, when the instance answered 409 `policy_changed`: the access policy
- * changed while the read was answered, and asked again, it is weighed as
+ * A read of values (`get`, `run`, `export`), or the handle `run` makes,
+ * asked again once, a moment later, when the instance answered 409
+ * `policy_changed` (which rolled any write back): the access policy
+ * changed while it was answered, and asked again, it is weighed as
  * the policy is now. A second change is answered as any refusal is.
  */
 async function retryingPolicyChange(request: Request): Promise<Response> {
@@ -1160,7 +1161,8 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
   // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
-  const handle = await client(to).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
+  // Asked again too: a handle weighed from a policy another change overtook is made from none, and refused to be asked again.
+  const handle = await client(to, undefined, [], retryingPolicyChange).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
   const planOf = async (path: string): Promise<Plan> => {
     const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });
     const body = (await response.json().catch(() => ({}))) as { message?: string };

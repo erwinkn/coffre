@@ -746,6 +746,20 @@ test("a handle keeps what its person reads and uses at each place, both columns:
   assert.deepEqual(developer.plan.left, ['WEBHOOK_SECRET']);
 });
 
+test("a handle reaches the source of a reference its environment holds, as its person does: an Owner's reads one in a protected prod through dev", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789' });
+  await root.secrets.set('market/dev', { WEBHOOK_SECRET: { ref: 'market/prod/WEBHOOK_SECRET' } });
+  await root.environments.protect('market/prod');
+  const made = await bearer(await sessionFor(ROOT)).handles.create({ label: 'run', paths: ['market/dev'] });
+  // Made for dev, it holds prod too, as its Owner reads it: the vault asks for that at a protected source.
+  assert.equal(made.scope['market/prod'], 'viewer');
+  const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(((await response.json()) as { env: Record<string, string> }).env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
+});
+
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {
   runtime.plugins = checkPlugins([credentialProxy({ credentials: { odd: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{constructor}') } }, insecureUpstreams: true })]);
   const handle = await handleFor();

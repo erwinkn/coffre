@@ -161,10 +161,10 @@ export async function changeRole(
       // Deleting one an Owner made: refused while a grant names it, which the vault refuses too.
       const granted = (await roleHolders(ctx.db)).roles.get(id) ?? 0;
       if (granted > 0) {
-        throw new Refusal(
-          conflict(`${granted === 1 ? '1 grant names' : `${granted} grants name`} ${id}: revoke ${granted === 1 ? 'it' : 'them'} first`),
-          denied(ctx, 'policy.change', 'role_granted', { metadata: { role: id, grants: granted } }),
-        );
+        const refused = conflict(`${granted === 1 ? '1 grant names' : `${granted} grants name`} ${id}: revoke ${granted === 1 ? 'it' : 'them'} first`);
+        // Weighed, it says so; asked, it is logged as refused.
+        if (dryRun) throw refused;
+        throw new Refusal(refused, denied(ctx, 'policy.change', 'role_granted', { metadata: { role: id, grants: granted } }));
       }
     }
     if (dryRun) return { ...await roleImpact(ctx, before, after(before, change), change), revision: revisionOf(ctx) };
@@ -192,7 +192,7 @@ function proposed(ctx: ApiContext, kind: Kind, id: string, definition: RoleInput
   if (!editsRoles(ctx.caller)) {
     throw new Refusal(
       forbidden('only an Owner of the whole instance edits roles, signed in as themselves'),
-      denied(ctx, 'policy.change', 'requires_instance_owner', { metadata: { role: id, kind } }),
+      denied(ctx, 'policy.change', 'requires_instance_owner', { metadata: { role: id, kind, ...(definition === null ? { definition: null } : {}) } }),
     );
   }
   const fixed = kind === 'role' ? FIXED_ROLES.roles.includes(id) : (FIXED_ROLES.instanceRoles as readonly string[]).includes(id);
