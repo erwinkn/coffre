@@ -12,6 +12,9 @@
   went from 33 to 25 ms of CPU, everything the runtime does for it
   included. `pnpm bench:workers` and `pnpm bench:node` measure each hot
   path, cold and warm.
+- **Pages with times render with less CPU.** A relative time ("3 hours
+  ago") made a new formatter each time it was shown; it reuses one. The
+  audit page's render costs about a quarter less.
 
 ## 0.10.0 (2026-10-19)
 
