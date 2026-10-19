@@ -837,6 +837,16 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(400, `the handle is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
   }
 
+  // What the request carried: each secret value, and what the rule made of them, Basic's base64, as stored and as they went
+  // out (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`). A plain
+  // value is no secret, and an upstream quotes an account's id back as a matter of course: it stays.
+  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
+    : inject.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(inject.name)!;
+  const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
+  // What the rule made of them too, unless it is made of plain values alone: an account's id in a header is quoted back.
+  const made = credential.keys.some((key) => !plain.includes(key)) ? [injected] : [];
+  const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
+
   let upstream: Response;
   try {
     upstream = await (credential.egress ?? globalThis).fetch(target, {
@@ -847,17 +857,11 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
       ...(streamed ? { duplex: 'half' } : {}),
     } as RequestInit);
   } catch (error) {
-    return failure(502, `${target.host} did not answer${credential.egress === undefined ? '' : ` through ${credential.name}'s egress`}: ${error instanceof Error ? error.message : String(error)}`);
+    // The error may quote the request, its URL a query rule's value and all, an egress's more so: redacted, as its UTF-8 bytes.
+    const said = binary(new TextEncoder().encode(error instanceof Error ? error.message : String(error)));
+    const message = new TextDecoder().decode(Uint8Array.from(redact.whole(said), (char) => char.charCodeAt(0)));
+    return failure(502, `${target.host} did not answer${credential.egress === undefined ? '' : ` through ${credential.name}'s egress`}: ${message}`);
   }
-  // What the request carried: each secret value, and what the rule made of them, Basic's base64, as stored and as they went
-  // out (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`). A plain
-  // value is no secret, and an upstream quotes an account's id back as a matter of course: it stays.
-  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
-    : inject.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(inject.name)!;
-  const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
-  // What the rule made of them too, unless it is made of plain values alone: an account's id in a header is quoted back.
-  const made = credential.keys.some((key) => !plain.includes(key)) ? [injected] : [];
-  const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
   // Redacted as the bytes it came in, before a URL encodes them again.
   const raw = upstream.headers.get('location');
@@ -1182,7 +1186,7 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   // A binding the Worker lacks is `undefined`, the key still there: refused, never the global fetch in its place.
   if ('egress' in credential && typeof credential.egress?.fetch !== 'function') {
     throw new Error(credential.egress === undefined
-      ? `credentialProxy: ${name}'s egress is undefined, as a binding the Worker lacks is: add the binding to wrangler.jsonc, or remove egress. ${name}'s requests never leave without it`
+      ? `credentialProxy: ${name}'s egress is undefined, as a Worker's binding is when wrangler.jsonc lacks it: add the binding, or remove egress. ${name}'s requests never leave without it`
       : `credentialProxy: ${name}'s egress has no fetch method: give it a VPC Service binding, a service binding, or { fetch(url, init) }`);
   }
   const methods = credential.methods?.map((method) => method.toUpperCase());

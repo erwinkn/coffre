@@ -68,5 +68,5 @@ test('an AWS-signed upload past the 16 MiB a body is held to streams through the
 test('a binding the Worker lacks, undefined in its env, fails the configuration', { timeout: 30_000 }, async () => {
   const missing = await worker.fetch('/use/schumann/companies?missing', { headers: { 'x-api-key': HANDLE } });
   assert.equal(missing.status, 500);
-  assert.match(await missing.text(), /schumann's egress is undefined, as a binding the Worker lacks is/);
+  assert.match(await missing.text(), /schumann's egress is undefined, as a Worker's binding is when wrangler\.jsonc lacks it/);
 });

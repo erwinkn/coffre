@@ -433,6 +433,13 @@ test("a credential with an egress leaves through it, never the global fetch, as 
     const down = await call('/companies');
     assert.equal(down.status, 502);
     assert.match((await down.json()).message, /did not answer through schumann's egress: tunnel down/);
+    // One that quotes the request it failed on says nothing of the key.
+    answer = (input) => {
+      throw new Error(`could not send ${input.href} with x-api-key: ${KEY}`);
+    };
+    const quoted = (await (await call('/companies')).json()) as { message: string };
+    assert.equal(quoted.message.includes(KEY), false, quoted.message);
+    assert.match(quoted.message, /x-api-key: \[redacted by coffre\]/);
 
     // A credential without one still leaves through the global fetch.
     assert.equal((await route('/use/market/dev/maps/geocode?key=' + handle)).status, 200);
@@ -884,7 +891,7 @@ test("the configuration is checked: HTTPS upstreams, no private address, rules t
   assert.throws(make({ dfns: { upstream: 'https://api.example.com', inject: header('authorization', 'Bearer {K}'), standIn: jwt() } }), /dfns's standIn is called placeholder in 0\.10: rename it/);
   // An egress named is one that fetches: a binding the Worker lacks, `undefined` with its key still there, fails the configuration.
   const env: { SCHUMANN_EGRESS?: Egress } = {};
-  assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: env.SCHUMANN_EGRESS } }), /schumann's egress is undefined, as a binding the Worker lacks is: add the binding to wrangler\.jsonc/);
+  assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: env.SCHUMANN_EGRESS } }), /schumann's egress is undefined, as a Worker's binding is when wrangler\.jsonc lacks it: add the binding, or remove egress/);
   // @ts-expect-error -- an egress has a fetch method
   assert.throws(make({ schumann: { upstream: 'https://api.example.com', inject: header('x', '{K}'), egress: {} } }), /schumann's egress has no fetch method/);
   // @ts-expect-error -- and is no null

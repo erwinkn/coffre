@@ -938,7 +938,7 @@ the value `undefined`. The proxy tells it apart from no `egress` at all
 (`'egress' in credential`) and refuses the configuration:
 
 ```
-credentialProxy: schumann's egress is undefined, as a binding the Worker lacks is: add the binding to wrangler.jsonc, or remove egress. schumann's requests never leave without it
+credentialProxy: schumann's egress is undefined, as a Worker's binding is when wrangler.jsonc lacks it: add the binding, or remove egress. schumann's requests never leave without it
 ```
 
 An `egress` with no `fetch` method (`{}`, `null`) is refused too. On
@@ -1050,8 +1050,8 @@ private, loopback or link-local address (`10.0.0.8`, `169.254.169.254`,
 `insecureUpstreams: true` allows both, for local fakes in development, and
 never belongs in production. A hostname that *resolves* to a private
 address is the operator's own DNS. On Workers, `fetch` cannot reach a
-private network anyway; an `egress` binding can (section 5), and reaches
-only the host it was made for. On Node, pinning the resolved address is left for
+private network anyway; a credential's `egress` can (section 5), and a
+VPC Service binding reaches only the host it was made for. On Node, pinning the resolved address is left for
 later (decision 9).
 
 **Injection** goes into headers, the query and Basic only. Nothing is
