@@ -334,20 +334,24 @@ export type Newest = StoredEntry | 'none' | 'forged' | 'unreached';
 
 /**
  * The newest of the entries `page` reads, newest first and before a seq,
- * that `check` finds authentic, read back a page at a time: 'none' when
- * there are none at all, 'forged' when every one is in the vault's name but
- * not its own, and 'unreached' once it has read LOOK_BACK such entries
- * (1024), whether or not more are left.
+ * that `check` finds authentic: the newest alone first, which it is unless
+ * entries were forged in the vault's name since, then back a page at a
+ * time. 'none' when there are none at all, 'forged' when every one is in
+ * the vault's name but not its own, and 'unreached' once it has read
+ * LOOK_BACK such entries (1024), whether or not more are left.
  */
-export async function newestAuthentic(page: (before: bigint | undefined) => Promise<StoredEntry[]>, check: Authenticity): Promise<Newest> {
+export async function newestAuthentic(page: (limit: number, before: bigint | undefined) => Promise<StoredEntry[]>, check: Authenticity): Promise<Newest> {
+  const most = LOOK_BACK.page * LOOK_BACK.pages;
+  let read = 0;
   let before: bigint | undefined;
-  for (let read = 0; read < LOOK_BACK.pages; read += 1) {
-    const entries = await page(before);
+  for (let limit = 1; read < most; limit = Math.min(LOOK_BACK.page, most - read)) {
+    const entries = await page(limit, before);
     for (const entry of entries) {
       if (check.authentic(entry)) return entry;
       check.forged(entry);
     }
-    if (entries.length < LOOK_BACK.page) return before === undefined && entries.length === 0 ? 'none' : 'forged';
+    read += entries.length;
+    if (entries.length < limit) return read === 0 ? 'none' : 'forged';
     before = entries.at(-1)!.seq;
   }
   return 'unreached';

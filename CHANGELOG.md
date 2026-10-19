@@ -32,7 +32,19 @@
   tally: on a log longer than that, `/readyz` stays red for a beat or a
   few until they catch up, and the page says how many entries are left.
   No migration.
-
+- **Reveals cost less CPU.** On Workers' Free plan an invocation has 10 ms
+  of CPU, and a reveal now runs 27 statements instead of 33, and reads
+  the same rows however large the log grows: with a vault key in memory,
+  the vault decides a read once, under the log's head, where it decided
+  twice; it reads the newest policy and access entries alone, not 32 at
+  a time; and a Worker no longer works out the database schema's
+  configuration at every call. On local workerd a warm one-key reveal
+  went from 33 to 25 ms of CPU, everything the runtime does for it
+  included. `pnpm bench:workers` and `pnpm bench:node` measure each hot
+  path, cold and warm.
+- **Pages with times render with less CPU.** A relative time ("3 hours
+  ago") made a new formatter each time it was shown; it reuses one. The
+  audit page's render costs about a quarter less.
 
 ## 0.10.0 (2026-10-19)
 

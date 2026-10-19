@@ -572,8 +572,10 @@ whose write then failed stays in the log, under an operation no
 
 The vault locks affected members before the shared audit head. Its member
 and grant changes commit with their audit entries. With a local vault key, a read
-is one short transaction. With AWS KMS, the intent commits first; the member
+is one short transaction, decided once under the member's row and the head.
+With AWS KMS, the intent commits first; the member
 row stays locked across the KMS calls, which settle within five seconds,
+the head is taken only once they have, and the decision is made again under it;
 and each key's outcome is logged: the keys of a place that came out alike in
 one entry, each its item of the intent. Removal waits for a read already in
 flight; the next read is refused before KMS is called.

@@ -3,9 +3,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { LocalKekProvider } from '@coffre/core/kek';
+import { LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
@@ -445,6 +445,26 @@ test('an environment added to a project deleted since its path was found is refu
   assert.equal((await root.audit.verify()).ok, true);
 });
 
+/**
+ * A key service, the test's key behind it, that opens a key only once
+ * `meanwhile` is done: a deletion, say, committed between the vault's check
+ * and its release. A key in memory leaves no such moment: the vault decides
+ * on it under the log's head from the start, which a deletion waits for.
+ */
+function slowKeyService(kek: Buffer, meanwhile: () => Promise<unknown> | undefined): KekProvider {
+  const local = new LocalKekProvider(kek, 'test-kek-1');
+  return {
+    provider: local.provider,
+    keyId: local.keyId,
+    keyVersion: local.keyVersion,
+    wrap: (...args) => local.wrap(...args),
+    async unwrap(...args) {
+      await meanwhile();
+      return local.unwrap(...args);
+    },
+  };
+}
+
 test('a key decided on before its place is deleted, and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
   await seedMarket();
   await root.environments.update('market/dev', { archived: true });
@@ -452,17 +472,13 @@ test('a key decided on before its place is deleted, and released after, is refus
   // The lead's grant on the project still covers market/dev, which is deleted
   // alone, while the vault opens its key: after the check, before the release.
   let meanwhile: (() => Promise<unknown>) | null = null;
-  class DeletedMeanwhile extends LocalKekProvider {
-    override async unwrap(...args: Parameters<LocalKekProvider['unwrap']>): Promise<Buffer> {
-      const run = meanwhile;
-      meanwhile = null;
-      await run?.();
-      return super.unwrap(...args);
-    }
-  }
   const vault = testVault(
     [ROOT],
-    { kek: new DeletedMeanwhile(deps.vault.kek, 'test-kek-1'), signingKey: deps.vault.signingKey.toString('base64') },
+    { kek: slowKeyService(deps.vault.kek, () => {
+      const run = meanwhile;
+      meanwhile = null;
+      return run?.();
+    }), signingKey: deps.vault.signingKey.toString('base64') },
     { kek: deps.vault.kek },
   );
   const read = () => vault.unwrap({ principal: LEAD, purpose: 'reveal', requestId: 'r', operationId: crypto.randomUUID(), items: [{ secretVersionId: id }] });
@@ -487,6 +503,44 @@ test('a key decided on before its place is deleted, and released after, is refus
   assert.equal((await root.audit.verify()).ok, true);
 });
 
+test('with a key in memory, a deletion asked while a read decides waits for it: the key is released, then the place deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
+  await seedMarket();
+  await root.environments.update('market/dev', { archived: true });
+  const { id } = await currentVersion('dev', 'DATABASE_URL');
+  // The deletion starts while the vault opens the key, and is given time to commit, which it may not before the read does.
+  let armed = false;
+  let release!: () => void;
+  class DeletionAsked extends LocalKekProvider {
+    override async unwrap(...args: Parameters<LocalKekProvider['unwrap']>): Promise<Buffer> {
+      if (armed) {
+        armed = false;
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      return super.unwrap(...args);
+    }
+  }
+  const vault = testVault(
+    [ROOT],
+    { kek: new DeletionAsked(deps.vault.kek, 'test-kek-1'), signingKey: deps.vault.signingKey.toString('base64') },
+    { kek: deps.vault.kek },
+  );
+  const read = () => vault.unwrap({ principal: LEAD, purpose: 'reveal', requestId: 'r', operationId: crypto.randomUUID(), items: [{ secretVersionId: id }] });
+  assert.equal((await read()).ok, true);
+  // Chained out here, the deletion runs as its own request would, not inside the vault's transaction.
+  const deletion = new Promise<void>((resolve) => (release = resolve)).then(() => root.environments.delete('market/dev'));
+  armed = true;
+  assert.equal((await read()).ok, true);
+  await deletion;
+  const order = await db.owner
+    .select({ action: auditLog.action, decision: auditLog.decision })
+    .from(auditLog)
+    .where(and(eq(auditLog.decision, 'allow'), inArray(auditLog.action, ['secret.read', 'environment.delete'])))
+    .orderBy(asc(auditLog.seq));
+  assert.deepEqual(order.map((entry) => entry.action), ['secret.read', 'secret.read', 'environment.delete']);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
 test('a read through a reference, decided on before its holder is deleted and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
   await seedMarket();
   await root.environments.create('web/prod', { name: 'Production' });
@@ -500,17 +554,13 @@ test('a read through a reference, decided on before its holder is deleted and re
     .innerJoin(environments, eq(environments.id, secrets.environmentId))
     .where(and(eq(secrets.key, 'OTHER'), eq(environments.slug, 'prod'), eq(secrets.projectId, await projectId('web'))));
   let meanwhile: (() => Promise<unknown>) | null = null;
-  class DeletedMeanwhile extends LocalKekProvider {
-    override async unwrap(...args: Parameters<LocalKekProvider['unwrap']>): Promise<Buffer> {
-      const run = meanwhile;
-      meanwhile = null;
-      await run?.();
-      return super.unwrap(...args);
-    }
-  }
   const vault = testVault(
     [ROOT],
-    { kek: new DeletedMeanwhile(deps.vault.kek, 'test-kek-1'), signingKey: deps.vault.signingKey.toString('base64') },
+    { kek: slowKeyService(deps.vault.kek, () => {
+      const run = meanwhile;
+      meanwhile = null;
+      return run?.();
+    }), signingKey: deps.vault.signingKey.toString('base64') },
     { kek: deps.vault.kek },
   );
   // The lead's project grant covers market/dev, the holder, which decides a read through it.
