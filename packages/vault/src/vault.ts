@@ -2371,17 +2371,7 @@ class VaultService implements Vault {
    */
   async #resume(db: Queryable, from: 'start' | 'newest' | bigint): Promise<Resumed | Broken> {
     if (from === 'start') return FIRST_ENTRY;
-    // The newest a release this old can read: one rolled back to from a newer release passes over tallies of a
-    // version it does not know, as 0.10.1 passes over 0.10.0's checkpoints, which keep none.
-    const newer = (entry: StoredEntry) => {
-      const version = (metadataOf(entry) as { tally?: { v?: unknown } } | null)?.tally?.v;
-      return typeof version === 'number' && version > TALLY_VERSION;
-    };
-    let entry = from === 'newest' ? await store.latestTallied(db) : (await store.entriesAt(db, [from])).get(from);
-    // One at a time, each as large as the members and grants it may keep: almost always the first is it.
-    for (let back = 1; from === 'newest' && entry !== undefined && newer(entry); back++) {
-      entry = back < LOOK_BACK_TALLIES ? await store.latestTallied(db, entry.seq) : undefined;
-    }
+    const entry = from === 'newest' ? await store.latestTallied(db) : (await store.entriesAt(db, [from])).get(from);
     if (entry === undefined) return from === 'newest' ? FIRST_ENTRY : { ok: false, failedAtSeq: Number(from), reason: 'no checkpoint at this entry' };
     return (await this.#resumeEach(db, [entry]))[0]!;
   }
@@ -2668,7 +2658,7 @@ class VaultService implements Vault {
       // Every checkpoint after it whose prefix the walk may pass, a stretch's end among them, signed while
       // the app walked or not: each tally is held to the walk where it gets there (`Walk.expect`).
       const walk = new Walk(from.tally);
-      const later = await store.talliedAfter(tx, from.entry ?? -1n, walks.verify + 1);
+      const later = await store.talliedAfter(tx, from.entry ?? -1n, walks.verify);
       const passed = later.filter(({ seq }) => to === null || seq <= to);
       if (to !== null && passed.at(-1)?.seq !== to) {
         return { ok: false, failedAtSeq: Number(to), reason: `a stretch passes no more than ${walks.verify} checkpoints: end one sooner` };
@@ -2858,9 +2848,6 @@ function timedOut(error: unknown): boolean {
   }
   return false;
 }
-
-/** Checkpoints a vault rolled back to looks back over for a tally of a version it reads: some hours of them. */
-const LOOK_BACK_TALLIES = 64;
 
 /** Where the next rehash of the past goes on from, null for the first entry; or what it found. */
 type Scrubbed = { ok: true; next: Lap | null } | Broken;

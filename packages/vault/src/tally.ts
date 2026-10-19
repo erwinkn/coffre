@@ -54,7 +54,9 @@ export type StoredTally = Omit<Tally, 'access'> & { v: typeof TALLY_VERSION; acc
  * What a tally keeps, as 0.10.1 wrote it. A release that keeps more, or
  * less, writes another version, and compares a tally of this one on what
  * this one kept: a walk from the first entry passes every tally ever
- * written, and an honest one must still match.
+ * written, and an honest one must still match. A release rolled back to
+ * reads no tally newer than its own, and refuses the checkpoints that
+ * keep one: going back across a version is not a way back.
  */
 export const TALLY_VERSION = 1;
 

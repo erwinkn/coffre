@@ -527,19 +527,16 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
 }
 
 /**
- * The vault's newest checkpoint that keeps a tally, allowed, before entry `before` if given, or undefined:
+ * The vault's newest checkpoint that keeps a tally, allowed, or undefined:
  * one written since 0.10.1, which names the last entry of the prefix it
  * signs as related (`related_seq`); those before name none.
  */
-export async function latestTallied(db: Queryable, before?: bigint): Promise<StoredEntry | undefined> {
+export async function latestTallied(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
   const [row] = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(
-      eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq),
-      before === undefined ? undefined : lt(auditLog.seq, before),
-    ))
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)))
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];

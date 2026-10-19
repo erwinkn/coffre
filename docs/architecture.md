@@ -1131,6 +1131,10 @@ Each limit is stated here once; the other documents link to it.
   the page's check about the same. Run 0.10.1 on a paid plan. Until the checkpoints catch up, the walk
   from the first entry ends short of the head and says so (`remaining`),
   and `coffre verify log` exits 3 rather than call the log verified.
+- **No rolling back across a tally's version.** A release that changes
+  what a checkpoint's tally keeps writes a new version of it; a release
+  rolled back to refuses the checkpoints that keep a version it does not
+  know, and every check with them. 0.10.1 writes the first.
 - **A change of access writes every member and grant into the log once.**
   The first checkpoint after it keeps them whole, and the others name it:
   an instance with thousands of grants, changed every few minutes, grows
