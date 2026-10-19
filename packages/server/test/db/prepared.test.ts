@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 import { prepared, tablesOf, type Database, type Queryable } from '@coffre/db';
 import * as server from '@coffre/db/schema';
-import { asc, eq, sql, type SQL } from 'drizzle-orm';
+import { asc, eq, sql, type Placeholder } from 'drizzle-orm';
 
 import { insert } from '../../src/db/queries.ts';
 import { openTestDatabase } from './engine.ts';
@@ -25,7 +25,7 @@ after(() => close());
 let builds = 0;
 
 /** A project and its environments, by slug: a left join, whose missing side reads as null. With values, or placeholders for them. */
-function projectAndEnvironments(on: Queryable, slug: string | SQL.Placeholder = sql.placeholder('slug'), limit: number | SQL.Placeholder = sql.placeholder('limit')) {
+function projectAndEnvironments(on: Queryable, slug: string | Placeholder = sql.placeholder('slug'), limit: number | Placeholder = sql.placeholder('limit')) {
   const { projects, environments } = tablesOf(on);
   return on
     .select({ project: { id: projects.id, slug: projects.slug }, environment: { slug: environments.slug } })
