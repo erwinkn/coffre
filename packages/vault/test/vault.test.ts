@@ -19,7 +19,7 @@ import {
   type KeyOperation,
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
-import { verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { checkpointMessage, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
 import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
@@ -27,6 +27,7 @@ import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
+import { signer } from '../src/checkpoint.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
 import * as store from '../src/store.ts';
@@ -2141,18 +2142,70 @@ test("a tally rewritten by a holder of the vault's key is found by the walk from
   assert.deepEqual(!resumed.ok && [resumed.failedAtSeq, resumed.reason], [Number(entry), "its tally's members and grants do not match their digest"]);
 });
 
-/** Change entry `seq`'s metadata, then chain the log again from there and seal the vault's entries under its key: what a holder of it could. */
+test("a checkpoint's tally rewritten in the middle of a stretch is found there, though the stretch's end is sound", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const first = await w.vault.checkpoint();
+  assert.ok(first.ok);
+  await member(w, BOB, [[w.dev, 'viewer']]);
+  const second = await w.vault.checkpoint();
+  assert.ok(second.ok);
+  await rewriteMetadata(BigInt(first.checkpoint.seq + 1), (metadata) => ({ ...metadata, tally: { ...metadata.tally as object, entries: 99 } }));
+  // The newest checkpoint's tally is sound, so the page's check, from it, holds; a stretch from the first entry
+  // to it passes the first checkpoint on the way, and holds it to the walk.
+  const fresh = await openLocalVault(db.vault, configure());
+  assert.equal((await fresh.verifyLog({})).ok, true);
+  const whole = await fresh.verifyLog({ from: 'start', to: second.checkpoint.seq + 1 });
+  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.reason], [first.checkpoint.seq + 1, 'the tally this checkpoint keeps does not follow from the log before it']);
+});
+
+test('a verification counts the prefix it resumes from: an entry cut before the newest checkpoint is found', async () => {
+  const w = await world();
+  await reads(10);
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok);
+  await reads(2);
+  const { auditLog } = tablesOf(db.owner);
+  await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.seq, 5n)));
+  const verdict = await (await fresh()).verifyLog({});
+  assert.deepEqual(!verdict.ok && [verdict.failedAtSeq, verdict.reason], [6, 'sequence gap: expected seq 5, found 6']);
+});
+
+test("access changed after the app's head is read by the vault's own walk, not taken for tampering", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const [head] = await store.vaultPage(db.owner, undefined, 1);
+  const upTo = { seq: Number(head!.seq), hash: head!.hash.toString('hex') };
+  // Bob admitted, and Ada's grant gone, between the app's snapshot and the vault's.
+  await member(w, BOB, [[w.dev, 'viewer']]);
+  assert.equal((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] })).ok, true);
+  const verdict = await w.vault.verifyLog({ upTo });
+  assert.deepEqual(verdict.ok && verdict.through, upTo.seq, JSON.stringify(verdict));
+});
+
+/**
+ * Change entry `seq`'s metadata, then chain the log again from there, seal the vault's entries under its key and
+ * sign its checkpoints over the new hashes: all that a holder of its key could.
+ */
 async function rewriteMetadata(seq: bigint, change: (metadata: Record<string, unknown>) => Record<string, unknown>) {
   const { auditLog, auditChainHead } = tablesOf(db.owner);
   const entries = (await db.owner.select().from(auditLog).where(gte(auditLog.seq, seq)).orderBy(asc(auditLog.seq))) as StoredEntry[];
+  const signing = await signer(SIGNING_KEY);
+  const hashes = new Map<bigint, string>();
   await withLogUnlocked(db.owner, async (owned) => {
     let prevHash = entries[0]!.prevHash;
     for (const entry of entries) {
-      const metadata = entry.seq === seq ? JSON.stringify(change(JSON.parse(entry.metadata) as Record<string, unknown>)) : entry.metadata;
+      let metadata = entry.seq === seq ? JSON.stringify(change(JSON.parse(entry.metadata) as Record<string, unknown>)) : entry.metadata;
+      if (entry.seq > seq && entry.action === 'audit.checkpoint' && entry.decision === 'allow') {
+        const kept = JSON.parse(metadata) as Checkpoint;
+        const hash = hashes.get(BigInt(kept.seq)) ?? kept.hash;
+        metadata = JSON.stringify({ ...kept, hash, signature: await signing.sign(checkpointMessage({ seq: kept.seq, hash, signedAt: kept.signedAt })) });
+      }
       const changed = { ...entry, metadata, prevHash };
       const mac = entry.author === 'vault' ? entryMac(VAULT_KEY.key, prevHash, changed) : entry.mac;
       const hash = entryHash(prevHash, changed, mac);
       await owned.update(auditLog).set({ metadata, prevHash, mac, hash }).where(eq(auditLog.seq, entry.seq));
+      hashes.set(entry.seq, hash.toString('hex'));
       prevHash = hash;
     }
     await owned.update(auditChainHead).set({ headHash: prevHash });

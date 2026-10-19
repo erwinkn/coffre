@@ -74,6 +74,7 @@ export async function writeAuditHeartbeat(
   }
   try {
     const signed = await vault.checkpoint();
+    if (signed.ok && signed.warning !== undefined) log.warn({ warning: signed.warning }, 'the vault checkpointed the audit log, with a warning');
     if (signed.ok) return true;
     log.warn({ code: signed.refusal.code }, 'the vault refused to checkpoint the audit log');
     return false;

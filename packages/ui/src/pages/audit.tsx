@@ -489,17 +489,20 @@ function ChainStatus({
           </button>
         </Toggletip>
       )}
-      {!chain.whole && (
+      {!chain.whole && chain.remaining === 0 && (
         <button type="button" className="btn btn-sm" onClick={onWalk}>
           Verify whole log
         </button>
       )}
-      <Toggletip align="end" label={verified}>
-        <button type="button" className="chain-seal">
-          <ShieldCheck size={14} />
-          Verified
-        </button>
-      </Toggletip>
+      {/* No seal over a log verified only in part: what is left could be anything. */}
+      {chain.remaining === 0 && (
+        <Toggletip align="end" label={verified}>
+          <button type="button" className="chain-seal">
+            <ShieldCheck size={14} />
+            Verified
+          </button>
+        </Toggletip>
+      )}
     </div>
   );
 }

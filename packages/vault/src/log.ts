@@ -98,21 +98,25 @@ export async function relink(db: Queryable, from: Position, to: bigint, limit: n
 }
 
 /**
- * The vault's own entries after `after` through `to`, oldest first: each
- * against its own hash, and by its MAC, over the link it names, its keys
- * moving only forward, each fed to `walk`. The links between entries are
- * the caller's to recompute, as the app does over the same stretch.
+ * The vault's own entries after `after`, through `to` or its last, no more
+ * than `limit` of them, oldest first: each against its own hash, and by its
+ * MAC, over the link it names, its keys moving only forward, each fed to
+ * `walk`. The links between entries are the caller's to recompute, as the
+ * app does over the same stretch. The last it read, and whether that is as
+ * far as it was to go.
  */
 export async function ownEntries(
   db: Queryable,
   logKeys: readonly LogKey[],
   after: bigint,
-  to: bigint,
   walk: Walk,
-): Promise<{ ok: true } | Broken> {
-  for (;;) {
-    const batch = (await vaultEntriesAfter(db, after, VERIFY_BATCH)).filter((entry) => entry.seq <= to);
-    if (batch.length === 0) return { ok: true };
+  { to, limit = Infinity }: { to?: bigint; limit?: number },
+): Promise<{ ok: true; at: bigint; done: boolean } | Broken> {
+  for (let left = limit; ; ) {
+    if (left <= 0) return { ok: true, at: after, done: false };
+    let batch = await vaultEntriesAfter(db, after, Math.min(VERIFY_BATCH, left));
+    if (to !== undefined) batch = batch.filter((entry) => entry.seq <= to);
+    if (batch.length === 0) return { ok: true, at: after, done: true };
     for (const entry of batch) {
       const result = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: logKeys });
       if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
@@ -122,6 +126,7 @@ export async function ownEntries(
     walk.keys = moved.keys;
     for (const entry of batch) walk.add(entry);
     after = batch[batch.length - 1]!.seq;
+    left -= batch.length;
   }
 }
 

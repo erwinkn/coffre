@@ -1842,8 +1842,15 @@ async function verifyLog(): Promise<void> {
       ? 'no checkpoint signed yet'
       : `last checkpoint: entry ${result.checkpoint.seq}, signed ${result.checkpoint.signedAt}`;
     const pending = result.pending === undefined ? '' : `${result.pending} key operations still under way\n`;
-    const remaining = result.remaining > 0 ? `${result.remaining} newer entries not verified yet: the checkpoints are catching up with the log\n` : '';
-    process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}${remaining}`);
+    if (result.remaining > 0) {
+      // Past the newest checkpoint a stretch goes one walk, and none goes on from there: not the whole log.
+      process.stderr.write(
+        `audit log not verified to its end: ${through}, and ${result.remaining} newer entries wait for the checkpoints to catch up, ` +
+          'a walk every five minutes; run this again after the next beats\n',
+      );
+      process.exit(3);
+    }
+    process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
     return;
   }
   const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;

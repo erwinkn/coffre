@@ -664,9 +664,10 @@ checkpoint's prefix, then from the first entry again: some 6 ms of a cold
 Worker's CPU. Where it stopped is kept in the checkpoint it signs. An entry
 edited in place is refused within one lap, the log's length over 100
 beats, and from then on every verification says so, by the refused
-checkpoint, though none reads that far back itself. A rehash that fails
-for another reason, a database error or a call cut short, leaves the
-stretch for the next beat and the checkpoint is signed all the same.
+checkpoint, though none reads that far back itself. A rehash the database
+fails leaves the stretch for the next beat, and the checkpoint is signed
+all the same, with a warning in the app's log; but a refusal stands until
+the rehash that found it runs again and passes.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and a checkpoint after it carries the vault's signature. A log
@@ -1106,6 +1107,15 @@ Each limit is stated here once; the other documents link to it.
   verify log` still reads everything, 10,000 entries a request, about 200
   milliseconds of a Worker's CPU each. A team's instance writes some 600
   entries a day of heartbeats and checkpoints alone, plus its own work.
+- **Catching up and the walk from the first entry take a Worker's paid
+  plan.** A call walks up to 10,000 entries: about a second of a cold
+  isolate's CPU, where the Free plan allows 10 milliseconds. That is the
+  first beats after an upgrade from 0.10.0, each stretch of `coffre verify
+  log`, and a stretch between two checkpoints more than 10,000 entries
+  apart, which only checkpoints stopped for a while leave: a stretch ends
+  at a checkpoint, however far. Until the checkpoints catch up, the walk
+  from the first entry ends short of the head and says so (`remaining`),
+  and `coffre verify log` exits 3 rather than call the log verified.
 - **Key operations' identities are checked against those still under way.**
   The walk from the first entry used to refuse a key operation's identity
   seen twice anywhere in the log. A tally keeps the batches still open, not

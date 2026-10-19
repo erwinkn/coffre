@@ -125,8 +125,10 @@ export type AuditVerification =
       remaining: number;
       /**
        * For a stretch of the walk from the first entry (`from` asked for):
-       * the checkpoint the next stretch goes on from, as `from`, or null once
-       * it reached the head.
+       * the checkpoint the next stretch goes on from, as `from`, or null for
+       * the last, from the newest checkpoint. The whole log is verified only
+       * when the last says `remaining` 0: past the newest checkpoint, a
+       * stretch goes no further than one walk, and none goes on from there.
        */
       next?: number | null;
       /** The newest prefix the vault signed, which the log still holds; null before the first. */
@@ -165,7 +167,7 @@ export type AuditKeys = {
 
 /** The vault's verdict as the API gives it, its fault already in words. */
 export type VaultVerification =
-  | { ok: true; entries: number; pending?: number }
+  | { ok: true; entries: number; pending?: number; through?: number }
   | { ok: false; failedAtSeq: number | null; reason: string };
 
 export type AuditQuery = {
@@ -400,9 +402,6 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
         const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint);
         start = own.seq <= signed.seq ? own : signed;
         vaultFrom = tallied === null ? 'start' : Number(tallied.entry);
-        // Every entry before it still there: one count, and only a log with a gap pays to find where.
-        const gap = await missingEntry(tx, start.seq);
-        if (gap !== null) return failed('app', gap.found, `sequence gap: expected seq ${gap.expected}, found ${gap.found}`, gap.expected - 1n);
       } else {
         const anchor = query.from === 'start' ? null : await talliedAt(tx, BigInt(query.from));
         if (query.from !== 'start' && anchor === null) throw badRequest(`entry ${query.from} is not a checkpoint that keeps a tally`);
@@ -414,6 +413,11 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
         const ends = target === undefined ? null : await talliedAt(tx, target.entry);
         if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends) };
       }
+      // Every entry before where it starts still there: one count, and only a log with a gap pays to find where.
+      const gap = await missingEntry(tx, start.seq);
+      if (gap !== null) return failed('app', gap.found, `sequence gap: expected seq ${gap.expected}, found ${gap.found}`, gap.expected - 1n);
+      // A stretch runs to its checkpoint however far that is: one more than a walk apart only when the
+      // checkpoints stopped for a while, and the vault cannot end a stretch anywhere else.
       const walked = await walkChain(tx, ctx.chainKey, start, to === null ? {} : { to: to.at.seq, limit: Infinity });
       if (!walked.ok) return failed('app', walked.failedAtSeq, walked.reason, walked.through);
       // Whether it ends at the hash the checkpoint signed is the vault's to say, once it has checked its own entries.
@@ -460,12 +464,15 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: number | 'sta
     const last = chain.last === null ? null : BigInt(chain.last.seq);
     return failed('vault', verified.failedAtSeq, verified.reason, verified.failedAtSeq === null ? last : BigInt(verified.failedAtSeq) - 1n);
   }
+  // Verified as far as both got: the vault's own walk stops short of the app's head only when it had more than a
+  // walk of its own entries to read since its tally.
+  const through = chain.last === null ? null : Math.min(chain.last.seq, verified.through ?? chain.last.seq);
   return {
     ok: true,
-    through: chain.last?.seq ?? null,
-    entries: (chain.last?.seq ?? -1) + 1,
+    through,
+    entries: (through ?? -1) + 1,
     from: Number(chain.start.seq + 1n),
-    remaining: chain.remaining,
+    remaining: chain.remaining + (chain.last?.seq ?? -1) - (through ?? -1),
     ...(query.from === undefined ? {} : { next: chain.to === null ? null : Number(chain.to.entry) }),
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
     ...(verified.pending === undefined ? {} : { pending: verified.pending }),

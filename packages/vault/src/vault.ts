@@ -2369,31 +2369,40 @@ class VaultService implements Vault {
     if (from === 'start') return FIRST_ENTRY;
     const entry = from === 'newest' ? await store.latestTallied(db) : (await store.entriesAt(db, [from])).get(from);
     if (entry === undefined) return from === 'newest' ? FIRST_ENTRY : { ok: false, failedAtSeq: Number(from), reason: 'no checkpoint at this entry' };
-    const broken = (reason: string): Broken => ({ ok: false, failedAtSeq: Number(entry.seq), reason });
-    const read = this.#tallied(entry);
-    if (typeof read === 'string') return broken(read);
-    let carrier = entry.seq;
-    let { access } = read.tally;
-    if ('at' in access) {
-      carrier = BigInt(access.at);
-      const held = carrier < entry.seq ? (await store.entriesAt(db, [carrier])).get(carrier) : undefined;
-      const holder = held === undefined ? undefined : this.#tallied(held);
-      if (holder === undefined || typeof holder === 'string' || 'at' in holder.tally.access) {
-        return broken(`its tally keeps its members and grants in entry ${carrier}, which holds none`);
+    return (await this.#resumeEach(db, [entry]))[0]!;
+  }
+
+  /** `#resume` for each of these checkpoint entries, the entries their members and grants are kept in read at once. */
+  async #resumeEach(db: Queryable, entries: readonly StoredEntry[]): Promise<(Resumed | Broken)[]> {
+    const reads = entries.map((entry) => this.#tallied(entry));
+    const named = reads.flatMap((read) => (typeof read !== 'string' && 'at' in read.tally.access ? [BigInt(read.tally.access.at)] : []));
+    const carriers = new Map([...(await store.entriesAt(db, named))].map(([seq, held]) => [seq, this.#tallied(held)]));
+    return entries.map((entry, i): Resumed | Broken => {
+      const broken = (reason: string): Broken => ({ ok: false, failedAtSeq: Number(entry.seq), reason });
+      const read = reads[i]!;
+      if (typeof read === 'string') return broken(read);
+      let carrier = entry.seq;
+      let { access } = read.tally;
+      if ('at' in access) {
+        carrier = BigInt(access.at);
+        const holder = carrier < entry.seq ? carriers.get(carrier) : undefined;
+        if (holder === undefined || typeof holder === 'string' || 'at' in holder.tally.access) {
+          return broken(`its tally keeps its members and grants in entry ${carrier}, which holds none`);
+        }
+        access = holder.tally.access;
       }
-      access = holder.tally.access;
-    }
-    const kept = { members: access.members, grants: access.grants, newest: access.newest };
-    if (accessDigest(kept) !== read.tally.access.digest) return broken("its tally's members and grants do not match their digest");
-    return {
-      ok: true,
-      entry: entry.seq,
-      at: { seq: BigInt(read.seq), hash: Buffer.from(read.hash, 'hex') },
-      tally: { ...read.tally, access: kept },
-      digest: read.tally.access.digest,
-      carrier,
-      scrub: read.scrub === null ? null : { seq: BigInt(read.scrub.seq), hash: Buffer.from(read.scrub.hash, 'hex') },
-    };
+      const kept = { members: access.members, grants: access.grants, newest: access.newest };
+      if (accessDigest(kept) !== read.tally.access.digest) return broken("its tally's members and grants do not match their digest");
+      return {
+        ok: true,
+        entry: entry.seq,
+        at: { seq: BigInt(read.seq), hash: Buffer.from(read.hash, 'hex') },
+        tally: { ...read.tally, access: kept },
+        digest: read.tally.access.digest,
+        carrier,
+        scrub: read.scrub === null ? null : { seq: BigInt(read.scrub.seq), hash: Buffer.from(read.scrub.hash, 'hex') },
+      };
+    });
   }
 
   /** A checkpoint's entry that keeps a tally, as it says, or why it is not one the vault wrote. */
@@ -2433,7 +2442,7 @@ class VaultService implements Vault {
    * from the first entry, one walk a call, and `/readyz` stays red until the
    * checkpoints reach the newest heartbeat.
    */
-  async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
+  async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
     await this.#settled();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
     // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
@@ -2457,14 +2466,17 @@ class VaultService implements Vault {
       if (unsigned !== null) return unsigned;
       return { ok: true as const, from, tally: walk.tally(), at: chain.at, done: chain.done };
     }, SNAPSHOT);
-    // The past rehashed, in a snapshot of its own: an error there, or a call cut short, leaves the
-    // stretch for the next call, where it was, and the checkpoint is signed all the same.
+    // The past rehashed, in a snapshot of its own. The database failing it leaves the stretch for the
+    // next call, where it was, and the checkpoint is signed all the same, saying why (`warning`); a bug
+    // throws, as anywhere else.
     let scrub: Scrubbed = { ok: true, next: walked.ok ? walked.from.scrub : null };
+    let stalled: string | null = null;
     if (walked.ok) {
       try {
         scrub = await this.#db.transaction((tx) => this.#scrub(tx, walked.from), SNAPSHOT);
-      } catch {
-        // Kept where it was.
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof RangeError || error instanceof ReferenceError || error instanceof SyntaxError) throw error;
+        stalled = `the rehash of the past did not run, and goes on where it was next time: ${(error as Error).message}`;
       }
     }
     return this.#decide([], async (d) => {
@@ -2481,6 +2493,13 @@ class VaultService implements Vault {
       if (wrongKek !== null) throw refused('wrong_kek', { reason: wrongKek }, wrongKek);
       if (!walked.ok) throw refused('log_broken', { failedAtSeq: walked.failedAtSeq, reason: walked.reason });
       if (!scrub.ok) throw refused('log_broken', { failedAtSeq: scrub.failedAtSeq, reason: scrub.reason });
+      if (stalled !== null) {
+        // A refusal for a broken log stands until the rehash that would find it again runs and passes.
+        const last = await store.newestCheckpointEntry(d.tx);
+        if (last?.decision === 'deny' && last.code === 'log_broken' && this.#authentic(last)) {
+          throw refused('log_broken', JSON.parse(last.metadata) as Record<string, unknown>);
+        }
+      }
       const newest = latest === undefined ? null : (JSON.parse(latest.metadata) as Checkpoint);
       // Nothing since the last one, which signed every entry before its own: it is still the newest prefix.
       if (newest !== null && latest!.seq === head.nextSeq - 1n && latest!.relatedSeq === latest!.seq - 1n) return { checkpoint: signedPart(newest) };
@@ -2505,6 +2524,8 @@ class VaultService implements Vault {
       } else if (!(await carries(d.tx, headOf(at)))) {
         throw refused('log_broken', { reason: `the log up to entry ${at.seq} changed while the vault walked it` });
       }
+      // Another call signed as far, or further, while this one walked behind the head: that is the newest prefix, never one shorter.
+      if (newest !== null && latest!.relatedSeq !== null && latest!.relatedSeq >= at.seq) return { checkpoint: signedPart(newest) };
       this.#prepared.verified = further(this.#prepared.verified, at);
       const tally = walk.tally();
       // Its members and grants once, in the first checkpoint after they change; the others name that one.
@@ -2519,7 +2540,7 @@ class VaultService implements Vault {
       };
       const kept: TalliedCheckpoint = { ...checkpoint, tally: { ...tally, access }, scrub: scrub.next === null ? null : headOf(scrub.next) };
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
-      return { checkpoint };
+      return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
   }
 
@@ -2590,35 +2611,52 @@ class VaultService implements Vault {
     await this.#settled();
     const upTo = input.upTo ?? null;
     const { logKeys } = this.#prepared;
+    const { walks } = this.#prepared.options;
     return this.#db.transaction(async (tx): Promise<LogVerification> => {
       const remembered = this.#prepared.verified;
       const from = await this.#resume(tx, input.from === undefined ? 'newest' : input.from === 'start' ? 'start' : BigInt(input.from));
       if (!from.ok) return from;
-      // Where a stretch ends, the last entry its checkpoint names: that checkpoint, and its tally, are
-      // checked once the walk is there, so a fault on the way is named where it is.
-      const ends = input.to === undefined ? null : (await store.entriesAt(tx, [BigInt(input.to)])).get(BigInt(input.to))?.relatedSeq ?? -1n;
+      // Where a stretch ends, the last entry its checkpoint names: that checkpoint, and each it passes on the
+      // way, are held to the walk as it gets there, so a fault on the way is named where it is.
+      const to = input.to === undefined ? null : BigInt(input.to);
+      const ends = to === null ? null : (await store.entriesAt(tx, [to])).get(to)?.relatedSeq ?? -1n;
       if (ends !== null && (ends <= from.at.seq || (upTo !== null && BigInt(upTo.seq) !== ends))) {
-        return { ok: false, failedAtSeq: input.to!, reason: 'not a checkpoint after the one the walk starts from, whose prefix ends where the app verified to' };
+        return { ok: false, failedAtSeq: Number(to), reason: 'not a checkpoint after the one the walk starts from, whose prefix ends where the app verified to' };
       }
-      // The prefix the walk starts from still there, as it was signed: a rewrite chained again changes its hash.
+      // The prefix the walk starts from still there, as it was signed, and whole: a rewrite chained again
+      // changes its hash, and a cut its count.
       if (!(await this.#holding(tx, [headOf(from.at)]))(headOf(from.at))) {
         return { ok: false, failedAtSeq: Number(from.entry), reason: `the log up to entry ${from.at.seq} is not the prefix this checkpoint signed: it was rewritten` };
       }
+      const gap = await missingEntry(tx, from.at.seq);
+      if (gap !== null) return { ok: false, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
       const walk = new Walk(from.tally);
-      let through = from.at.seq;
-      // The hash where the walk ended: the app's head, or what the vault recomputed.
-      let reached = upTo?.hash ?? headOf(from.at).hash;
-      if (upTo === null) {
-        const chain = await rehash(tx, logKeys, from.at, walk, ends === null ? { limit: this.#prepared.options.walks.verify } : { to: ends });
-        if (!chain.ok) return chain;
-        through = chain.at.seq;
-        reached = headOf(chain.at).hash;
-        this.#prepared.verified = further(this.#prepared.verified, chain.at);
-      } else if (BigInt(upTo.seq) > from.at.seq) {
-        const own = await ownEntries(tx, logKeys, from.at.seq, BigInt(upTo.seq), walk);
-        if (!own.ok) return own;
-        through = BigInt(upTo.seq);
+      if (to !== null) {
+        const passed = (await store.talliedAfter(tx, from.entry ?? -1n, walks.verify + 1)).filter(({ seq }) => seq <= to);
+        const entries = await store.entriesAt(tx, passed.map(({ seq }) => seq));
+        const resumed = await this.#resumeEach(tx, passed.map(({ seq }) => entries.get(seq)!));
+        walk.expect(resumed.map((one, i) => (one.ok
+          ? { entry: one.entry!, through: one.at.seq, tally: one.tally }
+          : { entry: passed[i]!.seq, through: passed[i]!.signs, unreadable: one.reason })));
       }
+      // How far the walk got, the hash there, and whether that is the present: the rows and the key batches
+      // are held to the log only when the walk read every entry of the vault's there is.
+      let through = from.at.seq;
+      let reached = headOf(from.at).hash;
+      let present = false;
+      if (upTo === null) {
+        const chain = await rehash(tx, logKeys, from.at, walk, ends === null ? { limit: walks.verify } : { to: ends });
+        if (!chain.ok) return chain;
+        [through, reached, present] = [chain.at.seq, headOf(chain.at).hash, chain.done && ends === null];
+        this.#prepared.verified = further(this.#prepared.verified, chain.at);
+      } else {
+        // On past the app's head, to the vault's last entry in this snapshot: the rows are as they are at
+        // this one's. The app's head bounds what is verified; the vault's own walk, what the rows meet.
+        const own = await ownEntries(tx, logKeys, from.at.seq, walk, ends === null ? { limit: walks.verify } : { to: ends });
+        if (!own.ok) return own;
+        [through, reached, present] = [own.done ? BigInt(upTo.seq) : own.at, upTo.hash, own.done && ends === null];
+      }
+      walk.finish(ends ?? through);
       // Each head the log must still hold, in one read: the app's, every
       // checkpoint's walked, and the last this vault rehashed.
       const rememberedHead = remembered.seq >= 0n ? headOf(remembered) : null;
@@ -2636,16 +2674,14 @@ class VaultService implements Vault {
         return { ok: false, failedAtSeq: rememberedHead.seq, reason: 'changed since the vault last verified it' };
       }
       if (ends !== null) {
-        const to = await this.#resume(tx, BigInt(input.to!));
-        if (!to.ok) return to;
-        // The walk ends at the prefix it signed, by its hash too: a chain made again from before it is not.
-        if (through !== ends || headOf(to.at).hash !== reached) {
-          return { ok: false, failedAtSeq: input.to!, reason: `the log up to entry ${ends} is not the prefix this checkpoint signed: it was rewritten` };
+        // The walk ends at the prefix the stretch's checkpoint signed, by its hash too: a chain made again from before it is not.
+        const end = await this.#resume(tx, to!);
+        if (!end.ok) return end;
+        if ((upTo === null && through !== ends) || headOf(end.at).hash !== reached) {
+          return { ok: false, failedAtSeq: Number(to), reason: `the log up to entry ${ends} is not the prefix this checkpoint signed: it was rewritten` };
         }
-        if (!sameTally(walk.tally(), to.tally)) {
-          return { ok: false, failedAtSeq: input.to!, reason: 'the tally this checkpoint keeps does not follow from the log before it' };
-        }
-        return { ok: true, entries: walk.entries, through: Number(through) };
+        if (walk.mismatch !== null) return { ok: false, failedAtSeq: Number(walk.mismatch.entry), reason: walk.mismatch.reason };
+        return { ok: true, entries: walk.entries, through: Number(ends) };
       }
       // The newest checkpoint refused as the log broken, since the one the walk starts from: what it found,
       // the stretch of the past it rehashed among it, which no walk from a tally reads again.
@@ -2654,13 +2690,14 @@ class VaultService implements Vault {
         const { failedAtSeq, reason } = JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
         return { ok: false, failedAtSeq: failedAtSeq ?? null, reason: `the last checkpoint was refused: ${reason ?? 'the log is broken'}` };
       }
+      const verified = { ok: true as const, entries: walk.entries, through: Number(through) };
+      if (!present) return verified;
       const at = await this.#now(tx);
       const accounting = walk.accounting.result(at);
       if (!accounting.ok) return accounting;
       const [rows, held] = await Promise.all([store.allMembers(tx), store.grants(tx)]);
       const fault = this.#unsealed(rows, held, walk.newestAccess) ?? walk.replayFault ?? replayFault(walk.replayed, rows, held, at);
       if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
-      const verified = { ok: true as const, entries: walk.entries, through: Number(through) };
       return accounting.pending === 0 ? verified : { ...verified, pending: accounting.pending };
     }, SNAPSHOT);
   }

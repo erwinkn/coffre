@@ -66,10 +66,21 @@ export function accessDigest(access: AccessTally): string {
   return createHash('sha256').update(canonical(access)).digest('hex');
 }
 
-/** Whether two tallies say the same, whatever order their maps were built in. */
+/**
+ * Whether two tallies say the same, whatever order their maps were built
+ * in. A fault is the same where it was found: the words for it may change
+ * from one release to the next.
+ */
 export function sameTally(a: Tally, b: Tally): boolean {
-  return canonical(a) === canonical(b);
+  const unworded = ({ accounting, ...rest }: Tally) => ({ ...rest, accounting: { ...accounting, fault: accounting.fault?.failedAtSeq ?? null } });
+  return canonical(unworded(a)) === canonical(unworded(b));
 }
+
+/**
+ * A tally a walk must come to: the one a checkpoint keeps, `entry`, of the
+ * prefix through `through`; or why that checkpoint's tally cannot be read.
+ */
+export type Expected = { entry: bigint; through: bigint; tally: Tally } | { entry: bigint; through: bigint; unreadable: string };
 
 /**
  * The vault's entries walked, oldest first, each after its MAC was checked,
@@ -90,6 +101,11 @@ export class Walk {
   /** The checkpoints walked, each to be checked against its signature and the prefix it signed once the walk ends. */
   readonly checkpoints: { entry: { seq: bigint; keyId: string; relatedSeq: bigint | null }; checkpoint: Checkpoint }[] = [];
 
+  /** The tallies the walk must come to as it passes them, oldest first (`expect`). */
+  #expected: Expected[] = [];
+  /** The first it did not come to, and why. */
+  mismatch: { entry: bigint; reason: string } | null = null;
+
   constructor(from: Tally) {
     this.accounting = new KeyAccounting(from.accounting);
     this.replayed = {
@@ -107,7 +123,33 @@ export class Walk {
     this.keys = from.keys;
   }
 
+  /**
+   * Hold the walk to these tallies, each as the walk stands once it has
+   * read every entry through the prefix's end: before the vault's next
+   * entry, since only the vault's change a tally, or at `finish`.
+   */
+  expect(expected: readonly Expected[]): void {
+    this.#expected = [...expected].sort((a, b) => (a.through < b.through ? -1 : 1));
+  }
+
+  /** The tallies expected through `through`, held to the walk. */
+  finish(through: bigint): void {
+    this.#reach(through + 1n);
+  }
+
+  #reach(before: bigint): void {
+    while (this.#expected.length > 0 && this.#expected[0]!.through < before) {
+      const expected = this.#expected.shift()!;
+      if (this.mismatch !== null) continue;
+      if ('unreadable' in expected) this.mismatch = { entry: expected.entry, reason: expected.unreadable };
+      else if (!sameTally(this.tally(), expected.tally)) {
+        this.mismatch = { entry: expected.entry, reason: 'the tally this checkpoint keeps does not follow from the log before it' };
+      }
+    }
+  }
+
   add(entry: StoredEntry): void {
+    this.#reach(entry.seq);
     this.entries += 1;
     this.accounting.add(entry);
     if (entry.decision !== 'allow') return;

@@ -216,10 +216,15 @@ test("an entry forged in the app's name is found by the next check, though check
 test('a log longer than one walk is checked as far as one goes, and walked from its first entry a stretch at a time', async () => {
   assert.equal((await root.me()).instanceRole, 'owner');
   await write(12_000);
+  // Someone admitted past where one walk reaches: the rows hold them, the walk does not, and that is no tampering.
+  assert.equal((await deps.vault.admit({ actor: 'user:root@acme.example', principal: 'user:ada@acme.example' })).ok, true);
   // No beat yet, as after an upgrade from 0.10.0: the check starts at the first entry, and stops one walk on.
   const [{ nextSeq }] = await db.owner.select().from(auditChainHead);
   const first = await root.audit.verify();
   assert.deepEqual(first.ok && [first.from, first.through, first.remaining], [0, CHAIN_WALK - 1, Number(nextSeq) - CHAIN_WALK], JSON.stringify(first));
+  // Nor is the walk from the first entry whole: it ends where the page's does, saying what it left.
+  const partial = await root.audit.verifyWhole();
+  assert.deepEqual(partial.ok && [partial.through, partial.remaining, partial.next], [CHAIN_WALK - 1, Number(nextSeq) - CHAIN_WALK, null], JSON.stringify(partial));
 
   // Beats catch up, a checkpoint each, signed a walk at a time; then more is written, and beaten.
   for (let i = 0; i < 3; i++) await beat();

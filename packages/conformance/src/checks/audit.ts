@@ -63,7 +63,7 @@ export async function verification(deployment: Deployment, { admin }: People): P
   const anchored = await admin.api.audit.verify();
   expect(anchored.ok && anchored.remaining === 0, 'the log does not verify from its newest checkpoint', anchored);
   const result = await admin.api.audit.verifyWhole();
-  expect(result.ok, 'the full log does not verify', result);
+  expect(result.ok && result.remaining === 0, 'the full log does not verify to its end', result);
   expect(result.through !== null && anchored.through !== null && result.through >= anchored.through, 'the walk from the first entry stopped short', { anchored, result });
   await using(deployment.database(), async (sql) => {
     const [head] = await sql.query<{ next_seq: string | number; head_hash: Uint8Array }>('SELECT next_seq, head_hash FROM audit_chain_head');
