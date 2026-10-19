@@ -19,7 +19,9 @@ import {
   queries,
   refresh,
   shellOf,
+  shownChain,
   tabOpens,
+  type ChainResult,
 } from '../src/lib/queries.ts';
 
 const market = {
@@ -324,4 +326,24 @@ test('an environment of an archived project asks its secrets alone, though you r
   const loaded = await loadEnvironment(queryClient, client, { project: 'market', environment: 'dev' });
   assert.equal(loaded.ok, false);
   assert.deepEqual(calls, ['GET /projects', 'GET /secrets/market/dev']);
+});
+
+test('the page shows a break either check found, and the walk from the first entry only while the newer check agrees', () => {
+  const intact = (remaining: number, whole: boolean): ChainResult => ({
+    integrity: 'intact', whole, through: 100 - remaining, entries: 101 - remaining, from: whole ? 0 : 90, remaining, checkpoint: null, pending: 0,
+  });
+  const broken: ChainResult = { integrity: 'broken', through: 4, failedAtSeq: 5, author: 'app', reason: 'hash does not match the entry' };
+  const unknown: ChainResult = { integrity: 'unknown', problem: 'the request never got an answer' };
+  const walked = intact(0, true);
+  // Before anyone walks, the check from the newest checkpoint.
+  assert.equal(shownChain(intact(0, false), null)?.integrity, 'intact');
+  // The walk's verdict while the newer check finds the log whole too.
+  assert.equal(shownChain(intact(0, false), walked), walked);
+  // A break the walk found stays, whatever the newer check says.
+  const walkedBroken = { ...broken, failedAtSeq: 2 };
+  assert.equal(shownChain(intact(0, false), walkedBroken), walkedBroken);
+  // A newer check that finds a break, checks only part, or cannot run says how the log is now.
+  assert.equal(shownChain(broken, walked), broken);
+  assert.equal(shownChain(intact(12_000, false), walked)?.integrity === 'intact' && (shownChain(intact(12_000, false), walked) as { remaining: number }).remaining, 12_000);
+  assert.equal(shownChain(unknown, walked), unknown);
 });

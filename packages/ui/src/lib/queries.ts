@@ -382,6 +382,24 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
       };
 }
 
+/**
+ * What the page shows, of the check from the newest checkpoint (`quick`)
+ * and the walk from the first entry, once someone ran it (`whole`). A break
+ * the walk found stands; otherwise the newer check says how the log is now,
+ * broken, partly checked or not checked at all; and only while it found the
+ * log whole too does the walk's verdict, which read further back, stand
+ * over it.
+ *
+ *   whole broken                                  → whole
+ *   whole intact, quick intact with 0 remaining   → whole
+ *   whole intact, quick anything else             → quick
+ */
+export function shownChain(quick: ChainResult | undefined, whole: ChainResult | null): ChainResult | undefined {
+  if (whole === null || whole.integrity === 'broken') return whole ?? quick;
+  if (quick === undefined) return whole;
+  return quick.integrity === 'intact' && quick.remaining === 0 && whole.integrity === 'intact' ? whole : quick;
+}
+
 /** Why the log's verdict is not known: closed to the caller, or no answer. */
 export function chainUnknown(error: unknown) {
   const status = statusOf(error);

@@ -588,9 +588,13 @@ class VaultService implements Vault {
 
   /** Whether `entry` carries the vault's MAC: under any of its keys before `since`, and only its current one from there. */
   #authentic(entry: StoredEntry): boolean {
+    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: this.#keysFor(entry) }).ok;
+  }
+
+  /** The vault's log keys an entry may be under: any of them before `since`, and only its current one from there. */
+  #keysFor(entry: StoredEntry): LogKey[] {
     const { logKeys, since } = this.#prepared;
-    const keys = since !== null && entry.seq >= since ? logKeys.slice(0, 1) : logKeys;
-    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys }).ok;
+    return since !== null && entry.seq >= since ? logKeys.slice(0, 1) : logKeys;
   }
 
   /**
@@ -2413,9 +2417,7 @@ class VaultService implements Vault {
   #tallied(entry: StoredEntry): TalliedCheckpoint | string {
     const not = "not a checkpoint of the vault's that keeps a tally";
     if (entry.author !== 'vault' || entry.action !== CHECKPOINT || entry.decision !== 'allow' || entry.relatedSeq === null) return not;
-    const { logKeys, since } = this.#prepared;
-    const keys = since !== null && entry.seq >= since ? logKeys.slice(0, 1) : logKeys;
-    const authentic = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys });
+    const authentic = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: this.#keysFor(entry) });
     if (!authentic.ok) return withCause(authentic.reason);
     const read = metadataOf(entry) as Partial<TalliedCheckpoint> | null;
     if (read?.tally?.v !== TALLY_VERSION || read.scrub === undefined || typeof read.seq !== 'number' || BigInt(read.seq) !== entry.relatedSeq) return not;
@@ -2466,12 +2468,12 @@ class VaultService implements Vault {
       }
       const gap = await missingEntry(tx, from.at.seq);
       if (gap !== null) return { ok: false as const, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
-      const walk = new Walk(from.tally);
+      const walk = new Walk(from.tally, from.digest);
       const chain = await rehash(tx, logKeys, from.at, walk, { limit: walks.checkpoint });
       if (!chain.ok) return chain;
       const unsigned = await this.#checkpointFault(tx, walk.checkpoints);
       if (unsigned !== null) return unsigned;
-      return { ok: true as const, from, tally: walk.tally(), at: chain.at, done: chain.done };
+      return { ok: true as const, from, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
     }, SNAPSHOT);
     // The past rehashed, in a snapshot of its own. The database failing it leaves the stretch for the
     // next call, where it was, and the checkpoint is signed all the same, saying why (`warning`); a bug
@@ -2518,7 +2520,7 @@ class VaultService implements Vault {
       if (newest !== null && !(await carries(d.tx, newest))) {
         throw refused('log_broken', { reason: `the log up to entry ${newest.seq} is not the prefix the last checkpoint signed` });
       }
-      const walk = new Walk(walked.tally);
+      const walk = new Walk(walked.tally, walked.digest);
       let { at } = walked;
       if (walked.done) {
         const rest = await rehash(d.tx, logKeys, at, walk, {});
@@ -2538,7 +2540,7 @@ class VaultService implements Vault {
       this.#prepared.verified = further(this.#prepared.verified, at);
       const tally = walk.tally();
       // Its members and grants once, in the first checkpoint after they change; the others name that one.
-      const digest = accessDigest(tally.access);
+      const digest = walk.digest();
       const { from } = walked;
       const access = digest === from.digest && from.carrier !== null ? { digest, at: Number(from.carrier) } : { digest, ...tally.access };
       const signed = { seq: Number(at.seq), hash: at.hash.toString('hex'), signedAt: iso(d.at) };
@@ -2657,7 +2659,7 @@ class VaultService implements Vault {
       if (gap !== null) return { ok: false, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
       // Every checkpoint after it whose prefix the walk may pass, a stretch's end among them, signed while
       // the app walked or not: each tally is held to the walk where it gets there (`Walk.expect`).
-      const walk = new Walk(from.tally);
+      const walk = new Walk(from.tally, from.digest);
       const later = await store.talliedAfter(tx, from.entry ?? -1n, walks.verify);
       const passed = later.filter(({ seq }) => to === null || seq <= to);
       if (to !== null && passed.at(-1)?.seq !== to) {

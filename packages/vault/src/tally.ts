@@ -133,16 +133,19 @@ export class Walk {
   /** The digest of the members and grants as the walk has them, until an access entry changes them. */
   #digest: string | null = null;
 
-  #accessDigest(): string {
+  /** The digest of the members and grants as the walk has them: the tally's it started from, until an access entry. */
+  digest(): string {
     return (this.#digest ??= accessDigest(this.tally().access));
   }
 
-  /** The tally but for its members and grants, which `#accessDigest` stands for. */
+  /** The tally but for its members and grants, which `digest` stands for. */
   #unaccessed(): Omit<Tally, 'access'> {
     return { entries: this.entries, keys: [...this.keys], accounting: this.accounting.state(), replayFault: this.replayFault };
   }
 
-  constructor(from: Tally) {
+  /** `digest` is that of `from`'s members and grants, when the caller has it: a beat with no access entry hashes none. */
+  constructor(from: Tally, digest?: string) {
+    this.#digest = digest ?? null;
     this.accounting = new KeyAccounting(from.accounting);
     this.replayed = {
       members: new Map(from.access.members.map((member) => [member.principal, { ...member, accessSeq: BigInt(member.accessSeq) }])),
@@ -178,7 +181,7 @@ export class Walk {
       const expected = this.#expected.shift()!;
       if (this.mismatch !== null) continue;
       if ('unreadable' in expected) this.mismatch = { entry: expected.entry, reason: expected.unreadable };
-      else if (tallyKey(this.#unaccessed(), this.#accessDigest()) !== expected.key) {
+      else if (tallyKey(this.#unaccessed(), this.digest()) !== expected.key) {
         this.mismatch = { entry: expected.entry, reason: 'the tally this checkpoint keeps does not follow from the log before it' };
       }
     }

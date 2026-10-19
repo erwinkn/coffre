@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { chainResult, chainUnknown, queries, type AuditSearch, type ChainResult } from '../lib/queries';
+import { chainResult, chainUnknown, queries, shownChain, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -39,12 +39,10 @@ export function AuditPage() {
   const { data: result } = useSuspenseQuery(queries.auditEntries(client, search));
   // Not suspended: the table shows while the log is verified.
   const verification = useQuery(queries.auditChain(client));
-  // The walk from the first entry, once someone ran it, stands over the check from the newest checkpoint, which
-  // reads nothing before it and refetches as the page is looked at again: until the page is left. A break either
-  // finds stands over both: what the walk found stays, and what a later check finds is newer.
+  // The walk from the first entry, once someone ran it, beside the check from the newest checkpoint, which
+  // refetches as the page is looked at again: `shownChain` says which the page shows, until the page is left.
   const [whole, setWhole] = useState<ChainResult | null>(null);
-  const quick = verification.data;
-  const chain = whole?.integrity === 'broken' || quick?.integrity === 'broken' ? (whole?.integrity === 'broken' ? whole : quick) : (whole ?? quick);
+  const chain = shownChain(verification.data, whole);
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
   const [walked, setWalked] = useState<{ through: number | null } | null>(null);
   const [walkFailed, setWalkFailed] = useState<string | null>(null);
