@@ -94,17 +94,16 @@ export function forgetLogHeads(): void {
 }
 
 /**
- * Lock the log's head, and read it, with the database's clock once the lock
- * is held (`now`, in milliseconds). A transaction that appends takes this
+ * Lock the log's head, and read it. A transaction that appends takes this
  * before any other row, so the lock order is the same everywhere; taking it
  * again in the same transaction is free.
  */
-export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; headHash: Buffer; now: number }> {
+export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; headHash: Buffer }> {
   const { auditChainHead } = tablesOf(tx);
   const [head] = await forUpdate(
     tx,
     tx
-      .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash, now: clockMillis(tx) })
+      .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash })
       .from(auditChainHead)
       .where(eq(auditChainHead.onlyRow, true)),
   );
@@ -130,7 +129,7 @@ export async function appendEntries(
   // Every append queues here, if its transaction has not already.
   const head = await lockLogHead(tx);
   await check?.(tx);
-  const { now } = head;
+  const [{ now }] = await tx.select({ now: clockMillis(tx) }).from(auditChainHead);
   const [last] = await tx
     .select({ seq: auditLog.seq, hash: auditLog.hash })
     .from(auditLog)

@@ -49,6 +49,12 @@ if (!readdirSync('/proc').includes('self')) {
   process.exit(2);
 }
 const count = (name: keyof typeof values) => Number(values[name]);
+for (const name of ['entries', 'members', 'keys', 'warm', 'cold', 'port'] as const) {
+  if (!Number.isInteger(count(name)) || count(name) < (name === 'keys' || name === 'port' ? 1 : 0)) {
+    console.error(`--${name} takes a whole number${name === 'keys' || name === 'port' ? ' above zero' : ''}\n${USAGE}`);
+    process.exit(2);
+  }
+}
 
 // --- CPU, from /proc ---------------------------------------------------------
 
@@ -76,6 +82,9 @@ function processes(groups: Record<string, number>): Map<string, number[]> {
       found.get(name)!.push(Number(entry));
     }
   }
+  for (const [name, pids] of found) {
+    if (pids.length === 0) throw new Error(`no ${kind === 'workers' ? 'workerd running the Workers' : 'process'} in ${name}'s process group to measure`);
+  }
   return found;
 }
 
@@ -87,18 +96,26 @@ function cmdline(pid: string): string[] {
   }
 }
 
-/** Milliseconds on CPU so far, by group: every thread's, from its schedstat, in nanoseconds. */
+/**
+ * Milliseconds on CPU so far, by group: every thread's, from its schedstat,
+ * in nanoseconds. A process that is gone, or whose counters cannot be read,
+ * fails the measurement; a thread that ended between listing and reading is
+ * passed over, as it no longer runs.
+ */
 function cpu(of: Map<string, number[]>): Record<string, number> {
   const total = (pid: number) => {
     let ns = 0;
-    let tasks: string[] = [];
-    try {
-      tasks = readdirSync(`/proc/${pid}/task`);
-    } catch {}
-    for (const task of tasks) {
+    for (const task of readdirSync(`/proc/${pid}/task`)) {
+      let schedstat: string;
       try {
-        ns += Number(readFileSync(`/proc/${pid}/task/${task}/schedstat`, 'utf8').split(' ')[0]);
-      } catch {}
+        schedstat = readFileSync(`/proc/${pid}/task/${task}/schedstat`, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') continue;
+        throw error;
+      }
+      const onCpu = Number(schedstat.split(' ')[0]);
+      if (!Number.isFinite(onCpu)) throw new Error(`unreadable CPU counter for thread ${task} of process ${pid}: ${schedstat}`);
+      ns += onCpu;
     }
     return ns / 1e6;
   };
@@ -143,7 +160,7 @@ function paths(deployment: Deployment, people: { admin: Who; reader: Who; servic
     { name: 'GET /livez (the floor)', request: async () => ok(await fetch(`${origin}/livez`)) },
     { name: 'GET /api/me, browser session', request: async () => ok(await people.admin.browser.send('GET', '/api/me')) },
     { name: 'GET /api/me, CLI session', request: async () => ok(await fetch(`${origin}/api/me`, { headers: as(people.cli) })) },
-    { name: 'POST /api/reveals, one key', request: async () => ok(await people.admin.browser.send('POST', '/api/reveals', { path: `${APP}/KEY_1` })) },
+    { name: 'POST /api/reveals, one key', request: async () => ok(await people.admin.browser.send('POST', '/api/reveals', { path: `${APP}/KEY_0` })) },
     { name: `POST /api/reveals, ${count('keys')} keys`, request: async () => ok(await people.reader.browser.send('POST', '/api/reveals', { path: APP })) },
     { name: 'export: reveals as a service', request: async () => ok(await fetch(`${origin}/api/reveals`, { ...reveal(APP), headers: as(people.service) })) },
     { name: 'export --watch: version', request: async () => ok(await fetch(`${origin}/api/projects/${APP}/version`, { headers: as(people.service) })) },

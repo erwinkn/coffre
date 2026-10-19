@@ -494,13 +494,10 @@ class VaultService implements Vault {
       const result = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
-        // The clock as the head's lock reads it, when this takes it now.
-        const head = late ? null : await lockLogHead(tx);
+        if (!late) await lockLogHead(tx);
+        // The clock once the locks are held, in a statement of its own: one that waited for a lock is decided as of when it got it.
         const d: Decision = {
-          tx,
-          members,
-          at: head === null ? await this.#now(tx) : head.now + this.#prepared.options.clockOffset(),
-          log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
+          tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
         const result = await decide(d);
         // A read is logged once per place, whichever way it ends (`readsByPlace`).
