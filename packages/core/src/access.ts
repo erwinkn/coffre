@@ -198,8 +198,12 @@ export type Policy = {
   roles: Readonly<Record<Role, RoleDefinition>>;
   instanceRoles: Readonly<Record<InstanceRole, RoleDefinition>>;
   protected: readonly string[];
-  /** The protected environments by their project's id: what a grant on a whole project reaches of them. */
-  protectedIn: Readonly<Record<string, readonly string[]>>;
+  /**
+   * The protected environments by their project's id, each with its slug,
+   * which a scoped role's filters read: what a grant on a whole project
+   * reaches of them. A fork's slug is null until its row is written.
+   */
+  protectedIn: Readonly<Record<string, readonly { environmentId: string; slug: string | null }[]>>;
 };
 
 /** The policy before any Owner edits it: every role as it ships, and no environment protected. */
@@ -477,7 +481,7 @@ export function heldColumns(holder: Holdings, place: Place): Columns {
  */
 export function protectedWithin(policy: Policy, place: Place): Place[] {
   if (place.environmentId != null) return [];
-  return (policy.protectedIn[place.projectId] ?? []).map((environmentId) => ({ projectId: place.projectId, environmentId, environmentSlug: null }));
+  return (policy.protectedIn[place.projectId] ?? []).map(({ environmentId, slug }) => ({ projectId: place.projectId, environmentId, environmentSlug: slug }));
 }
 
 /** What a scope's grant holds, as it was issued, as a role holds it: whatever the role is now, which no edit changes. */

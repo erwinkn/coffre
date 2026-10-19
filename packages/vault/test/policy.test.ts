@@ -10,7 +10,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import { ROLES, type RoleDefinition } from '@coffre/core/access';
+import { INSTANCE_ROLES, ROLES, type RoleDefinition } from '@coffre/core/access';
 import type { SecretRef } from '@coffre/core/vault';
 import { entryHash } from '@coffre/core/audit';
 import { tablesOf, type Database } from '@coffre/db';
@@ -42,7 +42,8 @@ function configure(): ResolvedVaultConfig {
 
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config);
+  const clock = { offset: 0 };
+  const vault = await openLocalVault(db.vault, config, { clockOffset: () => clock.offset });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const where = await places(db.owner);
   const grant = async (principal: string, environmentId: string | null, role: string) => {
@@ -57,7 +58,7 @@ async function world() {
     assert.ok(wrap.ok);
     return storedVersions(db.owner, [{ secret, wrapped: wrap.wrapped[0]! }]);
   };
-  return { vault, config, ...where, grant, stored };
+  return { vault, config, clock, ...where, grant, stored };
 }
 
 const protect = (vault: LocalVault, actor: string, projectId: string, environmentIds: string[], on = true) =>
@@ -143,19 +144,25 @@ test('a role holds no more in a protected environment than elsewhere, reads only
   }
 });
 
-/** An entry in the vault's name that no key of its sealed: what an owner of the database inserts by hand. */
-async function forge(metadata: unknown): Promise<void> {
+/** `count` entries in the vault's name that no key of its sealed: what an owner of the database inserts by hand. */
+async function forge(metadata: unknown, count = 1): Promise<void> {
   const { auditLog, auditChainHead } = tablesOf(db.owner);
   const [head] = await db.owner.select().from(auditChainHead);
   const mac = Buffer.alloc(32, 7);
-  const fields = {
-    seq: head!.nextSeq, author: 'vault' as const, keyId: 'forged', occurredAt: Date.now(), actor: ROOT, action: 'policy.change', decision: 'allow',
-    code: null, subjectPrincipal: null, projectId: null, environmentId: null, secretId: null, secretVersionId: null,
-    operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: JSON.stringify(metadata),
-  };
-  const hash = entryHash(head!.headHash, fields, mac);
-  await db.owner.insert(auditLog).values({ ...fields, prevHash: head!.headHash, mac, hash });
-  await db.owner.update(auditChainHead).set({ nextSeq: head!.nextSeq + 1n, headHash: hash });
+  let [seq, prevHash] = [head!.nextSeq, head!.headHash];
+  const forged = [];
+  for (let i = 0; i < count; i++, seq++) {
+    const fields = {
+      seq, author: 'vault' as const, keyId: 'forged', occurredAt: Date.now(), actor: ROOT, action: 'policy.change', decision: 'allow',
+      code: null, subjectPrincipal: null, projectId: null, environmentId: null, secretId: null, secretVersionId: null,
+      operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: JSON.stringify(metadata),
+    };
+    const hash = entryHash(prevHash, fields, mac);
+    forged.push({ ...fields, prevHash, mac, hash });
+    prevHash = hash;
+  }
+  for (let i = 0; i < forged.length; i += 200) await db.owner.insert(auditLog).values(forged.slice(i, i + 200));
+  await db.owner.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash });
 }
 
 test("a policy entry forged in the vault's name is passed over; with none of its own within reach, every environment is protected", async () => {
@@ -175,6 +182,52 @@ test("a policy entry forged in the vault's name is passed over; with none of its
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, true);
   assert.equal((await w.vault.unwrap({ principal: CI, purpose: 'run', items: dev })).ok, true);
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod })).ok, false);
+});
+
+test("a policy the vault cannot read is written again by an Owner of the whole instance alone, from nothing: no change erases what the forged rows hide", async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'owner');
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  // The vault's own entry, beyond reach behind 1,024 forged ones: unreadable, so closed.
+  await forge({ policy: { roles: {}, instanceRoles: {}, protected: [] } }, 1024);
+  assert.deepEqual((await w.vault.policy()).protected, ['*']);
+  // An Owner of market protecting dev would write a policy that protects dev alone, prod no longer: refused.
+  const ada = await protect(w.vault, ADA, w.project, [w.dev]);
+  assert.equal(!ada.ok && ada.refusal.code, 'not_allowed');
+  assert.match(!ada.ok ? ada.refusal.message : '', /cannot read its own policy/);
+  // An Owner of the whole instance writes it again, from the roles as they ship: what the forged rows hid is for them to restore.
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.dev])).ok);
+  assert.deepEqual((await w.vault.policy()).protected, [w.dev]);
+});
+
+test('an id protected before its row exists protects it for an hour; one still with no row after is a fork never written, and protects nothing', async () => {
+  const w = await world();
+  const [refused, written] = [randomUUID(), randomUUID()];
+  assert.ok((await protect(w.vault, ROOT, w.project, [refused, written])).ok);
+  await db.owner.insert(tablesOf(db.owner).environments).values({ id: written, projectId: w.project, slug: 'staging', name: 'Staging' });
+  w.clock.offset = 61 * 60_000;
+  const young = randomUUID();
+  assert.ok((await protect(w.vault, ROOT, w.project, [young])).ok);
+  const policy = await w.vault.policy();
+  assert.deepEqual([...policy.protected].sort(), [written, young].sort());
+  // Each with its slug, which a scoped role's filters read; a fork's none until its row is written.
+  assert.deepEqual(
+    [...policy.protectedIn[w.project]!].sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1)),
+    [{ environmentId: written, slug: 'staging' }, { environmentId: young, slug: null }].sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1)),
+  );
+});
+
+test('a protected environment keeps its slug: a person scoped to it by slug holds what their role holds there', async () => {
+  const w = await world();
+  // Ada, a Viewer of market, and a Developer of every prod, as an Owner edited Developer to read in protected environments.
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'instance-role', role: 'developer', definition: { ...INSTANCE_ROLES.developer, protected: ['secret.read', 'secret.use', 'secret.write'] } } })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: { projects: 'all', environments: { only: ['prod'] } } })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  // She reads all of market, prod included: she gives CI a Viewer of market. Without prod's slug, her scope would not take it in.
+  assert.ok((await w.vault.admit({ actor: ADA, principal: CI })).ok);
+  const given = await w.vault.setAccess({ actor: ADA, principal: CI, changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] });
+  assert.ok(given.ok, JSON.stringify(given));
 });
 
 test('a read in flight when an environment is protected is decided as the policy is when it commits', { skip: process.env.COFFRE_TEST_ENGINE === 'sqlite' && 'SQLite runs one writer at a time' }, async () => {

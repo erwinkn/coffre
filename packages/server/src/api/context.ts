@@ -1,12 +1,12 @@
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import type { Refusal as VaultRefusal, Vault } from '@coffre/core/vault';
-import type { Database, Transaction } from '@coffre/db';
+import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
 import { can, newestPolicySeq, type Caller, type Place } from './caller.ts';
-import { ApiError, conflict, forbidden, vaultRefused } from './errors.ts';
+import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { PersonalToken, SigninService } from './signin.ts';
@@ -180,22 +180,26 @@ export async function audited<T>(
 }
 
 /**
- * Refuse, inside an audited transaction, if the instance's roles or
- * protected environments changed since the caller was loaded: the fence
- * for every decision made from `caller.policy` that this transaction
- * commits (`audited` runs it for a request), a fork left unprotected or a
- * credential's scope. A change appends its `policy.change` under the same
- * head this transaction holds, so one that passes here was not overtaken
- * by any:
+ * Refuse, 409 `policy_changed`, if the instance's roles or protected
+ * environments changed since the caller was loaded. In an audited
+ * transaction, it fences every decision made from `caller.policy` that the
+ * transaction commits (`audited` runs it for a request), a fork left
+ * unprotected or a credential's scope: a change appends its
+ * `policy.change` under the same head the transaction holds, so one that
+ * passes here was not overtaken by any. After a read, with no lock, it
+ * fences what the read hands back (`fenced`).
  *
  *   caller loaded, prod not protected (newest change 41)
  *   a Maintainer protects prod                           change 57
  *   the fork's transaction, under the head: 57, not 41   409; asked again, the fork is protected
  */
-export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq'> }, tx: Transaction): Promise<void> {
-  if ((await newestPolicySeq(tx)) === ctx.caller.policySeq) return;
-  throw conflict("the instance's roles or protected environments changed while this ran: try again");
+export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq'> }, db: Queryable): Promise<void> {
+  if ((await newestPolicySeq(db)) === ctx.caller.policySeq) return;
+  throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
 }
+
+/** The reason a request overtaken by a change to the policy answers with: asked again, it is weighed as the policy is now. */
+export const POLICY_CHANGED = 'policy_changed';
 
 /**
  * Collect read and vault events without a transaction; commit before
@@ -211,22 +215,25 @@ export async function recorded<T>(
     const log: AuditEntry[] = [];
     let fencing = false;
     const result = await work(log, () => (fencing = true));
-    if (log.length > 0 || fencing) await audited(ctx, async (_tx, entries) => { entries.push(...log); });
+    if (log.length > 0) await audited(ctx, async (_tx, entries) => { entries.push(...log); });
+    else if (fencing) await fenced(ctx);
     return result;
   });
 }
 
 /**
  * Hand back a value the app opened itself, a plain one, only as the policy
- * is now: once a transaction under the head, which writes nothing, finds
- * the caller's policy still the newest (`policyStill`). No vault call
- * decided it, as one decides each value it releases, under its own head.
+ * is now: once a read after the value's finds the caller's policy still
+ * the newest (`policyStill`). It takes no lock: a change committed before
+ * this read is seen, and one after it came after the value was read, so
+ * the read stands before it. No vault call decided it, as one decides each
+ * value it releases, under its own head.
  *
  *   caller loaded, Ada reads prod                    a plain value of prod read
  *   prod protected; she only uses it now             the read answers 409, not the value
  */
-export async function fenced(ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller'>): Promise<void> {
-  await audited(ctx, async () => {});
+export async function fenced(ctx: Pick<ApiContext, 'db' | 'caller'>): Promise<void> {
+  await policyStill(ctx, ctx.db);
 }
 
 /** Checks made before the write transaction still need their refusal recorded. */

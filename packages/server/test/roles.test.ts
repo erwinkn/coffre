@@ -16,6 +16,8 @@ import { asc, eq } from 'drizzle-orm';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
+import { lockLogHead } from '@coffre/db/log';
+import { postgresOnly } from './db/engine.ts';
 import { auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
@@ -97,6 +99,17 @@ async function status(call: Promise<unknown>): Promise<number> {
     return 200;
   } catch (error) {
     return (error as { status: number }).status;
+  }
+}
+
+/** The status and reason a call is refused with, or 200. */
+async function refusal(call: Promise<unknown>): Promise<{ status: number; reason?: string }> {
+  try {
+    await call;
+    return { status: 200 };
+  } catch (error) {
+    const { status, reason } = error as { status: number; reason?: string };
+    return { status, reason };
   }
 }
 
@@ -404,7 +417,7 @@ test('rule 2: a reveal of plain values, which the app opens itself, weighed befo
   await root.secrets.set('market/prod', { REGION: { value: 'eu-west-3', plain: true } });
   // No vault call opens a plain value: the app's fence, under the head, is all that sees prod protected meanwhile.
   meanwhileOn('access', (asked) => asked === ADA, () => maya.environments.protect('market/prod'));
-  assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 409);
+  assert.deepEqual(await refusal(ada.secrets.reveal('market/prod/REGION')), { status: 409, reason: 'policy_changed' });
   // Asked again, it is decided as the policy is now: Ada only uses prod.
   assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 403);
 });
@@ -449,4 +462,58 @@ test("rule 4: who reads through a reference held in a protected environment is w
   const [held] = (await root.references.list('market/prod')).references;
   // Ada, Maya and Vic only use prod now; CI, a service account, reads it, and the Owner.
   assert.deepEqual([...held!.readers!].sort(), [CI, `user:${ROOT}`].sort());
+});
+
+test('a reference made before its source was protected lends prod to no person who does not read prod: refused, and listed unreadable; a service account reads on', async () => {
+  await root.secrets.set('market/dev', { DATABASE_URL: { ref: 'market/prod/API_KEY' } });
+  await root.members.add('token:ci-dev', { access: { 'market/dev': 'viewer' } });
+  const ciDev = clientFor(deps, 'ci-dev', 'service');
+  await maya.environments.protect('market/prod');
+  // Ada, a Developer, reads dev and only uses prod: dev's read stops at the reference, saying why, rather than go without it.
+  const refused = await ada.secrets.reveal('market/dev').then(() => null, (error: unknown) => error as { status: number; message: string });
+  assert.equal(refused?.status, 409);
+  assert.match(refused!.message, /DATABASE_URL is a reference to market\/prod\/API_KEY, in a protected environment you do not read/);
+  assert.equal(await status(ada.secrets.reveal('market/dev/DATABASE_URL')), 409);
+  const listed = (await ada.secrets.list('market/dev')).keys;
+  assert.deepEqual(listed.map((key) => [key.key, key.readable]), [['API_KEY', true], ['DATABASE_URL', false]]);
+  // Nor is she counted among its readers; CI's service account, a Viewer of dev, is, and reads it as before.
+  const [held] = (await root.references.list('market/dev')).references;
+  assert.deepEqual([...held!.readers!].sort(), ['token:ci-dev', `user:${ROOT}`].sort());
+  assert.equal((await ciDev.secrets.reveal('market/dev')).values.DATABASE_URL, 'prod-key');
+  // The reference stays, and lends prod again once it is unprotected.
+  await root.environments.protect('market/prod', false);
+  assert.equal((await ada.secrets.reveal('market/dev')).values.DATABASE_URL, 'prod-key');
+});
+
+test('a role edit weighed from a policy another change overtook is refused, policy_changed, to be asked again, rather than applied', async () => {
+  // The Owner previewed Viewer reading in protected environments with nothing protected; prod is protected before it is saved.
+  meanwhileOn('access', (asked) => asked === `user:${ROOT}`, () => maya.environments.protect('market/prod'));
+  assert.deepEqual(await refusal(root.roles.set('viewer', READS_PROTECTED)), { status: 409, reason: 'policy_changed' });
+  assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, false);
+  // Asked again, as the policy is now, it is made.
+  await root.roles.set('viewer', READS_PROTECTED);
+  assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, true);
+});
+
+test('rule 2: a plain value is fenced by a read of the newest policy change, which waits on no write', postgresOnly('one writer at a time is SQLite\'s'), async () => {
+  await root.secrets.set('market/prod', { REGION: { value: 'eu-west-3', plain: true } });
+  // Another transaction holds the log's head, as any write does while it commits: the read is not queued behind it.
+  let release!: () => void;
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const writing = db.owner.transaction(async (tx) => {
+    await lockLogHead(tx);
+    holding();
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  await held;
+  try {
+    const read = ada.secrets.reveal('market/prod/REGION');
+    const answered = await Promise.race([read.then(() => true), new Promise((resolve) => setTimeout(resolve, 3000, false))]);
+    assert.equal(answered, true, 'answered while the head was held');
+    assert.equal((await read).values.REGION, 'eu-west-3');
+  } finally {
+    release();
+    await writing;
+  }
 });

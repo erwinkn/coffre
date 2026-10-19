@@ -125,6 +125,24 @@ test('a read through several references held in one environment is one entry of 
     [w.source.secretId, via.reference, holder.path, holder.secretId]));
 });
 
+test('a reference made before its source was protected lends its values to no person who does not read them there; a service account reads on', async () => {
+  const w = await world();
+  const { via } = await made(w);
+  const CI = 'token:ci';
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: CI })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: CI, changes: [{ projectId: w.billing, environmentId: w.billingProd, role: 'viewer', expiresAt: null }] })).ok);
+  const protect = (on: boolean) => w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: on } });
+  assert.ok((await protect(true)).ok);
+  // Bo reads billing, and nothing of market/prod; Ada, a Viewer of market/prod, only uses it now. Neither reads it through billing.
+  assert.equal(await read(w, BO, via).then((result) => result.ok || result.refusal.code), 'no_grant');
+  assert.equal(await read(w, ADA, via).then((result) => result.ok || result.refusal.code), 'no_grant');
+  // CI, a Viewer of billing/prod, holds its role's normal column everywhere: it reads through the reference as before.
+  assert.equal(await read(w, CI, via).then((result) => result.ok || result.refusal.code), true);
+  // The reference stays, and reads again once prod is unprotected.
+  assert.ok((await protect(false)).ok);
+  assert.equal(await read(w, BO, via).then((result) => result.ok || result.refusal.code), true);
+});
+
 test('making a reference takes read on the source and write on the holder, by your own grants', async () => {
   const w = await world();
   const ask = (principal: string) => w.vault.reference({ principal, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });

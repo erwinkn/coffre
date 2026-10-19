@@ -35,7 +35,7 @@ import { credentials, serviceBindings } from '@coffre/db/schema';
 
 import { memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
-import { placeOf } from './caller.ts';
+import { newestPolicySeq, placeOf } from './caller.ts';
 import { audited, denied, Refusal, type ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
@@ -364,24 +364,28 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
   const unsealed = await unsealedCredentials(db, new Date());
   let sealed = 0;
   for (const principal of new Set(unsealed.map((row) => row.principal))) {
+    const policySeq = await newestPolicySeq(db);
     const access = await vault.access(principal);
     if (access.status !== 'active') continue;
-    sealed += await sealCredentials(db, chainKey, access, unsealed.filter((candidate) => candidate.principal === principal));
+    sealed += await sealCredentials(db, chainKey, access, policySeq, unsealed.filter((candidate) => candidate.principal === principal));
   }
   return sealed;
 }
 
 /**
  * Seal these unsealed rows of one account with what it holds now, as
- * `access` answered, asked of the vault before: in one transaction, with a
- * `token.seal` entry naming those it sealed, so a row put back unsealed
- * later, and sealed again, shows in the log. Each update matches the row's
- * MAC as read, so two at once seal a row once. Returns how many it sealed.
+ * `access` answered, asked of the vault after the newest `policy.change`
+ * was `policySeq`: in one transaction, committed only while it still is
+ * (`policyStill`), so what each keeps is its roles as the policy is when it
+ * commits; with a `token.seal` entry naming those it sealed, so a row put
+ * back unsealed later, and sealed again, shows in the log. Each update
+ * matches the row's MAC as read, so two at once seal a row once. Returns
+ * how many it sealed.
  */
-export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, rows: readonly Unsealed[]): Promise<number> {
+export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, policySeq: bigint | null, rows: readonly Unsealed[]): Promise<number> {
   // Each with what its role holds now, kept, as one issued now.
   const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, access.policy ?? DEFAULT_POLICY)));
-  return audited({ db, chainKey }, async (tx, log) => {
+  return audited({ db, chainKey, caller: { policySeq } }, async (tx, log) => {
     const done = { tokens: [] as string[], bindings: [] as string[] };
     for (const row of rows) {
       const changed = row.kind === 'token'

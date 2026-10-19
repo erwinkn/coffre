@@ -53,6 +53,7 @@ import {
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
+import { newestPolicySeq } from './caller.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
@@ -673,10 +674,11 @@ export class WorkloadService {
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
+    const policySeq = await newestPolicySeq(db);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One 0.4 made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
-    if (binding.scope === null) await sealCredentials(db, chainKey, standing, [{ kind: 'binding', id: binding.id, principal: member }]);
+    if (binding.scope === null) await sealCredentials(db, chainKey, standing, policySeq, [{ kind: 'binding', id: binding.id, principal: member }]);
 
     const service = member.slice('token:'.length);
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;

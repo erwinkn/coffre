@@ -724,6 +724,28 @@ test('the plan: placeholders for what the proxy covers, and as they are the valu
   assert.equal(exposed.length, 4);
 });
 
+test("a handle keeps what its person reads and uses at each place, both columns: an Owner's reads a protected prod as they do, a Developer's only uses it", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789' });
+  await root.environments.protect('market/prod');
+  const plan = async (who: string) => {
+    const made = await bearer(await sessionFor(who)).handles.create({ label: 'run', paths: ['market/prod'] });
+    const response = await route('/use/market/prod', { headers: { authorization: `Bearer ${made.token}` } });
+    assert.equal(response.status, 200, await response.clone().text());
+    return { made, plan: (await response.json()) as { env: Record<string, string>; left: string[] } };
+  };
+  const owner = await plan(ROOT);
+  assert.deepEqual(owner.made.scope, { 'market/prod': 'viewer' });
+  assert.equal(owner.plan.env.WEBHOOK_SECRET, 'whsec_prod_0123456789', 'the Owner reads prod, and so does their handle');
+  const [stored] = await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.label, 'run'));
+  assert.deepEqual((JSON.parse(stored!.scope!) as { permissions: unknown }[])[0]!.permissions, { normal: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] });
+  const developer = await plan(DEV);
+  assert.deepEqual(developer.made.scope, { 'market/prod': 'contributor' });
+  assert.equal(developer.plan.env.WEBHOOK_SECRET, undefined, 'a Developer only uses a protected prod');
+  assert.deepEqual(developer.plan.left, ['WEBHOOK_SECRET']);
+});
+
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {
   runtime.plugins = checkPlugins([credentialProxy({ credentials: { odd: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{constructor}') } }, insecureUpstreams: true })]);
   const handle = await handleFor();

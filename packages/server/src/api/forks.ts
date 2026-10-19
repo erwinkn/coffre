@@ -7,7 +7,7 @@ import { badRequest, conflict, forbidden, notFound, vaultRefused } from './error
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
 import { protectedFor, protectIds } from './roles.ts';
-import { readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
+import { protectedSources, readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -63,7 +63,7 @@ export async function forkEnvironment(
       if (live.length > 0) throw conflict(`${project.slug}/${slug} already has secrets: a fork goes into a new or empty environment`);
     }
     // What the fork reads, checked before anything is made: a reference that cannot be read stops it.
-    const readable = await readableValues(ctx.db, source, sourcePlace);
+    const readable = protectedSources(ctx.caller, await readableValues(ctx.db, source, sourcePlace));
     const unread = unreadParents(ctx, project.id, readable);
     if (unread.size > 0) {
       const which = [...unread].map(([parent, keys]) => `${keys.join(', ')} from ${project.slug}/${parent}`);

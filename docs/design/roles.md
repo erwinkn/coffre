@@ -33,6 +33,8 @@ service account, a Viewer of `market/prod`, reads them as it always did.
 - **Forks stay protected.** A fork of a protected environment, a copy or
   one that inherits, is protected from its first moment: the vault
   protects its id before its row exists, and only an Owner unprotects it.
+  Each protected id keeps when it was protected: one with no row an hour
+  later is a fork refused or abandoned, and protects nothing.
 - **The vault keeps it**, as it keeps the instance's settings: the set of
   protected environments is in the vault's newest `policy.change` entry,
   under its MAC, with the roles (section 3). An environment's row says
@@ -47,16 +49,38 @@ service account, a Viewer of `market/prod`, reads them as it always did.
 - **The app's decisions are fenced the same way.** A request reads the
   number of the newest `policy.change` before it asks the vault who is
   calling, so the policy it decides from is that one or newer. Every
-  transaction the request commits, and every plain value it hands back,
-  reads that number again under the head and answers 409, "try again",
-  if it moved: a change appends under the same head, so one that passes
-  was not overtaken (section 8, rule 2). A Developer's service token weighed
-  before prod was protected, and issued after, is refused; asked again,
-  it is weighed as prod is now.
+  transaction the request commits reads that number again under the head,
+  and every plain value it hands back reads it again after the value was
+  read; either answers 409, reason `policy_changed`, if it moved: a change
+  appends under the same head, so one that passes was not overtaken
+  (section 8, rule 2). A Developer's service token weighed before prod was
+  protected, and issued after, is refused; asked again, it is weighed as
+  prod is now. `coffre run`, `export` and `get` ask again once, after a
+  short pause; the UI's confirmations ask the person again.
+- **A reference into a protected environment** lends its values to no
+  person who does not read them there. A read through a reference is
+  decided where its holder is, so `market/dev/DATABASE_URL`, a reference
+  to `market/prod/DATABASE_URL` made before prod was protected, would let
+  every Developer read prod through dev. Where the source is protected, the
+  vault asks a person for the permission at the source too, in their
+  protected column, and refuses otherwise; the app says so first, the key
+  unreadable with why, so a whole environment's read refuses rather than
+  go without it, and the listing says it is not readable. The reference
+  stays, and reads again once prod is unprotected. A service account
+  holds its normal column in prod, and reads through it as before. Making
+  one into a protected environment takes reading there, as making any
+  reference takes reading its source, decided under the head (rule 1).
 - **When the vault cannot read its own policy**, only entries forged in
   its name within reach, no role holds anything, a service account's
-  neither, but Owner, which holds everything and so writes the policy
-  again: a narrowing hidden by forged rows is never undone by them.
+  neither, but Owner, which holds everything: a narrowing hidden by forged
+  rows is never undone by them. Its edits are unknown, not none, so no
+  change is made from them, which would write a policy without the
+  protections and role edits the forged rows hide: every change is
+  refused but an Owner's of the whole instance, on no credential's scope,
+  which starts a fresh policy, the roles as they ship and only what it
+  protects. That is the recovery: the Owner then protects again what was
+  protected, and edits again what was edited, from the log's own entries
+  (`coffre audit`), which still name each change.
 
 ## 3. Roles, in two columns
 
@@ -169,7 +193,7 @@ two: replacing a Viewer's binding keeps what the Viewer held.
    that commit a decision made from the policy (rule 2). *Alternative:*
    fence call site by call site. Cost: a write that races a policy
    change answers 409 once, and a read that hands back a plain value
-   opens one short transaction; one of sealed values opens none.
+   reads one row more, with no lock; one of sealed values reads none.
 9. **A scope kept by its role's name alone, before 0.10, holds the role
    as it ships**, a constant no edit changes: it never widens, and the
    credentials CI already holds keep working. *Alternative:* none at all,
@@ -184,7 +208,7 @@ GET    /api/roles                     every role and instance role: both columns
 PUT    /api/roles/<role>              { name, description, permissions, protected }: an edit, or a new role
 DELETE /api/roles/<role>              a built-in role as it ships again; one an Owner made, deleted (409 while granted)
 PUT    /api/instance-roles/<role>     the same, for an instance role; DELETE resets it
-PATCH  /api/projects/<p>/<e>          { "protected": true }, or false, an Owner's alone
+PATCH  /api/projects/<p>/<e>          { "protected": true }: managing its environments; false: an Owner of the whole instance
 ```
 
 `?dryRun=1` on a `PUT` or `DELETE` answers what the change would do, and
@@ -243,10 +267,13 @@ protected…".
 itself, is fenced.** `audited` (packages/server/src/api/context.ts),
 given the request's caller, checks under the head that the newest
 `policy.change` is still the one the caller was loaded with
-(`policyStill`), and answers 409 otherwise. A sealed value needs no
-fence of the app's: the vault releases each under its own head (rule 1).
-A plain value, which the app opens from its own rows, is handed back
-only after `fenced`, a transaction that writes nothing: by a reveal,
+(`policyStill`), and answers 409 otherwise. Its 409 says `policy_changed`, as does the vault's refusal of a policy
+change weighed from an older one. A sealed value needs no fence of the
+app's: the vault releases each under its own head (rule 1). A plain
+value, which the app opens from its own rows, is handed back only after
+`fenced`, one read of the newest `policy.change` after the value's,
+which takes no lock: a change committed before it is seen, and one after
+it came after the value was read, which stands before it. By a reveal,
 `coffre run`, the credential proxy's `use`, MCP's and plugins' reads
 (`reveal`, through `recorded`'s `fence`), by a listing (`listSecrets`),
 and as an import preview's "unchanged" (`dryRunSecrets`). Reads that
@@ -266,13 +293,16 @@ accounts, connecting and disconnecting an MCP app, a CI run's exchange.
 
 A request that changes the policy itself goes on as of its change:
 `protectIds` (packages/server/src/api/roles.ts) asks the vault with the
-caller's `policySeq`, refused unless it is still the newest, and the
+caller's `policySeq`, refused unless it is still the newest, as is a role's
+edit (`changeRole`), so one previewed on an older policy is asked again
+rather than applied; and the
 request's caller then holds the policy it made, as of its own entry. A
 fork of a protected environment protects its id first and writes on; a
 change in between stops it.
 
-Test (packages/server/test/roles.test.ts): "rule 2: a reveal of plain
-values…".
+Tests (packages/server/test/roles.test.ts): "rule 2: a reveal of plain
+values…", "rule 2: a plain value is fenced by a read…", "a role edit
+weighed from a policy another change overtook…".
 
 **Rule 3: a credential never holds more than its issuer held, in either
 column.** Each grant of a scope keeps the columns it resolved to at
@@ -283,10 +313,13 @@ protected, the protected one as a person in a protected environment; for
 a grant on a project, in an environment of it no grant names, the least
 of all of them, those protected later included. Every credential issued
 now stores both columns (R17): personal tokens and handles
-(`personalScope`), service tokens and trust bindings (`issuedScope`), a
+(`personalScope`), a handle keeping at each place what its person holds
+there of reading and using, in each column, so an Owner's reads a
+protected prod as they do; service tokens and trust bindings (`issuedScope`), a
 binding replaced or its keys replaced (no more than it held before, nor
 than two it replaces held at one place, `narrowest`), and the scopes
-sealed onto 0.4's credentials (`sealCredentials`). A service credential
+sealed onto 0.4's credentials (`sealCredentials`, fenced by the policy
+the vault answered with, as rule 2 fences a request). A service credential
 is capped by its role alone: issuing one takes the account, and the
 issuer unless they manage access there, holding all of the role's normal
 column wherever it reaches, protected environments included
@@ -314,7 +347,8 @@ role…".
 
 **Rule 4: a check on a whole project checks its protected environments
 too.** A grant on a project reaches each environment of it the policy
-protects (`protectedWithin`, packages/core/src/access.ts), where a person
+protects (`protectedWithin`, packages/core/src/access.ts, each with its
+slug, which a scoped instance role's filters read), where a person
 holds the protected column and a service account the normal one, so a
 check of what someone holds on a project is made there too: giving a
 service account a role (`givesService`, and through it `managesService`,
@@ -322,12 +356,14 @@ service account a role (`givesService`, and through it `managesService`,
 `setAccess`, `admit` and `remove`, so service tokens and trust bindings
 too), and a personal token's scope (`personalScope`). Handles name
 environments only. Who reads through a reference (`readersAt`) is weighed
-as the policy has each reader. The project-wide checks left
+as the policy has each reader, at its source too where that is protected
+(`readsThrough`, as the vault's `#keys` decides). The project-wide checks left
 (`environment.manage`, `grant.manage`, `project.manage`) have one column,
 and a project's log leaves out each protected environment its reader's
 role leaves out (`listAudit`).
 
 Tests (packages/server/test/roles.test.ts): "rule 4: a personal token on
-a whole project…", "rule 4: who reads through a reference…", "a person
+a whole project…", "rule 4: who reads through a reference…", "a
+reference made before its source was protected…", "a person
 gives a service account a role on a whole project only if…", and "a
 service token weighed before prod was protected…".

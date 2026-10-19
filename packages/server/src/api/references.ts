@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission, Place } from '@coffre/core/access';
+import { allows, guarded, type Holdings, type Permission, type Place } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
@@ -269,6 +269,8 @@ export type Readable = {
   /** How its value was made, when a client generated it; a reference's is its source's business, and has none here. */
   recipe?: VersionRecipe | null;
   via?: Via;
+  /** Where a reference's source is, as grants match it: what `protectedSources` weighs. */
+  source?: Place;
   through?: string;
   parent?: { environmentId: string; slug: string };
 };
@@ -354,6 +356,38 @@ export function unreadParents(
   return unread;
 }
 
+/**
+ * Whether `caller` reads through a reference into `source`: anyone the
+ * holder lends it to, but in a protected environment, where a person holds
+ * their protected column and must hold `anyOf` there too, as the vault
+ * decides. A reference made before prod was protected lends prod's values
+ * to nobody who does not read them in prod; it reads again once prod is
+ * unprotected. A service account holds its normal column there, and reads on.
+ */
+export function readsThrough(holder: Holdings, source: Place, anyOf: readonly Permission[] = ['secret.read']): boolean {
+  return !guarded(holder, source) || anyOf.some((permission) => allows(holder, permission, source));
+}
+
+/**
+ * A read with each reference its caller does not read through
+ * (`readsThrough`) moved to its `unreadable`, saying why: a whole
+ * environment's read refuses rather than go without it, as for any
+ * reference that cannot be read.
+ */
+export function protectedSources(
+  caller: Holdings,
+  read: { items: Readable[]; unreadable: Unreadable[] },
+  anyOf: readonly Permission[] = ['secret.read'],
+): { items: Readable[]; unreadable: Unreadable[] } {
+  const lent = (item: Readable) => item.source === undefined || readsThrough(caller, item.source, anyOf);
+  const refused = read.items.filter((item) => !lent(item)).map((item): Unreadable => ({
+    key: item.key,
+    reason: `${item.key} is a reference to ${item.secret.path}, in a protected environment you do not read: only its readers read it through here`,
+    ...(item.parent === undefined ? {} : { parent: item.parent }),
+  }));
+  return refused.length === 0 ? read : { items: read.items.filter(lent), unreadable: [...read.unreadable, ...refused] };
+}
+
 /** One environment's own values, without what it inherits: `readableValues`, a layer at a time. */
 async function valuesIn(
   db: Queryable,
@@ -403,6 +437,7 @@ async function valuesIn(
       secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source), sensitive: opened.sensitive },
       envelope: opened.envelope,
       via: { reference: reference.row.id, seq: Number(reference.row.createdSeq) },
+      source: placeOfRow(source),
     });
   }
   return { items, unreadable: refused };
@@ -429,7 +464,7 @@ export type ListedReference = ReferenceView & {
 export async function listReferences(
   ctx: ApiContext,
   path: Path,
-  readersAt: (places: { projectId: string; environmentId: string; environmentSlug: string }[]) => Promise<string[][]>,
+  readersAt: (places: { projectId: string; environmentId: string; environmentSlug: string; source?: Place }[]) => Promise<string[][]>,
 ): Promise<{ references: ListedReference[] }> {
   const place = await resolvePath(ctx.db, path);
   if (place === null || (path.environment !== undefined && place.environment === null) || (path.key !== undefined && place.secret === null)) {
@@ -446,7 +481,7 @@ export async function listReferences(
     current.get(row.holder.secretId)?.id === row.id && (at(row.holder) || at(row.source)) && sees(row)));
   const manages = (row: ReferenceRow) => [row.holder, row.source].some((end) => can(caller, 'grant.manage', { projectId: end.projectId }));
   const shown = resolved.filter((reference) => manages(reference.row));
-  const readers = await readersAt(shown.map((reference) => reference.row.holder));
+  const readers = await readersAt(shown.map((reference) => ({ ...reference.row.holder, ...(reference.source === null ? {} : { source: placeOfRow(reference.source) }) })));
   return {
     references: resolved.map((reference) => ({
       ...reference.view,

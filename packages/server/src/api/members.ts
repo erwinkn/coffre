@@ -14,6 +14,7 @@ import {
   ownsInstance,
   runsInstance,
   type Filter,
+  type Holdings,
   type InstanceRole,
   type Permission,
   type Place,
@@ -46,7 +47,7 @@ import { audited, denied, Refusal, requireInstance, withRefusals, type ApiContex
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
-import { referencesBy, type ReferenceView } from './references.ts';
+import { readsThrough, referencesBy, type ReferenceView } from './references.ts';
 import { tokenRows, type TokenRow } from './signin.ts';
 import { accountOf, managedAccount, notManager, readScope, scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 
@@ -547,21 +548,23 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
  * policy has it: a person holds their roles' protected column in a
  * protected environment, a service account the other one.
  */
-export async function readersAt(ctx: ApiContext, places: readonly { projectId: string; environmentId: string; environmentSlug: string }[]): Promise<string[][]> {
+export async function readersAt(
+  ctx: ApiContext,
+  places: readonly { projectId: string; environmentId: string; environmentSlug: string; source?: Place }[],
+): Promise<string[][]> {
   if (places.length === 0) return [];
   const all = await directory(ctx, new Date());
+  const holdings = (listed: (typeof all)[number]): Holdings => ({
+    role: instanceRole(listed),
+    scope: scopeOf(listed),
+    grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })),
+    policy: ctx.caller.policy,
+    service: listed.member.type === 'service',
+  });
+  // Through a reference, its source too, where it is protected (`readsThrough`), as the vault decides.
   return places.map((place) => all
-    .filter((listed) => listed.status === 'active' && allows(
-      {
-        role: instanceRole(listed),
-        scope: scopeOf(listed),
-        grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })),
-        policy: ctx.caller.policy,
-        service: listed.member.type === 'service',
-      },
-      'secret.read',
-      place,
-    ))
+    .filter((listed) => listed.status === 'active' && allows(holdings(listed), 'secret.read', place)
+      && (place.source === undefined || readsThrough(holdings(listed), place.source)))
     .map((listed) => formatMember(listed.member)));
 }
 

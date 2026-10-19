@@ -220,6 +220,11 @@ export type RefusalCode =
   | 'last_owner'
   /** Well-formed, but not something the rules allow: a project role on an environment, a service account with an instance role. */
   | 'invalid'
+  /**
+   * A change to the policy weighed from one `policy.change` (`policySeq`)
+   * when another came since: asked again, it is weighed as the policy is now.
+   */
+  | 'policy_changed'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
   | 'log_broken'
   /**

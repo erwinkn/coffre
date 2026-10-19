@@ -43,7 +43,7 @@ import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.t
 import { personalName, resolveRead } from './personal.ts';
 import { openValues, plain, rewrapValue, rewrapValues, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
+import { currentReferences, placeOfRow, protectedSources, readableValues, readersOf, readsThrough, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -330,6 +330,11 @@ export async function listSecrets(
   const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
   const readsAt = (from: { id: string; slug: string }) =>
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
+  // A reference into a protected environment reads only for its readers there (`readsThrough`).
+  const lent = (row: SecretRow) => {
+    const source = references.get(row.id)?.source;
+    return source == null || readsThrough(ctx.caller, placeOfRow(source));
+  };
   const readable = (key: Pick<SecretKey, 'value' | 'sensitivity'>, reader: boolean) =>
     key.sensitivity !== null && key.sensitivity !== 'sensitive' && (key.value !== null || reader);
 
@@ -340,7 +345,7 @@ export async function listSecrets(
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
     // An archived key has no value to read: a read of it is refused.
     const listed = view(row);
-    const here = { ...listed, readable: row.archivedAt === null && readable(listed, readsHere) };
+    const here = { ...listed, readable: row.archivedAt === null && lent(row) && readable(listed, readsHere) };
     if (held === undefined) return { ...here, parent: null };
     // Flagged while the parent's value is newer than the override, to whoever may know when it was written.
     const [mine, theirs] = [writtenAt(row), writtenAt(held.row)];
@@ -365,7 +370,7 @@ export async function listSecrets(
     keys.push({
       ...listed,
       // Read through here, so by a reader of here and of the parent that holds it, while the chain to it is whole.
-      readable: readable(listed, live(held.from) && readsHere && readsAt(held.from)),
+      readable: lent(held.row) && readable(listed, live(held.from) && readsHere && readsAt(held.from)),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
@@ -1564,7 +1569,8 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
-    const read = await readableValues(ctx.db, place, environment, path.key);
+    // A reference into a protected environment reads only for those who read or use it there, as the vault decides.
+    const read = protectedSources(ctx.caller, await readableValues(ctx.db, place, environment, path.key), use === undefined ? ['secret.read'] : ['secret.read', 'secret.use']);
     const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
@@ -1660,7 +1666,7 @@ export async function reveal(
  */
 export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): Promise<{ version: string }> {
   const environment = requireLive(place);
-  const read = await readableValues(ctx.db, place, environment);
+  const read = protectedSources(ctx.caller, await readableValues(ctx.db, place, environment), ['secret.read', 'secret.use']);
   // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
   const person = ctx.caller.principal.type === 'user';
   const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) };

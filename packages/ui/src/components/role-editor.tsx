@@ -490,7 +490,11 @@ function RoleGrid({
         </span>
       );
     }
-    return <input type="checkbox" className="role-grid-box" aria-label={words} checked={on} onChange={(event) => onChange(permission, column, event.target.checked)} />;
+    return (
+      <label className="role-grid-hit">
+        <input type="checkbox" className="role-grid-box" aria-label={words} checked={on} onChange={(event) => onChange(permission, column, event.target.checked)} />
+      </label>
+    );
   };
   const values = GRID_PERMISSIONS.filter((permission) => !projectWide(permission));
   const wide = GRID_PERMISSIONS.filter(projectWide);

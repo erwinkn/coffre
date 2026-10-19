@@ -27,7 +27,7 @@ import type { PolicyChange } from '@coffre/core/vault';
 import { peopleHoldings, places, roleHolders, type ResolvedPath } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { placeOf } from './caller.ts';
-import { denied, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { denied, POLICY_CHANGED, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 
@@ -163,6 +163,8 @@ export async function changeRole(
     const result = await ctx.vault.changePolicy({
       actor: formatMember(ctx.caller.principal),
       change,
+      // Weighed, and previewed, from the caller's policy: refused, to be asked again, if another change came since.
+      policySeq: ctx.caller.policySeq === null ? null : Number(ctx.caller.policySeq),
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
@@ -330,7 +332,13 @@ export async function protectIds(ctx: ApiContext, projectId: string, environment
   return { ...ctx, caller: { ...ctx.caller, policy: result.policy, policySeq: result.seq === null ? null : BigInt(result.seq) } };
 }
 
-/** The vault's refusal of a policy change: one the rules refuse as things are, a role granted where it no longer fits, is a conflict. */
+/**
+ * The vault's refusal of a policy change: one the rules refuse as things
+ * are, a role granted where it no longer fits, is a conflict; one weighed
+ * from a policy another change overtook, the conflict any request so
+ * overtaken answers (`policyStill`), to be asked again.
+ */
 function policyRefused(refusal: { code: string; message: string }): ApiError {
+  if (refusal.code === 'policy_changed') return new ApiError('conflict', refusal.message, POLICY_CHANGED);
   return refusal.code === 'invalid' ? new ApiError('conflict', refusal.message, refusal.code) : vaultRefused(refusal);
 }

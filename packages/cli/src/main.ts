@@ -258,14 +258,47 @@ type Hint = (status: number, reason: string | null) => string | null;
 /**
  * The API, for one instance. A refusal of a status in `handled` comes back
  * to the command, as a CoffreError, for it to say what to do; any other
- * ends the CLI, said in `send`'s words.
+ * ends the CLI, said in `send`'s words. `ask` sends each request.
  */
-function client(to: Target = target(), hint?: Hint, handled: readonly number[] = []): CoffreClient {
+function client(to: Target = target(), hint?: Hint, handled: readonly number[] = [], ask: Ask = once): CoffreClient {
   return createClient({
     url: to.origin,
     headers: () => headersFor(to).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error))),
-    transport: (request) => send(request, to, hint, handled),
+    transport: (request) => send(request, to, hint, handled, ask),
   });
+}
+
+/** How `send` puts a request to the instance: `once`, or `retryingPolicyChange`. */
+type Ask = (request: Request) => Promise<Response>;
+
+/**
+ * A request, sent once. Cloudflare Access redirects rejected non-browser
+ * clients to its login page. Following that redirect would turn an auth
+ * failure into HTML that later explodes in JSON parsing.
+ */
+function once(request: Request): Promise<Response> {
+  return fetch(request, { redirect: 'manual' });
+}
+
+/**
+ * A read of values (`get`, `run`, `export`), asked again once, a moment
+ * later, when the instance answered 409 `policy_changed`: the access policy
+ * changed while the read was answered, and asked again, it is weighed as
+ * the policy is now. A second change is answered as any refusal is.
+ */
+async function retryingPolicyChange(request: Request): Promise<Response> {
+  const again = request.clone();
+  const response = await once(request);
+  if (response.status !== 409) return response;
+  const body = (await response.clone().json().catch(() => null)) as { reason?: unknown } | null;
+  if (body?.reason !== 'policy_changed') return response;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  return once(again);
+}
+
+/** `client`, for the values `get`, `run` and `export` read: each request is `retryingPolicyChange`. */
+function reader(handled: readonly number[] = []): CoffreClient {
+  return client(target(), undefined, handled, retryingPolicyChange);
 }
 
 /**
@@ -277,20 +310,17 @@ function enduringClient(to: Target): CoffreClient {
   return createClient({
     url: to.origin,
     headers: () => headersFor(to),
-    transport: (request) => fetch(request, { redirect: 'manual' }).catch((error: unknown) => {
+    transport: (request) => retryingPolicyChange(request).catch((error: unknown) => {
       throw new Error(unreachable(to.origin, error));
     }),
   });
 }
 
 /** One request; every way it can fail is explained in terms of what to do next. */
-async function send(request: Request, to: Target, hint?: Hint, handled: readonly number[] = []): Promise<Response> {
+async function send(request: Request, to: Target, hint?: Hint, handled: readonly number[] = [], ask: Ask = once): Promise<Response> {
   let response: Response;
   try {
-    // Cloudflare Access redirects rejected non-browser clients to its login
-    // page. Following that redirect would turn an auth failure into HTML that
-    // later explodes in JSON parsing.
-    response = await fetch(request, { redirect: 'manual' });
+    response = await ask(request);
   } catch (error) {
     fail(unreachable(to.origin, error));
   }
@@ -835,7 +865,7 @@ async function get(args: string[]): Promise<void> {
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre get <project>/<environment>/<KEY>');
 
-  const { values } = await client().secrets.reveal(`${project}/${environment}/${key}`);
+  const { values } = await reader().secrets.reveal(`${project}/${environment}/${key}`);
 
   // The value's own bytes when stdout is no terminal, so it composes: coffre get x/y/Z | pbcopy
   // A terminal gets its newline, to leave the prompt on a line of its own.
@@ -1096,7 +1126,7 @@ function sayLeftOut(sensitive: readonly string[]): void {
 
 /** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
 function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
-  const api = { read: client(), list: client(target(), undefined, [403, 404]) };
+  const api = { read: reader(), list: reader([403, 404]) };
   return readEnvironments(paths, api).then(
     (read) => {
       sayLeftOut(read.sensitive);
@@ -1125,8 +1155,9 @@ type Plan = { env: Record<string, string>; credentials: Record<string, string>; 
  */
 async function placeholders(paths: readonly string[], to: Target = target()): Promise<Placeholders | null> {
   if (!(await proxied(to))) return null;
+  // A plan reads values too, and is asked again as `run`'s reads are.
   const at = (path: string, headers: Record<string, string>) =>
-    fetch(`${to.origin}/use${path}`, { headers, redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
+    retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
   // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   const handle = await client(to).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });

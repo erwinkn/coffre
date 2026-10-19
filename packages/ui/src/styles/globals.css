@@ -4778,13 +4778,24 @@ a.menu-item:hover {
   margin-left: 0.25rem;
 }
 
+/* A box toggles from across its cell, a target well past 24px (WCAG 2.5.8): its label takes the cell's padding. */
+.role-grid td:has(> .role-grid-hit) {
+  padding: 0;
+}
+
+.role-grid-hit {
+  display: flex;
+  justify-content: center;
+  padding: 0.5rem 0;
+  cursor: pointer;
+}
+
 .role-grid-box {
   width: 1rem;
   height: 1rem;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
-  vertical-align: middle;
 }
 
 .role-grid-short {
