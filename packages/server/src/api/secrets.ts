@@ -20,6 +20,7 @@ import {
   resolvePath,
   secretHeads,
   secretPlaces,
+  plainVersions,
   sensitiveVersions,
   secretsInFolder,
   secretHistory,
@@ -43,7 +44,7 @@ import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.t
 import { personalName, resolveRead } from './personal.ts';
 import { openValues, plain, rewrapValue, rewrapValues, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, protectedSources, readableValues, readersOf, readsThrough, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -280,15 +281,24 @@ export async function listSecrets(
     if (inherited === null) throw conflict(`${place.project.slug}/${place.environment!.slug}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre`);
     const references = await currentReferences(db, [...rows, ...[...inherited.held.values()].map((held) => held.row)].filter((row) => row.current === null).map((row) => row.id));
     // A reference reads as its source's current value does: sensitive, or a secret, a plain one's included.
-    const sensitiveSources = await sensitiveVersions(db, [...references.values()].flatMap((reference) => (reference.state === 'live' ? [reference.source!.currentVersionId!] : [])));
-    return { rows, inherited, references, sensitiveSources };
+    const sources = [...references.values()].flatMap((reference) => (reference.state === 'live' ? [reference.source!.currentVersionId!] : []));
+    const [sensitiveSources, plainSources] = await Promise.all([sensitiveVersions(db, sources), plainVersions(db, sources)]);
+    return { rows, inherited, references, sensitiveSources, plainSources };
   };
-  const { rows, inherited, references, sensitiveSources } = fork ? await ctx.db.transaction(read, SNAPSHOT) : await read(ctx.db);
+  const { rows, inherited, references, sensitiveSources, plainSources } = fork ? await ctx.db.transaction(read, SNAPSHOT) : await read(ctx.db);
   const levelOfRow = (row: SecretRow): Sensitivity | null => {
     if (row.current !== null) return sensitivityOf(row.current);
     const reference = references.get(row.id);
     if (reference?.state !== 'live') return null;
-    return sensitiveSources.has(reference.source!.currentVersionId!) ? 'sensitive' : 'secret';
+    // A reference takes its nature from its source: plain, secret or sensitive, as the source's value is now.
+    const version = reference.source!.currentVersionId!;
+    return sensitiveSources.has(version) ? 'sensitive' : plainSources.has(version) ? 'plain' : 'secret';
+  };
+  /** A plain value: its own, or its source's through a reference. */
+  const plainOf = (row: SecretRow): string | null => {
+    if (row.current !== null) return row.current.plaintext;
+    const reference = references.get(row.id);
+    return reference?.state === 'live' ? plainSources.get(reference.source!.currentVersionId!) ?? null : null;
   };
   const referenceOf = (secretId: string): SecretKey['reference'] => {
     const reference = references.get(secretId);
@@ -320,7 +330,7 @@ export async function listSecrets(
     updatedAt: writtenAt(row)?.toISOString() ?? null,
     updatedBy: row.current?.createdBy ?? null,
     generated: generated.get(row.id) ?? null,
-    value: row.current?.plaintext ?? null,
+    value: plainOf(row),
     sensitivity: levelOfRow(row),
   });
   // Told of a parent's key, its version, age and plain value, as a lister of the parent is: a reader, or a Contributor who uses it.
@@ -330,11 +340,6 @@ export async function listSecrets(
   const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
   const readsAt = (from: { id: string; slug: string }) =>
     can(ctx.caller, 'secret.read', { projectId: environment.projectId, environmentId: from.id, environmentSlug: from.slug });
-  // A reference into a protected environment reads only for its readers there (`readsThrough`).
-  const lent = (row: SecretRow) => {
-    const source = references.get(row.id)?.source;
-    return source == null || readsThrough(ctx.caller, placeOfRow(source));
-  };
   const readable = (key: Pick<SecretKey, 'value' | 'sensitivity'>, reader: boolean) =>
     key.sensitivity !== null && key.sensitivity !== 'sensitive' && (key.value !== null || reader);
 
@@ -345,7 +350,7 @@ export async function listSecrets(
     const held = row.archivedAt === null ? inherited.held.get(row.key) : undefined;
     // An archived key has no value to read: a read of it is refused.
     const listed = view(row);
-    const here = { ...listed, readable: row.archivedAt === null && lent(row) && readable(listed, readsHere) };
+    const here = { ...listed, readable: row.archivedAt === null && readable(listed, readsHere) };
     if (held === undefined) return { ...here, parent: null };
     // Flagged while the parent's value is newer than the override, to whoever may know when it was written.
     const [mine, theirs] = [writtenAt(row), writtenAt(held.row)];
@@ -370,7 +375,7 @@ export async function listSecrets(
     keys.push({
       ...listed,
       // Read through here, so by a reader of here and of the parent that holds it, while the chain to it is whole.
-      readable: lent(held.row) && readable(listed, live(held.from) && readsHere && readsAt(held.from)),
+      readable: readable(listed, live(held.from) && readsHere && readsAt(held.from)),
       archived: false,
       parent: { from: held.from.slug, state: removed ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
     });
@@ -1077,7 +1082,13 @@ async function referenceTargets(
       throw new Refusal(notFound(why), denied(ctx, 'secret.reference', 'unknown_source', { ...environment, operationId, metadata: { key, source: ref } }));
     }
     if (found.environment.owner !== null) throw refused(key, `${ref} is in a personal config, which no reference reads`, 'personal');
-    need(ctx, 'secret.read', placeOf(found.project, found.environment), 'secret.reference', { operationId, metadata: { key, source: ref } });
+    // Making one hands its source's value to whoever reads here: its maker holds there what the source's nature asks, as
+    // the vault decides. To list a plain value, to read a secret, to use a sensitive one.
+    const at = placeOf(found.project, found.environment);
+    const version = found.secret.currentVersionId === null ? [] : [found.secret.currentVersionId];
+    const [sensitive, plainValue] = await Promise.all([sensitiveVersions(ctx.db, version), plainVersions(ctx.db, version)]);
+    const asked = sensitive.size > 0 ? 'secret.use' : plainValue.size > 0 && !can(ctx.caller, 'secret.read', at) ? 'secret.use' : 'secret.read';
+    need(ctx, asked, at, 'secret.reference', { operationId, metadata: { key, source: ref } });
     return { key, secretId: found.secret.id };
   }));
   const holders = refs.map(({ key }) => prepared.get(key)?.id ?? randomUUID());
@@ -1591,8 +1602,7 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
-    // A reference into a protected environment reads only for those who read or use it there, as the vault decides.
-    const read = protectedSources(ctx.caller, await readableValues(ctx.db, place, environment, path.key), use === undefined ? ['secret.read'] : ['secret.read', 'secret.use']);
+    const read = await readableValues(ctx.db, place, environment, path.key);
     const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
@@ -1601,9 +1611,7 @@ export async function reveal(
     const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
     // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
     const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
-    // A reference's value is read where its source is too, where that is protected (`readsThrough`), as the vault decides.
-    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)))
-      && (item.source === undefined || readsThrough(ctx.caller, item.source));
+    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
     const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
       key: item.key,
       inherited: item.parent !== undefined,
@@ -1690,7 +1698,7 @@ export async function reveal(
  */
 export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): Promise<{ version: string }> {
   const environment = requireLive(place);
-  const read = protectedSources(ctx.caller, await readableValues(ctx.db, place, environment), ['secret.read', 'secret.use']);
+  const read = await readableValues(ctx.db, place, environment);
   // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
   const person = ctx.caller.principal.type === 'user';
   const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) };

@@ -746,14 +746,14 @@ test("a handle keeps what its person reads and uses at each place, both columns:
   assert.deepEqual(developer.plan.left, ['WEBHOOK_SECRET']);
 });
 
-test("a handle made for dev reads a reference into a protected prod through dev, as its person does, and reaches nothing else of prod", async () => {
+test("a handle made for dev reads its reference into a protected prod through dev, and reaches nothing else of prod", async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789', MAPS_KEY: 'maps+prod/key=0123456789' });
   await root.secrets.set('market/dev', { WEBHOOK_SECRET: { ref: 'market/prod/WEBHOOK_SECRET' } });
   await root.environments.protect('market/prod');
   const made = await bearer(await sessionFor(ROOT)).handles.create({ label: 'run', paths: ['market/dev'] });
-  // Made for dev, it holds dev alone: the source is weighed on its person, an Owner, who reads prod.
+  // Made for dev, it holds dev alone: a reference's permissions are where it lives.
   assert.deepEqual(made.scope, { 'market/dev': 'viewer' });
   const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
   assert.equal(response.status, 200, await response.clone().text());
@@ -765,7 +765,7 @@ test("a handle made for dev reads a reference into a protected prod through dev,
   assert.equal(received.length, sent, 'nothing reached an upstream');
 });
 
-test("a reference into a protected prod lends nothing to whoever does not read or use prod, whatever reads dev", async () => {
+test("a reference into a protected prod is handed to whoever reads dev, holding nothing in prod: its permissions are dev's", async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789' });
@@ -776,26 +776,8 @@ test("a reference into a protected prod lends nothing to whoever does not read o
   const made = await bearer(await sessionFor('dee@acme.example')).handles.create({ label: 'run', paths: ['market/dev'] });
   const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
   assert.equal(response.status, 200, await response.clone().text());
-  const plan = (await response.json()) as { env: Record<string, string>; left: string[] };
-  // Not handed, not used: neither its value nor a placeholder for it.
-  assert.equal(plan.env.WEBHOOK_SECRET, undefined);
-  assert.ok(!JSON.stringify(plan).includes('whsec_prod'), JSON.stringify(plan));
-});
-
-test("a reference into a protected prod is left out of a plan for whoever only uses prod, and the rest of dev is handed back", async () => {
-  const root = clientFor(deps, ROOT);
-  await root.environments.create('market/prod');
-  await root.secrets.set('market/prod', { WEBHOOK_SECRET: 'whsec_prod_0123456789' });
-  await root.secrets.set('market/dev', { WEBHOOK_SECRET: { ref: 'market/prod/WEBHOOK_SECRET' } });
-  await root.environments.protect('market/prod');
-  // A Developer reads dev and only uses prod: no credential covers the key, and its value is prod's to read.
-  const made = await bearer(await sessionFor(DEV)).handles.create({ label: 'run', paths: ['market/dev'] });
-  const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
-  assert.equal(response.status, 200, await response.clone().text());
-  const plan = (await response.json()) as { env: Record<string, string>; left: string[] };
-  assert.equal(plan.env.WEBHOOK_SECRET, undefined);
-  assert.ok(plan.left.includes('WEBHOOK_SECRET'), JSON.stringify(plan.left));
-  assert.ok(Object.keys(plan.env).length > 0, 'the rest of dev');
+  assert.equal(((await response.json()) as { env: Record<string, string> }).env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
+  assert.equal((await route('/use/market/prod', { headers: { authorization: `Bearer ${made.token}` } })).status, 403);
 });
 
 test("a key named as an object's own property is still missing when the environment lacks it", async () => {

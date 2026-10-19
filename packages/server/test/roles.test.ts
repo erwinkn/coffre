@@ -450,18 +450,17 @@ test('rule 3: a personal token holds no more than its person held when it was is
   assert.deepEqual((await storedScopeOf(token.id))[0]!.permissions, { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] });
 });
 
-test("rule 3: a personal token on dev reads a reference into a protected prod as its person does, and nothing else of prod", async () => {
+test("rule 3: a personal token on dev reads dev's reference into a protected prod as dev's readers do, and nothing else of prod", async () => {
   await root.secrets.set('market/dev', { FROM_PROD: { ref: 'market/prod/API_KEY' } });
   await maya.environments.protect('market/prod');
+  // The Owner's token, made for dev, reads all of dev, the reference included; prod itself is no place it reaches.
   const token = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  // The Owner reads prod: their token, made for dev, reads all of dev, the reference included.
-  const read = await bearer(token.token).secrets.reveal('market/dev');
-  assert.equal(read.values.FROM_PROD, 'prod-key');
-  assert.equal(await status(bearer(token.token).secrets.reveal('market/prod')), 403, 'prod itself is no place it reaches');
-  // A Developer of market only uses prod: her token on dev is refused the reference, as she is.
+  assert.equal((await bearer(token.token).secrets.reveal('market/dev')).values.FROM_PROD, 'prod-key');
+  assert.equal(await status(bearer(token.token).secrets.reveal('market/prod')), 403);
+  // A Developer's, who only uses prod, too: the reference's permissions are dev's.
   const hers = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  assert.equal(await status(bearer(hers.token).secrets.reveal('market/dev')), 409);
-  assert.equal(await status(ada.secrets.reveal('market/dev')), 409);
+  assert.equal((await bearer(hers.token).secrets.reveal('market/dev')).values.FROM_PROD, 'prod-key');
+  assert.equal(await status(bearer(hers.token).secrets.reveal('market/prod')), 403);
 });
 
 test('rule 3: a service token issued under a narrowed role keeps it when the role is put back as it ships', async () => {
@@ -493,25 +492,37 @@ test("rule 4: who reads through a reference held in a protected environment is w
   assert.deepEqual([...held!.readers!].sort(), [CI, `user:${ROOT}`].sort());
 });
 
-test('a reference made before its source was protected lends prod to no person who does not read prod: refused, and listed unreadable; a service account reads on', async () => {
+test("a reference takes its value and nature from its source and its permissions from where it lives: protecting prod after it was made leaves it working", async () => {
   await root.secrets.set('market/dev', { DATABASE_URL: { ref: 'market/prod/API_KEY' } });
   await root.members.add('token:ci-dev', { access: { 'market/dev': 'viewer' } });
   const ciDev = clientFor(deps, 'ci-dev', 'service');
   await maya.environments.protect('market/prod');
-  // Ada, a Developer, reads dev and only uses prod: dev's read stops at the reference, saying why, rather than go without it.
-  const refused = await ada.secrets.reveal('market/dev').then(() => null, (error: unknown) => error as { status: number; message: string });
-  assert.equal(refused?.status, 409);
-  assert.match(refused!.message, /DATABASE_URL is a reference to market\/prod\/API_KEY, in a protected environment you do not read/);
-  assert.equal(await status(ada.secrets.reveal('market/dev/DATABASE_URL')), 409);
-  const listed = (await ada.secrets.list('market/dev')).keys;
-  assert.deepEqual(listed.map((key) => [key.key, key.readable]), [['API_KEY', true], ['DATABASE_URL', false]]);
-  // Nor is she counted among its readers; CI's service account, a Viewer of dev, is, and reads it as before.
-  const [held] = (await root.references.list('market/dev')).references;
-  assert.deepEqual([...held!.readers!].sort(), ['token:ci-dev', `user:${ROOT}`].sort());
-  assert.equal((await ciDev.secrets.reveal('market/dev')).values.DATABASE_URL, 'prod-key');
-  // The reference stays, and lends prod again once it is unprotected.
-  await root.environments.protect('market/prod', false);
+  // Ada, a Developer, reads dev, and only uses prod: dev's reference to a prod secret reads through dev's grants alone.
   assert.equal((await ada.secrets.reveal('market/dev')).values.DATABASE_URL, 'prod-key');
+  assert.equal((await ada.secrets.reveal('market/dev/DATABASE_URL')).values.DATABASE_URL, 'prod-key');
+  assert.deepEqual((await ada.secrets.list('market/dev')).keys.map((key) => [key.key, key.readable]), [['API_KEY', true], ['DATABASE_URL', true]]);
+  assert.equal(await status(ada.secrets.reveal('market/prod')), 403, 'prod itself she only uses');
+  // Its readers are dev's.
+  const [held] = (await root.references.list('market/dev')).references;
+  assert.deepEqual([...held!.readers!].sort(), [ADA, MAYA, VIC, 'token:ci-dev', `user:${ROOT}`].sort());
+  assert.equal((await ciDev.secrets.reveal('market/dev')).values.DATABASE_URL, 'prod-key');
+});
+
+test("a reference to a sensitive source is use-only where it lives, a plain one plain, and making one takes what the source's nature asks there", async () => {
+  await maya.environments.protect('market/prod');
+  await root.secrets.set('market/prod', { STRIPE_KEY: { value: 'sk_live_0123456789', sensitivity: 'sensitive' }, REGION: { value: 'eu-west-3', plain: true } });
+  // Ada, a Developer of market, uses prod, and reads none of it: she refers to what she uses, never to a secret she does not read.
+  assert.equal(await status(ada.secrets.set('market/dev', { PROD_API: { ref: 'market/prod/API_KEY' } })), 403);
+  await ada.secrets.set('market/dev', { STRIPE_KEY: { ref: 'market/prod/STRIPE_KEY' }, REGION: { ref: 'market/prod/REGION' } });
+  const listed = new Map((await vic.secrets.list('market/dev')).keys.map((key) => [key.key, key]));
+  assert.deepEqual([listed.get('STRIPE_KEY')!.sensitivity, listed.get('STRIPE_KEY')!.readable], ['sensitive', false]);
+  assert.deepEqual([listed.get('REGION')!.sensitivity, listed.get('REGION')!.value], ['plain', 'eu-west-3']);
+  // Vic, a Viewer of dev, reads dev: the plain one as it is, the sensitive one no person reads.
+  const read = await vic.secrets.reveal('market/dev');
+  assert.equal(read.values.REGION, 'eu-west-3');
+  assert.equal(read.values.STRIPE_KEY, undefined);
+  assert.ok(read.sensitive.includes('STRIPE_KEY'));
+  assert.equal(await status(vic.secrets.reveal('market/dev/STRIPE_KEY')), 403);
 });
 
 test('a role edit weighed from a policy another change overtook is refused, policy_changed, to be asked again, rather than applied', async () => {

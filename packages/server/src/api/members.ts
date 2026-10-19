@@ -47,7 +47,7 @@ import { audited, denied, Refusal, requireInstance, withRefusals, type ApiContex
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
-import { readsThrough, referencesBy, type ReferenceView } from './references.ts';
+import { referencesBy, type ReferenceView } from './references.ts';
 import { tokenRows, type TokenRow } from './signin.ts';
 import { accountOf, managedAccount, notManager, readScope, scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 
@@ -561,10 +561,9 @@ export async function readersAt(
     policy: ctx.caller.policy,
     service: listed.member.type === 'service',
   });
-  // Through a reference, its source too, where it is protected (`readsThrough`), as the vault decides.
+  // Through a reference too, its readers are the holder's: a reference takes its permissions from where it lives.
   return places.map((place) => all
-    .filter((listed) => listed.status === 'active' && allows(holdings(listed), 'secret.read', place)
-      && (place.source === undefined || readsThrough(holdings(listed), place.source)))
+    .filter((listed) => listed.status === 'active' && allows(holdings(listed), 'secret.read', place))
     .map((listed) => formatMember(listed.member)));
 }
 

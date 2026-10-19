@@ -98,9 +98,13 @@ export async function openValues(
   return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)) };
 }
 
-/** Whether an item's value is plain, and read as it is: its own or a parent's, never one through a reference. */
-export function plain(item: { plaintext?: string | null; via?: Via }): boolean {
-  return item.plaintext != null && item.via === undefined;
+/**
+ * Whether an item's value is plain, and read as it is: its own, a
+ * parent's, or a reference's to a plain source, which takes its nature
+ * from its source and its readers from where it is held.
+ */
+export function plain(item: { plaintext?: string | null }): boolean {
+  return item.plaintext != null;
 }
 
 /**

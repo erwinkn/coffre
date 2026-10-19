@@ -7,7 +7,8 @@
   protected, and in one that is. A person in a protected environment
   holds the second; a service account holds the first everywhere, so CI
   reads what it read. As they ship, Viewer, Developer and Maintainer
-  drop read in a protected environment, and keep use and write:
+  drop read in a protected environment and keep use; Developer and
+  Maintainer keep write too:
 
   ```sh
   coffre environments protect market/prod   # whoever manages market's environments
@@ -41,7 +42,14 @@
   nothing. A request whose roles or protected environments changed while
   it ran answers 409 `policy_changed`, "try again", as does a role's edit
   confirmed with an impact preview (`?revision=`) another change
-  overtook.
+  overtook. A reference takes its value and nature (plain, secret,
+  sensitive) from its source, and its permissions from where it lives:
+  whoever reads `market/dev` reads dev's reference into a protected
+  `market/prod`, and a reference to a sensitive key is use-only there.
+  Making one takes, at its source, what that nature asks (to list a plain
+  value, to read a secret, to use a sensitive one); after that it works on
+  its own, prod protected later or not, so making one hands the value to
+  dev's readers. A reference to a plain value is plain, no longer secret.
   The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
   and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and
   `PATCH /api/projects/<p>/<e>` with `{ "protected": true }`. Migration

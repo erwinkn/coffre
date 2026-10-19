@@ -670,7 +670,14 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         if (!apiMember(member).startsWith('token:') || (role ?? 'member') !== 'member' || scope !== undefined) return instanceOnly(ctx);
         if (!(await ctx.api.me()).setsUpServices) throw new CoffreError(403, 'forbidden', 'you set up no service account: the instance keeps them to admins where you hold access');
       },
-      replaces: async (api, { member, access }) => (access === undefined ? { details: [], state: null } : heldAt(api, member, access)),
+      // What it gives, as the page says it: the grants as they were, or the instance role as the instance defines it, which
+      // Approve refuses once an Owner has edited it since.
+      replaces: async (api, { member, role, access }) => {
+        if (access !== undefined) return heldAt(api, member, access);
+        if (role === undefined) return { details: [], state: null };
+        const { name, description, permissions, protected: guarded } = await instanceRoleOf(api, role);
+        return { details: [], state: { role, definition: { name, description, permissions, protected: guarded } } };
+      },
       preview: async (api, { member, role, scope, access }, _viewing, replaced) => [
         { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
         role === undefined

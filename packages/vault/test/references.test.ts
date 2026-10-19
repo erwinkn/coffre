@@ -125,22 +125,35 @@ test('a read through several references held in one environment is one entry of 
     [w.source.secretId, via.reference, holder.path, holder.secretId]));
 });
 
-test('a reference made before its source was protected lends its values to no person who does not read them there; a service account reads on', async () => {
+test("a reference reads by its holder's grants alone: its source protected after it was made, it reads on for whoever reads the holder", async () => {
   const w = await world();
   const { via } = await made(w);
-  const CI = 'token:ci';
-  assert.ok((await w.vault.admit({ actor: ROOT, principal: CI })).ok);
-  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: CI, changes: [{ projectId: w.billing, environmentId: w.billingProd, role: 'viewer', expiresAt: null }] })).ok);
   const protect = (on: boolean) => w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: on } });
   assert.ok((await protect(true)).ok);
-  // Bo reads billing, and nothing of market/prod; Ada, a Viewer of market/prod, only uses it now. Neither reads it through billing.
-  assert.equal(await read(w, BO, via).then((result) => result.ok || result.refusal.code), 'no_grant');
-  assert.equal(await read(w, ADA, via).then((result) => result.ok || result.refusal.code), 'no_grant');
-  // CI, a Viewer of billing/prod, holds its role's normal column everywhere: it reads through the reference as before.
-  assert.equal(await read(w, CI, via).then((result) => result.ok || result.refusal.code), true);
-  // The reference stays, and reads again once prod is unprotected.
-  assert.ok((await protect(false)).ok);
+  // Bo reads billing, and nothing of market/prod: he reads through the reference as before, its permissions billing's.
   assert.equal(await read(w, BO, via).then((result) => result.ok || result.refusal.code), true);
+});
+
+test("making a reference takes, at its source, what the source's nature asks, as any access there: to read a secret, to use a sensitive one, to list a plain one", async () => {
+  const w = await world();
+  const { secrets, secretVersions } = tablesOf(db.owner);
+  // Protected, market/prod gives Ada, its Viewer, use alone: she refers to none of its secrets.
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: true } })).ok);
+  const ask = () => w.vault.reference({ principal: ADA, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });
+  assert.equal(await ask().then((result) => result.ok || result.refusal.code), 'no_grant');
+  // Its value made sensitive, which nobody reads: using it is what a reference to it lends, and Ada uses it.
+  const sensitive = { ...w.source, version: 2, sensitive: true };
+  const wrapped = await w.vault.wrap({ principal: ROOT, items: [{ secret: sensitive, key: randomBytes(32).toString('base64') }] });
+  assert.ok(wrapped.ok);
+  const [{ secretVersionId }] = await storedVersions(db.owner, [{ secret: sensitive, wrapped: wrapped.wrapped[0] }]);
+  await db.owner.update(secrets).set({ currentVersionId: secretVersionId, currentVersion: 2 }).where(eq(secrets.id, w.source.secretId));
+  assert.equal(await ask().then((result) => result.ok || result.refusal.code), true);
+  // Plain, it lends what listing it shows, and Ada lists it.
+  const [row] = await db.owner.select().from(secretVersions).where(eq(secretVersions.id, secretVersionId));
+  const plainId = randomUUID();
+  await db.owner.insert(secretVersions).values({ ...row!, id: plainId, version: 3, sensitive: false, plaintext: 'eu-west-3' });
+  await db.owner.update(secrets).set({ currentVersionId: plainId, currentVersion: 3 }).where(eq(secrets.id, w.source.secretId));
+  assert.equal(await ask().then((result) => result.ok || result.refusal.code), true);
 });
 
 test('making a reference takes read on the source and write on the holder, by your own grants', async () => {

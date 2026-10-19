@@ -488,6 +488,22 @@ export async function secretsByIds(db: Queryable, ids: readonly string[]): Promi
   return new Map(rows.map(({ project, environment, key, ...row }) => [row.secretId, { ...row, path: `${project}/${environment}/${key}` }]));
 }
 
+/**
+ * Each secret's nature, as its current version has it: plain where its
+ * value is stored as it is, sensitive where it is bound so, and otherwise
+ * secret, as is one with no value of its own.
+ */
+export async function natures(db: Queryable, secretIds: readonly string[]): Promise<Map<string, 'plain' | 'secret' | 'sensitive'>> {
+  if (secretIds.length === 0) return new Map();
+  const { secrets, secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ id: secrets.id, sensitive: secretVersions.sensitive, plain: truth(isNotNull(secretVersions.plaintext)) })
+    .from(secrets)
+    .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+    .where(inArray(secrets.id, [...new Set(secretIds)]));
+  return new Map(rows.map((row) => [row.id, Boolean(row.sensitive) ? 'sensitive' : Boolean(row.plain) ? 'plain' : 'secret']));
+}
+
 /** The vault's newest entry of any of these actions, allowed, or undefined. */
 export async function latestVaultEntry(db: Queryable, actions: readonly string[]): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);

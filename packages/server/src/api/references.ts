@@ -269,7 +269,7 @@ export type Readable = {
   /** How its value was made, when a client generated it; a reference's is its source's business, and has none here. */
   recipe?: VersionRecipe | null;
   via?: Via;
-  /** Where a reference's source is, as grants match it: what `protectedSources` weighs. */
+  /** Where a reference's source is, as grants match it. */
   source?: Place;
   through?: string;
   parent?: { environmentId: string; slug: string };
@@ -356,42 +356,6 @@ export function unreadParents(
   return unread;
 }
 
-/**
- * Whether `caller` reads through a reference into `source`: anyone the
- * holder lends it to, but in a protected environment, where a person holds
- * their protected column and must hold `anyOf` there too, as the vault
- * decides. A reference made before prod was protected lends prod's values
- * to nobody who does not read them in prod; it reads again once prod is
- * unprotected. A service account holds its normal column there, and reads on.
- * Weighed on the person's own standing, not their credential's: a token's
- * scope governs the holder it was made to reach, and a reference lends no
- * more of the source than its one key, as the vault decides (`#keys`).
- */
-export function readsThrough(holder: Holdings, source: Place, anyOf: readonly Permission[] = ['secret.read']): boolean {
-  const person: Holdings = { ...holder, credentialScope: null };
-  return !guarded(person, source) || anyOf.some((permission) => allows(person, permission, source));
-}
-
-/**
- * A read with each reference its caller does not read through
- * (`readsThrough`) moved to its `unreadable`, saying why: a whole
- * environment's read refuses rather than go without it, as for any
- * reference that cannot be read.
- */
-export function protectedSources(
-  caller: Holdings,
-  read: { items: Readable[]; unreadable: Unreadable[] },
-  anyOf: readonly Permission[] = ['secret.read'],
-): { items: Readable[]; unreadable: Unreadable[] } {
-  const lent = (item: Readable) => item.source === undefined || readsThrough(caller, item.source, anyOf);
-  const refused = read.items.filter((item) => !lent(item)).map((item): Unreadable => ({
-    key: item.key,
-    reason: `${item.key} is a reference to ${item.secret.path}, in a protected environment you do not read: only its readers read it through here`,
-    ...(item.parent === undefined ? {} : { parent: item.parent }),
-  }));
-  return refused.length === 0 ? read : { items: read.items.filter(lent), unreadable: [...read.unreadable, ...refused] };
-}
-
 /** One environment's own values, without what it inherits: `readableValues`, a layer at a time. */
 async function valuesIn(
   db: Queryable,
@@ -440,6 +404,8 @@ async function valuesIn(
       // Opened as the source it is: its value is bound to the source's ids.
       secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source), sensitive: opened.sensitive },
       envelope: opened.envelope,
+      // A plain source's value is plain here too: a reference takes its nature from its source.
+      plaintext: opened.plaintext,
       via: { reference: reference.row.id, seq: Number(reference.row.createdSeq) },
       source: placeOfRow(source),
     });

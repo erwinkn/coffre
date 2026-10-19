@@ -60,20 +60,24 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   protected, and issued after, is refused; asked again, it is weighed as
   prod is now. `coffre run`, `export` and `get` ask again once, after a
   short pause; the UI's confirmations ask the person again.
-- **A reference into a protected environment** lends its values to no
-  person who does not read them there. A read through a reference is
-  decided where its holder is, so `market/dev/DATABASE_URL`, a reference
-  to `market/prod/DATABASE_URL` made before prod was protected, would let
-  every Developer read prod through dev. Where the source is protected, the
-  vault asks a person for the permission at the source too, in their
-  protected column, on their own standing, whatever credential they read
-  with (its scope governs the holder), and refuses otherwise; the app says so first, the key
-  unreadable with why, so a whole environment's read refuses rather than
-  go without it, and the listing says it is not readable. The reference
-  stays, and reads again once prod is unprotected. A service account
-  holds its normal column in prod, and reads through it as before. Making
-  one into a protected environment takes reading there, as making any
-  reference takes reading its source, decided under the head (rule 1).
+- **A reference takes its value and nature from its source, and its
+  permissions from where it lives** (Erwin, 2026-10-19). Reading or using
+  `market/dev/DATABASE_URL`, a reference to `market/prod/DATABASE_URL`, is
+  decided by the reader's grants on dev alone, whatever their credential,
+  and whether prod is protected or not: a Viewer of dev reads it, and
+  `market/prod` itself stays theirs only if they hold it. Its nature is
+  the source's value's: a reference to a sensitive key is use-only in dev,
+  for everyone; to a secret, read by dev's readers; to a plain value,
+  plain. The source is weighed once, when someone makes or repoints the
+  reference: its maker holds there what the source's nature asks, as any
+  direct access there would, protection included (to list a plain value,
+  to read a secret, to use a sensitive one), decided by the vault under
+  the head (rule 1, `reference`). After that the reference works on its
+  own: its maker losing their grant, or its source being protected, does
+  not stop it. **The tradeoff:** making a reference hands its source's
+  value to whoever reads where it is held. Protecting prod does not take
+  back what references made before already lend; ending the reference
+  does (`coffre references`, or deleting the key).
 - **When the vault cannot read its own policy**, only entries forged in
   its name within reach, no role holds anything, a service account's
   neither, but Owner, which holds everything: a narrowing hidden by forged
@@ -126,7 +130,8 @@ The instance's roles have the same two columns (Developer as above).
 
 ## 4. The role editor
 
-Settings → Roles, for Owners of the whole instance only (R1, R15):
+Settings → Roles: any member reads the roles, and only an Owner of the
+whole instance edits them (R1, R15):
 
 - A grid per role: one row per permission, a column for normal and one for
   protected environments, and one column for project-wide permissions.
@@ -137,10 +142,11 @@ Settings → Roles, for Owners of the whole instance only (R1, R15):
 - **Custom roles**: an Owner makes one (`release-manager`, a name and a
   description), edits it, and deletes it once no grant names it.
 - **Impact, before saving**: the editor asks what the change would do, and
-  says it in words: "Widens read for 6 people on 4 protected environments;
-  narrows write for 2 people on market/dev". Every person reached by a
-  grant of the role, or holding it as their instance role, is weighed at
-  every environment they reach, with the role as it is and as it would be.
+  says it in words: "Widens secret.read for 6 people on 4 protected
+  environments; narrows secret.write for 2 people on market/dev". Every
+  person reached by a grant of the role, or holding it as their instance
+  role, and every service account reached by a grant, is weighed at every
+  environment they reach, with the role as it is and as it would be.
 - **Every edit is audited**: one `policy.change` entry, with the role as
   it was and as it is.
 
@@ -330,6 +336,13 @@ keeps an id with none (`UNWRITTEN_FORK_MS`), or the fork is refused: a
 row written later could protect again an id the policy had let go, which
 no request is fenced on.
 
+A change that lands between the app's read of the newest
+`policy.change` and the vault's answer makes the request's policy newer
+than its seq: the fence refuses it, 409, though nothing it decided was
+stale, and asked again it goes through. That is the price of a fence
+that never trusts the newest entry's own number, which a forged one
+could hold.
+
 Tests (packages/server/test/roles.test.ts): "rule 2: a reveal of plain
 values…", "rule 2: a plain value is fenced by a read…", "rule 2: a
 protected environment renamed while a token is given…", "a role edit
@@ -351,13 +364,11 @@ now stores both columns (R17): personal tokens and handles
 (`personalScope`), a handle keeping at each place what its person holds
 there of reading and using, in each column, so an Owner's reads a
 protected prod as they do. A handle reaches the environments it is made
-for and those they inherit from, nothing else. A credential's scope
-governs where a reference is held; at a protected source, the reference
-is weighed on its person's own standing (`readsThrough`, and the vault's
-`#keys`), never widened by the scope and never narrowed by it: an app
-given a handle for `market/dev`, whose person reads `market/prod`, reads
-dev's reference into prod, that one key, and `/use/market/prod` refuses
-it; an Owner's token on `market/dev` reads all of dev. Service tokens and trust bindings (`issuedScope`), a
+for and those they inherit from, nothing else. A reference is weighed
+where it is held, never at its source (section 2): an app given a handle
+for `market/dev` reads dev's reference into prod, that one key, as dev's
+readers do, and `/use/market/prod` refuses it; a token on `market/dev`
+reads all of dev. Service tokens and trust bindings (`issuedScope`), a
 binding replaced or its keys replaced (no more than it held before, nor
 than two it replaces held at one place, `narrowest`, and weighed by what
 it keeps: a role widened since neither widens it nor stops it), and the scopes
@@ -400,16 +411,16 @@ service account a role (`givesService`, and through it `managesService`,
 `issuesCredential` and `setsUpServices`, in the app and in the vault's
 `setAccess`, `admit` and `remove`, so service tokens and trust bindings
 too), and a personal token's scope (`personalScope`). Handles name
-environments only. Who reads through a reference (`readersAt`) is weighed
-as the policy has each reader, at its source too where that is protected
-(`readsThrough`, as the vault's `#keys` decides). The project-wide checks left
+environments only. Who reads through a reference (`readersAt`) is who
+reads where it is held, as the policy has each reader there. The project-wide checks left
 (`environment.manage`, `grant.manage`, `project.manage`) have one column,
 and a project's log leaves out each protected environment its reader's
 role leaves out (`listAudit`).
 
 Tests (packages/server/test/roles.test.ts): "rule 4: a personal token on
 a whole project…", "rule 4: who reads through a reference…", "a
-reference made before its source was protected…", "a person
+reference takes its value and nature from its source…", "a reference to
+a sensitive source is use-only where it lives…", "a person
 gives a service account a role on a whole project only if…", and "a
 service token weighed before prod was protected…".
 

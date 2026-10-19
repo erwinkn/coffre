@@ -7,7 +7,7 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
+import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, PROJECT_ONLY_PERMISSIONS, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
 
 import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
@@ -701,7 +701,7 @@ export async function roles(connect: () => CoffreClient, args: string[], io: Io 
     io.out.write(`${role.id}  ${role.name}${marks(role)}${role.description === '' ? '' : `  ${role.description}`}\n`);
     const width = Math.max(...role.permissions.map((permission) => permission.length), 0) + 2;
     for (const permission of role.permissions) {
-      const wide = ['environment.manage', 'grant.manage', 'project.manage'].includes(permission);
+      const wide = (PROJECT_ONLY_PERMISSIONS as readonly string[]).includes(permission);
       io.out.write(`  ${permission.padEnd(width)}yes${wide ? '   on the project' : `   protected: ${role.protected.includes(permission) ? 'yes' : 'no'}`}\n`);
     }
     if (role.permissions.length === 0) io.out.write('  nothing\n');

@@ -1118,8 +1118,7 @@ class VaultService implements Vault {
     // Each personal config's owner, hashed, by environment, as the decision read them: what its keys' contexts bind.
     const owners = new Map<string, string>();
     const check = async (d: Decision) => {
-      const person = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
-      const reader = through(person, call.input);
+      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
       // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
       // matches the slug there, and a place deleted on either side opens for none.
@@ -1134,13 +1133,10 @@ class VaultService implements Vault {
       const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
         const personal = personalRefusal(reader, principal, call.permission, secret, at[i]!, environments);
         if (personal !== undefined) return personal;
-        const held = refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
-        // Through a reference into a protected environment, a person holds their protected column at its source too: one
-        // made before prod was protected lends prod's values to nobody who reads the holder. A service account reads on.
-        // Weighed on the person's own standing, not their credential's: its scope governs the holder, where it was made
-        // to reach, and a reference lends no more of the source than this one key.
-        const source = placeIn(secret, environments);
-        return held ?? (at[i] !== secret && guarded(person.live, source) ? refuses(person, call.permission, source, false) : null);
+        // Through a reference, the holder's grants decide, its source's never: a reference takes its value and nature
+        // (a sensitive one stays use-only) from its source, and its permissions from where it lives. Its maker held what
+        // the source's nature asks when it was made (`reference`).
+        return refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
       });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
@@ -1334,6 +1330,8 @@ class VaultService implements Vault {
       // Under the log's head, which a deletion and every change to the policy take: neither side deleted, nor protected,
       // nor a role narrowed, before this commits.
       const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports), input);
+      // Each source's nature, its current version's, under the head: what its maker must hold there.
+      const natures = await store.natures(d.tx, [...sources.values()].map((source) => source.secretId));
       // Both sides as the store has them: a grant on a slug matches there, and neither side may be deleted.
       const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
         const source = sources.get(item.source.secretId);
@@ -1346,8 +1344,14 @@ class VaultService implements Vault {
         if (source.secretId === item.holder.secretId) return 'invalid';
         // A personal config's values are bound to its owner: no reference holds one, nor reads one.
         if (environments.get(item.holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
-        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder))
-          ?? refuses(reader, 'secret.read', placeIn(source, environments), gone(source));
+        // Making one hands its source's value to whoever reads the holder: its maker holds at the source, as any direct
+        // access there would, what the source's nature asks. To list a plain value, to read a secret, to use a sensitive one.
+        const at = placeIn(source, environments);
+        const holds = (permission: Permission) => refuses(reader, permission, at, gone(source));
+        const nature = natures.get(source.secretId) ?? 'secret';
+        const sourceRefusal = nature === 'plain' ? (holds('secret.read') === null ? null : holds('secret.use'))
+          : holds(nature === 'sensitive' ? 'secret.use' : 'secret.read');
+        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder)) ?? sourceRefusal;
       });
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));

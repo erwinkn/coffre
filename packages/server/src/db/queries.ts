@@ -1858,14 +1858,25 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
 }
 
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
-export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean }>> {
+export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean; plaintext: string | null }>> {
   if (ids.length === 0) return new Map();
   const { secretVersions } = tablesOf(db);
   const rows = await db
-    .select({ id: secretVersions.id, version: secretVersions.version, sensitive: secretVersions.sensitive, ...envelopeColumns(secretVersions) })
+    .select({ id: secretVersions.id, version: secretVersions.version, sensitive: secretVersions.sensitive, plaintext: secretVersions.plaintext, ...envelopeColumns(secretVersions) })
     .from(secretVersions)
     .where(inArray(secretVersions.id, [...new Set(ids)]));
-  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row), sensitive: row.sensitive === true }]));
+  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row), sensitive: row.sensitive === true, plaintext: row.plaintext ?? null }]));
+}
+
+/** These versions' plain values, by id, for those that are plain: a reference to one is plain too. */
+export async function plainVersions(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ id: secretVersions.id, plaintext: secretVersions.plaintext })
+    .from(secretVersions)
+    .where(and(inArray(secretVersions.id, [...new Set(ids)]), isNotNull(secretVersions.plaintext)));
+  return new Map(rows.map((row) => [row.id, row.plaintext!]));
 }
 
 // --- the audit log ------------------------------------------------------------
