@@ -1992,9 +1992,10 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     within === undefined
       ? undefined
       : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
+    // An entry about a place left out, as its main place or one it names besides (`also`), is left out with it.
     within?.except === undefined || within.except.length === 0
       ? undefined
-      : or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)),
+      : and(or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)), sql`NOT COALESCE(${also(db, 'environmentId', within.except)}, false)`),
     filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
     filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
     filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),

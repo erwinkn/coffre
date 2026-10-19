@@ -280,6 +280,8 @@ test('every other action has a sentence', () => {
     [{ action: 'policy.change', author: 'vault', metadata: { change: { kind: 'instance-role', role: 'auditor', definition: null }, before: { definition: { name: 'Auditor', description: '', permissions: [], protected: [] } } } }, 'reset the Auditor instance role'],
     [{ action: 'policy.change', decision: 'deny', reason: 'role_granted', metadata: { role: 'release-manager', grants: 2 } }, 'tried to delete the release-manager role: grants still name it'],
     [{ action: 'policy.change', decision: 'deny', reason: 'requires_instance_owner', metadata: { role: 'developer', kind: 'role' } }, 'tried to edit the Developer role: requires an instance owner'],
+    [{ action: 'policy.change', decision: 'deny', reason: 'requires_instance_owner', metadata: { role: 'developer', kind: 'role', definition: null } }, 'tried to reset the Developer role: requires an instance owner'],
+    [{ action: 'policy.change', decision: 'deny', reason: 'requires_instance_owner', metadata: { role: 'release-manager', kind: 'role', definition: null } }, 'tried to delete the release-manager role: requires an instance owner'],
     [{ action: 'token.create', decision: 'deny', reason: 'not_service_manager', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'tried to issue a bearer token to service:ci-deploy: they hold less than the service account, or than they gave it'],
     [{ action: 'key.rotate', metadata: { from: 'vault:1a2b3c4d' } }, 'rotated its key'],
     [{ action: 'sign_in', metadata: { kind: 'cli' } }, 'signed in to the CLI'],

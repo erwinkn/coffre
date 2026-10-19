@@ -343,11 +343,17 @@ issuer held there (`issuedGrant`, `heldColumns`,
 packages/core/src/access.ts): the normal column as if nothing were
 protected, the protected one as a person in a protected environment; for
 a grant on a project, in an environment of it no grant names, the least
-of all of them, those protected later included. Every credential issued
+of all of them, those protected later included: an instance role scoped
+to environments by slug (Owner of every `prod`) reaches no such
+environment, and counts for nothing there. Every credential issued
 now stores both columns (R17): personal tokens and handles
 (`personalScope`), a handle keeping at each place what its person holds
 there of reading and using, in each column, so an Owner's reads a
-protected prod as they do; service tokens and trust bindings (`issuedScope`), a
+protected prod as they do. A handle reaches the environments it is made
+for, those they inherit from, and the sources of the references they
+hold, each as its person does there: an app given one for `market/dev`
+that holds a reference into `market/prod` uses prod through the proxy as
+its person may, never more; service tokens and trust bindings (`issuedScope`), a
 binding replaced or its keys replaced (no more than it held before, nor
 than two it replaces held at one place, `narrowest`, and weighed by what
 it keeps: a role widened since neither widens it nor stops it), and the scopes

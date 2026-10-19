@@ -303,10 +303,14 @@ test("whoever reads the whole log reads it as the instance's Auditor role is now
   await maya.environments.protect('market/prod');
   await root.secrets.set('market/prod', { PROD_ONLY: 'p' });
   await root.secrets.set('market/dev', { DEV_ONLY: 'd' });
+  // A reference held in dev to prod: its entry names prod besides, and is prod's too.
+  await root.secrets.set('market/dev', { FROM_PROD: { ref: 'market/prod/PROD_ONLY' } });
   const paul = clientFor(deps, 'paul@acme.example');
   const seen = (await paul.audit.list({ limit: 200 })).entries;
   assert.ok(seen.some((entry) => entry.environment === 'dev'));
   assert.ok(!seen.some((entry) => entry.environment === 'prod'), 'none of prod');
+  assert.ok(!seen.some((entry) => entry.action === 'secret.reference'), 'nor one that names prod besides');
+  assert.ok((await root.audit.list({ limit: 200 })).entries.some((entry) => entry.action === 'secret.reference'));
 });
 
 test("a built-in role is put back as it ships only where that is coherent: not a project-wide permission over grants on environments", async () => {

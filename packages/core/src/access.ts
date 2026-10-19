@@ -694,7 +694,10 @@ export function givesService(holder: Holdings, setting: ServiceSetting | null, r
   const policy = holder.policy ?? DEFAULT_POLICY;
   // What the grant holds: its role as the policy defines it, or what a credential kept of it (`issuesCredential`).
   const definition = kept ?? definitionOf(policy, role);
-  if (definition === undefined || setting === null || holder.credentialScope != null || !inScope(setting, place)) return false;
+  // A role that holds nothing is given by whoever manages access there alone: by anyone else, it would be a grant an
+  // Owner could fill in later, and under a policy the vault cannot read, every role but Owner's holds nothing.
+  if (definition === undefined || definition.permissions.length === 0) return false;
+  if (setting === null || holder.credentialScope != null || !inScope(setting, place)) return false;
   if (!definition.permissions.every((permission) => allows(holder, permission, place))) return false;
   // A grant on a whole project reaches its protected environments too, where the service holds the role's normal column:
   // the person giving it holds that there as well, or gives none.

@@ -184,6 +184,28 @@ test("a policy entry forged in the vault's name is passed over; with none of its
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod })).ok, false);
 });
 
+test('a role that holds nothing is given by whoever manages access alone: so a policy the vault cannot read leaves every service account to Owners', async () => {
+  const w = await world();
+  await w.grant(ADA, null, 'developer');
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'pending', definition: { name: 'Pending', description: '', permissions: [], protected: [] } } })).ok);
+  // Ada, a Developer of market, gives a service account what she holds, never a role that holds nothing an Owner could fill in.
+  assert.ok((await w.vault.admit({ actor: ADA, principal: 'token:ada-ci' })).ok);
+  const given = (role: string) => w.vault.setAccess({ actor: ADA, principal: 'token:ada-ci', changes: [{ projectId: w.project, environmentId: null, role, expiresAt: null }] });
+  const pending = await given('pending');
+  assert.equal(!pending.ok && pending.refusal.code, 'not_allowed', JSON.stringify(pending));
+  assert.ok((await given('viewer')).ok);
+  await w.grant(CI, w.dev, 'viewer');
+  // Unreadable, its own entry beyond reach, every role but Owner holds nothing: no member but an Owner gives, takes or
+  // removes a service account.
+  await forge({ policy: { roles: {}, instanceRoles: {}, protected: [] } }, 1024);
+  assert.deepEqual((await w.vault.policy()).protected, ['*']);
+  const revoked = await w.vault.setAccess({ actor: ADA, principal: CI, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] });
+  assert.equal(revoked.ok, false, JSON.stringify(revoked));
+  assert.equal((await w.vault.admit({ actor: ADA, principal: 'token:another' })).ok, false);
+  assert.equal((await w.vault.remove({ actor: ADA, principal: 'token:ada-ci' })).ok, false);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: CI, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] })).ok);
+});
+
 test("a policy the vault cannot read is written again by an Owner of the whole instance alone, from nothing: no change erases what the forged rows hide", async () => {
   const w = await world();
   await w.grant(ADA, null, 'owner');

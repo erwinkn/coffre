@@ -565,7 +565,8 @@ function policyOf(entry: AuditEntry): { verb: keyof typeof POLICY_VERBS; what: P
   const before = record(entry.metadata.before);
   const name = text(definition?.name) ?? text(record(before.definition).name)
     ?? (id === null ? null : shipped ? (instance ? INSTANCE_ROLES[id as keyof typeof INSTANCE_ROLES] : ROLES[id as keyof typeof ROLES]).name : id);
-  const verb = change.definition === null || entry.reason === 'role_granted'
+  // A reset or deletion: the vault's entry says so in its change, a refusal of the app's in its own metadata.
+  const verb = change.definition === null || entry.metadata.definition === null || entry.reason === 'role_granted'
     ? (shipped ? 'reset' : 'delete')
     : before.definition === null ? 'make' : 'edit';
   return { verb, what: [name === null ? 'a role' : `the ${name} ${instance ? 'instance role' : 'role'}`] };
