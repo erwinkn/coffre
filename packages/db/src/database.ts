@@ -1,7 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-import { getTableName, is, Table } from 'drizzle-orm';
-import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
+import {
+  createTableRelationsHelpers,
+  extractTablesRelationalConfig,
+  getTableName,
+  is,
+  Table,
+  type ExtractTablesWithRelations,
+  type RelationalSchemaConfig,
+} from 'drizzle-orm';
+import { NodePgDatabase, NodePgDriver } from 'drizzle-orm/node-postgres';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type pg from 'pg';
 
 import { trackCommits } from './commits.ts';
@@ -74,8 +83,29 @@ function brokenRule(error: unknown): QueryOutsideTransaction | undefined {
   return undefined;
 }
 
+/**
+ * What Drizzle makes of the schema, which `drizzle(pool, { schema })` works
+ * out again from every table at each call: on Workers, a database is made
+ * per call, and this was a fifth of a vault call's CPU. The schema never
+ * changes, so it is worked out once per process or isolate, a settled value.
+ */
+type Relational = RelationalSchemaConfig<ExtractTablesWithRelations<typeof schema>>;
+let relational: Relational | undefined;
+
+function relationalSchema(): Relational {
+  if (relational === undefined) {
+    const { tables, tableNamesMap } = extractTablesRelationalConfig(schema, createTableRelationsHelpers);
+    // Drizzle's own construct passes the same untyped tables on as these.
+    relational = { fullSchema: schema, schema: tables as Relational['schema'], tableNamesMap };
+  }
+  return relational;
+}
+
 export function createDatabase(pool: PoolLike): Database {
-  const db = drizzle(guarded(pool) as pg.Pool, { schema });
+  // What `drizzle(pool, { schema })` builds, but for the schema's config, made once.
+  const dialect = new PgDialect();
+  const config = relationalSchema();
+  const db: Database = new NodePgDatabase(dialect, new NodePgDriver(guarded(pool) as pg.Pool, dialect).createSession(config), config);
   // Each transaction's work runs knowing which one it is in, until that work is done. Not until
   // the COMMIT comes back: the transaction waits on nothing then, so what the work left running
   // may ask for a query, which waits for the transaction to end rather than for itself.

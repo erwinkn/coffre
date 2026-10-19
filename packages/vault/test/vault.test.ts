@@ -682,6 +682,26 @@ test('an expired grant refuses with its own code', async () => {
   assert.deepEqual((await w.vault.access(ADA)).grants, []);
 });
 
+test('a read that waits for the log\'s head is decided as of when it holds it: a grant that lapsed meanwhile refuses', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer', Date.now() + 1_500]]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  // Another transaction holds the head past the grant's end, then commits writing nothing: the read waits for it.
+  const other = await db.connect();
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holder = other.transaction(async (tx) => {
+    await lockLogHead(tx);
+    holding();
+    await sleep(2_500);
+  });
+  await held;
+  const result = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  await holder;
+  assert.equal(!result.ok && result.refusal.code, 'expired');
+});
+
 test('the bulk limit counts keys per principal over a rolling window', async () => {
   const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   await member(w, ADA, [[w.dev, 'viewer']]);

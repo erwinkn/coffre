@@ -209,6 +209,13 @@ unsupported diff select full validation.
   client, which declares Node >= 20, with each Node `COFFRE_CLIENT_NODES`
   lists (`scripts/client-smoke.cjs`; the current one when unset; CI names 20,
   22 and 24). It needs network for third-party packages.
+- `pnpm bench:workers` / `pnpm bench:node` (after `pnpm build`) boot an example as
+  conformance does, on ports 3182 to +2, and print the CPU each hot path costs, cold (a
+  new isolate or process) and warm, read from Linux's per-thread counters: on Workers,
+  the workerd that runs both Workers, not wrangler's own; on Node, the server and the
+  vault apart. `--entries` and `--members` grow the instance first. Workers' Free plan
+  gives an invocation 10 ms of CPU; `request-cost.test.ts` holds a request's
+  statements and rows to the same however the instance grows.
 - `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, with
   TLC (`docs/formal.md`): every scenario must hold, and each again without one
   of the code's protections must fail. It needs Java 11+, and downloads TLC's

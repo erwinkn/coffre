@@ -101,7 +101,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
-import { appendEntries, LOOK_BACK, lockLogHead, newestAuthentic, newestVaultSeq, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, lockLogHead, newestAuthentic, newestVaultSeq, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -495,6 +495,7 @@ class VaultService implements Vault {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
         if (!late) await lockLogHead(tx);
+        // The clock once the locks are held, in a statement of its own: one that waited for a lock is decided as of when it got it.
         const d: Decision = {
           tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
@@ -1223,7 +1224,12 @@ class VaultService implements Vault {
       intentSeq = intent.seq;
     }
 
-    return this.#decide([principal], async (d) => {
+    // Under the reader's row: the check, the key operations, and their outcome. With a key in memory, under the
+    // log's head too, from the start (`#decideOnce`): what the check read stands until the commit, as every change it
+    // reads appends under the head, and the head waits on nothing slow. With a key service, which nothing may wait on
+    // holding the head, the head is taken once the keys are open, and what the check read is read again under it.
+    const late = call.remote;
+    const decided = async (d: Decision) => {
       try {
         await check(d);
       } catch (error) {
@@ -1233,9 +1239,12 @@ class VaultService implements Vault {
         }
         throw error;
       }
+    };
+    return this.#decide([principal], async (d) => {
+      await decided(d);
       // A reference ended while this decided refuses it, rather than a read logged after its end.
       const { vet } = call;
-      if (vet !== undefined) {
+      if (late && vet !== undefined) {
         d.underLock.push(async (locked) => {
           const codes = await vet(locked);
           const first = codes.find((code) => code !== null);
@@ -1262,25 +1271,20 @@ class VaultService implements Vault {
         if (done.length < outcomes.length) {
           throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries());
         }
-        // Again under the log's head, the append's, taken a statement early: a
-        // deletion renames its place under it, so one that committed since the
-        // check above is seen here, and nothing is released after it.
-        // A read through a reference: its holder's place too, which a deletion may have taken.
-        await lockLogHead(d.tx);
-        // And as the policy is now, under the head every change to it takes: an environment protected, or a role narrowed,
-        // since the check above is seen here, and nothing it refuses now is released.
-        try {
-          await check(d);
-        } catch (error) {
-          if (error instanceof Refused) {
-            throw new Refused(error.refusal, secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', error.entries[item].code ?? error.refusal.code)));
+        if (late) {
+          // Again under the log's head, the append's, taken a statement early: a
+          // deletion renames its place under it, so one that committed since the
+          // check above is seen here, and nothing is released after it.
+          // A read through a reference: its holder's place too, which a deletion may have taken.
+          await lockLogHead(d.tx);
+          // And as the policy is now, under the head every change to it takes: an environment protected, or a role narrowed,
+          // since the check above is seen here, and nothing it refuses now is released.
+          await decided(d);
+          const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
+          const now = await store.environmentsById(d.tx, places.map((place) => place.environmentId));
+          if (places.some((place) => now.get(place.environmentId)?.deleted ?? false)) {
+            throw new Refused(refusal('deleted', MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
           }
-          throw error;
-        }
-        const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
-        const now = await store.environmentsById(d.tx, places.map((place) => place.environmentId));
-        if (places.some((place) => now.get(place.environmentId)?.deleted ?? false)) {
-          throw new Refused(refusal('deleted', MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
         }
         const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
         d.log.push(...released);
@@ -1291,7 +1295,7 @@ class VaultService implements Vault {
       } finally {
         for (const value of done) value.wipe();
       }
-    }, true);
+    }, late);
   }
 
   /** Whether `n` more keys would take `principal` past the bulk limit; counted under their row's lock, so exactly. */
@@ -2052,7 +2056,7 @@ class VaultService implements Vault {
    */
   async #settingsAt(db: Queryable, reports: NewEntry[]): Promise<Settings> {
     const entry = await newestAuthentic(
-      (before) => store.newestVaultEntries(db, SETTINGS, LOOK_BACK.page, before),
+      (limit, before) => store.newestVaultEntries(db, SETTINGS, limit, before),
       this.#check(reports, null),
     );
     if (entry === 'none') return DEFAULT_SETTINGS;
@@ -2081,7 +2085,7 @@ class VaultService implements Vault {
    */
   async #policyAt(db: Queryable, reports: NewEntry[], at: number): Promise<{ policy: Policy; edits: PolicyEdits; readable: boolean }> {
     const entry = await newestAuthentic(
-      (before) => store.newestVaultEntries(db, POLICY, LOOK_BACK.page, before),
+      (limit, before) => store.newestVaultEntries(db, POLICY, limit, before),
       this.#check(reports, null),
     );
     if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS, readable: true };
