@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.1 (2026-10-19)
+
 - **The audit log is verified from its last checkpoint, not its first
   entry.** Opening the audit page re-verified every entry, in the app and
   in the vault: on a Workers deployment with 7,000 entries that was 1.2
