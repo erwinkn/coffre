@@ -318,10 +318,10 @@ export const queries = {
     }),
 
   /**
-   * Whether the log holds: verified on every visit, and never waited for.
-   * It reads what was written since the newest checkpoint, so it takes as
-   * long as five minutes of the log, however long the log; the page shows
-   * the entries first and the verdict when it comes.
+   * Whether the log holds: verified on every visit, and rendered with the
+   * page. It reads what was written since the newest checkpoint, so it takes
+   * as long as five minutes of the log, however long the log. It never
+   * rejects: a check that could not run is its verdict (`unknown`).
    */
   auditChain: (client: CoffreClient) =>
     queryOptions({ queryKey: [...keys.audit, 'chain'], staleTime: 0, queryFn: () => verifyChain(client) }),
@@ -394,9 +394,8 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
  *   whole intact, quick intact with 0 remaining   → whole
  *   whole intact, quick anything else             → quick
  */
-export function shownChain(quick: ChainResult | undefined, whole: ChainResult | null): ChainResult | undefined {
+export function shownChain(quick: ChainResult, whole: ChainResult | null): ChainResult {
   if (whole === null || whole.integrity === 'broken') return whole ?? quick;
-  if (quick === undefined) return whole;
   return quick.integrity === 'intact' && quick.remaining === 0 && whole.integrity === 'intact' ? whole : quick;
 }
 
@@ -524,6 +523,20 @@ export async function loadEnvironment(queryClient: QueryClient, client: CoffreCl
   const secrets = await queryClient.fetchQuery(queries.secrets(client, place));
   if (secrets.ok) await others();
   return secrets;
+}
+
+/**
+ * What the audit page reads: a page of the log and the verification from
+ * the newest checkpoint, asked together and rendered together, so the badge
+ * arrives with the page. The verification never fails the load: a check that
+ * could not run is its verdict.
+ */
+export async function loadAudit(queryClient: QueryClient, client: CoffreClient, search: AuditSearch) {
+  const [entries] = await Promise.all([
+    queryClient.fetchQuery(queries.auditEntries(client, search)),
+    queryClient.fetchQuery(queries.auditChain(client)),
+  ]);
+  return entries;
 }
 
 /** The directory pages' read: the directory, for owners. */

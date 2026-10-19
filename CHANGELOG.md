@@ -55,6 +55,14 @@
 - **Pages with times render with less CPU.** A relative time ("3 hours
   ago") made a new formatter each time it was shown; it reuses one. The
   audit page's render costs about a quarter less.
+- **The audit page arrives with its verification.** The page rendered
+  its table, then asked for the log's check from the browser and showed
+  "Verifying…" until it came. The check from the last checkpoint now runs
+  while the page renders, and the page is sent whole, badge included. A
+  check that cannot run still leaves the page up, with the badge saying
+  so and offering a retry. The page costs the check's CPU, on Node about
+  11 ms warm at 7,000 entries; **Verify whole log** is unchanged, still
+  asked for and walked in stretches.
 
 ## 0.10.0 (2026-10-19)
 

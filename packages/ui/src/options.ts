@@ -24,6 +24,7 @@ import { memberRef, uiResult } from './lib/coffre';
 import { stringsOf } from './lib/search';
 import {
   hasAppsTab,
+  loadAudit,
   loadDirectory,
   loadEnvironment,
   loadMember,
@@ -173,11 +174,9 @@ export const audit = {
     detail: search.detail === '1' || search.decision === 'deny' ? '1' : undefined,
   }),
   loaderDeps: ({ search }: { search: AuditSearch }) => search,
-  // The entries only: the verification is asked for once the page is up
-  // (`ChainStatus`), so the table never waits on it.
   loader: ({ context, deps }: Loader & { deps: AuditSearch }) => {
     const { coffre, queryClient } = coffreOf(context);
-    return queryClient.fetchQuery(queries.auditEntries(coffre, deps));
+    return loadAudit(queryClient, coffre, deps);
   },
 };
 

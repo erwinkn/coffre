@@ -10,6 +10,7 @@ import {
   FRESH_MS,
   keys,
   loadAccess,
+  loadAudit,
   loadDirectory,
   loadEnvironment,
   loadPrincipal,
@@ -174,6 +175,42 @@ test('the audit log and its verification are read on every visit', () => {
   assert.equal(queries.auditChain(client).staleTime, 0);
 });
 
+test('the audit page loads its entries and its verification together, and a check that fails does not fail the load', async () => {
+  const calls: string[] = [];
+  const load = async (verify: () => Promise<unknown>) => {
+    const queryClient = createQueryClient();
+    const coffre = {
+      audit: {
+        list: async () => {
+          calls.push('GET /audit');
+          return { entries: [] };
+        },
+        verify: async () => {
+          calls.push('GET /audit/verification');
+          return verify();
+        },
+      },
+    } as unknown as CoffreClient;
+    const result = await loadAudit(queryClient, coffre, {});
+    return { result, chain: queryClient.getQueryData<ChainResult>([...keys.audit, 'chain']) };
+  };
+
+  const verified = await load(async () => ({ ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null }));
+  assert.deepEqual(calls.sort(), ['GET /audit', 'GET /audit/verification']);
+  assert.equal(verified.chain?.integrity, 'intact');
+
+  // A vault that cannot be reached, and a refusal: each the badge's verdict, the entries still there.
+  const down = await load(async () => {
+    throw new Error('connection refused');
+  });
+  assert.equal((down.result as { ok: boolean }).ok, true);
+  assert.equal(down.chain?.integrity, 'unknown');
+  const refused = await load(async () => {
+    throw new CoffreError(403, 'forbidden', 'forbidden');
+  });
+  assert.equal(refused.chain?.integrity, 'owners-only');
+});
+
 test('every change marks the audit log and its verification stale', async () => {
   const queryClient = createQueryClient();
   queryClient.setQueryData([...keys.audit, 'chain'], { integrity: 'intact' });
@@ -336,7 +373,7 @@ test('the page shows a break either check found, and the walk from the first ent
   const unknown: ChainResult = { integrity: 'unknown', problem: 'the request never got an answer' };
   const walked = intact(0, true);
   // Before anyone walks, the check from the newest checkpoint.
-  assert.equal(shownChain(intact(0, false), null)?.integrity, 'intact');
+  assert.equal(shownChain(intact(0, false), null).integrity, 'intact');
   // The walk's verdict while the newer check finds the log whole too.
   assert.equal(shownChain(intact(0, false), walked), walked);
   // A break the walk found stays, whatever the newer check says.
