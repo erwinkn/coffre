@@ -145,7 +145,7 @@ In order, since each builds on the ones before:
 | app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
 | no audit, no access | A refused append commits no grant, removal or admission |
-| full verification | Verification from the newest checkpoint, and the walk from the first entry a stretch a request, each reach the actual head and count every entry |
+| full verification | Verification from the newest checkpoint, and the walk from the first entry a stretch a request, each reach the actual head and count every entry; the audit page is sent with its verification result |
 | checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
 | forged grant, forged member, stale member | A forged grant, an edited member or a genuine older member row put back is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
 | sealing race | On Postgres, a grant inserted while the vault's decision waits on the held log head is refused as `tampered` and logged; removal recovers the member. SQLite prevents that concurrent write; the vault suite covers review R2 on Postgres |

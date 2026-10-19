@@ -184,7 +184,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: "a user's or service account's page › Activity", in: 'components/actions-log.tsx', call: 'audit.list' },
     ],
   },
-  'GET /audit/verification': { ui: [{ does: "Audit: the log's seal, verified on every visit", in: 'pages/audit.tsx', call: 'audit.verify' }] },
+  'GET /audit/verification': { ui: [{ does: "Audit: the log's seal, verified with every visit", in: 'pages/audit.tsx', call: 'audit.verify' }] },
   'GET /roles': {
     ui: [
       { does: 'Settings › Roles and Instance roles; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },
