@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 import { prepared, tablesOf, type Database, type Queryable } from '@coffre/db';
 import * as server from '@coffre/db/schema';
-import { asc, eq, sql, type Placeholder } from 'drizzle-orm';
+import { and, asc, eq, sql, type Placeholder } from 'drizzle-orm';
 
 import { insert } from '../../src/db/queries.ts';
 import { openTestDatabase } from './engine.ts';
@@ -72,4 +72,26 @@ test('inside a transaction, a prepared select reads through it', async () => {
   );
   const after = await byProject(db, { slug: market.slug, limit: 10 });
   assert.deepEqual(after.map((row) => row.environment?.slug), ['dev']);
+});
+
+/** The log's head by its number and hash: a bigint and bytes, which go to the driver as they are. */
+function headAt(on: Queryable, seq: bigint | Placeholder = sql.placeholder('seq'), hash: Buffer | Placeholder = sql.placeholder('hash')) {
+  const { auditChainHead } = tablesOf(on);
+  return on
+    .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash })
+    .from(auditChainHead)
+    .where(and(eq(auditChainHead.nextSeq, seq), eq(auditChainHead.headHash, hash)));
+}
+
+const headByValue = prepared((on) => headAt(on));
+
+test('bigint and byte values bind as the builder binds them', async () => {
+  const [head] = await db.select({ nextSeq: tablesOf(db).auditChainHead.nextSeq, headHash: tablesOf(db).auditChainHead.headHash }).from(tablesOf(db).auditChainHead);
+  assert.ok(head !== undefined);
+  const other = Buffer.from(head.headHash).fill(head.headHash[0]! ^ 1, 0, 1);
+  for (const [seq, hash] of [[head.nextSeq, head.headHash], [head.nextSeq + 1n, head.headHash], [head.nextSeq, other]] as const) {
+    const found = await headByValue(db, { seq, hash });
+    assert.deepEqual(found, await headAt(db, seq, hash));
+    assert.equal(found.length, seq === head.nextSeq && hash === head.headHash ? 1 : 0);
+  }
 });

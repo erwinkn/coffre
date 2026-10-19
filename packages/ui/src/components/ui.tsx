@@ -368,7 +368,7 @@ const unchanging = () => () => {};
  * each row of an environment's table. Its trigger is elsewhere, so mounting
  * it after hydration remounts nothing else.
  */
-function useMounted(open: boolean): boolean {
+function useHydrated(open: boolean): boolean {
   return useSyncExternalStore(unchanging, hydrated, serverRender) || open;
 }
 
@@ -384,7 +384,7 @@ export function ConfirmDialog({
   onOpenChange,
   ...confirm
 }: ConfirmProps & { open: boolean; onOpenChange: (open: boolean) => void }) {
-  if (!useMounted(open)) return null;
+  if (!useHydrated(open)) return null;
   return (
     <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <ConfirmContent {...confirm} />
@@ -414,7 +414,7 @@ export function Modal({
   children: ReactNode;
 }) {
   const { portal } = usePreferences();
-  if (!useMounted(open)) return null;
+  if (!useHydrated(open)) return null;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal container={portal}>
