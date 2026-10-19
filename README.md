@@ -182,7 +182,10 @@ coffre reset    market/prod-eu/DATABASE_URL # in a fork, back to prod's value; -
 coffre remove   market/prod-eu/SENTRY_DSN   # in a fork, does without prod's key; --undo inherits it again
 coffre set      market/dev@me/DATABASE_URL  # your personal dev: values only you read; reads of dev@me are dev's while you have none
 coffre personal market                      # the project's personal configs: whose, of what, key names; for its maintainers
-coffre roles                                # the instance roles and the project roles, and their permissions
+coffre roles                                # every role, in two columns: anywhere, and in a protected environment
+coffre environments protect market/prod     # people hold their role's protected column there; service accounts as before
+coffre roles set developer --protected use,write,read   # an Owner edits a role: previews whom it widens, --apply saves
+coffre roles set release-manager --name 'Release manager' --permissions use,write --protected use   # or makes one
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
 coffre grant market alice@acme.example --role developer --env dev

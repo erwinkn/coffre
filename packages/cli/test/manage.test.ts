@@ -81,7 +81,7 @@ test('tokens issue --scope narrows what it reaches, by path and role, repeated o
   const { connect, calls, io } = fixture(() => ({ id: 't', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z', scope: {} }));
   await manage.tokensIssue(connect, ['deploy', '--scope', 'market/dev=developer,market/prod=viewer', '--scope', 'billing=auditor'], io);
   assert.deepEqual(calls[0]!.body, { expiresInDays: 90, label: null, scope: { 'market/dev': 'developer', 'market/prod': 'viewer', billing: 'auditor' } });
-  for (const bad of ['market/dev', 'market/dev=reader', '=viewer', 'a=b=c']) {
+  for (const bad of ['market/dev', 'market/dev=Reader', '=viewer', 'a=b=c']) {
     await assert.rejects(manage.tokensIssue(connect, ['deploy', '--scope', bad], io), manage.UsageError, bad);
   }
   assert.equal(calls.length, 1, 'nothing asked for a bad scope');
@@ -183,7 +183,7 @@ test('admit makes a member, and for a service names the next steps: grant, then 
   assert.equal(granted.written.out, 'admitted service:deploy, holding developer on market/dev, viewer on market/prod\n');
   for (const [args, refusal] of [
     [['ada@acme.example', '--grant', 'market=viewer'], /--grant comes with a service account/],
-    [['deploy', '--service', '--grant', 'market=boss'], /--grant takes <project>\[\/<environment>\]=<role>/],
+    [['deploy', '--service', '--grant', 'market=Boss'], /--grant takes <project>\[\/<environment>\]=<role>/],
   ] as const) {
     await assert.rejects(manage.admit(granted.connect, [...args], granted.io), refusal);
   }
@@ -639,4 +639,86 @@ test('version prints the version alone, or the JSON answer, and asks nothing els
   assert.deepEqual(calls.map((call) => [call.method, call.path]), [['GET', '/projects/market/prod/version'], ['GET', '/projects/market/prod/version']]);
   assert.equal(written.out, 'u0Hq2bWk1M6l0j3t5rH4dQyT1vXJ9n0dD8c2F7k3pZa\n{\n  "version": "u0Hq2bWk1M6l0j3t5rH4dQyT1vXJ9n0dD8c2F7k3pZa"\n}\n');
   await assert.rejects(manage.version(connect, ['market/prod/KEY'], io), /expected <project>\/<environment>/);
+});
+
+/** A role as `GET /roles` lists it, as it ships unless told. */
+function listedRole(id: string, definition: { name: string; permissions: string[]; protected: string[] }, more: Record<string, unknown> = {}) {
+  const shipped = { ...definition, description: '' };
+  return { id, ...shipped, builtin: true, edited: false, fixed: false, default: shipped, assignableToEnvironment: true, grants: 0, ...more };
+}
+
+const LISTED_ROLES = {
+  roles: [
+    listedRole('developer', { name: 'Developer', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.use', 'secret.write'] }, { edited: true }),
+    listedRole('release-manager', { name: 'Release manager', permissions: ['secret.use', 'secret.write'], protected: ['secret.use'] }, { builtin: false, default: null }),
+    listedRole('owner', { name: 'Owner', permissions: ['secret.read', 'grant.manage'], protected: ['secret.read'] }, { fixed: true, assignableToEnvironment: false }),
+  ],
+  instanceRoles: [listedRole('member', { name: 'Member', permissions: [], protected: [] }, { fixed: true, assignableToEnvironment: false })],
+  editable: true,
+};
+
+test('roles lists both columns of every role, says which an Owner made, edited or nobody edits, and one role by its permissions', async () => {
+  const { connect, calls, written, io } = fixture(() => LISTED_ROLES);
+  await manage.roles(connect, [], io);
+  assert.deepEqual(calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles']);
+  // The first column as wide as its widest entry, Owner's, and two spaces after: every "protected:" lines up.
+  assert.match(written.out, /\n {2}developer {8}\[project or env\] read, use, write {4}protected: use, write {2}\[edited\]\n/);
+  assert.match(written.out, /\n {2}owner {12}\[project only\] {3}read, grant\.manage {2}protected: read {2}\[fixed\]\n/);
+  assert.match(written.out, /\n {2}release-manager .*protected: use {2}\[custom\]\n/);
+  assert.match(written.out, /\n {2}owner .*\[project only\].*\[fixed\]\n/);
+  assert.match(written.out, /\n {2}member .*nothing .*protected: nothing {2}\[fixed\]\n/);
+  const one = fixture(() => LISTED_ROLES);
+  await manage.roles(one.connect, ['developer'], one.io);
+  assert.equal(one.written.out, 'developer  Developer  [edited]\n  secret.read   yes   protected: no\n  secret.use    yes   protected: yes\n  secret.write  yes   protected: yes\n');
+  await assert.rejects(manage.roles(one.connect, ['boss'], one.io), /no role "boss": `coffre roles` lists them/);
+});
+
+test('roles set says what the change would do and saves it only with --apply, keeping what the flags leave out', async () => {
+  const impact = { impact: [], sentence: 'Widens secret.read for 1 person on market/prod, protected', revision: '57.3f9a0c2e81b4d7a6' };
+  const preview = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
+  await manage.rolesSet(preview.connect, ['developer', '--protected', 'read,use,write'], preview.io);
+  const definition = { name: 'Developer', description: '', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.read', 'secret.use', 'secret.write'] };
+  assert.deepEqual(preview.calls, [{ method: 'GET', path: '/roles', body: undefined }, { method: 'PUT', path: '/roles/developer?dryRun=1', body: definition }]);
+  assert.equal(preview.written.out, 'developer: read, use, write, protected: read, use, write\n  Widens secret.read for 1 person on market/prod, protected\nNothing changed. Re-run with --apply to save it.\n');
+  const applied = fixture(({ method, path }) => (method === 'GET' ? LISTED_ROLES : path.endsWith('dryRun=1') ? impact : { role: null }));
+  await manage.rolesSet(applied.connect, ['developer', '--protected', 'secret.read,secret.use,secret.write', '--apply'], applied.io);
+  // Saved as previewed, from the policy its preview was weighed from.
+  assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'PUT /roles/developer?dryRun=1', 'PUT /roles/developer?revision=57.3f9a0c2e81b4d7a6']);
+  assert.match(applied.written.out, /^saved developer: /);
+  // Its first column narrowed alone, the kept protected column narrows with it.
+  const narrowed = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
+  await manage.rolesSet(narrowed.connect, ['developer', '--permissions', 'use'], narrowed.io);
+  assert.deepEqual(narrowed.calls[1]!.body, { name: 'Developer', description: '', permissions: ['secret.use'], protected: ['secret.use'] });
+  // A new role holds nothing it is not given; an instance role is one that ships.
+  const made = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : impact));
+  await manage.rolesSet(made.connect, ['qa', '--name', 'QA', '--permissions', 'use'], made.io);
+  assert.deepEqual(made.calls[1]!.body, { name: 'QA', description: '', permissions: ['secret.use'], protected: [] });
+  await assert.rejects(manage.rolesSet(made.connect, ['qa', '--instance', '--name', 'QA'], made.io), /no instance role "qa"/);
+  await assert.rejects(manage.rolesSet(() => assert.fail('no session is asked for'), ['developer'], made.io), /say what changes/);
+});
+
+test('roles reset puts an edited role back, shown first; roles remove deletes one an Owner made, and neither the other kind', async () => {
+  const impact = { impact: [], sentence: 'Changes what nobody holds', revision: 'none.b20e94d1c6a8f305' };
+  const reset = fixture(({ method, path }) => (method === 'GET' ? LISTED_ROLES : path.endsWith('dryRun=1') ? impact : { role: LISTED_ROLES.roles[0] }));
+  await manage.rolesReset(reset.connect, ['developer'], reset.io);
+  await manage.rolesReset(reset.connect, ['developer', '--apply'], reset.io);
+  assert.deepEqual(reset.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'DELETE /roles/developer?dryRun=1', 'GET /roles', 'DELETE /roles/developer?dryRun=1', 'DELETE /roles/developer?revision=none.b20e94d1c6a8f305']);
+  assert.match(reset.written.out, /Nothing changed\. Re-run with --apply to reset it\.\nreset developer, as it ships\n/);
+  await assert.rejects(manage.rolesReset(reset.connect, ['release-manager'], reset.io), /`coffre roles remove release-manager` deletes it/);
+  const removed = fixture(({ method }) => (method === 'GET' ? LISTED_ROLES : { role: null }));
+  await manage.rolesRemove(removed.connect, ['release-manager'], removed.io);
+  assert.deepEqual(removed.calls.map(({ method, path }) => `${method} ${path}`), ['GET /roles', 'DELETE /roles/release-manager']);
+  assert.equal(removed.written.out, 'removed release-manager\n');
+  await assert.rejects(manage.rolesRemove(removed.connect, ['developer'], removed.io), /ships with coffre, and stays/);
+});
+
+test('environments protect and unprotect send the flag, and say what it does', async () => {
+  const on = fixture(() => ({ environment: { slug: 'prod', name: 'prod', archivedAt: null, protected: true } }));
+  await manage.environmentsProtect(on.connect, ['market/prod'], true, on.io);
+  assert.deepEqual(on.calls, [{ method: 'PATCH', path: '/projects/market/prod', body: { protected: true } }]);
+  assert.match(on.written.out, /^market\/prod is protected: each role holds there what its protected column says, for people/);
+  const off = fixture(() => ({ environment: { slug: 'prod', name: 'prod', archivedAt: null, protected: false } }));
+  await manage.environmentsProtect(off.connect, ['market/prod'], false, off.io);
+  assert.deepEqual(off.calls[0]!.body, { protected: false });
+  assert.equal(off.written.out, 'market/prod is not protected: each role holds there what it holds anywhere\n');
 });

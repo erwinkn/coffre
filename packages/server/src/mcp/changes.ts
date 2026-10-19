@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, ROLE_NAMES, runsInstance, scopeInWords, type Permission } from '@coffre/core/access';
+import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
 import {
   claimValues,
   defaultIssuer,
@@ -20,7 +20,7 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
-import { instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
@@ -103,6 +103,23 @@ const serviceMember = (name: string) => apiMember(name.includes(':') ? name : `s
 const shownService = (name: string) => shownMember(serviceMember(name));
 
 /** Refuse now, as the API would on Approve, when the person lacks a permission at an environment. */
+/** An instance role as the instance defines it now, an Owner's edits included (docs/design/roles.md). */
+async function instanceRoleOf(api: CoffreClient, role: InstanceRole): Promise<{ name: string; description: string; permissions: readonly string[]; protected: readonly string[] }> {
+  return (await api.roles.list()).instanceRoles.find((each) => each.id === role) ?? INSTANCE_ROLES[role];
+}
+
+/**
+ * What an instance role holds, as an approval says it: its name and
+ * description, and its two columns as they are now, which an Owner may
+ * have edited since it shipped. "Auditor: Reads the log … Holds audit.read;
+ * in a protected environment, audit.read."
+ */
+async function instanceRoleInWords(api: CoffreClient, role: InstanceRole): Promise<string> {
+  const defined = await instanceRoleOf(api, role);
+  const column = (permissions: readonly string[]) => (permissions.length === 0 ? 'nothing' : permissions.join(', '));
+  return `${defined.name}: ${defined.description} Holds ${column(defined.permissions)}; in a protected environment, ${column(defined.protected)}.`;
+}
+
 async function needs(api: CoffreClient, path: string, permission: Permission): Promise<void> {
   const { project, environment } = splitEnvironment(path);
   const me = await api.me();
@@ -317,7 +334,8 @@ function archiving(archived: boolean): Tool {
   });
 }
 
-const role = z.enum(ROLE_NAMES);
+/** A role by id: one that ships, or one an Owner made, which the API checks against the instance's policy. */
+const role = roleId;
 /**
  * What a token or a binding will reach, as the server would make it now,
  * as the page says it, and its basis: Approve reads it again and is refused
@@ -592,7 +610,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         changes: z
           .record(z.string().min(1).max(200), accessChange)
           .refine((changes) => Object.keys(changes).length > 0 && Object.keys(changes).length <= 50, 'name from 1 to 50 places')
-          .describe(`Each place, a project or project/environment, with the role to hold there (${ROLE_NAMES.join(', ')}; { role, until } for one that ends), or null to revoke it`),
+          .describe(`Each place, a project or project/environment, with the role to hold there (${ROLE_NAMES.join(', ')}, or one the instance's Owners made; { role, until } for one that ends), or null to revoke it`),
       })
       .strict(),
     names: ({ member, changes }) => [apiMember(member), ...Object.keys(changes)],
@@ -638,12 +656,12 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         .record(z.string().min(1).max(200), accessChange)
         .refine((access) => Object.keys(access).length > 0 && Object.keys(access).length <= 50, 'name from 1 to 50 places')
         .optional()
-        .describe(`A service account's first grants, as set_access takes them: each place, a project or project/environment, with its role (${ROLE_NAMES.join(', ')}; { role, until } for one that ends)`),
+        .describe(`A service account's first grants, as set_access takes them: each place, a project or project/environment, with its role (${ROLE_NAMES.join(', ')}, or one the instance's Owners made; { role, until } for one that ends)`),
     }).strict(),
     names: ({ member, access }) => [apiMember(member), ...Object.keys(access ?? {})],
     change: {
       summary: ({ member, role, scope, access }) =>
-        `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${INSTANCE_ROLES[role].name}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
+        `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${role}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
       // The grants are the API's to decide on Approve, as set_access's for a service account are.
       check: async (ctx, { member, role, scope, access }) => {
         if (access !== undefined && (!apiMember(member).startsWith('token:') || role !== undefined || scope !== undefined)) {
@@ -652,12 +670,19 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         if (!apiMember(member).startsWith('token:') || (role ?? 'member') !== 'member' || scope !== undefined) return instanceOnly(ctx);
         if (!(await ctx.api.me()).setsUpServices) throw new CoffreError(403, 'forbidden', 'you set up no service account: the instance keeps them to admins where you hold access');
       },
-      replaces: async (api, { member, access }) => (access === undefined ? { details: [], state: null } : heldAt(api, member, access)),
-      preview: async (_api, { member, role, scope, access }, _viewing, replaced) => [
+      // What it gives, as the page says it: the grants as they were, or the instance role as the instance defines it, which
+      // Approve refuses once an Owner has edited it since.
+      replaces: async (api, { member, role, access }) => {
+        if (access !== undefined) return heldAt(api, member, access);
+        if (role === undefined) return { details: [], state: null };
+        const { name, description, permissions, protected: guarded } = await instanceRoleOf(api, role);
+        return { details: [], state: { role, definition: { name, description, permissions, protected: guarded } } };
+      },
+      preview: async (api, { member, role, scope, access }, _viewing, replaced) => [
         { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
         role === undefined
           ? { label: 'As', value: access === undefined ? 'a member, with no access until granted some, or as they are' : 'a member, with this access' }
-          : { label: 'As', value: `${INSTANCE_ROLES[role].name}: ${INSTANCE_ROLES[role].description}` },
+          : { label: 'As', value: await instanceRoleInWords(api, role) },
         ...(role === undefined || role === 'member' ? [] : [{ label: 'Where', value: scopeInWords(fullScope(scope)) }]),
         ...replaced,
       ],
@@ -666,7 +691,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
           apiMember(member),
           access !== undefined ? { access: access as RouteInput<'PATCH /access/:member'> } : role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) },
         );
-        const as = `${INSTANCE_ROLES[made.instanceRole].name}, ${scopeInWords(made.scope)}`;
+        const as = `${(await instanceRoleOf(api, made.instanceRole)).name}, ${scopeInWords(made.scope)}`;
         return {
           result: { member: shownMember(made.member), instanceRole: made.instanceRole, scope: made.scope, created: made.created, ...(made.changes === undefined ? {} : { changes: made.changes }) },
           text: `${shownMember(made.member)} is a member${made.created ? '' : ' already'}, as ${as}${made.changes === undefined ? '' : ', with its access set'}.`,

@@ -19,7 +19,7 @@ import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
-import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
+import { AlertTriangle, Folder, Hash, Layers, Lock, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
   MakesProjectsOnly,
@@ -239,6 +239,7 @@ function ProjectRow({
                     params={{ project: project.slug, environment: environment.slug }}
                   >
                     {environment.slug}
+                    {environment.protected && <Lock size={11} className="env-link-lock" label="protected" />}
                     <span className="count">{environment.details.secretCount}</span>
                   </Link>
                 ) : (
@@ -248,6 +249,7 @@ function ProjectRow({
                     title="You can't open this environment"
                   >
                     {environment.slug}
+                    {environment.protected && <Lock size={11} className="env-link-lock" label="protected" />}
                   </span>
                 ),
               )}

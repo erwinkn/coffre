@@ -51,6 +51,12 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'GET /workloads/repositories': 'read',
   'DELETE /members/:member/bindings/:id': 'manage-access',
   'PATCH /access/:member': 'manage-access',
+  'GET /roles': 'read',
+  // The instance's roles stay with its Owners, in the pages and the CLI, as its settings do.
+  'PUT /roles/:role': null,
+  'DELETE /roles/:role': null,
+  'PUT /instance-roles/:role': null,
+  'DELETE /instance-roles/:role': null,
   'GET /settings': 'read',
   // The instance's settings stay with people, in the pages and the CLI, as permanent deletion does.
   'PUT /settings': null,

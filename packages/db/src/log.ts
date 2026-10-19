@@ -283,6 +283,22 @@ export async function newestVaultEntries(db: Queryable, action: string, limit: n
   return rows as StoredEntry[];
 }
 
+/**
+ * The number of the newest entry in the vault's name, allowed, of one
+ * `action`, or null for none: whether one was appended since, and nothing
+ * of what it says, so its MAC is not checked. One indexed read.
+ */
+export async function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db
+    .select({ seq: auditLog.seq })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(1);
+  return (row?.seq as bigint | undefined) ?? null;
+}
+
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
 export const LOOK_BACK = { page: 32, pages: 32 };
 

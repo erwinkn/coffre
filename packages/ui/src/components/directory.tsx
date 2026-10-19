@@ -1,12 +1,14 @@
 import { Fragment, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Menu } from '@base-ui/react/menu';
-import { EVERYWHERE, INSTANCE_ROLES, scopeInWords, unscoped } from '@coffre/core/access';
+import { EVERYWHERE, scopeInWords, unscoped } from '@coffre/core/access';
 import { changeRole, directoryList, invite, removeMember, type InviteVars, type RoleVars } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { scopeComplete } from '../lib/validation';
 import { queries, waysFor } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
+import { roleNameOf } from '../lib/roles';
+import { useRoles } from '../lib/use-roles';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
 import { setByDeployment } from './affordances';
@@ -278,6 +280,7 @@ function ServiceCells({ principal, adding }: { principal: DirectoryPrincipal; ad
  */
 export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
   const { capabilities } = useShell();
+  const { instanceRoles } = useRoles();
   if (principal.tampered === true) {
     return (
       <Toggletip
@@ -295,7 +298,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
       </Toggletip>
     );
   }
-  const name = INSTANCE_ROLES[principal.instanceRole].name;
+  const name = roleNameOf(instanceRoles, principal.instanceRole);
   return (
     <>
       {setByDeployment(principal, capabilities) ? (

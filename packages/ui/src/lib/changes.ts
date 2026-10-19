@@ -81,7 +81,7 @@ export function grantAccess(client: CoffreClient, project: string): Change<Grant
   const list = grantsList(project);
   return {
     list,
-    label: (vars) => `${vars.roleName} for ${vars.principalId}`,
+    label: (vars) => `${projectAccessLabel(vars)} for ${vars.principalId}`,
     targets: (vars) => [saving(grantId(vars))],
     apply: (grants, vars) => {
       const row: GrantRow = {
@@ -106,7 +106,7 @@ export function grantAccess(client: CoffreClient, project: string): Change<Grant
     ],
     run: async (vars) => {
       const place = grantPlace(project, vars.environmentSlug);
-      const role = vars.role as Role;
+      const role = vars.role;
       const member = memberRef(vars.principalType, vars.principalId);
       const access = { [place]: vars.expiresAt === null ? role : { role, until: vars.expiresAt } };
       const { changes } = vars.admit === true ? await client.members.add(member, { access }) : await client.access.set(member, access);
@@ -386,7 +386,16 @@ export function createEnvironment(client: CoffreClient, project: string): Change
     targets: (vars) => [saving(environmentId(project, vars.slug))],
     apply: (environments, vars) => [
       ...environments,
-      { slug: vars.slug, name: vars.slug, accessible: false, parent: vars.inherit === true ? (vars.from ?? null) : null, personal: false, details: { archivedAt: null, secretCount: 0 } },
+      {
+        slug: vars.slug,
+        name: vars.slug,
+        accessible: false,
+        parent: vars.inherit === true ? (vars.from ?? null) : null,
+        // A fork of a protected environment, however made, is protected from its first moment.
+        protected: vars.from !== undefined && environments.some((environment) => environment.slug === vars.from && environment.protected),
+        personal: false,
+        details: { archivedAt: null, secretCount: 0 },
+      },
     ],
     affects: () => affects.places(),
     run: async (vars) => {
@@ -416,6 +425,25 @@ export function renameEnvironment(client: CoffreClient, project: string): Change
       ),
     affects: () => affects.places(),
     run: (vars) => client.environments.update(`${project}/${vars.from}`, { slug: vars.slug }),
+  };
+}
+
+/**
+ * Protect an environment, or take its protection off (docs/design/roles.md):
+ * shown on its card at once, and the card says if the server refuses. Only
+ * an Owner of the whole instance unprotects one, which the page offers to
+ * them alone. What everyone holds there changes, so the roles' readers are
+ * refetched too.
+ */
+export function protectEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; protected: boolean }, unknown> {
+  return {
+    list: environmentsList(project),
+    label: (vars) => `environment ${vars.slug}`,
+    targets: (vars) => [saving(environmentId(project, vars.slug))],
+    apply: (environments, vars) =>
+      environments.map((environment) => (environment.slug === vars.slug ? { ...environment, protected: vars.protected } : environment)),
+    affects: () => [...affects.places(), ...affects.roles()],
+    run: (vars) => client.environments.protect(`${project}/${vars.slug}`, vars.protected),
   };
 }
 

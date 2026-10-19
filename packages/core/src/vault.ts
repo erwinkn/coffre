@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
+
 import type { AccessFault } from './access-fault.ts';
-import type { CredentialScope, GrantPlace, InstanceRole, Role, Scope, ServiceSetting } from './access.ts';
+import type { CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -94,6 +96,29 @@ export interface Vault {
   settings(): Promise<Settings>;
   /** Change the instance's settings: those who run it, never anyone else. */
   setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>>;
+
+  /**
+   * The instance's access policy (`Policy` in @coffre/core/access): its
+   * roles, as an Owner edited and made them, and its protected
+   * environments, as the vault's newest `policy.change` says, by its MAC.
+   * As it ships, before any. A vault older than 0.10 has none, and the app
+   * decides as it ships.
+   */
+  policy(): Promise<Policy>;
+  /**
+   * Change the policy by one change, its own `policy.change` entry, which
+   * names it and what it was (docs/design/roles.md):
+   * - a project or instance role defined, or put back as it ships (null),
+   *   or, one an Owner made, deleted while no grant names it: an Owner of
+   *   the whole instance, and never the Owner role, nor the instance's
+   *   Member;
+   * - environments of one project protected, by whoever manages its
+   *   environments, before their rows exist too (a fork's); or
+   *   unprotected, by an Owner of the whole instance.
+   * The policy after it, and the newest `policy.change`, which it is as of:
+   * the change's own, when it changed anything.
+   */
+  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>>;
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
@@ -197,6 +222,11 @@ export type RefusalCode =
   | 'last_owner'
   /** Well-formed, but not something the rules allow: a project role on an environment, a service account with an instance role. */
   | 'invalid'
+  /**
+   * A change to the policy weighed from one revision of it (`revision`)
+   * when another came since: asked again, it is weighed as the policy is now.
+   */
+  | 'policy_changed'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
   | 'log_broken'
   /**
@@ -377,6 +407,8 @@ export type Access = {
   /** When the status last changed, and who changed it; null for strangers. */
   since: string | null;
   by: string | null;
+  /** The instance's policy, which every decision about them reads: absent from a vault older than 0.10, which decides as it ships. */
+  policy?: Policy;
 };
 
 /**
@@ -436,6 +468,47 @@ export type Settings = {
 export type SetSettingsInput = Correlation & Through & {
   actor: string;
   settings: Settings;
+};
+
+/** One change to the policy (`changePolicy`). */
+export type PolicyChange =
+  | { kind: 'role'; role: Role; definition: RoleDefinition | null }
+  | { kind: 'instance-role'; role: InstanceRole; definition: RoleDefinition | null }
+  | { kind: 'protect'; projectId: string; environmentIds: string[]; protected: boolean };
+
+/**
+ * A policy's revision, as a decision made from it names it: its newest
+ * `policy.change` (null for none), and the slug of each environment it
+ * protects, by id, which a scoped instance role's filters match, and
+ * which a rename or a deletion changes with no `policy.change` of its own
+ * (docs/design/roles.md, "What changes the policy"). Equal revisions decide
+ * alike.
+ *
+ *   57.3f9a0c2e81b4d7a6   change 57, prod protected as `prod`
+ *   57.b20e94d1c6a8f305   change 57, prod renamed `staging`
+ */
+export function policyRevision(seq: number | bigint | null, policy: Pick<Policy, 'protectedIn'>): string {
+  const places = Object.values(policy.protectedIn).flat()
+    .map(({ environmentId, slug }) => `${environmentId}=${slug ?? ''}`)
+    .sort();
+  return `${seq === null ? 'none' : String(seq)}.${createHash('sha256').update(places.join('\n')).digest('hex').slice(0, 16)}`;
+}
+
+/** A revision as `policyRevision` writes it. */
+export const POLICY_REVISION = /^(none|[1-9][0-9]{0,15})\.[0-9a-f]{16}$/;
+
+export type ChangePolicyInput = Correlation & Through & {
+  actor: string;
+  change: PolicyChange;
+  /**
+   * The policy the caller decided from, as its revision
+   * (`policyRevision`): its newest `policy.change` and the rows of the
+   * environments it protects. Refused, `policy_changed`, unless the policy
+   * under the vault's head is still that one, so that a request carries on
+   * from the policy it made (`seq`) only where nothing came between, and a
+   * change previewed is made as previewed. Unchecked when absent.
+   */
+  revision?: string;
 };
 
 /**

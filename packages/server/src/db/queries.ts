@@ -1,4 +1,4 @@
-import type { GrantPlace, InstanceRole, Scope } from '@coffre/core/access';
+import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
@@ -282,6 +282,22 @@ export async function environmentPaths(db: Queryable, ids: readonly string[]): P
     .innerJoin(projects, eq(projects.id, environments.projectId))
     .where(and(inArray(environments.id, [...ids]), standing(environments.slug), standing(projects.slug)));
   return new Map(rows.map((row) => [row.id, `${row.project}/${row.environment}`]));
+}
+
+/**
+ * Live environments' slugs by id, as the vault reads them into the policy
+ * (`livePolicy`): one deleted, or of a project deleted, is left out, as
+ * one whose row is not written yet.
+ */
+export async function liveEnvironmentSlugs(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { projects, environments } = tablesOf(db);
+  const rows = await db
+    .select({ id: environments.id, slug: environments.slug })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(and(inArray(environments.id, [...ids]), standing(environments.slug), standing(projects.slug)));
+  return new Map(rows.map((row) => [row.id, row.slug]));
 }
 
 export type PlaceRow = {
@@ -569,6 +585,55 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
     .from(vaultMembers)
     .where(eq(vaultMembers.principal, principal));
   return row ?? null;
+}
+
+/**
+ * Who holds each role, as stored: how many grants name each project role,
+ * lapsed ones too, as the vault counts them before deleting a role; and how
+ * many active people hold each instance role.
+ */
+export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, number>; instanceRoles: Map<InstanceRole, number> }> {
+  const { vaultGrants, vaultMembers } = tablesOf(db);
+  const [granted, people] = await Promise.all([
+    db.select({ role: vaultGrants.role, count: count() }).from(vaultGrants).groupBy(vaultGrants.role),
+    db.select({ owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
+      .from(vaultMembers)
+      .where(and(eq(vaultMembers.status, 'active'), like(vaultMembers.principal, 'user:%'))),
+  ]);
+  const instanceRoles = new Map<InstanceRole, number>();
+  for (const row of people) {
+    const { role } = storedRole(row);
+    instanceRoles.set(role, (instanceRoles.get(role) ?? 0) + 1);
+  }
+  return { roles: new Map(granted.map((row) => [row.role, Number(row.count)])), instanceRoles };
+}
+
+/**
+ * Every active member, person or service account, with their instance
+ * role, its scope and their live grants, as stored: what weighing a change
+ * to the roles reads (`roleImpact`). A service account is a Member of
+ * everything, whatever its row says, as the vault reads it. The vault
+ * checks these rows whenever they are used; a display reads them as the
+ * database has them.
+ */
+export async function memberHoldings(db: Queryable, now: Date): Promise<{ principal: string; service: boolean; role: InstanceRole; scope: Scope; grants: StoredGrant[] }[]> {
+  const { vaultMembers } = tablesOf(db);
+  const [rows, granted] = await Promise.all([
+    db.select({ principal: vaultMembers.principal, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
+      .from(vaultMembers)
+      .where(eq(vaultMembers.status, 'active'))
+      .orderBy(asc(vaultMembers.principal)),
+    readGrants(db, { liveAt: now.getTime() }),
+  ]);
+  const byPrincipal = new Map<string, StoredGrant[]>();
+  for (const { principal, projectId, environmentId, role, expiresAt } of granted) {
+    byPrincipal.set(principal, [...(byPrincipal.get(principal) ?? []), { projectId, environmentId, role, expiresAt }]);
+  }
+  return rows.map((row) => {
+    const service = !row.principal.startsWith('user:');
+    const standing = service ? { role: 'member' as const, scope: EVERYWHERE } : storedRole(row);
+    return { principal: row.principal, service, ...standing, grants: byPrincipal.get(row.principal) ?? [] };
+  });
 }
 
 /**
@@ -1793,14 +1858,25 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
 }
 
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
-export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean }>> {
+export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean; plaintext: string | null }>> {
   if (ids.length === 0) return new Map();
   const { secretVersions } = tablesOf(db);
   const rows = await db
-    .select({ id: secretVersions.id, version: secretVersions.version, sensitive: secretVersions.sensitive, ...envelopeColumns(secretVersions) })
+    .select({ id: secretVersions.id, version: secretVersions.version, sensitive: secretVersions.sensitive, plaintext: secretVersions.plaintext, ...envelopeColumns(secretVersions) })
     .from(secretVersions)
     .where(inArray(secretVersions.id, [...new Set(ids)]));
-  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row), sensitive: row.sensitive === true }]));
+  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row), sensitive: row.sensitive === true, plaintext: row.plaintext ?? null }]));
+}
+
+/** These versions' plain values, by id, for those that are plain: a reference to one is plain too. */
+export async function plainVersions(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ id: secretVersions.id, plaintext: secretVersions.plaintext })
+    .from(secretVersions)
+    .where(and(inArray(secretVersions.id, [...new Set(ids)]), isNotNull(secretVersions.plaintext)));
+  return new Map(rows.map((row) => [row.id, row.plaintext!]));
 }
 
 // --- the audit log ------------------------------------------------------------
@@ -1860,8 +1936,12 @@ export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
 }
 
 export type AuditFilter = {
-  /** Entries in any of these projects or environments, for a caller who reads only those. */
-  within?: { projectIds: string[]; environmentIds: string[] };
+  /**
+   * Entries in any of these projects or environments, for a caller who reads
+   * only those; in a project, none about the environments of it they do not
+   * read (`except`), a protected one whose log their role leaves out.
+   */
+  within?: { projectIds: string[]; environmentIds: string[]; except?: string[] };
   projectId?: string;
   environmentId?: string;
   secretId?: string;
@@ -1923,6 +2003,10 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     within === undefined
       ? undefined
       : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
+    // An entry about a place left out, as its main place or one it names besides (`also`), is left out with it.
+    within?.except === undefined || within.except.length === 0
+      ? undefined
+      : and(or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)), sql`NOT COALESCE(${also(db, 'environmentId', within.except)}, false)`),
     filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
     filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
     filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),

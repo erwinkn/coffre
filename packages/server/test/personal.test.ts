@@ -2,6 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
+import { issuedGrant } from '@coffre/core/access';
 import { and, eq, isNotNull } from 'drizzle-orm';
 
 import { environments, secrets, secretVersions } from './db/tables.ts';
@@ -292,7 +293,7 @@ test("the vault holds an owner's scoped credential to its role on dev: a viewer'
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
     .where(eq(secrets.environmentId, config.id));
-  const credentialScope = [{ projectId: config.projectId, environmentId: config.parentId!, role: 'viewer' as const }];
+  const credentialScope = [issuedGrant({ projectId: config.projectId, environmentId: config.parentId!, role: 'viewer' })];
   const read = await deps.vault.unwrap({ principal: `user:${ADA}`, purpose: 'run', credentialScope, items: [{ secretVersionId: version!.id }] });
   assert.equal(read.ok, true);
   const secret = { projectId: config.projectId, environmentId: config.id, secretId: version!.secretId, version: version!.version + 1, path: 'market/dev@me/DATABASE_URL' };

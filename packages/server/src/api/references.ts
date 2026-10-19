@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission, Place } from '@coffre/core/access';
+import { allows, guarded, type Holdings, type Permission, type Place } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
@@ -269,6 +269,8 @@ export type Readable = {
   /** How its value was made, when a client generated it; a reference's is its source's business, and has none here. */
   recipe?: VersionRecipe | null;
   via?: Via;
+  /** Where a reference's source is, as grants match it. */
+  source?: Place;
   through?: string;
   parent?: { environmentId: string; slug: string };
 };
@@ -402,7 +404,10 @@ async function valuesIn(
       // Opened as the source it is: its value is bound to the source's ids.
       secret: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id, version: opened.version, path: path(source), sensitive: opened.sensitive },
       envelope: opened.envelope,
+      // A plain source's value is plain here too: a reference takes its nature from its source.
+      plaintext: opened.plaintext,
       via: { reference: reference.row.id, seq: Number(reference.row.createdSeq) },
+      source: placeOfRow(source),
     });
   }
   return { items, unreadable: refused };
@@ -429,7 +434,7 @@ export type ListedReference = ReferenceView & {
 export async function listReferences(
   ctx: ApiContext,
   path: Path,
-  readersAt: (places: { projectId: string; environmentId: string; environmentSlug: string }[]) => Promise<string[][]>,
+  readersAt: (places: { projectId: string; environmentId: string; environmentSlug: string; source?: Place }[]) => Promise<string[][]>,
 ): Promise<{ references: ListedReference[] }> {
   const place = await resolvePath(ctx.db, path);
   if (place === null || (path.environment !== undefined && place.environment === null) || (path.key !== undefined && place.secret === null)) {
@@ -446,7 +451,7 @@ export async function listReferences(
     current.get(row.holder.secretId)?.id === row.id && (at(row.holder) || at(row.source)) && sees(row)));
   const manages = (row: ReferenceRow) => [row.holder, row.source].some((end) => can(caller, 'grant.manage', { projectId: end.projectId }));
   const shown = resolved.filter((reference) => manages(reference.row));
-  const readers = await readersAt(shown.map((reference) => reference.row.holder));
+  const readers = await readersAt(shown.map((reference) => ({ ...reference.row.holder, ...(reference.source === null ? {} : { source: placeOfRow(reference.source) }) })));
   return {
     references: resolved.map((reference) => ({
       ...reference.view,

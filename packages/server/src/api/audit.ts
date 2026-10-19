@@ -193,17 +193,22 @@ export async function listAudit(
   if (!readsWholeLog(caller)) {
     const projectIds: string[] = [];
     const environmentIds: string[] = [];
-    // A project's whole log where they read all of it, else each environment's they read, as places are now.
+    const except: string[] = [];
+    // A project's whole log where they read all of it, else each environment's they read, as places are now; in a
+    // project they read, but for an environment whose log their role leaves out there, a protected one.
     if (canAnywhere(caller, 'audit.read')) {
       for (const project of await places(ctx.db)) {
-        if (can(caller, 'audit.read', placeOf(project, null))) projectIds.push(project.id);
-        else environmentIds.push(...project.environments.filter((environment) => can(caller, 'audit.read', placeOf(project, environment))).map((environment) => environment.id));
+        const unread = project.environments.filter((environment) => !can(caller, 'audit.read', placeOf(project, environment))).map((environment) => environment.id);
+        if (can(caller, 'audit.read', placeOf(project, null))) {
+          projectIds.push(project.id);
+          except.push(...unread);
+        } else environmentIds.push(...project.environments.filter((environment) => !unread.includes(environment.id)).map((environment) => environment.id));
       }
     }
     if (projectIds.length === 0 && environmentIds.length === 0) {
       throw forbidden('you do not hold audit.read on any project');
     }
-    filter.within = { projectIds, environmentIds };
+    filter.within = { projectIds, environmentIds, except };
   }
   if (query.path !== undefined) {
     // A deleted place's entries stay readable by its tombstone's slug.

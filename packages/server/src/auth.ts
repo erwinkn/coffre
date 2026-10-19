@@ -2,7 +2,8 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@
 import type { CredentialScope } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
-import { callerFrom, loadCaller, type Caller } from './api/caller.ts';
+import { callerFrom, newestPolicySeq, type Caller } from './api/caller.ts';
+import { formatMember } from './api/paths.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
 import { CredentialUncheckable, type HandlePlace, type PersonalToken } from './api/signin.ts';
@@ -33,7 +34,7 @@ export type AuthenticatedIdentity = {
 
 type AuthenticationRuntime = Pick<
   CoffreRuntime,
-  'auth' | 'verifier' | 'vault'
+  'auth' | 'verifier' | 'vault' | 'db'
 >;
 
 function cookieValue(request: Request, name: string): string | null {
@@ -148,6 +149,14 @@ export async function authenticateRequest(
   let personalToken: PersonalToken | null = null;
   let handlePlaces: readonly HandlePlace[] | null = null;
   let checked: Access | undefined;
+  // Before the vault is asked, by the verifier or below: the policy it answers with is this one or newer (`policyStill`).
+  let policySeq: bigint | null;
+  try {
+    policySeq = await newestPolicySeq(runtime.db);
+  } catch (error) {
+    console.error('checking a credential failed', { requestId, error: logged(error) });
+    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+  }
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
       credentialId?: string;
@@ -172,7 +181,7 @@ export async function authenticateRequest(
 
   try {
     // A coffre credential was checked against what the vault says of its member: that answer, not a second call.
-    const caller = checked === undefined ? await loadCaller(runtime.vault, principal) : callerFrom({ type: principal.type, id: principal.id }, checked, credentialScope);
+    const caller = callerFrom({ type: principal.type, id: principal.id }, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope);
     // Removal may have raced the credential verification above.
     if (credentialGeneration !== undefined && caller.generation !== credentialGeneration) {
       return unauthenticated(runtime.auth);

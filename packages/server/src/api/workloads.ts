@@ -53,6 +53,7 @@ import {
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
+import { newestPolicySeq } from './caller.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
@@ -272,7 +273,7 @@ export class WorkloadService {
       throw error;
     }
     // Its scope's shape too, before the issuer is asked anything: what it names is checked once the bindings it replaces are known.
-    if (input.scope !== undefined) parseScope(input.scope);
+    if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
       const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
@@ -319,7 +320,8 @@ export class WorkloadService {
       });
       if (options.dryRun) return plan(replaced);
 
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
@@ -419,7 +421,8 @@ export class WorkloadService {
       const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id) };
       if (options.dryRun) return plan;
 
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
@@ -476,7 +479,8 @@ export class WorkloadService {
     return withRefusals(this.#deps, async () => {
       // Logged as a denial, which no tombstone check counts.
       if (!(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) throw notManager(ctx, 'token.unbind', metadata, 'remove its trust bindings');
-      return audited(this.#deps, async (tx, log) => {
+      // Who manages it was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
         const live = row !== null && row.revokedAt === null
           && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
@@ -670,10 +674,11 @@ export class WorkloadService {
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
+    const policySeq = await newestPolicySeq(db);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One 0.4 made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
-    if (binding.scope === null) await sealCredentials(db, chainKey, standing, [{ kind: 'binding', id: binding.id, principal: member }]);
+    if (binding.scope === null) await sealCredentials(db, chainKey, standing, policySeq, [{ kind: 'binding', id: binding.id, principal: member }]);
 
     const service = member.slice('token:'.length);
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;

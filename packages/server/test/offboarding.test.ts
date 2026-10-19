@@ -85,7 +85,7 @@ async function cliSession(email: string) {
 
 test('a session the vault cannot check right now is an outage, answered 503, not a sign-out', async (t) => {
   const session = await browserSession(DEV, 'dev-account');
-  const runtime = { auth: null, verifier: signin, vault: deps.vault } as never;
+  const runtime = { auth: null, verifier: signin, vault: deps.vault, db: deps.db } as never;
   const authenticate = () => authenticateRequest(new Request('https://coffre.test/api/me'), runtime, randomUUID(), session.token);
   const hung = t.mock.method(deps.vault, 'access', async () => {
     throw new Error("The Workers runtime canceled this request because it detected that your Worker's code had hung");

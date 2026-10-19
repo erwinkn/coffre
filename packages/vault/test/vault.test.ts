@@ -1920,7 +1920,8 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
 /**
  * Hold the log's head as its owner, run `during` while a decision about
  * someone waits for it, then let go: the window between the decision's
- * check of a member's row and its seal, which the owner can widen at will.
+ * lock on a member's row and everything it reads under the head, which the
+ * owner can widen at will.
  */
 async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promise<void>): Promise<T> {
   let release!: () => void;
@@ -1989,13 +1990,14 @@ test('a grant written around the vault while it removes a member goes with the r
       });
     },
   );
-  // The removal's own writes take every grant, the one written around it included, and seal none.
+  // The removal reads her under the head, the grant written around it included: her row fails, which it logs, and it
+  // starts her over from the log, taking every grant and sealing none.
   assert.equal(removal.ok, true);
   assert.equal((await w.vault.access(ADA)).status, 'removed');
   // Admitted again, they start from nothing: no grant written around the vault comes back with them.
   assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
   assert.deepEqual((await w.vault.access(ADA)).grants, []);
-  assert.deepEqual(await tamperings(w), []);
+  assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
 });
 
 const HOUR = 60 * 60 * 1000;

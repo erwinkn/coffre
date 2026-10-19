@@ -1,18 +1,23 @@
 import {
   allows,
+  DEFAULT_POLICY,
   instanceRoleGrants,
   withinCredential,
   PERMISSIONS,
   roleGrants,
+  scopeDefinition,
   type GrantPlace,
   type InstanceRole,
   type Permission,
   type Place as CorePlace,
   type CredentialScope,
+  type Policy,
   type Role,
   type Scope,
 } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
+import type { Queryable } from '@coffre/db';
+import { newestVaultSeq } from '@coffre/db/log';
 
 import { formatMember } from './paths.ts';
 
@@ -54,14 +59,34 @@ export type Caller = {
   grants: CallerGrant[];
   /** The scope of the service token or binding the request came in on, past which nothing reaches; null for a session. */
   credentialScope: CredentialScope | null;
+  /** The instance's roles and protected environments, as the vault told them with this access (docs/design/roles.md). */
+  policy: Policy;
+  /**
+   * The newest `policy.change` the app saw before it asked the vault, by
+   * its number; null for none. A transaction that commits a decision made
+   * from `policy` checks, under the log's head, that none came since
+   * (`policyStill`).
+   */
+  policySeq: bigint | null;
+  /** A service account's: it holds each role's normal column, in a protected environment too. */
+  service: boolean;
 };
 
 /** The principal and their live grants, in one vault call. */
-export async function loadCaller(vault: Vault, principal: PrincipalRef): Promise<Caller> {
-  return callerFrom({ type: principal.type, id: principal.id }, await vault.access(formatMember(principal)));
+export async function loadCaller(db: Queryable, vault: Vault, principal: PrincipalRef): Promise<Caller> {
+  const seq = await newestPolicySeq(db);
+  return callerFrom({ type: principal.type, id: principal.id }, await vault.access(formatMember(principal)), seq);
 }
 
-export function callerFrom(principal: PrincipalRef, access: Access, credentialScope: CredentialScope | null = null): Caller {
+/**
+ * The newest `policy.change` there is, by its number: read before the
+ * vault is asked, whose answer's policy is then that one or newer, never older.
+ */
+export function newestPolicySeq(db: Queryable): Promise<bigint | null> {
+  return newestVaultSeq(db, 'policy.change');
+}
+
+export function callerFrom(principal: PrincipalRef, access: Access, policySeq: bigint | null, credentialScope: CredentialScope | null = null): Caller {
   return {
     principal,
     registered: access.status === 'active',
@@ -76,6 +101,10 @@ export function callerFrom(principal: PrincipalRef, access: Access, credentialSc
       expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt),
     })),
     credentialScope,
+    // A vault older than 0.10 tells none, and decides as the roles ship.
+    policy: access.policy ?? DEFAULT_POLICY,
+    policySeq,
+    service: principal.type === 'service',
   };
 }
 
@@ -147,6 +176,7 @@ export function seesProject(caller: Caller, project: { id: string; environments:
 
 /** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role; within their credential's scope. */
 export function canAnywhere(caller: Caller, permission: Permission): boolean {
-  if (caller.credentialScope !== null && !caller.credentialScope.some((grant) => roleGrants(grant.role, permission))) return false;
-  return instanceRoleGrants(caller.role, permission) || caller.grants.some((grant) => roleGrants(grant.role, permission));
+  // A role's normal column holds all its protected one does: what it holds anywhere.
+  if (caller.credentialScope !== null && !caller.credentialScope.some((grant) => scopeDefinition(grant).permissions.includes(permission))) return false;
+  return instanceRoleGrants(caller.role, permission, caller.policy) || caller.grants.some((grant) => roleGrants(grant.role, permission, caller.policy));
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { assignableToEnvironment, givesService, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, definitionOf, givesService, type Role } from '@coffre/core/access';
 import type { AccessChange, Admitted } from '@coffre/core/vault';
 
 import { memberStanding, places } from '../db/queries.ts';
@@ -101,6 +101,11 @@ export async function setAccess(
     const subject = { principalType: grantee.type, principalId: grantee.id };
     const scoped = (want: (typeof located)[number]) =>
       ({ projectId: want.projectId, environmentId: want.environmentId, metadata: { ...subject, role: want.role } });
+    // A role the instance's policy defines: one that ships, or one an Owner made. The vault decides on the policy as it is then.
+    const unknown = located.find((want) => want.role !== null && definitionOf(ctx.caller.policy, want.role) === undefined);
+    if (unknown !== undefined) {
+      throw new Refusal(badRequest(`no role "${unknown.role}": Settings › Roles, or \`coffre roles\`, lists the instance's`), denied(ctx, 'access.grant', 'unknown_role', scoped(unknown)));
+    }
     if (grantee.type === 'service' && ctx.caller.principal.type === 'user' && !located.every((want) => can(ctx.caller, 'grant.manage', want.place))) {
       // What it held at each place they change too: taking a grant away is changing it.
       const { standing, managed, setting } = await managedAccount(ctx, ctx.caller, grantee.id);
@@ -137,7 +142,7 @@ export async function setAccess(
       if (standing?.status === 'removed' && !admit) {
         throw refuse(want, 'they were removed; add them as a member again before granting access', 'principal_inactive');
       }
-      if (want.environmentId !== null && !assignableToEnvironment(want.role)) {
+      if (want.environmentId !== null && !assignableToEnvironment(want.role, ctx.caller.policy)) {
         throw refuse(
           want,
           `${want.role} includes permissions that only make sense on a whole project; grant it on "${want.project}"`,

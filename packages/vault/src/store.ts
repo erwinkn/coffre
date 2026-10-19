@@ -451,6 +451,13 @@ export async function endedReferences(db: Queryable, seqs: readonly bigint[]): P
 }
 
 /** The project each environment is in: a holder's ids, checked against each other. */
+/** Whether a project of this id is there, and not deleted. */
+export async function projectLive(db: Queryable, id: string): Promise<boolean> {
+  const { projects } = tablesOf(db);
+  const rows = await db.select({ deleted: truth(tombstone(projects.slug)) }).from(projects).where(eq(projects.id, id));
+  return rows.length > 0 && !rows[0]!.deleted;
+}
+
 export async function projectsOfEnvironments(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
   const { environments } = tablesOf(db);
@@ -479,6 +486,43 @@ export async function secretsByIds(db: Queryable, ids: readonly string[]): Promi
     .innerJoin(projects, eq(projects.id, secrets.projectId))
     .where(inArray(secrets.id, [...new Set(ids)]));
   return new Map(rows.map(({ project, environment, key, ...row }) => [row.secretId, { ...row, path: `${project}/${environment}/${key}` }]));
+}
+
+/**
+ * Each secret's nature, as its current version has it: plain where its
+ * value is stored as it is, sensitive where it is bound so, and otherwise
+ * secret, as is one with no value of its own.
+ */
+export async function natures(db: Queryable, secretIds: readonly string[]): Promise<Map<string, 'plain' | 'secret' | 'sensitive'>> {
+  if (secretIds.length === 0) return new Map();
+  const { secrets, secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ id: secrets.id, sensitive: secretVersions.sensitive, plain: truth(isNotNull(secretVersions.plaintext)) })
+    .from(secrets)
+    .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+    .where(inArray(secrets.id, [...new Set(secretIds)]));
+  return new Map(rows.map((row) => [row.id, Boolean(row.sensitive) ? 'sensitive' : Boolean(row.plain) ? 'plain' : 'secret']));
+}
+
+/**
+ * For each version a rewrap would bring back into its secret, its nature
+ * as stored when it is an old value, not the secret's current one; null
+ * for the current one, which a mark wraps again with no value changing.
+ */
+export async function restoredNatures(
+  db: Queryable,
+  items: readonly { secretId: string; from: string }[],
+): Promise<('plain' | 'secret' | 'sensitive' | null)[]> {
+  if (items.length === 0) return [];
+  const { secrets, secretVersions } = tablesOf(db);
+  const [current, versions] = await Promise.all([
+    db.select({ id: secrets.id, version: secrets.currentVersionId }).from(secrets).where(inArray(secrets.id, [...new Set(items.map((item) => item.secretId))])),
+    db.select({ id: secretVersions.id, sensitive: secretVersions.sensitive, plain: truth(isNotNull(secretVersions.plaintext)) }).from(secretVersions)
+      .where(inArray(secretVersions.id, [...new Set(items.map((item) => item.from))])),
+  ]);
+  const currentOf = new Map(current.map((row) => [row.id, row.version]));
+  const natureOf = new Map(versions.map((row) => [row.id, Boolean(row.sensitive) ? 'sensitive' as const : Boolean(row.plain) ? 'plain' as const : 'secret' as const]));
+  return items.map(({ secretId, from }) => (currentOf.get(secretId) === from ? null : natureOf.get(from) ?? 'secret'));
 }
 
 /** The vault's newest entry of any of these actions, allowed, or undefined. */
@@ -544,6 +588,16 @@ export async function newestSensitive(db: Queryable, secretIds: readonly string[
       sql`${secretVersions.version} = (SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
     ));
   return new Set(rows.map((row) => row.secretId));
+}
+
+/** How many grants name `role`: all of them, or those on environments. */
+export async function grantsNaming(db: Queryable, role: string, filter: { onEnvironments?: boolean } = {}): Promise<number> {
+  const { vaultGrants } = tablesOf(db);
+  const rows = await db
+    .select({ count: sql<number | string>`count(*)` })
+    .from(vaultGrants)
+    .where(and(eq(vaultGrants.role, role), filter.onEnvironments === true ? or(isNotNull(vaultGrants.environmentId), isNotNull(vaultGrants.environmentSlug)) : undefined));
+  return Number(rows[0]?.count ?? 0);
 }
 
 /**

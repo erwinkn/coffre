@@ -10,7 +10,7 @@
  * issuer and the keys it names. `--apply` saves it.
  */
 import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView, type KeysPlan, type WorkloadIds } from '@coffre/client';
-import { credentialScopeInWords, isRole, type Role } from '@coffre/core/access';
+import { credentialScopeInWords, ROLE_ID, type Role } from '@coffre/core/access';
 import {
   claimValues,
   EVENT_EXPOSURE,
@@ -99,8 +99,9 @@ export function scopeFrom(values: string[] | undefined, flag = '--scope'): Recor
   if (pairs === undefined) return undefined;
   return Object.fromEntries(pairs.map((pair) => {
     const [path, role, ...rest] = pair.split('=');
-    if (!path || role === undefined || rest.length > 0 || !isRole(role)) {
-      throw new Error(`${flag} takes <project>[/<environment>]=<role>, a role one of viewer, developer, maintainer, access-manager, auditor, owner; not "${pair}"`);
+    // A role by id: which the instance defines, it says, and `coffre roles` lists.
+    if (!path || role === undefined || rest.length > 0 || !ROLE_ID.test(role)) {
+      throw new Error(`${flag} takes <project>[/<environment>]=<role>, a role \`coffre roles\` lists, such as viewer or developer; not "${pair}"`);
     }
     return [path, role];
   }));

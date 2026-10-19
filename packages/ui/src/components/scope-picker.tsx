@@ -1,4 +1,8 @@
-import { assignableToEnvironment, credentialScopeInWords, ROLE_NAMES, ROLES, type Role } from '@coffre/core/access';
+import type { RoleView } from '@coffre/client';
+import { credentialScopeInWords, type Role } from '@coffre/core/access';
+
+import { roleNameOf } from '../lib/roles';
+import { useRoles } from '../lib/use-roles';
 
 /** A grant of the account's, as its Access tab lists it. */
 export type HeldGrant = { project: string; environment: string | null; role: Role };
@@ -13,12 +17,17 @@ export function wholeScope(grants: readonly HeldGrant[]): ScopeByPath {
   return Object.fromEntries(grants.map((grant) => [pathOf(grant), grant.role]));
 }
 
-/** The roles a credential may hold where its account holds `grant`: those it holds all of, and that the place takes. */
-function within(grant: HeldGrant): Role[] {
-  const held: readonly string[] = ROLES[grant.role].permissions;
-  return ROLE_NAMES.filter(
-    (role) => (grant.environment === null || assignableToEnvironment(role)) && ROLES[role].permissions.every((permission) => held.includes(permission)),
-  );
+/**
+ * The roles a credential may hold where its account holds `grant`: those it
+ * holds all of, and that the place takes. Its own role always, whatever the
+ * policy says of it now.
+ */
+function within(grant: HeldGrant, roles: readonly RoleView[]): Role[] {
+  const held: readonly string[] = roles.find((role) => role.id === grant.role)?.permissions ?? [];
+  const smaller = roles
+    .filter((role) => (grant.environment === null || role.assignableToEnvironment) && role.permissions.every((permission) => held.includes(permission)))
+    .map((role) => role.id);
+  return smaller.includes(grant.role) ? smaller : [grant.role, ...smaller];
 }
 
 /**
@@ -27,6 +36,7 @@ function within(grant: HeldGrant): Role[] {
  * given later reaches it, and it never changes after.
  */
 export function ScopePicker({ grants, value, onChange }: { grants: readonly HeldGrant[]; value: ScopeByPath; onChange: (scope: ScopeByPath) => void }) {
+  const { roles } = useRoles();
   if (grants.length === 0) {
     return <p className="hint">The account holds nothing yet: give it a grant first, since nothing it is given later reaches a token or binding made before.</p>;
   }
@@ -55,9 +65,9 @@ export function ScopePicker({ grants, value, onChange }: { grants: readonly Held
               disabled={chosen === undefined}
               onChange={(event) => set(path, event.target.value as Role)}
             >
-              {within(grant).map((role) => (
+              {within(grant, roles).map((role) => (
                 <option key={role} value={role}>
-                  {ROLES[role].name}
+                  {roleNameOf(roles, role)}
                 </option>
               ))}
             </select>

@@ -1,20 +1,30 @@
 import {
   allows,
   assignableToEnvironment,
+  DEFAULT_POLICY,
+  definitionOf,
   delegable,
-  DELEGABLE_ROLES,
+  delegableRoles,
+  heldColumns,
+  holds,
   isCredentialScope,
+  issuedGrant,
   issuesCredential,
   managesService,
   NOTHING,
-  ROLES,
+  PERMISSIONS,
+  protectedWithin,
   runsInstance,
+  scopeDefinition,
   setsUpServices,
   type CredentialScope,
+  type GrantPlace,
   type Holdings,
   type Place,
   type Permission,
+  type Policy,
   type Role,
+  type ScopeGrant,
   type ServiceAccount,
   type ServiceSetting,
 } from '@coffre/core/access';
@@ -25,7 +35,7 @@ import { credentials, serviceBindings } from '@coffre/db/schema';
 
 import { memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
-import { placeOf } from './caller.ts';
+import { newestPolicySeq, placeOf } from './caller.ts';
 import { audited, denied, Refusal, type ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
@@ -113,14 +123,32 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
 /** A credential's scope as the API names it: each place by its path, `market` or `market/dev`, and the role there. */
 export type ScopeByPath = Record<string, Role>;
 
-/** A scope as a token's or binding's row stores it, under its MAC: its grants as JSON, by place. */
+/**
+ * A scope as a token's or binding's row stores it, under its MAC: its
+ * grants as JSON, by place, each with what its role held when it was
+ * issued (`issuedGrant`), so that a role widened later widens no credential.
+ */
 export function storedScope(scope: CredentialScope): string {
   const key = (grant: CredentialScope[number]) => `${grant.projectId}/${grant.environmentId ?? ''}`;
   return JSON.stringify(
     [...scope]
       .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
-      .map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role })),
+      .map((grant) => {
+        const { permissions, protected: guarded } = scopeDefinition(grant);
+        return { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role, permissions: { normal: [...permissions], protected: [...guarded] } };
+      }),
   );
+}
+
+/**
+ * A grant of a scope as it holds now and as it was issued, whichever is
+ * narrower, column by column: what a credential that inherits another's
+ * scope carries, so trusting a workload again never widens it.
+ */
+function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
+  const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
+  const [a, b] = [scopeDefinition(now), scopeDefinition(before)];
+  return { ...now, permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) } };
 }
 
 /**
@@ -138,7 +166,7 @@ export function readScope(stored: string | null): CredentialScope | null {
 }
 
 /** A scope by path, as the caller would name its places now; one deleted is left out, as it reaches nothing. */
-export function scopeByPath(scope: CredentialScope | null, known: readonly PlaceRow[]): ScopeByPath | null {
+export function scopeByPath(scope: readonly (GrantPlace & { role: Role })[] | null, known: readonly PlaceRow[]): ScopeByPath | null {
   if (scope === null) return null;
   const named = scope.flatMap((grant): [string, Role][] => {
     const project = known.find((candidate) => candidate.id === grant.projectId);
@@ -155,10 +183,11 @@ export function scopeByPath(scope: CredentialScope | null, known: readonly Place
  * database: each path a project or an environment, and each role one its
  * place takes.
  */
-export function parseScope(wanted: ScopeByPath): { path: ReturnType<typeof parsePath>; role: Role }[] {
+export function parseScope(wanted: ScopeByPath, policy: Policy): { path: ReturnType<typeof parsePath>; role: Role }[] {
   return Object.entries(wanted).map(([raw, role]) => {
     const path = parsePath(raw, [1, 2]);
-    if (path.environment !== undefined && !assignableToEnvironment(role)) {
+    if (definitionOf(policy, role) === undefined) throw badRequest(`no role "${role}": Settings › Roles, or \`coffre roles\`, lists the instance's`);
+    if (path.environment !== undefined && !assignableToEnvironment(role, policy)) {
       throw badRequest(`${role} includes permissions that only make sense on a whole project; name "${path.project}"`);
     }
     return { path, role };
@@ -185,15 +214,28 @@ export async function issuedScope(
   inherited?: CredentialScope,
 ): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
   const known = await places(db);
+  const { policy } = ctx.caller;
   const account = accountOf(standing.grants, standing.by, known);
+  // Each grant with what its role holds now, kept; one inherited, no more than it held before either. Nothing narrower
+  // to cap it with: the account holds all of what it keeps, the only column a service holds, wherever it reaches, and
+  // the caller could give all of it there, its protected environments included (`issuesCredential`).
+  const before = new Map((inherited ?? []).map((grant) => [`${grant.projectId}/${grant.environmentId ?? ''}`, grant]));
+  const kept = (grant: ServiceAccount['grants'][number]): ScopeGrant => {
+    const now = issuedGrant(asGrant(grant), policy);
+    const was = before.get(`${now.projectId}/${now.environmentId ?? ''}`);
+    return was === undefined ? now : narrowest(now, was);
+  };
   let scope: ServiceAccount['grants'];
   if (wanted !== undefined) {
-    scope = placedScope(wanted, known);
+    scope = placedScope(wanted, known, policy);
   } else if (inherited !== undefined) {
-    // What the replaced bindings reached and the account still holds: a place deleted, or a role it lost, drops out.
-    const held: Holdings = { ...NOTHING, grants: account.grants.map(asGrant) };
-    scope = accountOf(inherited, null, known).grants
-      .filter(({ role, place }) => ROLES[role].permissions.every((permission) => allows(held, permission, place)));
+    // What the replaced bindings kept, each as its role is now and no more than it held, where the account still holds
+    // all of that: a place deleted, or what it lost, drops out. A role widened since keeps nothing new, and drops nothing.
+    const held: Holdings = { ...NOTHING, policy, service: true, grants: account.grants.map(asGrant) };
+    scope = accountOf(inherited, null, known).grants.filter((grant) => {
+      const { permissions } = scopeDefinition(kept(grant));
+      return permissions.length > 0 && permissions.every((permission) => allows(held, permission, grant.place));
+    });
     if (scope.length === 0) throw badRequest('the bindings it replaces reach nothing the account still holds: say what it reaches');
   } else {
     scope = account.grants;
@@ -202,7 +244,8 @@ export async function issuedScope(
     throw badRequest('a credential reaches only what its account holds when it is made: give the account a grant first');
   }
   const actor = formatMember(ctx.caller.principal);
-  const beyond = scope.find((grant) => !issuesCredential(ctx.caller, setting, actor, account, [grant]));
+  // Each as it will be kept: the caller gives, and the account holds, what the credential will hold, no more.
+  const beyond = scope.find((grant) => !issuesCredential(ctx.caller, setting, actor, account, [{ ...grant, kept: scopeDefinition(kept(grant)) }]));
   if (beyond !== undefined) {
     const path = Object.keys(scopeByPath([asGrant(beyond)], known)!)[0]!;
     throw new Refusal(
@@ -210,7 +253,7 @@ export async function issuedScope(
       denied(ctx, refused.action, 'beyond_account', { metadata: { ...refused.metadata, path } }),
     );
   }
-  const issued = scope.map(asGrant);
+  const issued = scope.map(kept);
   return { scope: issued, byPath: scopeByPath(issued, known)! };
 }
 
@@ -218,8 +261,8 @@ export async function issuedScope(
  * A scope asked by path, each place found as it is now: one that is not
  * there is not found. Each place once.
  */
-function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[]): ServiceAccount['grants'] {
-  const scope = parseScope(wanted).map(({ path, role }) => {
+function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[], policy: Policy): ServiceAccount['grants'] {
+  const scope = parseScope(wanted, policy).map(({ path, role }) => {
     const project = known.find((candidate) => candidate.slug === path.project);
     if (project === undefined) throw notFound(`no project "${path.project}"`);
     if (path.environment === undefined) return { role, place: placeOf(project, null) };
@@ -235,9 +278,15 @@ function placedScope(wanted: ScopeByPath, known: readonly PlaceRow[]): ServiceAc
  * The scope a personal token is made with, as its person asked for it, by
  * path: each role one that manages no access (`delegable`), and one they
  * hold all of at its place now, by their instance role or a grant
- * (`holder`, as the vault answers them, with no credential's scope). One
- * that reaches nothing is refused: a token reaches what it names, and
- * nothing its person is given later.
+ * (`holder`, as the vault answers them, with no credential's scope): all
+ * the role gives them there, its protected column in a protected
+ * environment, and for a project, in each of its protected environments
+ * too (`protectedWithin`). One that reaches nothing is refused: a token
+ * reaches what it names, and nothing its person is given later. Each grant
+ * keeps what its role holds in `policy` now, the holder's unless told, and
+ * what the holder holds there, whichever is less, column by column
+ * (`issuedGrant`): the column a place does not use now, its normal one in a
+ * protected environment, never grows past what they held either.
  */
 export async function personalScope(
   db: Queryable,
@@ -245,23 +294,30 @@ export async function personalScope(
   holder: Holdings,
   wanted: ScopeByPath,
   metadata: Record<string, unknown>,
-  /**
-   * What the holder must hold at a place for its role: every permission of
-   * it, unless told. A handle's, only what the proxy exercises: it writes
-   * nothing, whatever its scope says, the API refusing it.
-   */
-  needs: (role: Role) => readonly Permission[] = (role) => ROLES[role].permissions,
+  {
+    policy = holder.policy ?? DEFAULT_POLICY,
+    needs = (role, place) => PERMISSIONS.filter((permission) => holds(definitionOf(policy, role), permission, place, holder)),
+  }: {
+    policy?: Policy;
+    /**
+     * What the holder must hold at a place for its role: all it gives them
+     * there, unless told. A handle's, only what the proxy exercises: it
+     * writes nothing, whatever its scope says, the API refusing it.
+     */
+    needs?: (role: Role, place: Place) => readonly Permission[];
+  } = {},
 ): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
   const known = await places(db);
-  const scope = placedScope(wanted, known);
+  const scope = placedScope(wanted, known, policy);
   if (scope.length === 0) throw badRequest('say what the token reaches: a role on a project or an environment, as --scope market/dev=viewer');
-  const issued = scope.map(asGrant);
+  const issued = scope.map((grant) => issuedGrant(asGrant(grant), policy, heldColumns(holder, grant.place)));
   const named = (grant: ServiceAccount['grants'][number]) => Object.keys(scopeByPath([asGrant(grant)], known)!)[0]!;
-  const managing = scope.find(({ role }) => !delegable(role));
+  const managing = scope.find(({ role }) => !delegable(role, policy));
   if (managing !== undefined) {
-    throw badRequest(`a personal token never manages access: name ${DELEGABLE_ROLES.join(', ')} on ${named(managing)}, not ${managing.role}`);
+    throw badRequest(`a personal token never manages access: name ${delegableRoles(policy).join(', ')} on ${named(managing)}, not ${managing.role}`);
   }
-  const beyond = scope.find(({ role, place }) => !needs(role).every((permission) => allows(holder, permission, place)));
+  const protects = holder.policy ?? DEFAULT_POLICY;
+  const beyond = scope.find(({ role, place }) => ![place, ...protectedWithin(protects, place)].every((at) => needs(role, at).every((permission) => allows(holder, permission, at))));
   if (beyond !== undefined) {
     const path = named(beyond);
     throw new Refusal(
@@ -290,12 +346,13 @@ export function inheritedScope(replaced: readonly { scope: string | null }[]): C
     if (before !== undefined && before.role !== grant.role) {
       throw badRequest('the bindings it replaces reach one place with different roles: say what it reaches');
     }
-    byPlace.set(place, grant);
+    // One role at a place held differently by two of them, one issued under an edit: the narrower of the two.
+    byPlace.set(place, before === undefined ? grant : narrowest(grant, before));
   }
   return [...byPlace.values()];
 }
 
-function asGrant({ role, place }: ServiceAccount['grants'][number]): CredentialScope[number] {
+function asGrant({ role, place }: ServiceAccount['grants'][number]): GrantPlace & { role: Role } {
   return { projectId: place.projectId, environmentId: place.environmentId ?? null, role };
 }
 
@@ -312,23 +369,29 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
   const unsealed = await unsealedCredentials(db, new Date());
   let sealed = 0;
   for (const principal of new Set(unsealed.map((row) => row.principal))) {
+    const policySeq = await newestPolicySeq(db);
     const access = await vault.access(principal);
     if (access.status !== 'active') continue;
-    sealed += await sealCredentials(db, chainKey, access, unsealed.filter((candidate) => candidate.principal === principal));
+    sealed += await sealCredentials(db, chainKey, access, policySeq, unsealed.filter((candidate) => candidate.principal === principal));
   }
   return sealed;
 }
 
 /**
  * Seal these unsealed rows of one account with what it holds now, as
- * `access` answered, asked of the vault before: in one transaction, with a
- * `token.seal` entry naming those it sealed, so a row put back unsealed
- * later, and sealed again, shows in the log. Each update matches the row's
- * MAC as read, so two at once seal a row once. Returns how many it sealed.
+ * `access` answered, asked of the vault after the newest `policy.change`
+ * was `policySeq`: in one transaction, committed only while it still is
+ * (`policyStill`), so what each keeps is its roles as the policy is when it
+ * commits; with a `token.seal` entry naming those it sealed, so a row put
+ * back unsealed later, and sealed again, shows in the log. Each update
+ * matches the row's MAC as read, so two at once seal a row once. Returns
+ * how many it sealed.
  */
-export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, rows: readonly Unsealed[]): Promise<number> {
-  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role })));
-  return audited({ db, chainKey }, async (tx, log) => {
+export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, policySeq: bigint | null, rows: readonly Unsealed[]): Promise<number> {
+  // Each with what its role holds now, kept, as one issued now.
+  const policy = access.policy ?? DEFAULT_POLICY;
+  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy)));
+  return audited({ db, chainKey, caller: { policySeq, policy } }, async (tx, log) => {
     const done = { tokens: [] as string[], bindings: [] as string[] };
     for (const row of rows) {
       const changed = row.kind === 'token'

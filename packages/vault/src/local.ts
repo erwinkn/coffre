@@ -17,6 +17,8 @@ export const METHODS = [
   'remove',
   'settings',
   'setSettings',
+  'policy',
+  'changePolicy',
   'checkpoint',
   'about',
   'keyChecks',

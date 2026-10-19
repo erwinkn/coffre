@@ -219,10 +219,10 @@ test("an override that takes its level from the parent is prepared again when th
   assert.equal((await refusal(root.secrets.reveal('market/dev-eu/WEBHOOK'))).reason, 'sensitive');
 });
 
-test("a reference lists as its source reads: sensitive, or a secret, a plain source's included", async () => {
+test("a reference lists as its source reads: sensitive, a secret, or plain", async () => {
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { API_KEY: { ref: 'market/dev/API_KEY' }, WEBHOOK: { ref: 'market/dev/WEBHOOK' }, REGION: { ref: 'market/dev/REGION' } });
-  assert.deepEqual(await levels('market/prod'), { API_KEY: 'sensitive', REGION: 'secret', WEBHOOK: 'secret' });
+  assert.deepEqual(await levels('market/prod'), { API_KEY: 'sensitive', REGION: 'plain', WEBHOOK: 'secret' });
   assert.equal((await refusal(root.secrets.reveal('market/prod/API_KEY'))).reason, 'sensitive');
 });
 

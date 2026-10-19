@@ -10,6 +10,7 @@ import { useAction } from '../lib/use-action';
 import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
 import { ScopeField } from '../components/role-field';
+import { RolesSettings } from '../components/role-editor';
 import { ErrorLine, Modal, Spinner, Toggletip } from '../components/ui';
 import { Info, Pencil } from '../components/icons';
 
@@ -71,6 +72,7 @@ export function SettingsPage() {
         </dl>
       </Card>
 
+      <RolesSettings />
       {settings?.ok === true && <ServiceSetup scope={settings.serviceAccounts} />}
       {keys?.ok === true && <Keys keys={keys} />}
     </>

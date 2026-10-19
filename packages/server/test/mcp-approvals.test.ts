@@ -732,6 +732,26 @@ test("set_access takes places as the API reads them, and no grant on every proje
   }
 });
 
+test('admit_member as an instance role says what the role holds as the instance defines it now, an Owner\'s edit included', async () => {
+  await clientFor(deps, ROOT).roles.set('auditor', { name: 'Auditor', description: 'Reads the log, and values too.', permissions: ['audit.read', 'secret.read', 'secret.use'], protected: ['audit.read'] }, { instance: true });
+  const root = await connect(ROOT, 'read manage-access');
+  const id = idOf(await callRaw(root, 'admit_member', { member: 'user:bob@acme.example', role: 'auditor' }));
+  const as = (await view(id, ROOT)).body.approval.details.find((line) => line.label === 'As')?.value;
+  assert.equal(as, 'Auditor: Reads the log, and values too. Holds secret.read, secret.use, audit.read; in a protected environment, audit.read.');
+  // Approved as shown, it admits Bob as that.
+  assert.equal((await decide(id, true, {}, ROOT)).status, 200);
+  assert.ok((await clientFor(deps, ROOT).members.list()).members.some((member) => member.principalId === 'bob@acme.example'));
+});
+
+test('admit_member as an instance role an Owner edits after the page showed it is refused: Approve gives what the page said, or nothing', async () => {
+  const root = await connect(ROOT, 'read manage-access');
+  const id = idOf(await callRaw(root, 'admit_member', { member: 'user:bob@acme.example', role: 'auditor' }));
+  const shown = (await view(id, ROOT)).body.approval;
+  await clientFor(deps, ROOT).roles.set('auditor', { name: 'Auditor', description: 'Reads the log, and values too.', permissions: ['audit.read', 'secret.read', 'secret.use'], protected: ['audit.read'] }, { instance: true });
+  assert.equal((await decide(id, true, { shown }, ROOT)).status, 409);
+  assert.equal((await clientFor(deps, ROOT).members.list()).members.some((member) => member.principalId === 'bob@acme.example'), false);
+});
+
 test('admit_member makes a service account with its first grant in one approval: the page shows the grant, and Approve makes both', async () => {
   const root = await connect(ROOT, 'read manage-access');
   const id = idOf(await callRaw(root, 'admit_member', { member: 'service:ci-new', access: { 'market/prod': 'viewer' } }));

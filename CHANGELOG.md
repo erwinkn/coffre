@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- **Protected environments, and roles an Owner edits.** Each role now
+  holds permissions in two columns: in an environment that is not
+  protected, and in one that is. A person in a protected environment
+  holds the second; a service account holds the first everywhere, so CI
+  reads what it read. As they ship, Viewer, Developer and Maintainer
+  drop read in a protected environment and keep use; Developer and
+  Maintainer keep write too:
+
+  ```sh
+  coffre environments protect market/prod   # whoever manages market's environments
+  coffre roles developer                     # secret.read  yes  protected: no
+  ```
+
+  Ada, a Developer of `market`, reads `market/dev` as before; in
+  `market/prod` her reveal is refused and `coffre run` gives her app
+  placeholders. No environment is protected until someone says so, so
+  nobody's access changes on upgrade. Only an Owner of the whole
+  instance unprotects one (`coffre environments unprotect`), and a fork
+  of a protected environment, a copy or one that inherits, is protected
+  before its row exists. Forking one takes reading it there, as any fork
+  takes reading its source: as they ship, an Owner forks a protected
+  prod, and a Maintainer or a Developer does not. Settings › Roles, or
+  `coffre roles set`, `reset` and `remove`, lets an Owner of the whole
+  instance edit any role but Owner and the instance's Member, and make
+  custom ones (`release-manager`), granted as any is and deleted once no
+  grant names one; each change is previewed in words first ("Widens
+  secret.read for 6 people on 4 protected environments") and logged as
+  `policy.change`. The vault keeps roles and protection in its newest
+  `policy.change` entry, under its MAC, and decides on them. A token, a
+  service token or a trust binding keeps what its roles held when it was
+  issued, and no more than its issuer held there, in either column, so
+  neither a role nor its issuer, widened later, widens a credential, and
+  a role narrowed narrows each at once. A personal token,
+  service token or trust binding issued before 0.10 holds its roles as
+  they ship, whatever an Owner makes of them. Deploy the vault Worker
+  with the app, or first: a 0.9 vault refuses every request on a
+  credential 0.10 issued (500), where a 0.9 app reads it as reaching
+  nothing. A request whose roles or protected environments changed while
+  it ran answers 409 `policy_changed`, "try again", as does a role's edit
+  confirmed with an impact preview (`?revision=`) another change
+  overtook. A reference takes its value and nature (plain, secret,
+  sensitive) from its source, live, and its permissions from where it
+  lives: whoever reads `market/dev` reads dev's reference into a protected
+  `market/prod`, and a reference to a sensitive key is use-only there.
+  Making or repointing one takes reading its source, and using it where
+  it is sensitive; a reference to a plain value is plain, no longer
+  secret. A value is made live only by whoever could have read it, or
+  typed it: restoring an old version, or unarchiving a key, takes reading
+  a secret there, using a sensitive one, writing alone for a plain one. A
+  writer who cannot read prod no longer rolls a secret back there; they
+  type a new value.
+  The API: `GET /api/roles`, `PUT` and `DELETE /api/roles/<role>`
+  and `/api/instance-roles/<role>` (`?dryRun=1` for the impact), and
+  `PATCH /api/projects/<p>/<e>` with `{ "protected": true }`. Migration
+  `0014_custom_roles` widens the grants' role check. See
+  docs/design/roles.md.
 - **Breaking: each key says who sees its value, and `people` and
   `expose` are gone.** One setting per key, three levels:
   - `plain`: anyone who lists the environment, as 0.9's plain values.

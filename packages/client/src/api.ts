@@ -50,7 +50,7 @@ export type Api = {
         label: string;
         expiresAt: string;
         scope: {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
       };
       credentialExpiresAt: string | null;
@@ -75,6 +75,7 @@ export type Api = {
           name: string;
           accessible: boolean;
           parent: string | null;
+          protected: boolean;
           personal: boolean;
           details: null | {
             archivedAt: string | null;
@@ -149,6 +150,7 @@ export type Api = {
         slug: string;
         name: string;
         archivedAt: string | null;
+        protected: boolean;
       };
       created: boolean;
       forked: null | {
@@ -165,12 +167,14 @@ export type Api = {
       name?: string;
       archived?: boolean;
       slug?: string;
+      protected?: boolean;
     };
     output: {
       environment: {
         slug: string;
         name: string;
         archivedAt: string | null;
+        protected: boolean;
       };
     };
   };
@@ -272,6 +276,7 @@ export type Api = {
         of: string;
         fallback: boolean;
       };
+      protected: boolean;
       rotateAfterDays: number | null;
     };
   };
@@ -472,7 +477,7 @@ export type Api = {
           id: string;
           project: string;
           environment: string | null;
-          role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          role: string;
           roleName: string;
           permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
           expiresAt: string | null;
@@ -531,7 +536,7 @@ export type Api = {
         expiresAt: string;
         lastUsedAt: string | null;
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
       }[];
       apps: {
@@ -555,7 +560,7 @@ export type Api = {
         lastUsedAt: string | null;
         lastUsedIp: string | null;
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
       }[];
       references: {
@@ -592,8 +597,8 @@ export type Api = {
         };
       };
       access?: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
-          role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string | null | {
+          role: string;
           until: string | null;
         };
       };
@@ -673,7 +678,7 @@ export type Api = {
           expiresAt: string;
           lastUsedAt: string | null;
           scope: null | {
-            [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+            [key: string]: string;
           };
         }[];
         apps: {
@@ -697,7 +702,7 @@ export type Api = {
           lastUsedAt: string | null;
           lastUsedIp: string | null;
           scope: null | {
-            [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+            [key: string]: string;
           };
         }[];
         references: {
@@ -732,7 +737,7 @@ export type Api = {
         lastUsedAt: string | null;
         lastUsedIp: string | null;
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
       }[];
     };
@@ -743,7 +748,7 @@ export type Api = {
       expiresInDays?: number;
       expiresInMinutes?: number;
       scope?: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string;
       };
     };
     output: {
@@ -751,11 +756,11 @@ export type Api = {
       token: string;
       expiresAt: string;
       scope: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string;
       };
     } | {
       scope: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string;
       };
     };
   };
@@ -782,7 +787,7 @@ export type Api = {
           [key: string]: string | string[];
         };
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
         label: string | null;
         createdAt: string;
@@ -799,7 +804,7 @@ export type Api = {
       };
       issuer?: string | null;
       scope?: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string;
       };
       label?: string | null;
       replaces?: string[];
@@ -822,7 +827,7 @@ export type Api = {
         [key: string]: string | string[];
       };
       scope: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string;
       };
       replaces: {
         id: string;
@@ -843,7 +848,7 @@ export type Api = {
           [key: string]: string | string[];
         };
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
         label: string | null;
         createdAt: string;
@@ -880,8 +885,8 @@ export type Api = {
   };
   "PATCH /access/:member": {
     input: {
-      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
-        role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: string | null | {
+        role: string;
         until: string | null;
       };
     };
@@ -1230,7 +1235,7 @@ export type Api = {
         id: string;
         project: string;
         environment: string | null;
-        role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        role: string;
         roleName: string;
         permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         expiresAt: string | null;
@@ -1342,7 +1347,7 @@ export type Api = {
           [key: string]: string | string[];
         };
         scope: null | {
-          [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+          [key: string]: string;
         };
         label: string | null;
         createdAt: string;
@@ -1376,14 +1381,210 @@ export type Api = {
       token: string;
       expiresAt: string;
       scope: {
-        [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+        [key: string]: string;
+      };
+    };
+  };
+  "GET /roles": {
+    input: undefined;
+    output: {
+      roles: {
+        name: string;
+        description: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        id: string;
+        builtin: boolean;
+        edited: boolean;
+        fixed: boolean;
+        default: null | {
+          name: string;
+          description: string;
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        };
+        assignableToEnvironment: boolean;
+        grants: number;
+      }[];
+      instanceRoles: {
+        name: string;
+        description: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        id: string;
+        builtin: boolean;
+        edited: boolean;
+        fixed: boolean;
+        default: null | {
+          name: string;
+          description: string;
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        };
+        assignableToEnvironment: boolean;
+        grants: number;
+      }[];
+      editable: boolean;
+    };
+  };
+  "PUT /roles/:role": {
+    input: {
+      name: string;
+      description: string;
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    };
+    output: {
+      impact: {
+        change: "narrows" | "widens";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        protected: boolean;
+        people: number;
+        services: number;
+        environments: number;
+        projects: number;
+        examples: string[];
+      }[];
+      sentence: string;
+      revision: string;
+    } | {
+      role: null | {
+        name: string;
+        description: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        id: string;
+        builtin: boolean;
+        edited: boolean;
+        fixed: boolean;
+        default: null | {
+          name: string;
+          description: string;
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        };
+        assignableToEnvironment: boolean;
+        grants: number;
+      };
+    };
+  };
+  "DELETE /roles/:role": {
+    input: undefined;
+    output: {
+      impact: {
+        change: "narrows" | "widens";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        protected: boolean;
+        people: number;
+        services: number;
+        environments: number;
+        projects: number;
+        examples: string[];
+      }[];
+      sentence: string;
+      revision: string;
+    } | {
+      role: null | {
+        name: string;
+        description: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        id: string;
+        builtin: boolean;
+        edited: boolean;
+        fixed: boolean;
+        default: null | {
+          name: string;
+          description: string;
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        };
+        assignableToEnvironment: boolean;
+        grants: number;
+      };
+    };
+  };
+  "PUT /instance-roles/:role": {
+    input: {
+      name: string;
+      description: string;
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    };
+    output: {
+      impact: {
+        change: "narrows" | "widens";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        protected: boolean;
+        people: number;
+        services: number;
+        environments: number;
+        projects: number;
+        examples: string[];
+      }[];
+      sentence: string;
+      revision: string;
+    } | {
+      role: null | {
+        name: string;
+        description: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        id: string;
+        builtin: boolean;
+        edited: boolean;
+        fixed: boolean;
+        default: null | {
+          name: string;
+          description: string;
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        };
+        assignableToEnvironment: boolean;
+        grants: number;
+      };
+    };
+  };
+  "DELETE /instance-roles/:role": {
+    input: undefined;
+    output: {
+      impact: {
+        change: "narrows" | "widens";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        protected: boolean;
+        people: number;
+        services: number;
+        environments: number;
+        projects: number;
+        examples: string[];
+      }[];
+      sentence: string;
+      revision: string;
+    } | {
+      role: null | {
+        name: string;
+        description: string;
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        id: string;
+        builtin: boolean;
+        edited: boolean;
+        fixed: boolean;
+        default: null | {
+          name: string;
+          description: string;
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        };
+        assignableToEnvironment: boolean;
+        grants: number;
       };
     };
   };
 };
 
-export type AccessValue = "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
-  role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+export type AccessValue = string | null | {
+  role: string;
   until: string | null;
 };
 
@@ -1513,7 +1714,7 @@ export type BindingPlan = {
     [key: string]: string | string[];
   };
   scope: {
-    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: string;
   };
   replaces: {
     id: string;
@@ -1535,7 +1736,7 @@ export type BindingView = {
     [key: string]: string | string[];
   };
   scope: null | {
-    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: string;
   };
   label: string | null;
   createdAt: string;
@@ -1712,7 +1913,7 @@ export type Me = {
     label: string;
     expiresAt: string;
     scope: {
-      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: string;
     };
   };
   credentialExpiresAt: string | null;
@@ -1748,7 +1949,7 @@ export type Member = {
     id: string;
     project: string;
     environment: string | null;
-    role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+    role: string;
     roleName: string;
     permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
@@ -1778,7 +1979,7 @@ export type MemberAccess = {
     id: string;
     project: string;
     environment: string | null;
-    role: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+    role: string;
     roleName: string;
     permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
@@ -1850,7 +2051,7 @@ export type OffboardingReport = {
     expiresAt: string;
     lastUsedAt: string | null;
     scope: null | {
-      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: string;
     };
   }[];
   apps: {
@@ -1874,7 +2075,7 @@ export type OffboardingReport = {
     lastUsedAt: string | null;
     lastUsedIp: string | null;
     scope: null | {
-      [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+      [key: string]: string;
     };
   }[];
   references: {
@@ -1930,6 +2131,7 @@ export type ProjectSummary = {
     name: string;
     accessible: boolean;
     parent: string | null;
+    protected: boolean;
     personal: boolean;
     details: null | {
       archivedAt: string | null;
@@ -1955,6 +2157,98 @@ export type RemovedMember = {
   principalType: "service" | "user";
   principalId: string;
   toRotate: number;
+};
+
+export type ImpactLine = {
+  change: "narrows" | "widens";
+  permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+  protected: boolean;
+  people: number;
+  services: number;
+  environments: number;
+  projects: number;
+  examples: string[];
+};
+
+export type RoleImpact = {
+  impact: {
+    change: "narrows" | "widens";
+    permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+    protected: boolean;
+    people: number;
+    services: number;
+    environments: number;
+    projects: number;
+    examples: string[];
+  }[];
+  sentence: string;
+  revision: string;
+};
+
+export type RoleView = {
+  name: string;
+  description: string;
+  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+  protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+  id: string;
+  builtin: boolean;
+  edited: boolean;
+  fixed: boolean;
+  default: null | {
+    name: string;
+    description: string;
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+  };
+  assignableToEnvironment: boolean;
+  grants: number;
+};
+
+export type RolesView = {
+  roles: {
+    name: string;
+    description: string;
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    id: string;
+    builtin: boolean;
+    edited: boolean;
+    fixed: boolean;
+    default: null | {
+      name: string;
+      description: string;
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    };
+    assignableToEnvironment: boolean;
+    grants: number;
+  }[];
+  instanceRoles: {
+    name: string;
+    description: string;
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    id: string;
+    builtin: boolean;
+    edited: boolean;
+    fixed: boolean;
+    default: null | {
+      name: string;
+      description: string;
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    };
+    assignableToEnvironment: boolean;
+    grants: number;
+  }[];
+  editable: boolean;
+};
+
+export type EnvironmentView = {
+  slug: string;
+  name: string;
+  archivedAt: string | null;
+  protected: boolean;
 };
 
 export type SecretKey = {
@@ -2036,7 +2330,7 @@ export type SetResult = {
 
 export type TokenPlan = {
   scope: {
-    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: string;
   };
 };
 
@@ -2050,6 +2344,6 @@ export type TokenRow = {
   lastUsedAt: string | null;
   lastUsedIp: string | null;
   scope: null | {
-    [key: string]: "access-manager" | "auditor" | "contributor" | "developer" | "maintainer" | "owner" | "viewer";
+    [key: string]: string;
   };
 };

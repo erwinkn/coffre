@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
-import { EVERYWHERE } from '@coffre/core/access';
+import { DEFAULT_POLICY, EVERYWHERE } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
+import * as schema from '@coffre/db/schema';
 
 import { answer } from './start-fixture.ts';
 import { CredentialUncheckable } from '../src/api/signin.ts';
@@ -36,6 +37,9 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
   };
 }
 
+/** A database that holds no `policy.change`: all a request reads of it before the vault says who called. */
+const noPolicyChanges = { _: { fullSchema: schema }, select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }) }) };
+
 const root: Principal = {
   type: 'user',
   id: 'admin@acme.example',
@@ -51,7 +55,7 @@ function appRuntime(auth: AuthConfig) {
     signin: null,
     verifier: { verify: async () => root },
     vault: vaultKnowing({}),
-    db: null,
+    db: noPolicyChanges,
     schema: { migrated: true },
     plugins: [],
   } as never;
@@ -201,6 +205,7 @@ test('an Owner is whoever the vault says, in one call', async () => {
     }),
     {
       auth: cloudflare,
+      db: noPolicyChanges,
       verifier: { verify: async () => root },
       vault: vaultKnowing(
         { 'user:admin@acme.example': { status: 'active', role: 'owner' } },
@@ -235,6 +240,7 @@ test('an unregistered identity is marked for the closed-door boundary', async ()
     }),
     {
       auth: cloudflare,
+      db: noPolicyChanges,
       verifier: { verify: async () => principal },
       vault: vaultKnowing({}),
     } as never,
@@ -254,6 +260,9 @@ test('an unregistered identity is marked for the closed-door boundary', async ()
       scope: EVERYWHERE,
       grants: [],
       credentialScope: null,
+      policy: DEFAULT_POLICY,
+      policySeq: null,
+      service: false,
     },
     requestId: 'unregistered-request',
     sourceIp: null,
@@ -268,6 +277,7 @@ test('production fails closed when the Access assertion is missing', async () =>
     new Request('https://coffre.example.test/projects'),
     {
       auth: cloudflare,
+      db: noPolicyChanges,
       verifier: {
         verify: async () => {
           verified = true;
@@ -296,6 +306,7 @@ test('an active registered identity receives an auditable request context', asyn
     }),
     {
       auth: own,
+      db: noPolicyChanges,
       verifier: { verify: async () => principal },
       vault: vaultKnowing({ 'token:reporting.access': { status: 'active' } }),
     } as never,
@@ -316,6 +327,9 @@ test('an active registered identity receives an auditable request context', asyn
         scope: EVERYWHERE,
         grants: [],
         credentialScope: null,
+        policy: DEFAULT_POLICY,
+        policySeq: null,
+        service: true,
       },
       requestId: 'registered-request',
       sourceIp: null,
@@ -339,6 +353,7 @@ test('a principal lookup that fails answers unavailable, not unauthenticated, an
     }),
     {
       auth: cloudflare,
+      db: noPolicyChanges,
       verifier: { verify: async () => principal },
       vault: vaultKnowing({}, () => {
         throw new Error('connection refused');
@@ -360,6 +375,7 @@ test('a credential that cannot be checked answers unavailable, not unauthenticat
     new Request('https://coffre.test/api/me'),
     {
       auth: own,
+      db: noPolicyChanges,
       verifier: {
         verify: async () => {
           throw new CredentialUncheckable(new Error('the vault at /run/coffre/vault.sock is unreachable: read ECONNRESET'));
@@ -381,6 +397,7 @@ test('a credential that cannot be checked answers unavailable, not unauthenticat
 test('removal between credential verification and caller loading cannot use the new membership', async () => {
   const runtime = {
     auth: own,
+    db: noPolicyChanges,
     verifier: { verify: async () => ({ ...root, credentialId: 'old-session', credentialGeneration: 0 }) },
     vault: vaultKnowing({ [`user:${root.id}`]: { status: 'active', generation: 1 } }),
   };

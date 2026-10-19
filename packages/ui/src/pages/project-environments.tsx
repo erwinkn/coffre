@@ -6,7 +6,7 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
-import { archiveEnvironment, createEnvironment, environmentId, renameEnvironment } from '../lib/changes';
+import { archiveEnvironment, createEnvironment, environmentId, protectEnvironment, renameEnvironment } from '../lib/changes';
 import { affects, keys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
@@ -19,7 +19,10 @@ import { Card } from '../components/page';
 import { useAction } from '../lib/use-action';
 import { DeletePlaceDialog } from '../components/delete-place';
 import { PrincipalAvatar } from '../components/principal';
-import { Archive, ChevronRight, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
+import { Archive, ChevronRight, Lock, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
+import { ProtectedTag } from '../components/protected';
+import { protectionInWords } from '../lib/roles';
+import { useRoles } from '../lib/use-roles';
 import { pageRoute } from '../lib/page-route';
 import { useProject } from '../lib/project-page';
 import type { projectEnvironments } from '../options';
@@ -108,6 +111,7 @@ function EnvironmentsPanel({
             project={project.slug}
             // Your personal config is nobody's source: its values are yours alone.
             sources={current.filter((environment) => isActiveAccessibleEnvironment(environment) && !environment.personal).map((environment) => environment.slug)}
+            guarded={current.filter((environment) => environment.protected).map((environment) => environment.slug)}
           />
         </div>
       )}
@@ -183,11 +187,15 @@ function EnvironmentCard({
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Protecting, or taking it off, waiting for its confirmation.
+  const [guarding, setGuarding] = useState(false);
   const { capabilities } = useShell();
+  const { roles } = useRoles();
   const [slug, setSlug] = useState(environment.slug);
   const coffre = useCoffre();
   const rename = useChange(renameEnvironment(coffre, project));
   const archive = useChange(archiveEnvironment(coffre, project));
+  const protect = useChange(protectEnvironment(coffre, project));
   // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
   const place = `${project}/${environment.slug}`;
   const archiving = confirming && environment.details?.archivedAt == null;
@@ -204,6 +212,10 @@ function EnvironmentCard({
   const manageable = isAdmin && details !== null;
   // Deleting is for those who run the instance, and only once the environment is archived.
   const deletable = manageable && isArchived && capabilities.runsInstance;
+  // Whoever manages environments protects one; only an Owner of the whole instance takes it off.
+  const guarded = environment.protected;
+  const guardable = manageable && environment.personal !== true && (!guarded || capabilities.ownsInstance);
+  const protection = protectionInWords(roles);
   const slugError = slug === '' ? null : environmentSlugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
   // A personal config is its owner's alone: no grant reaches it, so none is shown on its card.
@@ -228,6 +240,7 @@ function EnvironmentCard({
           ) : (
             <span className="env-card-name">{environment.slug}</span>
           )}
+          {guarded && <ProtectedTag />}
           {/* A fork: its keys are its parent's, but for those it sets or removes. An instance before 0.7 says nothing. */}
           {environment.personal === true
             ? <span className="tag tag-blue">yours alone</span>
@@ -301,6 +314,12 @@ function EnvironmentCard({
               <Pencil size={14} />
               Rename
             </Menu.Item>
+            {guardable && (
+              <Menu.Item className="menu-item" onClick={() => setGuarding(true)}>
+                <Lock size={14} />
+                {guarded ? 'Unprotect…' : 'Protect…'}
+              </Menu.Item>
+            )}
             <Menu.Separator className="menu-sep" />
             <Menu.Item
               className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
@@ -423,6 +442,32 @@ function EnvironmentCard({
         </>
       )}
 
+      {guardable && (
+        <ConfirmDialog
+          open={guarding}
+          onOpenChange={setGuarding}
+          title={
+            <>
+              {guarded ? 'Unprotect' : 'Protect'}{' '}
+              <span className="mono">
+                {project}/{environment.slug}
+              </span>
+              ?
+            </>
+          }
+          body={
+            guarded
+              ? 'People holding a role here get its full column again, as in any other environment. Service accounts are unaffected.'
+              : `People holding a role here get its protected column${protection === null ? ', which for now holds what the other does' : `: ${protection}`}. Service accounts are unaffected.${
+                  capabilities.ownsInstance ? '' : ' Only an Owner of the whole instance takes protection off.'
+                }`
+          }
+          confirmLabel={guarded ? 'Unprotect' : 'Protect'}
+          destructive={guarded}
+          onConfirm={() => protect({ slug: environment.slug, protected: !guarded })}
+        />
+      )}
+
       {deletable && (
         <DeletePlaceDialog
           path={`${project}/${environment.slug}`}
@@ -499,7 +544,16 @@ function PersonalConfigs({ project }: { project: string }) {
  * folder, without history, or a reference to it. Copying is a read, and
  * logged as one; inheriting reads nothing until the fork is read.
  */
-function NewEnvironment({ project, sources }: { project: string; sources: string[] }) {
+function NewEnvironment({
+  project,
+  sources,
+  guarded,
+}: {
+  project: string;
+  sources: string[];
+  /** The protected ones: a fork of one is protected too. */
+  guarded: string[];
+}) {
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
   // '' for empty, 'inherit:prod' for a fork that inherits, 'copy:prod' for a copy, 'ref:prod' for references to prod.
@@ -599,6 +653,11 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
                     ? `Each of ${from}'s keys, with its current value and folder, without history.`
                     : `Each key follows ${from}'s until it gets a value of its own. Whoever can read ${slug === '' ? 'the new environment' : slug} will read ${from}'s values through them, even without access to ${from}.`}
               </span>
+              {from !== '' && guarded.includes(from) && (
+                <span className="hint">
+                  <span className="mono">{from}</span> is protected, so the new environment is too, from its first moment.
+                </span>
+              )}
               {copied.length > 0 && (
                 <span className="hint">
                   Copied instead, since you read their source only through {from}: <span className="mono">{copied.join(', ')}</span>.

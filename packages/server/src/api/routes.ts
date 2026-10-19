@@ -1,7 +1,8 @@
-import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, PERMISSIONS, protects, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
-import { displayName, environmentSlug, folderName, instanceRole, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { displayName, environmentSlug, folderName, instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { POLICY_REVISION } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
@@ -17,7 +18,8 @@ import { missingKeys, setDismissals } from './missing.ts';
 import { formatMember, parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
 import { listPersonal, makePersonal } from './personal.ts';
-import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type PlaceView } from './projects.ts';
+import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type EnvironmentView } from './projects.ts';
+import { changeRole, listRoles, protectEnvironment, type RoleImpact, type RoleView } from './roles.ts';
 import {
   dryRunSecrets,
   environmentVersion,
@@ -98,10 +100,22 @@ const placePatch = z
   .object({ name: displayName, slug, archived: z.boolean() })
   .partial()
   .strict();
-const environmentPatch = placePatch.extend({ slug: environmentSlug.optional() }).strict();
+// `protected`: whoever manages the project's environments protects one; only an Owner of the whole instance unprotects it.
+const environmentPatch = placePatch.extend({ slug: environmentSlug.optional(), protected: z.boolean().optional() }).strict();
 
 /** `?dryRun=1`: what the call would do, without doing it. Any other query is refused, not ignored. */
 const dryRunFlag = z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict();
+
+/**
+ * A role's change: `?dryRun=1` weighs it, and `?revision=57.3f9a0c2e81b4d7a6`,
+ * its preview's, confirms it as weighed: refused, 409 `policy_changed`, if
+ * the policy changed since.
+ */
+const roleChangeQuery = dryRunFlag.extend({ revision: z.string().regex(POLICY_REVISION).optional() }).strict();
+
+function roleChange(query: z.infer<typeof roleChangeQuery>): { dryRun: boolean; revision?: string } {
+  return { dryRun: query.dryRun !== undefined, ...(query.revision === undefined ? {} : { revision: query.revision }) };
+}
 
 const secretValue = z
   .string()
@@ -154,7 +168,15 @@ const sensitiveValue = z.object({
 /** The key's current value, kept, made stricter: as strict already is no change, and looser is refused (409). */
 const marked = z.object({ sensitivity }).strict();
 
-const role = z.enum(ROLE_NAMES);
+/** A role by id: one that ships, or one an Owner made; whether the instance defines it, the handler and the vault say. */
+const role = roleId;
+/** A role's definition, both columns (docs/design/roles.md): the vault checks it whole (`definitionProblem`). */
+const roleDefinition = z.object({
+  name: z.string().max(40),
+  description: z.string().max(200),
+  permissions: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
+  protected: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
+}).strict();
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
 const accessPatch = z.record(
   z.string().max(200),
@@ -268,13 +290,15 @@ export const routes = {
     creates: true,
     // `market/dev@me`: your personal config of dev, made if you have none; it takes read on dev, nothing more.
     personal: 'handles',
-    run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; forked: Forked | null }> => {
+    run: async (ctx, { params, place, input }): Promise<{ environment: EnvironmentView; created: boolean; forked: Forked | null }> => {
       if (place.personal !== undefined) {
         if (input.from !== undefined || input.inherit !== undefined || input.references !== undefined) {
           throw badRequest('a personal config inherits from the environment it is a config of: no `from`');
         }
         const made = place.environment === null ? await makePersonal(ctx, place, 'environment.create') : { place, created: false };
-        return { environment: { slug: params.environment, name: params.environment, archivedAt: null }, created: made.created, forked: null };
+        // Protected as the environment it is a config of is.
+        const guarded = protects(ctx.caller.policy, place.personal.of.id);
+        return { environment: { slug: params.environment, name: params.environment, archivedAt: null, protected: guarded }, created: made.created, forked: null };
       }
       // Not a slug a project's page has (`@coffre/core/pages`).
       environmentSlug.parse(params.environment);
@@ -295,7 +319,14 @@ export const routes = {
     input: environmentPatch,
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.update',
-    run: (ctx, { place, input }) => patchEnvironment(ctx, place, input),
+    run: async (ctx, { place, input }) => {
+      const { protected: guarded, ...patch } = input;
+      if (guarded === undefined) return patchEnvironment(ctx, place, patch);
+      // The vault's to change, with no transaction of the app's open across it: so asked alone, never with a rename or an
+      // archive whose refusal would leave the protection changed and the rest not.
+      if (Object.keys(patch).length > 0) throw badRequest('protect or unprotect an environment on its own, not with other changes');
+      return patchEnvironment(await protectEnvironment(ctx, place, guarded), place, {});
+    },
   }),
   ...route('DELETE /projects/:project/:environment', {
     query: dryRunFlag,
@@ -543,6 +574,32 @@ export const routes = {
   }),
   ...route('DELETE /members/:member/bindings/:id', {
     run: (ctx, { params }) => workloads(ctx).unbind(ctx, serviceId(params.member), params.id),
+  }),
+  // The instance's roles, as an Owner edited and made them, for any member; an Owner of the whole instance edits them
+  // (docs/design/roles.md). `?dryRun=1` answers what the change would do to everyone it reaches, and changes nothing.
+  ...route('GET /roles', { run: (ctx) => listRoles(ctx) }),
+  ...route('PUT /roles/:role', {
+    input: roleDefinition,
+    query: roleChangeQuery,
+    run: (ctx, { params, input, query }): Promise<RoleImpact | { role: RoleView | null }> =>
+      changeRole(ctx, 'role', params.role, input, roleChange(query)),
+  }),
+  // A built-in role back as it ships; one an Owner made, deleted, while no grant names it (409).
+  ...route('DELETE /roles/:role', {
+    query: roleChangeQuery,
+    run: (ctx, { params, query }): Promise<RoleImpact | { role: RoleView | null }> =>
+      changeRole(ctx, 'role', params.role, null, roleChange(query)),
+  }),
+  ...route('PUT /instance-roles/:role', {
+    input: roleDefinition,
+    query: roleChangeQuery,
+    run: (ctx, { params, input, query }): Promise<RoleImpact | { role: RoleView | null }> =>
+      changeRole(ctx, 'instance-role', params.role, input, roleChange(query)),
+  }),
+  ...route('DELETE /instance-roles/:role', {
+    query: roleChangeQuery,
+    run: (ctx, { params, query }): Promise<RoleImpact | { role: RoleView | null }> =>
+      changeRole(ctx, 'instance-role', params.role, null, roleChange(query)),
   }),
   // The instance's settings: where people set up service accounts themselves.
   ...route('GET /settings', {

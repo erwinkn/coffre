@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { runsInstance, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
+import { runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
@@ -35,6 +35,7 @@ import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 import { formatMember } from './paths.ts';
 import { resolveKeys, type Held } from './inheritance.ts';
+import { protectedFor } from './roles.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
 export type Me = {
@@ -92,6 +93,11 @@ export type ProjectEnvironmentSummary = {
   accessible: boolean;
   /** The environment it inherits from, by slug: a fork's (docs/design/forking.md). Null for none. */
   parent: string | null;
+  /**
+   * Whether it is protected (docs/design/roles.md): a person holds their
+   * role's protected column there. A personal config is as its parent is.
+   */
+  protected: boolean;
   /**
    * Your personal config of `parent`, listed as `dev@me`: nobody else's is
    * listed here, as only its owner reads it (maintainers find them under
@@ -196,7 +202,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
         const personal = environment.owner !== null;
         const slug = listedSlug(environment);
         if (!manages && !secretAccess) {
-          return { slug, name: personal ? slug : environment.name, accessible: false, parent: parent(environment), personal, details: null };
+          return { slug, name: personal ? slug : environment.name, accessible: false, parent: parent(environment), personal, protected: protectedFor(caller, environment), details: null };
         }
         return {
           slug,
@@ -204,6 +210,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
           accessible: secretAccess,
           parent: parent(environment),
           personal,
+          protected: protectedFor(caller, environment),
           details: {
             archivedAt: iso(environment.archivedAt),
             secretCount: secretAccess ? (resolved.get(environment.id)?.size ?? environment.secretCount) : null,
@@ -268,6 +275,8 @@ export type PlaceView = {
   archivedAt: string | null;
 };
 export type ProjectView = PlaceView & { folder: string | null };
+/** An environment's: whether it is protected too, a personal config as its parent is. */
+export type EnvironmentView = PlaceView & { protected: boolean };
 
 function slugTaken(what: 'project' | 'environment', slug: string): Error {
   return conflict(`a ${what} named "${slug}" already exists`);
@@ -407,12 +416,24 @@ export async function putEnvironment(
   place: ResolvedPath,
   slug: string,
   input: { name?: string },
-  { from, parentId = null }: { from?: string; parentId?: string | null } = {},
-): Promise<{ environment: PlaceView; created: boolean }> {
+  {
+    from,
+    parentId = null,
+    id = randomUUID(),
+    protectedAt,
+  }: {
+    from?: string;
+    parentId?: string | null;
+    /** Its id, made before it is: a fork's, which the vault protects first (`protectIds`), the request going on as of that. */
+    id?: string;
+    /** When the vault protected that id, for a fork of a protected environment. */
+    protectedAt?: number;
+  } = {},
+): Promise<{ environment: EnvironmentView; created: boolean }> {
   const { project, environment } = place;
   const name = input.name ?? slug;
   if (environment !== null) {
-    const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt) };
+    const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt), protected: protectedFor(ctx.caller, environment) };
     return { environment: existing, created: false };
   }
   return audited(ctx, async (tx, log) => {
@@ -426,6 +447,11 @@ export async function putEnvironment(
         }),
       );
     }
+    // A protected fork's row comes well within the ten minutes the policy keeps its id without one (`UNWRITTEN_FORK_MS`): later,
+    // the policy may have dropped it, and the row would protect it again with no change any request is fenced on.
+    if (protectedAt !== undefined && Date.now() - protectedAt > UNWRITTEN_FORK_MS / 2) {
+      throw conflict(`${project.slug}/${slug} took too long to fork: fork again`);
+    }
     // The parent too: archived or deleted since the fork checked it, it is no parent.
     if (parentId !== null && !(await liveEnvironment(tx, parentId))) {
       throw new Refusal(
@@ -433,7 +459,6 @@ export async function putEnvironment(
         denied(ctx, 'environment.create', 'parent_archived', { projectId: project.id, metadata: { environmentSlug: slug, from } }),
       );
     }
-    const id = randomUUID();
     try {
       await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
     } catch (error) {
@@ -445,7 +470,7 @@ export async function putEnvironment(
       environmentId: id,
       metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
     }));
-    return { environment: { slug, name, archivedAt: null }, created: true };
+    return { environment: { slug, name, archivedAt: null, protected: protectedFor(ctx.caller, { id }) }, created: true };
   });
 }
 
@@ -491,7 +516,7 @@ export async function patchEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   patch: PlacePatch,
-): Promise<{ environment: PlaceView }> {
+): Promise<{ environment: EnvironmentView }> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
   const { renames, archivedAt } = placeChanges(environment, patch);
@@ -558,6 +583,7 @@ export async function patchEnvironment(
         slug: renames.slug ?? environment.slug,
         name: renames.name ?? environment.name,
         archivedAt: iso(archivedAt === undefined ? environment.archivedAt : archivedAt),
+        protected: protectedFor(ctx.caller, environment),
       },
     };
   });

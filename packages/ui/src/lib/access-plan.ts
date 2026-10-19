@@ -1,23 +1,26 @@
 import type { AccessValue } from '@coffre/client';
-import type { Role } from '@coffre/core/access';
+import { assignableToEnvironment, type Role } from '@coffre/core/access';
 
 import type { GrantRow } from '../shared/models';
 
-/** Read or write on one environment, and when it ends: an ISO instant, or null for never. */
-export type EnvironmentAccess = { role: Extract<Role, 'viewer' | 'developer'>; expiresAt: string | null };
+/** A role on one environment, and when it ends: an ISO instant, or null for never. */
+export type EnvironmentAccess = { role: Role; expiresAt: string | null };
 
 /**
- * What one project is set to in a principal's access editor: nothing, owner,
- * read or write everywhere, or read or write per environment. Every grant the
+ * What one project is set to in a principal's access editor: nothing, one
+ * role on the whole project, or a role per environment. Every grant the
  * plan asks for carries its own expiry.
  *
- * `custom` is for grants that do not fit that shape -- an auditor grant, or
- * read everywhere plus write on one environment. The editor shows them and
- * leaves them alone unless another setting is picked.
+ * `custom` is for grants that do not fit that shape -- read everywhere plus
+ * write on one environment, or a grant on an environment the editor does not
+ * list. The editor shows them and leaves them alone unless another setting
+ * is picked.
  */
 export type AccessPlan = {
-  level: 'none' | Extract<Role, 'owner' | 'viewer' | 'developer'> | 'env' | 'custom';
-  /** When the project-wide level ends. */
+  level: 'none' | 'project' | 'env' | 'custom';
+  /** The role on the whole project, at level `project`. */
+  role: Role | null;
+  /** When the project-wide role ends. */
   expiresAt: string | null;
   /** Environments without an entry get no access. */
   environments: Record<string, EnvironmentAccess>;
@@ -38,6 +41,8 @@ export function environmentAccess(plan: AccessPlan, slug: string): EnvironmentAc
   return Object.hasOwn(plan.environments, slug) ? plan.environments[slug] : null;
 }
 
+const NONE: AccessPlan = { level: 'none', role: null, expiresAt: null, environments: {} };
+
 /**
  * Read what a principal holds on a project back into the editor's terms.
  * `environments` are the ones the editor can set: live, and not archived.
@@ -46,56 +51,52 @@ export function planFromGrants(
   grants: readonly HeldGrant[],
   environments: readonly string[],
 ): AccessPlan {
-  if (grants.length === 0) return { level: 'none', expiresAt: null, environments: {} };
+  if (grants.length === 0) return NONE;
 
   const [only] = grants;
-  if (
-    grants.length === 1 &&
-    only.environmentSlug === null &&
-    (only.role === 'owner' || only.role === 'viewer' || only.role === 'developer')
-  ) {
-    return { level: only.role, expiresAt: only.expiresAt, environments: {} };
+  if (grants.length === 1 && only.environmentSlug === null) {
+    return { level: 'project', role: only.role, expiresAt: only.expiresAt, environments: {} };
   }
 
   const perEnvironment: Record<string, EnvironmentAccess> = {};
   for (const grant of grants) {
     const slug = grant.environmentSlug;
-    if (
-      slug === null ||
-      !environments.includes(slug) ||
-      Object.hasOwn(perEnvironment, slug) ||
-      (grant.role !== 'viewer' && grant.role !== 'developer')
-    ) {
-      return { level: 'custom', expiresAt: null, environments: {} };
+    if (slug === null || !environments.includes(slug) || Object.hasOwn(perEnvironment, slug)) {
+      return { ...NONE, level: 'custom' };
     }
     perEnvironment[slug] = { role: grant.role, expiresAt: grant.expiresAt };
   }
-  return { level: 'env', expiresAt: null, environments: perEnvironment };
+  return { level: 'env', role: null, expiresAt: null, environments: perEnvironment };
 }
 
 /**
- * Switch a plan's level. Going from read or write everywhere to per
- * environment starts every environment at that level and expiry, so the
- * switch alone keeps the same reach.
+ * Switch a plan's level, with its role for `project`. Going from one role
+ * on the whole project to per environment starts every environment at that
+ * role and expiry, where an environment takes it, so the switch alone keeps
+ * the same reach.
  */
 export function withLevel(
   plan: AccessPlan,
   level: AccessPlan['level'],
   environments: readonly string[],
+  { role = null, assignable = (each) => assignableToEnvironment(each) }: { role?: Role | null; assignable?: (role: Role) => boolean } = {},
 ): AccessPlan {
   if (
     level === 'env' &&
-    (plan.level === 'viewer' || plan.level === 'developer') &&
+    plan.level === 'project' &&
+    plan.role !== null &&
+    assignable(plan.role) &&
     Object.keys(plan.environments).length === 0
   ) {
-    const access = { role: plan.level, expiresAt: plan.expiresAt };
+    const access = { role: plan.role, expiresAt: plan.expiresAt };
     return {
       ...plan,
       level,
+      role: null,
       environments: Object.fromEntries(environments.map((slug) => [slug, access])),
     };
   }
-  return { ...plan, level };
+  return { ...plan, level, role: level === 'project' ? role : null };
 }
 
 /** Set one environment's access, or take it away with `null`. */
@@ -117,10 +118,8 @@ function grantsFor(
     case 'none':
     case 'custom':
       return [];
-    case 'owner':
-    case 'viewer':
-    case 'developer':
-      return [{ role: plan.level, environmentSlug: null, expiresAt: plan.expiresAt }];
+    case 'project':
+      return plan.role === null ? [] : [{ role: plan.role, environmentSlug: null, expiresAt: plan.expiresAt }];
     case 'env':
       return Object.entries(plan.environments).map(([environmentSlug, access]) => ({
         environmentSlug,
@@ -177,7 +176,7 @@ export function accessPatch(project: string, changes: readonly AccessChange[]): 
   const place = (environmentSlug: string | null) =>
     environmentSlug === null ? project : `${project}/${environmentSlug}`;
   const holding = (role: string, expiresAt: string | null): AccessValue =>
-    expiresAt === null ? (role as Role) : { role: role as Role, until: expiresAt };
+    expiresAt === null ? role : { role, until: expiresAt };
 
   const patch: Record<string, AccessValue> = {};
   for (const change of changes) {

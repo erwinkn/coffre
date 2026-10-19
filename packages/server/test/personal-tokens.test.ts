@@ -6,6 +6,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createClient, type CoffreClient } from '@coffre/client';
+import { issuedGrant } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
 import { and, asc, eq } from 'drizzle-orm';
 
@@ -269,7 +270,7 @@ test('a personal token is a bearer token alone: planted in the session cookie it
   assert.equal(await status(cookie.me()), 401);
   // Linking an account checks its caller itself too, as approving a sign-in and connecting an app do.
   const asked = await contextFor(deps, 'ada@acme.example');
-  const scoped = { ...asked, caller: { ...asked.caller, credentialScope: [{ projectId: 'p', environmentId: null, role: 'viewer' as const }] } };
+  const scoped = { ...asked, caller: { ...asked.caller, credentialScope: [issuedGrant({ projectId: 'p', environmentId: null, role: 'viewer' })] } };
   await assert.rejects(signin.linkIdentity(scoped, { provider: 'github', subject: 'mallory', emails: ['mallory@evil.example'], name: null } as never), { status: 403 });
   await assert.rejects(signin.decideDevice(scoped, 'BCDF-GHJK', true), { status: 403 });
 });

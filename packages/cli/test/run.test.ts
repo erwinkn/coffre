@@ -41,6 +41,8 @@ type Environment = {
   values: Record<string, string>;
   listed?: Listed[];
   refused?: number;
+  /** The reasons its reads answer 409 `conflict` with, one apiece, before it reads as asked. */
+  conflicts?: string[];
   /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
   rotateAfterDays?: number | null | 'unsaid';
 };
@@ -69,6 +71,8 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
         ...(environment.rotateAfterDays === 'unsaid' ? {} : { rotateAfterDays: environment.rotateAfterDays === undefined ? 365 : environment.rotateAfterDays }),
       });
     }
+    const conflict = environment.conflicts?.shift();
+    if (conflict !== undefined) return send(409, { error: 'conflict', message: 'the access policy changed while this was answered: try again', reason: conflict });
     send(200, { operationId: 'op', values: environment.values });
   });
   t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
@@ -242,6 +246,35 @@ test('export of several environments prints their union, and refuses a clash as 
   assert.equal(clashing.code, 1);
   assert.equal(clashing.stdout, '');
   assert.equal(clashing.stderr, 'coffre: deploy/prod and www/prod both define A: a key comes from one environment only. Nothing was read\n');
+});
+
+test('run, export and get read again, once, when the access policy changed under their read', async (t) => {
+  const reads: [string[], (stdout: string) => void][] = [
+    [['run', 'deploy/prod', '--', ...printing('TOKEN')], (stdout) => assert.deepEqual(JSON.parse(stdout), { TOKEN: 'deploy-token-value' })],
+    [['export', 'deploy/prod', '--format', 'json'], (stdout) => assert.deepEqual(JSON.parse(stdout), { TOKEN: 'deploy-token-value' })],
+    [['get', 'deploy/prod/TOKEN'], (stdout) => assert.equal(stdout, 'deploy-token-value')],
+  ];
+  for (const [args, check] of reads) {
+    const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, conflicts: ['policy_changed'] } });
+    const read = await coffre.coffre(args);
+    assert.equal(read.code, 0, read.stderr);
+    check(read.stdout);
+    assert.equal(read.stderr, '');
+    assert.deepEqual(coffre.requests, [`reveal ${args[1]}`, `reveal ${args[1]}`], args[0]);
+  }
+});
+
+test('a read the policy changed under twice ends as a refusal does, and another conflict is not asked again', async (t) => {
+  for (const [conflicts, reads] of [[['policy_changed', 'policy_changed'], 2], [['stale'], 1]] as const) {
+    for (const args of [['export', 'deploy/prod'], ['get', 'deploy/prod/TOKEN']]) {
+      const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, conflicts: [...conflicts] } });
+      const read = await coffre.coffre(args);
+      assert.equal(read.code, 1);
+      assert.equal(read.stdout, '');
+      assert.equal(read.stderr, 'coffre: request failed with status 409: the access policy changed while this was answered: try again\n');
+      assert.deepEqual(coffre.requests, Array(reads).fill(`reveal ${args[1]}`), `${args[0]}, ${conflicts.join(' ')}`);
+    }
+  }
 });
 
 test("list of a fork says where each key stands to its parent's: inherited, overridden, removed", async (t) => {

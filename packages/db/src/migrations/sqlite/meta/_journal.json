@@ -99,6 +99,13 @@
       "when": 1792343374795,
       "tag": "0013_contributor_role",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1792345777255,
+      "tag": "0014_custom_roles",
+      "breakpoints": true
     }
   ]
 }

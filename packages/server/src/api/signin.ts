@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { allows, MAX_PERSONAL_TOKEN_MINUTES, ROLES, runsInstance, type CredentialScope, type Holdings } from '@coffre/core/access';
+import { allows, DEFAULT_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -39,7 +39,7 @@ import {
   update,
   updateAuth,
 } from '../db/queries.ts';
-import { callerFrom, type PrincipalRef } from './caller.ts';
+import { callerFrom, newestPolicySeq, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
@@ -310,6 +310,21 @@ export function normalizeUserCode(input: string): string | null {
   }
   return `${letters.slice(0, 4)}-${letters.slice(4)}`;
 }
+
+/** What a handle reads and uses, and no more: it writes nothing. */
+const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
+
+/**
+ * The roles a handle's scope is issued under (`issueHandle`): each place
+ * keeps what its person holds there, in each column, of reading and using
+ * (`issuedGrant`, capped by `heldColumns`), whatever an Owner made of the
+ * roles. `viewer` names a place its person reads, `contributor` one they
+ * only use.
+ *
+ *   an Owner, at a protected prod       read, use / read, use
+ *   a Developer, at the same            read, use / use
+ */
+const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS } };
 
 /**
  * coffre's own sign-in: who may come in, and the credentials they hold.
@@ -626,11 +641,13 @@ export class SigninService {
         this.#scopes.sealed = true;
       }
       row = await findCredential(db, chainKey, { tokenHash });
+      // Before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
+      const policySeq = row === null ? null : await newestPolicySeq(db);
       if (row !== null) access = await this.#deps.vault.access(row.principal);
       // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
         const binding = issuingBinding(row.createdBy);
-        await sealCredentials(db, chainKey, access, [binding === null ? { kind: 'token', id: row.id, principal: row.principal } : { kind: 'binding', id: binding, principal: row.principal }]);
+        await sealCredentials(db, chainKey, access, policySeq, [binding === null ? { kind: 'token', id: row.id, principal: row.principal } : { kind: 'binding', id: binding, principal: row.principal }]);
         row = await findCredential(db, chainKey, { tokenHash });
         if (row !== null && this.#unsealed(row, access, now)) throw new Error('its scope could not be sealed');
       }
@@ -716,7 +733,8 @@ export class SigninService {
    * `of`, a credential that is not one of the member's tokens is unknown.
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | null = null): Promise<{ revoked: true }> {
-    return audited(this.#deps, async (tx, log) => {
+    // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
+    return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
       const unknown = () =>
         new Refusal(
@@ -852,7 +870,8 @@ export class SigninService {
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
       const { standing, scope, byPath, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,
@@ -905,7 +924,8 @@ export class SigninService {
   async issuePersonalToken(ctx: Asker, input: PersonalTokenInput): Promise<IssuedToken> {
     return withRefusals(this.#deps, async () => {
       const { access, scope, byPath, details } = await this.#personalScope(ctx, input);
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
@@ -933,9 +953,12 @@ export class SigninService {
    * Mint a handle (docs/design/credential-proxy.md): the placeholder a
    * person's app holds in place of the values of `paths`, which only the
    * credential proxy takes, to use those values for them. It reaches
-   * nothing else: no API route, no page. It holds what both its scope,
-   * `viewer` on each path, and its person hold then, as a personal token
-   * does, so their losing a grant narrows it and their leaving ends it.
+   * nothing else: no API route, no page. Each place of its scope keeps
+   * what its person held there of reading and using, in each column
+   * (`HANDLE_POLICY`), and a request with it holds what both that and its
+   * person hold then, as a personal token does, so their losing a grant
+   * narrows it and their leaving ends it: an Owner's handle reads a
+   * protected prod as they do, a Developer's only uses it.
    * Made by a person, on a session or a personal token of theirs: from a
    * token, within its scope, and never past its end. `coffre run` makes
    * one per run.
@@ -956,14 +979,18 @@ export class SigninService {
       }
       const access = await this.#standing(person);
       // What the person holds now, and, on a personal token, what it does: a handle never reaches past the credential that made it.
-      const holder = { ...callerFrom(person, access), credentialScope: ctx.caller.credentialScope };
+      const holder = callerFrom(person, access, ctx.caller.policySeq, ctx.caller.credentialScope);
       const { reached, madeFor } = await this.#handlePlaces(holder, input.paths);
       // `viewer` where its person reads; `contributor` where they only use, which the proxy needs, and no more: a handle writes nothing.
       const wanted = Object.fromEntries(reached.map(({ path, reads }) => [path, reads ? 'viewer' as const : 'contributor' as const]));
       // Use is what a handle exercises: a token that only uses a place, its grant since narrowed, still makes one there.
-      const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details, (role) => (role === 'contributor' ? ['secret.use'] : ROLES[role].permissions));
+      const { scope, byPath } = await personalScope(this.#deps.db, ctx, holder, wanted, details, {
+        policy: HANDLE_POLICY,
+        needs: (role, place) => (role === 'contributor' ? ['secret.use'] : PERMISSIONS.filter((permission) => holds(ROLES.viewer, permission, place, holder))),
+      });
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
-      return audited(this.#deps, async (tx, log) => {
+      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
@@ -1038,7 +1065,7 @@ export class SigninService {
       );
     }
     const access = await this.#standing(person);
-    return { access, details, ...await personalScope(this.#deps.db, ctx, callerFrom(person, access), input.scope, details) };
+    return { access, details, ...await personalScope(this.#deps.db, ctx, callerFrom(person, access, ctx.caller.policySeq), input.scope, details) };
   }
 
   /**
