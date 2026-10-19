@@ -1,5 +1,5 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
-import type { Author } from '@coffre/core/audit';
+import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
@@ -2061,6 +2061,82 @@ export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null
   return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
 }
 
+/** The hash of entry `seq`, hex, or null when there is none. */
+export async function auditHashAt(db: Queryable, seq: bigint): Promise<string | null> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db.select({ hash: auditLog.hash }).from(auditLog).where(eq(auditLog.seq, seq));
+  return row?.hash.toString('hex') ?? null;
+}
+
+/**
+ * The vault's newest checkpoint that keeps a tally, and its entry: one
+ * written since 0.10.1, which names the last entry of the prefix it signs
+ * as related. A verification goes on from it.
+ */
+export async function latestTallied(db: Queryable): Promise<{ entry: bigint; checkpoint: Signed | null } | null> {
+  const [row] = await talliedCheckpoints(db).orderBy(desc(tablesOf(db).auditLog.seq)).limit(1);
+  return row === undefined ? null : { entry: row.seq, checkpoint: signedIn(row.metadata) };
+}
+
+/**
+ * The vault's checkpoint at entry `seq`, if one that keeps a tally is
+ * there, with its entry's hash: null for its prefix if it names none.
+ */
+export async function talliedAt(db: Queryable, seq: bigint): Promise<{ checkpoint: Signed | null; hash: string } | null> {
+  const [row] = await talliedCheckpoints(db, eq(tablesOf(db).auditLog.seq, seq));
+  return row === undefined ? null : { checkpoint: signedIn(row.metadata), hash: row.hash.toString('hex') };
+}
+
+/** The prefix a checkpoint names: its last entry and that entry's hash. */
+export type Signed = { seq: number; hash: string };
+
+/**
+ * What a checkpoint's entry says it signed, or null when it says nothing
+ * that could be: the app reads it before the vault checks the entry by its
+ * MAC, and the vault names what is wrong with it.
+ */
+function signedIn(metadata: string): Signed | null {
+  const read = JSON.parse(metadata) as unknown;
+  if (typeof read !== 'object' || read === null) return null;
+  const { seq, hash } = read as { seq?: unknown; hash?: unknown };
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return null;
+  return { seq, hash };
+}
+
+/** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */
+export async function talliedAfter(db: Queryable, after: bigint, limit: number): Promise<{ entry: bigint; signs: bigint }[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select({ entry: auditLog.seq, signs: auditLog.relatedSeq })
+    .from(auditLog)
+    .where(and(...talliedWhere(db), gt(auditLog.seq, after)))
+    .orderBy(asc(auditLog.seq))
+    .limit(limit);
+  return rows.map(({ entry, signs }) => ({ entry, signs: signs! }));
+}
+
+function talliedWhere(db: Queryable) {
+  const { auditLog } = tablesOf(db);
+  return [eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)];
+}
+
+function talliedCheckpoints(db: Queryable, where?: SQL) {
+  const { auditLog } = tablesOf(db);
+  return db.select({ seq: auditLog.seq, metadata: auditLog.metadata, hash: auditLog.hash }).from(auditLog).where(and(...talliedWhere(db), where));
+}
+
+/** Up to `limit` of the app's newest heartbeats, whole, newest first, with the database's clock: what each says the app had verified. */
+export async function newestHeartbeats(db: Queryable, limit: number) {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash, now: clockMillis(db) })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'audit.heartbeat'), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
+}
+
 /**
  * How many entries of each of `actions` match `filter`, but for its
  * exclusions and limit, from `fromSeq` on: one grouped count. Both authors
@@ -2094,10 +2170,13 @@ export async function auditActionCounts(
  * database's clock, so a skewed application server cannot hide a stale
  * one; and the newest checkpoint the vault signed.
  */
-export async function readiness(db: Queryable): Promise<{
-  beat: { seq: bigint; ageSeconds: number } | null;
+export async function readiness(db: Queryable, appKey: LogKey): Promise<{
+  beat: { seq: bigint; ageSeconds: number; metadata: string; authentic: boolean } | null;
   checkpoint: Checkpoint | null;
 }> {
-  const [[beat], checkpoint] = await Promise.all([newestEntry(db, 'app', 'audit.heartbeat'), latestCheckpoint(db)]);
-  return { beat: beat === undefined ? null : { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000 }, checkpoint };
+  const [[beat], checkpoint] = await Promise.all([newestHeartbeats(db, 1), latestCheckpoint(db)]);
+  if (beat === undefined) return { beat: null, checkpoint };
+  // Whether the app wrote it, by its MAC: what it says of the chain counts only then.
+  const authentic = verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [appKey] }).ok;
+  return { beat: { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000, metadata: beat.metadata, authentic }, checkpoint };
 }

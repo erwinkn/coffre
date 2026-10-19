@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { queries, type AuditSearch, type ChainResult } from '../lib/queries';
+import { chainResult, chainUnknown, queries, shownChain, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -39,7 +39,28 @@ export function AuditPage() {
   const { data: result } = useSuspenseQuery(queries.auditEntries(client, search));
   // Not suspended: the table shows while the log is verified.
   const verification = useQuery(queries.auditChain(client));
-  const chain = verification.data;
+  // The walk from the first entry, once someone ran it, beside the check from the newest checkpoint, which
+  // refetches as the page is looked at again: `shownChain` says which the page shows, until the page is left.
+  const [whole, setWhole] = useState<ChainResult | null>(null);
+  const chain = shownChain(verification.data, whole);
+  // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
+  const [walked, setWalked] = useState<{ through: number | null } | null>(null);
+  const [walkFailed, setWalkFailed] = useState<string | null>(null);
+  const walkWhole = async () => {
+    setWalked({ through: null });
+    setWalkFailed(null);
+    setWhole(null);
+    let verdict: ChainResult;
+    try {
+      verdict = chainResult(await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through })), true);
+    } catch (error) {
+      verdict = chainUnknown(error);
+    }
+    // A walk that could not run says nothing of the log: the verdict from the newest checkpoint stands.
+    if (verdict.integrity === 'unknown') setWalkFailed(verdict.problem);
+    else if (verdict.integrity !== 'owners-only') setWhole(verdict);
+    setWalked(null);
+  };
   const { decision, actorId } = search;
   const detail = search.detail === '1';
   const deniedOnly = decision === 'deny';
@@ -64,7 +85,7 @@ export function AuditPage() {
         actions={
           // One region for every state, so each change of it is announced.
           <div className="chain-live" aria-live="polite" aria-atomic="true">
-            <ChainStatus chain={chain} onRetry={() => void verification.refetch()} />
+            <ChainStatus chain={chain} walked={walked} walkFailed={walkFailed} onRetry={() => void verification.refetch()} onWalk={() => void walkWhole()} />
           </div>
         }
       />
@@ -368,11 +389,36 @@ function BreakMark() {
  * someone is already feeling confident, and not on the morning it would have
  * mattered. Recomputing on load makes the claim continuous.
  *
- * It is not waited for, though: verifying re-reads the whole log, so until
- * it answers the badge says it is verifying, and a check that could not run
- * says so and offers to run again, rather than passing for a broken log.
+ * On load it checks what was written since the newest checkpoint, which
+ * vouches for everything before, so it is quick however long the log. The
+ * walk from the first entry, which checks again what the checkpoints vouch
+ * for, is there to ask for, a stretch a request, with how far it has got.
+ * Neither is waited for: until a verdict comes the badge says it is
+ * verifying, and a check that could not run says so and offers to run
+ * again, rather than passing for a broken log.
  */
-function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRetry: () => void }) {
+function ChainStatus({
+  chain,
+  walked,
+  walkFailed,
+  onRetry,
+  onWalk,
+}: {
+  chain: ChainResult | undefined;
+  walked: { through: number | null } | null;
+  walkFailed: string | null;
+  onRetry: () => void;
+  onWalk: () => void;
+}) {
+  if (walked !== null) {
+    return (
+      <span className="chain-note" role="status">
+        <Spinner size={14} />
+        {walked.through === null ? 'Verifying from the first entry…' : `Verified through ${walked.through.toLocaleString('en')}…`}
+      </span>
+    );
+  }
+
   if (chain === undefined) {
     return (
       <span className="chain-note">
@@ -424,6 +470,12 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
     );
   }
 
+  const signed = chain.checkpoint === null ? null : `${absolute(chain.checkpoint.signedAt, false)} UTC`;
+  const verified = chain.whole
+    ? `Audit log verified from its first entry by the app and vault keys${signed === null ? ', not signed yet' : `, last signature at ${signed}`}.`
+    : signed === null
+      ? 'Audit log verified by the app and vault keys, not signed yet.'
+      : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
   return (
     <div className="chain">
       {chain.pending > 0 && (
@@ -436,19 +488,38 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
           </button>
         </Toggletip>
       )}
-      <Toggletip
-        align="end"
-        label={
-          chain.checkpoint === null
-            ? 'Audit log verified by the app and vault keys, not signed yet.'
-            : `Audit log verified by the app and vault keys, last signature at ${absolute(chain.checkpoint.signedAt, false)} UTC.`
-        }
-      >
-        <button type="button" className="chain-seal">
-          <ShieldCheck size={14} />
-          Verified
+      {chain.remaining > 0 && (
+        <Toggletip
+          align="end"
+          label={`Verified through entry ${chain.through?.toLocaleString('en') ?? 'none'}. The checkpoints are catching up with the log, a stretch every five minutes, and a check goes no further than they have.`}
+        >
+          <button type="button" className="chain-note" role="status">
+            {chain.remaining.toLocaleString('en')} newer {chain.remaining === 1 ? 'entry' : 'entries'} to verify
+          </button>
+        </Toggletip>
+      )}
+      {walkFailed !== null && (
+        <Toggletip align="end" label={`coffre could not walk the whole log: ${walkFailed}. The verdict beside it, from the newest checkpoint, stands.`}>
+          <button type="button" className="chain-flag chain-flag-warn">
+            <AlertTriangle size={14} />
+            Whole log not checked
+          </button>
+        </Toggletip>
+      )}
+      {!chain.whole && chain.remaining === 0 && (
+        <button type="button" className="btn btn-sm" onClick={onWalk}>
+          Verify whole log
         </button>
-      </Toggletip>
+      )}
+      {/* No seal over a log verified only in part: what is left could be anything. */}
+      {chain.remaining === 0 && (
+        <Toggletip align="end" label={verified}>
+          <button type="button" className="chain-seal">
+            <ShieldCheck size={14} />
+            Verified
+          </button>
+        </Toggletip>
+      )}
     </div>
   );
 }

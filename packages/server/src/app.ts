@@ -33,7 +33,7 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/readyz': {
     method: 'GET',
     handler: async (_request, runtime) => {
-      const readiness = await auditReadiness(runtime.db, runtime.vault);
+      const readiness = await auditReadiness(runtime.db, runtime.vault, runtime.chainKey);
       return jsonResponse(readiness, readiness.ok ? 200 : 503);
     },
   },

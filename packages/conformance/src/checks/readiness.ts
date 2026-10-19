@@ -55,16 +55,18 @@ export async function middleCut(deployment: Deployment, { admin }: People): Prom
     );
     expect(latest !== undefined, 'no signed prefix to cut from');
     const signed = JSON.parse(latest.metadata) as { seq: number };
-    // An old heartbeat and its checkpoint carry no access change or linked write.
+    // An old heartbeat and its checkpoint carry no access change or linked write: nothing names them but the
+    // checkpoint, which names the heartbeat as the last entry it signs.
     const [heartbeat] = await query<{ seq: string | number }>(sql, `SELECT h.seq FROM audit_log h JOIN audit_log c ON c.seq = h.seq + 1
       WHERE h.action = 'audit.heartbeat' AND h.seq > 0 AND c.author = 'vault' AND c.action = 'audit.checkpoint'
       AND c.decision = 'allow' AND c.seq < $1 AND NOT EXISTS
-        (SELECT 1 FROM audit_log linked WHERE linked.related_seq IN (h.seq, c.seq)) ORDER BY h.seq LIMIT 1`, [signed.seq]);
+        (SELECT 1 FROM audit_log linked WHERE linked.related_seq IN (h.seq, c.seq) AND linked.seq <> c.seq) ORDER BY h.seq LIMIT 1`, [signed.seq]);
     expect(heartbeat !== undefined, 'no older heartbeat and checkpoint to cut');
     seq = Number(heartbeat.seq);
     const kept = await query(sql, 'SELECT * FROM audit_log WHERE seq >= $1 AND seq <= $2 ORDER BY seq', [seq, seq + 1]);
     expect(kept.length === 2, 'the middle cut needs two adjacent entries');
     await appendOnlyLifted(sql, async () => {
+      await query(sql, 'UPDATE audit_log SET related_seq = NULL WHERE seq = $1', [seq + 1]);
       await query(sql, 'DELETE FROM audit_log WHERE seq >= $1 AND seq <= $2', [seq, seq + 1]);
       try {
         // Do not call full verification first: the scheduled job must find the hole itself.

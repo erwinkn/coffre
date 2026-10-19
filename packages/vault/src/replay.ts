@@ -141,7 +141,7 @@ function placeOf(row: StoredEntry, detail: Record<string, unknown>): Place {
 }
 
 /** A grant's place: its environment, or its project when it has none, or every project's path. */
-function placeKey(place: Place): string {
+export function placeKey(place: Place): string {
   return place.environmentId ?? place.projectId ?? (place.environmentSlug === null ? '*' : `*/${place.environmentSlug}`);
 }
 

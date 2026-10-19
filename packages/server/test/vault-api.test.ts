@@ -7,7 +7,7 @@ import { EVERYWHERE } from '@coffre/core/access';
 import { entryHash, sealEntry } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import { tablesOf } from '@coffre/db';
-import { and, asc, eq, is, Table } from 'drizzle-orm';
+import { and, asc, desc, eq, is, Table } from 'drizzle-orm';
 
 import { auditRange } from '../src/db/queries.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
@@ -190,7 +190,7 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
   assert.ok(!verdict.ok);
   assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
-  const ready = await auditReadiness(db.runtime, misled.vault);
+  const ready = await auditReadiness(db.runtime, misled.vault, deps.chainKey);
   assert.deepEqual([ready.ok, ready.checkpointed], [false, false]);
   // The right one still reads.
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'sk_test');
@@ -318,7 +318,19 @@ test('a read put on someone else and chained again fails: the vault wrote it, an
   await db.owner.update(auditChainHead).set({ headHash: previous });
 
   const read = rows.find((row) => row.action === 'secret.read')!;
+  // The page's check reads nothing before the newest checkpoint: the prefix it signed is not there any more.
+  // Read before the API's check, which refuses this log: straight from the table, as the owner.
+  const [checkpoint] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'audit.checkpoint')).orderBy(desc(auditLog.seq)).limit(1);
+  const signed = JSON.parse(checkpoint!.metadata) as { seq: number };
   assert.deepEqual(await root.audit.verify(), {
+    ok: false,
+    through: signed.seq - 1,
+    failedAtSeq: Number(checkpoint!.seq),
+    author: 'vault',
+    reason: `the log up to entry ${signed.seq} is not the prefix this checkpoint signed`,
+  });
+  // The walk from the first entry says why: the app's entries verify, sealed anew, and the vault's do not.
+  assert.deepEqual(await root.audit.verifyWhole(), {
     ok: false,
     through: Number(read.seq) - 1,
     failedAtSeq: Number(read.seq),

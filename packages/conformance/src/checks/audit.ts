@@ -54,10 +54,17 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
   return `${read.length} values read by the vault for ${purpose}, in one entry under ${operationId}`;
 }
 
-/** Full verification must reach the stored head, not just some intact prefix. */
+/**
+ * Verification must reach the stored head, not just some intact prefix:
+ * the page's, from the newest checkpoint, and the walk from the first
+ * entry, a stretch a request, which ends where it does.
+ */
 export async function verification(deployment: Deployment, { admin }: People): Promise<string> {
-  const result = await admin.api.audit.verify();
-  expect(result.ok, 'the full log does not verify', result);
+  const anchored = await admin.api.audit.verify();
+  expect(anchored.ok && anchored.remaining === 0, 'the log does not verify from its newest checkpoint', anchored);
+  const result = await admin.api.audit.verifyWhole();
+  expect(result.ok && result.remaining === 0, 'the full log does not verify to its end', result);
+  expect(result.through !== null && anchored.through !== null && result.through >= anchored.through, 'the walk from the first entry stopped short', { anchored, result });
   await using(deployment.database(), async (sql) => {
     const [head] = await sql.query<{ next_seq: string | number; head_hash: Uint8Array }>('SELECT next_seq, head_hash FROM audit_chain_head');
     const [last] = await sql.query<{ seq: string | number; hash: Uint8Array }>('SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1');
@@ -203,9 +210,13 @@ export async function forgedVaultEntry(deployment: Deployment, { admin }: People
   return 'a publicly chained vault entry with a made-up MAC was refused at its sequence';
 }
 
-/** Rewrite either author's entry and require a fault at that exact sequence. */
+/**
+ * Rewrite either author's first entry in place and require a fault at that
+ * exact sequence: from the walk from the first entry, since the page's
+ * check goes on from the newest checkpoint and reads nothing before it.
+ */
 export async function rewrittenEntry(deployment: Deployment, { admin }: People, author: 'app' | 'vault'): Promise<string> {
-  expect((await admin.api.audit.verify()).ok, 'the log does not verify before the rewrite');
+  expect((await admin.api.audit.verifyWhole()).ok, 'the log does not verify before the rewrite');
   let seq = 0;
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
     const [row] = await query<{ seq: string | number; actor: string }>(sql,
@@ -214,13 +225,13 @@ export async function rewrittenEntry(deployment: Deployment, { admin }: People, 
     seq = Number(row.seq);
     await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', row.seq]);
     try {
-      const result = await admin.api.audit.verify();
+      const result = await admin.api.audit.verifyWhole();
       expect(!result.ok && result.failedAtSeq === Number(row.seq), 'a rewritten entry was not caught at its sequence', result);
     } finally {
       await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, row.seq]);
     }
   }));
-  expect((await admin.api.audit.verify()).ok, 'the restored entry did not verify');
+  expect((await admin.api.audit.verifyWhole()).ok, 'the restored entry did not verify');
   return `entry ${seq}, the ${author}'s, rewritten: caught there, then put back`;
 }
 

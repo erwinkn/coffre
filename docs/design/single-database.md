@@ -728,7 +728,10 @@ refuses her as `tampered`, and writes a `vault.tampered` entry that the
 audit page shows. Verification flags it too, and the pages show a failed
 verification as a banner. A forged row can be displayed; it cannot be used.
 
-**What checkpoints keep** (S4). A checkpoint becomes a vault entry,
+**What checkpoints keep** (S4). Since 0.10.1 a checkpoint also keeps the
+tally of the prefix it signs, and the next one starts from it rather than
+from entry 0 ([architecture](../architecture.md#one-log-two-authors)); what
+follows is the design as 0.4 shipped it. A checkpoint becomes a vault entry,
 `audit.checkpoint`, with a signed payload: format, instance id, the `seq`
 and `hash` of the last entry before it, the time, the key id and an Ed25519
 signature. It signs a prefix that ends just before itself. Before writing

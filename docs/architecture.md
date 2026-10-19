@@ -613,42 +613,110 @@ from changing or deleting entries and permits each to append only as its
 own author. The owner can lift the triggers and bypass row-level security;
 the MACs still expose changes made without the keys.
 
-Every five minutes the Cron trigger appends an `audit.heartbeat` entry, then
-asks the vault to checkpoint the log. The vault reads the log itself: it
-recomputes the chain, every hash from content and its own entries by their
-MACs, checks that the prefix its last checkpoint signed is still there,
-then signs the log up to its last entry with Ed25519, in an
-`audit.checkpoint` entry of its own. The first checkpoint of each hour
-recomputes the whole chain from its first entry. The others resume from the
-prefix the last one signed, which the vault recomputed itself, and
-recompute only what is new since. They resume only while that prefix still
-ends at the hash it signed, which a rewrite chained again changes, and
-still has every entry, which a cut changes, as one count; otherwise they
-recompute from the first entry too. So a rewrite or a cut anywhere is never
-signed over, and an entry edited in place before the last checkpoint is
-found within the hour (see [Limits](#limits)). A call with nothing new
-returns the last checkpoint. The recomputation runs in a snapshot, without
-the log's lock, so writes never wait for it. The same checkpoint checks every
-member's row, as `access` would, and logs a `vault.tampered` for each one
-changed around the vault.
+Every five minutes the Cron trigger runs a beat. The app first walks the
+chain from where the last beat's walk ended, every link and hash and its
+own entries by their MACs, then appends an `audit.heartbeat` entry that
+says how far it got (`verified`). Then it asks the vault to checkpoint the
+log. The vault reads the log itself: from its newest checkpoint, it
+checks that the prefix that checkpoint signed is still there, its hash
+where it was and every entry of it, by one count of the log's index;
+recomputes the chain since, every hash from content and its own entries
+by their MACs; and signs the log up to its last entry with Ed25519, in an
+`audit.checkpoint` entry of its own. A call with nothing new returns the
+last checkpoint. The walk runs in a snapshot, without the log's lock, so
+writes never wait for it, and only the entries appended meanwhile are
+walked under the lock. The same checkpoint checks every member's row, as
+`access` would, and logs a `vault.tampered` for each one changed around
+the vault.
+
+**The tally.** A walk from the first entry gathers more than a head
+hash: the vault's keys in the order the log moved through them, the key
+batches still under way, who is a member and what they hold, each
+member's newest access entry, and the first fault that leaves the chain
+whole. The checkpoint's entry keeps all of it beside the signature, as of
+the prefix it signs: its tally. So the next checkpoint, and every
+verification, start from the newest tally and read only what came since,
+and lose none of the checks a walk from the first entry makes. Members
+and grants change far less often than every five minutes: they are kept
+whole in the first checkpoint after they change, and the others name that
+one, by its digest. The tally is under the vault's MAC like the rest of
+its entry, and pinned by the chain after it.
+
+Say the newest checkpoint is entry 9,412, signing entries 0 to 9,411, and
+the log has reached 9,430. The next beat checks that entry 9,411 still
+has the hash the checkpoint signed and that 9,412 entries come before it;
+rehashes 9,412 to 9,430, checking the vault's MACs and replaying the two
+grants among them onto the tally's members; and signs 0 to 9,430. Twenty
+entries, however long the log.
+
+A walk is bounded: no more than 10,000 entries a call. A log longer than
+that since its newest tally, as one is when 0.10.1 first checkpoints a
+log whose checkpoints kept none, is signed a walk a call, behind its
+head, until the checkpoints catch up; until then `/readyz` stays red,
+since no checkpoint covers the newest beat.
+
+**The past, rehashed.** Starting from the tally, nothing reads what a
+checkpoint signed again. Every entry of it was checked when the
+checkpoint signed it, and its hash pins it since: a rewrite chained again
+changes the hash the next checkpoint finds, and a cut changes the count.
+What it leaves is an entry edited in place, its stored hash left as it
+was. So each checkpoint also rehashes 100 entries of the past, a hash an
+entry and nothing else, some 6 ms of a cold Worker's CPU, in laps: a lap
+runs from the first entry to the prefix the newest checkpoint signed when
+it began, and the next to the prefix signed then. Where a lap stands, and
+where it ends, is kept in the checkpoint it signs. An entry edited in
+place is refused within two laps at most, each the length of the log when
+it began over 100 beats, however fast the log grows meanwhile; from then
+on every verification says so, by the refused checkpoint, though none
+reads that far back itself. The refusal stands, through refusals of other
+kinds after it, until a checkpoint is signed, which takes the check that
+found it running again and passing. A rehash the database fails leaves
+the lap where it was and the checkpoint is signed all the same, with a
+warning in the app's log, unless such a refusal stands.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
-minutes old and a checkpoint after it carries the vault's signature. A log
-that stops taking writes, a vault that stops signing, a cut in the log or a
-wrong vault key all turn it red within one beat; an entry edited in place,
-within the hour. There is no heartbeat table.
+minutes old and the app's, by its MAC, its walk found the chain whole and
+could run (`broken` otherwise), and a
+checkpoint after it carries the vault's signature. A log that stops taking
+writes, a vault that stops signing, a cut in the log, an entry forged in
+the app's name or a wrong vault key all turn it red within one beat; an
+entry edited in place, within two laps. There is no heartbeat table.
 
-`GET /api/audit/verification` (owners only), also called by `coffre verify log`,
-checks the chain from its first entry, every link and hash, and authenticates
-the app's MACs. It hands the vault the head it reached, and the vault reads
-its own entries in one pass: each by its MAC, every checkpoint against the
-prefix it signed, the key batches accounted for, and member and grant
-changes replayed. The links are the app's to recompute, as it just has
-through that head; the vault confirms its snapshot still holds the head, and
-asked with no head, it recomputes the chain itself.
-A grant inserted by the owner without a matching vault entry is detected
-by replay. The answer is the entry verified through, or the entry where it
-breaks and whose check found it.
+`GET /api/audit/verification` (those who read the whole log), which the
+audit page calls on every visit, checks the log from where the last checks
+left off. The app walks the chain, every link and hash and its own MACs,
+from the older of the newest beat's `verified` and the newest checkpoint's
+prefix, to the head; then hands the vault the head it reached, and the
+vault reads its own entries since its newest checkpoint: each by its MAC,
+every checkpoint among them against the prefix it signed, the key batches
+accounted for, and member and grant changes replayed onto the tally, then
+compared with the rows. The links are the app's to recompute, as it just
+has through that head; the vault confirms its snapshot still holds the
+head, and asked with no head, it recomputes the chain itself. Everything
+before is pinned by the hash the newest checkpoint signed, which the vault
+finds where it was, and is whole, by one count. A grant inserted by the
+owner without a matching vault entry is detected by replay. The answer is
+the entry verified through, or the entry where it breaks and whose check
+found it, and the entries the check did not reach, if the checkpoints are
+catching up. On Equisafe's log of 7,000 entries this took 1.2 seconds of a
+Worker's CPU, from the first entry; it now reads five minutes of the log.
+
+The beat's two halves are what make that sound. The app's MACs only the
+app can check, so the vault's checkpoint signs over the app's entries
+without them: an entry forged in the app's name, linked to the chain as
+anyone can, is signed over. The beat's own walk finds it first, and leaves
+its `verified` before it, so every check starts before it too, and finds
+it, until someone acts.
+
+`coffre verify log`, and the audit page's "Verify whole log", walk the log
+from its first entry, as the tallies take on trust: a stretch a request,
+`GET /api/audit/verification?from=start`, then `from=` each stretch's
+`next`. A stretch ends at the furthest checkpoint 10,000 entries reach,
+the newest once within reach, and the vault's walk must come to the tally
+that checkpoint keeps; the last runs from the newest to the head, as the
+page's check does. So each tally is checked against the log before it,
+and a tally a holder of the vault's key rewrote is found, as is anything
+the past holds that a walk from the first entry would find.
 
 **One entry per human action.** A read is the vault's `secret.read`, one
 per place it read at (and per outcome, where a refused or failed call's keys
@@ -1017,34 +1085,66 @@ Each limit is stated here once; the other documents link to it.
   then have no entries. Restarting both processes after a restore is what
   makes a deliberate rewind work ([restore.md](restore.md)).
 - **A cut in the middle of the log is found at the next checkpoint, and an
-  edit in place within the hour, not at once.** Say Ada was removed at entry
-  812, and the database's owner deletes 812 and puts back Ada's row from
-  before. Her row and the entries that remain agree, so the vault lets her
-  in. Within five minutes the next checkpoint finds an entry missing,
-  recomputes the chain, finds the gap, refuses to sign and turns `/readyz`
-  red; full verification says the same. If the owner edits 812 in place
-  instead, so that it is no longer about Ada, every entry is there and the
-  hash the last checkpoint signed stays: the checkpoints of that hour sign
-  on, each extending the chain the vault recomputed before the edit, so the
-  log as it now is verifies no better. The hour's first checkpoint
-  recomputes the chain from entry 0 and refuses; full verification finds it
-  at once. Until then, her reads are logged under her name.
+  edit in place within a lap of the past, not at once.** Say Ada was
+  removed at entry 812, and the database's owner deletes 812 and puts back
+  Ada's row from before. Her row and the entries that remain agree, so the
+  vault lets her in. Within five minutes the next checkpoint counts one
+  entry fewer than the prefix it starts from, finds where, refuses to sign
+  and turns `/readyz` red; every verification says the same. If the owner
+  edits 812 in place instead, so that it is no longer about Ada, every
+  entry is there and the hash the last checkpoint signed stays:
+  checkpoints and verifications start from the newest tally and read
+  nothing before it, so the log as it now is verifies no better. The
+  checkpoint whose stretch of the past holds 812 rehashes it and refuses,
+  and the audit page shows it broken from then on: within two laps of 100
+  entries a beat at most, a lap about 6 hours for a log of 7,000 entries,
+  and 3½ days for 100,000. `coffre verify log` finds it at once; run it on a schedule
+  to bound the window.
 
-  That one case is what moved from five minutes to an hour, when
-  checkpoints began resuming: an entry before the last signed checkpoint,
-  edited in place, with its stored hash left as it was. Everything else is
-  still found at the next checkpoint, within five minutes:
+  Everything else is found at the next checkpoint, within five minutes:
   - an entry cut from the middle;
   - a rewrite chained again, whether resealed or not;
   - the prefix the last checkpoint signed gone;
   - anything after the last checkpoint.
-
-  `GET /api/audit/verification` and `coffre verify log` still recompute
-  everything when asked.
-- **The full recomputation grows with the log,** once an hour: about 4
-  seconds per 100,000 entries on a small shared Postgres. A team's instance
-  writes some 600 entries a day of heartbeats and checkpoints alone, plus
-  its own work. The other checkpoints read only what is new since the last.
+- **A check costs what was written since the last beat, and the walk from
+  the first entry what the log holds.** Measured on Node with a small
+  Postgres: the page's check of a log of 100,000 entries took 6 seconds of
+  CPU from the first entry, and takes some 10 milliseconds from the newest
+  tally; a beat, with its 100 entries of the past, about 15. `coffre
+  verify log` still reads everything, 10,000 entries a request, about 200
+  milliseconds of a Worker's CPU each. A team's instance writes some 600
+  entries a day of heartbeats and checkpoints alone, plus its own work.
+- **Catching up and the walk from the first entry take a Worker's paid
+  plan.** A call walks up to 10,000 entries: about a second of a cold
+  isolate's CPU, where the Free plan allows 10 milliseconds. That is the
+  first beats after an upgrade from 0.10.0, each stretch of `coffre verify
+  log`, and a stretch between two checkpoints more than 10,000 entries
+  apart, which only checkpoints stopped for a while leave: a stretch ends
+  at a checkpoint, however far. On the Free plan the catch-up does not
+  slow down, it stops: each beat is cut off before it signs anything, the
+  next starts over, and `/readyz` stays red. Move a deployment whose log
+  is past a few hundred entries to a paid plan before upgrading. Even a
+  beat with nothing to catch up, its walk of five minutes of the log, the
+  heartbeat, the checkpoint and its 100 entries of the past, takes some
+  10 ms of CPU on Node, an estimated 25 on a Worker by the incident's
+  ratio: more than the Free plan allows, as 0.10.0's beat already did, and
+  the page's check about the same. Run 0.10.1 on a paid plan. Until the checkpoints catch up, the walk
+  from the first entry ends short of the head and says so (`remaining`),
+  and `coffre verify log` exits 3 rather than call the log verified.
+- **No rolling back across a tally's version.** A release that changes
+  what a checkpoint's tally keeps writes a new version of it; a release
+  rolled back to refuses the checkpoints that keep a version it does not
+  know, and every check with them. 0.10.1 writes the first.
+- **A change of access writes every member and grant into the log once.**
+  The first checkpoint after it keeps them whole, and the others name it:
+  an instance with thousands of grants, changed every few minutes, grows
+  its log by their size each time.
+- **Key operations' identities are checked against those still under way.**
+  The walk from the first entry used to refuse a key operation's identity
+  seen twice anywhere in the log. A tally keeps the batches still open, not
+  every identity that ever closed, so a repeat is found among those open
+  and those since the tally. A closed batch takes no more outcomes either
+  way: each outcome names its intent's entry.
 - **What only KMS gives.** With a local vault key, whoever holds the vault's
   configuration and a copy of the database holds every value, and nothing
   outside coffre records either being used. AWS KMS adds a second record
@@ -1061,8 +1161,8 @@ Each limit is stated here once; the other documents link to it.
   entries and member rows, grants included, besides reading every value.
 - **A replaced vault key stays configured to verify the past, and can't vouch for
   anything after the rotation.** What the vault wrote under the key an old
-  vault key stands for verifies only while that vault key is in `previousKeks`, and the
-  log is checked from its first entry once an hour. After the
+  vault key stands for verifies only while that vault key is in `previousKeks`, and
+  `coffre verify log` walks the log from its first entry. After the
   rotation, nothing under its keys counts, so a vault key replaced because it
   leaked forges nothing new; what was forged with it before verifies like
   the rest. The app key, `APP_KEY`, and with KMS the vault's
