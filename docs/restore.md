@@ -163,8 +163,9 @@ Before reopening traffic:
 
 1. `coffre verify log`, as an Owner. It must say `audit log OK`,
    verified through the newest entry, with the last checkpoint the backup
-   held. It checks every link, both authors' MACs, every checkpoint against
-   the prefix it signed, and replays the members and grants.
+   held. It walks the log from its first entry, a stretch a request: every
+   link, both authors' MACs, every checkpoint against the prefix it signed
+   and the tally it keeps, and replays the members and grants.
 2. Reveal a canary: a secret kept for this, whose value you know.
 3. Look at the Users page: members, owners, grants and the removed, as they
    were at the backup's moment. Someone removed before it stays removed, and

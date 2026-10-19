@@ -262,7 +262,7 @@ test('coffre verify alone, on a terminal, asks which check, and runs the one cho
   assert.equal(code, 0);
   const shown = visible(output);
   assert.match(shown, /✓ Which check\? {2}log {7}the whole audit log, as you, an owner/);
-  assert.match(shown, /audit log OK: verified through entry 11, 12 entries/);
+  assert.match(shown, /audit log OK: verified from the first entry through entry 11, 12 entries/);
 });
 
 test('coffre verify keys, on a terminal, asks for each key without showing it', { skip: ptySkip }, async (t) => {

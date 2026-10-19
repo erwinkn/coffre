@@ -210,7 +210,7 @@ coffre settings service-accounts --except-environments prod   # this lets them: 
 coffre audit --denied
 coffre audit market/prod/DATABASE_URL       # who read or changed it, a run of all of market/prod included
 coffre verify                               # asks which: instance, keys or log; admins and owners
-coffre verify log                           # checks the whole log, as an auditor, admin or owner of all of it
+coffre verify log                           # walks the whole log from its first entry, as an auditor, admin or owner of all of it
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
 coffre verify instance                      # checks the instance from outside (docs/conformance.md)
 ```

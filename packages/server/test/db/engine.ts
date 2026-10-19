@@ -118,9 +118,11 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
  */
 export async function emptyLog(owner: Database): Promise<void> {
   const { auditLog, auditChainHead } = tablesOf(owner);
-  // SQLite checks a RESTRICT foreign key row by row, so entries that point
-  // at others let go of them first.
   await withLogUnlocked(owner, async (db) => {
+    // Deleting checks every row against `related_seq`, which no index serves: on Postgres, a log of
+    // thousands takes longer than a statement may. References name entries, and are gone by now.
+    if (TEST_ENGINE === 'postgres') return void (await db.execute(sql`TRUNCATE audit_log, secret_references`));
+    // SQLite checks a RESTRICT foreign key row by row, so entries that point at others let go of them first.
     await db.update(auditLog).set({ relatedSeq: null });
     await db.delete(auditLog);
   });

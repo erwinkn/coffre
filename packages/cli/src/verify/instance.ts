@@ -221,10 +221,12 @@ async function setUp(api: CoffreClient, issued: Issued[]): Promise<{ detail: str
   };
 }
 
-/** What the whole audit chain says, read by the owner, which a token cannot be. */
+/** What the whole audit chain says, walked from its first entry by the owner, which a token cannot be. */
 async function verification(api: CoffreClient): Promise<string> {
-  const verified = await api.audit.verify();
+  const verified = await api.audit.verifyWhole();
   expect(verified.ok, 'the audit log does not verify', verified);
+  // A server older than 0.10.1 says nothing of what it left, and walked it all.
+  expect((verified.remaining ?? 0) === 0, 'the audit log is not verified to its end: the checkpoints are catching up', verified);
   return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}`;
 }
 

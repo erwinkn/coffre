@@ -456,7 +456,25 @@ export function createClient(options: ClientOptions) {
 
     audit: {
       list: (query: RouteInput<'GET /audit'> = {}) => call('GET /audit', {}, query),
-      verify: () => call('GET /audit/verification', {}),
+      /**
+       * Whether the log holds, from the newest checkpoint; or, with `from`, a
+       * stretch of the walk from the first entry: `start`, then each `next`
+       * until it is null (`verifyWhole`).
+       */
+      verify: (query: RouteInput<'GET /audit/verification'> = {}) => call('GET /audit/verification', {}, query),
+      /**
+       * The walk from the first entry to the head, a stretch a request, each
+       * as long as the server walks in one: the first stretch that fails, or
+       * the last. `onStretch` sees each verdict as it comes.
+       */
+      verifyWhole: async (onStretch: (verdict: RouteOutput<'GET /audit/verification'>) => void = () => {}) => {
+        for (let from = 'start'; ;) {
+          const verdict: RouteOutput<'GET /audit/verification'> = await call('GET /audit/verification', {}, { from });
+          onStretch(verdict);
+          if (!verdict.ok || verdict.next === undefined || verdict.next === null) return verdict;
+          from = verdict.next;
+        }
+      },
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
     },
