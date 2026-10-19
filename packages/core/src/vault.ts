@@ -132,7 +132,7 @@ export interface Vault {
    * an upgrade from 0.10.0, is signed a stretch a call, behind its head,
    * until the checkpoints catch up. Each call also rehashes a stretch of
    * what was signed before, round and round, which an entry edited in place
-   * fails. The vault reads the log itself: it takes nobody's word for where
+   * fails: then it refuses, and every verification reports the refusal. The vault reads the log itself: it takes nobody's word for where
    * it ends, or for what came before. It checks every member's row too, as
    * `access` would, and logs a `vault.tampered` for each one changed around
    * it: lists read rows without asking the vault.

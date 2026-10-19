@@ -2455,10 +2455,18 @@ class VaultService implements Vault {
       if (!chain.ok) return chain;
       const unsigned = await this.#checkpointFault(tx, walk.checkpoints);
       if (unsigned !== null) return unsigned;
-      const scrub = await this.#scrub(tx, from);
-      if (!scrub.ok) return scrub;
-      return { ok: true as const, from, tally: walk.tally(), at: chain.at, done: chain.done, scrub: scrub.next };
+      return { ok: true as const, from, tally: walk.tally(), at: chain.at, done: chain.done };
     }, SNAPSHOT);
+    // The past rehashed, in a snapshot of its own: an error there, or a call cut short, leaves the
+    // stretch for the next call, where it was, and the checkpoint is signed all the same.
+    let scrub: Scrubbed = { ok: true, next: walked.ok ? walked.from.scrub : null };
+    if (walked.ok) {
+      try {
+        scrub = await this.#db.transaction((tx) => this.#scrub(tx, walked.from), SNAPSHOT);
+      } catch {
+        // Kept where it was.
+      }
+    }
     return this.#decide([], async (d) => {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
       // Checkpoints one at a time, each against the one before.
@@ -2472,6 +2480,7 @@ class VaultService implements Vault {
       if (head.nextSeq === 0n) throw new Refused(refusal('invalid', 'the log is empty'), []);
       if (wrongKek !== null) throw refused('wrong_kek', { reason: wrongKek }, wrongKek);
       if (!walked.ok) throw refused('log_broken', { failedAtSeq: walked.failedAtSeq, reason: walked.reason });
+      if (!scrub.ok) throw refused('log_broken', { failedAtSeq: scrub.failedAtSeq, reason: scrub.reason });
       const newest = latest === undefined ? null : (JSON.parse(latest.metadata) as Checkpoint);
       // Nothing since the last one, which signed every entry before its own: it is still the newest prefix.
       if (newest !== null && latest!.seq === head.nextSeq - 1n && latest!.relatedSeq === latest!.seq - 1n) return { checkpoint: signedPart(newest) };
@@ -2508,7 +2517,7 @@ class VaultService implements Vault {
         keyId: this.#prepared.signer.keyId,
         signature: await this.#prepared.signer.sign(checkpointMessage(signed)),
       };
-      const kept: TalliedCheckpoint = { ...checkpoint, tally: { ...tally, access }, scrub: walked.scrub === null ? null : headOf(walked.scrub) };
+      const kept: TalliedCheckpoint = { ...checkpoint, tally: { ...tally, access }, scrub: scrub.next === null ? null : headOf(scrub.next) };
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return { checkpoint };
     });
@@ -2525,7 +2534,7 @@ class VaultService implements Vault {
    * within one lap, the log's length over `walks.scrub` beats. Where the
    * next one goes on, null for the first entry.
    */
-  async #scrub(db: Queryable, newest: Resumed): Promise<{ ok: true; next: Position | null } | Broken> {
+  async #scrub(db: Queryable, newest: Resumed): Promise<Scrubbed> {
     const end = newest.at.seq;
     const from = newest.scrub !== null && newest.scrub.seq < end ? newest.scrub : START;
     const relinked = await relink(db, from, end, this.#prepared.options.walks.scrub);
@@ -2638,6 +2647,13 @@ class VaultService implements Vault {
         }
         return { ok: true, entries: walk.entries, through: Number(through) };
       }
+      // The newest checkpoint refused as the log broken, since the one the walk starts from: what it found,
+      // the stretch of the past it rehashed among it, which no walk from a tally reads again.
+      const refused = await store.newestCheckpointEntry(tx);
+      if (refused !== undefined && refused.decision === 'deny' && refused.code === 'log_broken' && refused.seq > (from.entry ?? -1n) && this.#authentic(refused)) {
+        const { failedAtSeq, reason } = JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
+        return { ok: false, failedAtSeq: failedAtSeq ?? null, reason: `the last checkpoint was refused: ${reason ?? 'the log is broken'}` };
+      }
       const at = await this.#now(tx);
       const accounting = walk.accounting.result(at);
       if (!accounting.ok) return accounting;
@@ -2722,17 +2738,22 @@ type Resumed = {
   scrub: Position | null;
 };
 
+/** Where the next rehash of the past goes on from, null for the first entry; or what it found. */
+type Scrubbed = { ok: true; next: Position | null } | Broken;
+
 const FIRST_ENTRY: Resumed = { ok: true, entry: null, at: START, tally: EMPTY_TALLY, digest: accessDigest(EMPTY_TALLY.access), carrier: null, scrub: null };
 
 /** How far one call walks the log, in entries: a checkpoint's walk from the last, its rehash of the past, and a verification's own walk. */
 export type Walks = { checkpoint: number; scrub: number; verify: number };
 
 /**
- * About 10,000 entries take some 200 ms of CPU on a Worker; the rehash of
- * the past, a hash an entry, a tenth of that. A team's instance writes
- * fewer than a thousand entries a day.
+ * A walk rehashes, MACs and replays some 40 µs of CPU an entry, and 95
+ * with V8's optimizer off, as on a cold isolate: 10,000 entries is a beat
+ * of catching up, about a second, and a team's instance writes fewer than
+ * a thousand a day. The rehash of the past is a hash an entry, 14 µs warm
+ * and 55 cold, beside two reads: 100 entries keep it near 6 ms a beat.
  */
-const WALKS: Walks = { checkpoint: 10_000, scrub: 1_000, verify: 10_000 };
+const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
 
 /** A position as the log's heads are named, in hex. */
 function headOf(position: Position): LogHead {

@@ -2057,6 +2057,9 @@ test('an entry edited in place behind the newest checkpoint is found by the reha
     if (!next.ok) {
       assert.equal(next.refusal.code, 'log_broken');
       assert.deepEqual([(await vaultLog(w)).at(-1)!.detail.failedAtSeq, (await vaultLog(w)).at(-1)!.detail.reason], [Number(edited), 'hash does not match the entry']);
+      // And every verification says so from then on, though it reads nothing before the newest checkpoint.
+      const told = await w.vault.verifyLog({});
+      assert.deepEqual(!told.ok && [told.failedAtSeq, told.reason], [Number(edited), 'the last checkpoint was refused: hash does not match the entry']);
       break;
     }
   }

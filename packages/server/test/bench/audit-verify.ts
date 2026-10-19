@@ -5,6 +5,9 @@
 //
 //   COFFRE_TEST_DATABASE=coffre_bench ./scripts/setup-test-database.sh
 //   COFFRE_TEST_DATABASE=coffre_bench node --conditions=coffre:source packages/server/test/bench/audit-verify.ts --entries 7000
+//
+// `--keep` leaves the log in place, and `--measure` times one left by an earlier run, in a process that did not
+// just write it.
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
@@ -13,14 +16,17 @@ import { appendEntries } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../../src/db/audit.ts';
 import { writeAuditHeartbeat } from '../../src/heartbeat.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps } from '../api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 
-const { values } = parseArgs({ options: { entries: { type: 'string', default: '7000' }, runs: { type: 'string', default: '5' } } });
+const { values } = parseArgs({
+  options: { entries: { type: 'string', default: '7000' }, runs: { type: 'string', default: '5' }, keep: { type: 'boolean' }, measure: { type: 'boolean' } },
+});
 const target = Number(values.entries);
 
 const db = await openTestDatabase();
-await resetDatabase(db.owner);
-const deps = testDeps(db.runtime, ['root@acme.example']);
+if (values.measure !== true) await resetDatabase(db.owner);
+// The same keys each run, so that `--measure` reads what `--keep` left: a bench's, never a deployment's.
+const deps = testDeps(db.runtime, ['root@acme.example'], { chainKey: Buffer.alloc(32, 7), vault: testVault(['root@acme.example'], {}, { kek: Buffer.alloc(32, 9) }) });
 const root = clientFor(deps, 'root@acme.example');
 await root.me();
 const vaultKey = deriveLogKey('vault', deps.vault.signingKey);
@@ -40,7 +46,7 @@ const read = (i: number) => ({
 const write: AuditEntry = { actorType: 'user', actorId: 'ada@acme.example', action: 'secret.write', decision: 'allow', metadata: { key: 'DATABASE_URL', version: 8 } };
 
 const started = Date.now();
-for (let written = 0; written < target; written += 12) {
+for (let written = 0; values.measure !== true && written < target; written += 12) {
   await db.owner.transaction((tx) => appendEntries(tx, vaultKey, Array.from({ length: 6 }, (_, i) => read(written + i))));
   await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [write, write, write, write]));
   if (!(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet))) throw new Error('a beat failed');
@@ -83,6 +89,6 @@ console.log(JSON.stringify({
   beat: { cpuMs: median(beat.map((r) => r.cpuMs)), wallMs: median(beat.map((r) => r.wallMs)) },
   verdict,
 }));
-await resetDatabase(db.owner);
+if (values.keep !== true) await resetDatabase(db.owner);
 await db.close();
 process.exit(0);

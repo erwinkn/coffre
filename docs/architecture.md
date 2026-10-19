@@ -658,10 +658,15 @@ checkpoint signed again. Every entry of it was checked when the
 checkpoint signed it, and its hash pins it since: a rewrite chained again
 changes the hash the next checkpoint finds, and a cut changes the count.
 What it leaves is an entry edited in place, its stored hash left as it
-was. So each checkpoint also rehashes 1,000 entries of the past, a hash an
+was. So each checkpoint also rehashes 100 entries of the past, a hash an
 entry and nothing else, from where the last one stopped to the newest
-checkpoint's prefix, then from the first entry again: an entry edited in
-place is refused within one lap, the log's length over 1,000 beats.
+checkpoint's prefix, then from the first entry again: some 6 ms of a cold
+Worker's CPU. Where it stopped is kept in the checkpoint it signs. An entry
+edited in place is refused within one lap, the log's length over 100
+beats, and from then on every verification says so, by the refused
+checkpoint, though none reads that far back itself. A rehash that fails
+for another reason, a database error or a call cut short, leaves the
+stretch for the next beat and the checkpoint is signed all the same.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and a checkpoint after it carries the vault's signature. A log
@@ -1083,9 +1088,10 @@ Each limit is stated here once; the other documents link to it.
   checkpoints and verifications start from the newest tally and read
   nothing before it, so the log as it now is verifies no better. The
   checkpoint whose stretch of the past holds 812 rehashes it and refuses,
-  within one lap: 7 beats, 35 minutes, for a log of 7,000 entries, and 100
-  for 100,000, eight hours. `coffre verify log` finds it at once. Until
-  then, her reads are logged under her name.
+  and the audit page shows it broken from then on: within one lap of 100
+  entries a beat, about 6 hours for a log of 7,000 entries, and 3½ days
+  for 100,000. `coffre verify log` finds it at once; run it on a schedule
+  to bound the window.
 
   Everything else is found at the next checkpoint, within five minutes:
   - an entry cut from the middle;
@@ -1096,7 +1102,7 @@ Each limit is stated here once; the other documents link to it.
   the first entry what the log holds.** Measured on Node with a small
   Postgres: the page's check of a log of 100,000 entries took 6 seconds of
   CPU from the first entry, and takes some 10 milliseconds from the newest
-  tally; a beat, with its 1,000 entries of the past, about 30. `coffre
+  tally; a beat, with its 100 entries of the past, about 15. `coffre
   verify log` still reads everything, 10,000 entries a request, about 200
   milliseconds of a Worker's CPU each. A team's instance writes some 600
   entries a day of heartbeats and checkpoints alone, plus its own work.
