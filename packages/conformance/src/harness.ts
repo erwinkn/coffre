@@ -46,6 +46,10 @@ export type Deployment = {
   beforeFirstBeat: boolean;
   /** What the Cron trigger does every five minutes. */
   scheduled(options?: { allowFailure?: boolean }): Promise<void>;
+  /** Stop what serves the deployment and start it again on the same data: new isolates on Workers, new processes on Node. */
+  restart(): Promise<void>;
+  /** The process group of each process serving it, by name, for whoever measures them: `wrangler` on Workers; `vault` and `server` on Node. */
+  serving(): Record<string, number>;
   /** The app's database, as its owner. */
   database(): Promise<Sql>;
   /** The app's database as the login the app runs as, on an engine that has logins. */
@@ -143,6 +147,17 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     return entry;
   }
 
+  /** Stop one of the daemons on purpose: its exit fails nothing. */
+  async function halt(entry: Child): Promise<void> {
+    entry.daemon = false;
+    if (entry.exited) return;
+    const exited = new Promise((done) => entry.child.once('exit', done));
+    process.kill(-entry.child.pid!, 'SIGTERM');
+    const killed = setTimeout(() => process.kill(-entry.child.pid!, 'SIGKILL'), 10_000);
+    await exited;
+    clearTimeout(killed);
+  }
+
   async function run(command: string, args: string[], env: Record<string, string> = {}, input?: string): Promise<void> {
     const entry = start(args[0] ?? command, command, args, env, false, input);
     const code = await new Promise((done) => {
@@ -216,7 +231,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
-    start('wrangler', bin('wrangler'), [
+    const startWrangler = () => start('wrangler', bin('wrangler'), [
       'dev',
       ...['-c', drainingConfig(join(dir, 'app/dist/server')), '-c', 'vault/wrangler.jsonc'],
       ...['--ip', '127.0.0.1', '--port', String(port), '--inspector-port', String(port + 2)],
@@ -239,6 +254,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
       WRANGLER_SEND_METRICS: 'false',
     });
+    let wrangler = startWrangler();
     return {
       kind,
       origin,
@@ -249,6 +265,12 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         const response = await fetch(`${origin}/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*`);
         if (!response.ok && !options.allowFailure) throw new Failure(`the scheduled handler answered ${response.status}`, `${await response.text()}\n${logs()}`);
       },
+      async restart() {
+        await halt(wrangler);
+        wrangler = startWrangler();
+        await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`)).ok, 120, alive);
+      },
+      serving: () => ({ wrangler: wrangler.child.pid! }),
       database: () => postgres(owner),
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
@@ -263,14 +285,19 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     const database = join(scratch, 'coffre.db');
     const socket = join(scratch, 'vault.sock');
     await run(bin('coffre-server'), ['migrate', `file:${database}`]);
-    start('vault', process.execPath, ['src/vault.ts'], {
-      VAULT_SOCKET: socket,
-      DATABASE_URL: `file:${database}`,
-      VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
-      VAULT_KEY: KEYS.VAULT_KEY,
-      ...OWNER_VARS,
-    });
-    await until('the vault socket', async () => existsSync(socket), 30, alive);
+    const startVault = async () => {
+      rmSync(socket, { force: true });
+      const started = start('vault', process.execPath, ['src/vault.ts'], {
+        VAULT_SOCKET: socket,
+        DATABASE_URL: `file:${database}`,
+        VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
+        VAULT_KEY: KEYS.VAULT_KEY,
+        ...OWNER_VARS,
+      });
+      await until('the vault socket', async () => existsSync(socket), 30, alive);
+      return started;
+    };
+    let vault = await startVault();
     // The pages as they run: the deployment's Start app, built by its own Vite.
     await run(bin('vite'), ['build', 'app']);
     // As `pnpm start` runs it: the app's build, under srvx.
@@ -294,13 +321,18 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       // `serve` runs the job as it starts, and every five minutes after:
       // so restart the server.
       async scheduled() {
-        const exited = new Promise((done) => server.child.once('exit', done));
-        server.daemon = false;
-        process.kill(-server.child.pid!, 'SIGTERM');
-        await exited;
+        await halt(server);
         server = startServer();
         await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
       },
+      async restart() {
+        await halt(server);
+        await halt(vault);
+        vault = await startVault();
+        server = startServer();
+        await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
+      },
+      serving: () => ({ vault: vault.child.pid!, server: server.child.pid! }),
       database: async () => sqlite(database),
       runtime: null,
       vaultRuntime: null,

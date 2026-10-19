@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Reveals cost less CPU.** On Workers' Free plan an invocation has 10 ms
+  of CPU, and a reveal now runs 25 statements instead of 33, and reads
+  the same rows however large the log grows: with a vault key in memory,
+  the vault decides a read once, under the log's head, where it decided
+  twice; it reads the newest policy and access entries alone, not 32 at
+  a time; and a Worker no longer works out the database schema's
+  configuration at every call. On local workerd a warm one-key reveal
+  went from 33 to 26 ms of CPU, everything the runtime does for it
+  included. `pnpm bench:workers` and `pnpm bench:node` measure each hot
+  path, cold and warm.
+
 ## 0.10.0 (2026-10-19)
 
 - **Protected environments, and roles an Owner edits.** Each role now

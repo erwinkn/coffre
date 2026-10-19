@@ -19,7 +19,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } 
 
 import { tablesOf, type Queryable } from './database.ts';
 import { tombstone, truth } from './dialect.ts';
-import { entryColumns, LOOK_BACK, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
+import { entryColumns, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `vault_grants` holds it: on a project (`environmentId`
@@ -289,13 +289,13 @@ export async function reportStands(db: Queryable, principal: string, check: Auth
   const access = await newestAccess(db, principal, check);
   if (access === 'unreached') return true;
   const after = typeof access === 'string' ? -1n : access.seq;
-  const report = await newestAuthentic((before) => tamperReportsAbout(db, principal, LOOK_BACK.page, after, before), check);
+  const report = await newestAuthentic((limit, before) => tamperReportsAbout(db, principal, limit, after, before), check);
   return report === 'unreached' || typeof report !== 'string';
 }
 
 /** The newest access entry about `principal` that `check` finds the vault's own. */
 export function newestAccess(db: Queryable, principal: string, check: Authenticity): Promise<Newest> {
-  return newestAuthentic((before) => accessEntriesAbout(db, principal, LOOK_BACK.page, before), check);
+  return newestAuthentic((limit, before) => accessEntriesAbout(db, principal, limit, before), check);
 }
 
 /** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */
