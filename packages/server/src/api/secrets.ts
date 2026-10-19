@@ -1601,7 +1601,9 @@ export async function reveal(
     const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
     // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
     const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
-    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
+    // A reference's value is read where its source is too, where that is protected (`readsThrough`), as the vault decides.
+    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)))
+      && (item.source === undefined || readsThrough(ctx.caller, item.source));
     const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
       key: item.key,
       inherited: item.parent !== undefined,

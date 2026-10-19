@@ -41,7 +41,8 @@ export function givable(holder: Holder, project: ProjectSummary, environment: st
   const reached = environment === null ? project.environments.filter((candidate) => candidate.protected && !candidate.personal).map((candidate) => heldIn(candidate.slug)) : [];
   const gives = (permission: Permission) =>
     held.includes(permission) && (PROJECT_ONLY_PERMISSIONS.includes(permission) || reached.every((there) => there.includes(permission)));
-  return roles.filter((role) => role.permissions.every(gives)).map((role) => role.id);
+  // A role that holds nothing is given where its giver manages access alone, as the server decides (`givesService`).
+  return roles.filter((role) => role.permissions.length > 0 && role.permissions.every(gives)).map((role) => role.id);
 }
 
 /** The projects where you may give a service account something: on the project, or on one of its environments. */

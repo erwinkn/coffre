@@ -43,3 +43,11 @@ test('a project gives a service account only what you hold in each of its protec
   const open = developer(false);
   assert.deepEqual(givable(open, open.projects[0]!, null), ['viewer', 'contributor', 'developer']);
 });
+
+test('a role that holds nothing is offered only where you manage access, as the server gives it', () => {
+  const pending = { id: 'pending', permissions: [] as Permission[], assignableToEnvironment: true };
+  const holder = { ...developer(false), roles: [...roles, pending] };
+  assert.ok(!givable(holder, holder.projects[0]!, 'dev').includes('pending'));
+  const manager = { ...holder, projects: [{ ...holder.projects[0]!, permissions: [...holder.projects[0]!.permissions, 'grant.manage'] as Permission[] }] };
+  assert.ok(givable(manager, manager.projects[0]!, null).includes('pending'));
+});
