@@ -2168,6 +2168,23 @@ test("a tally whose members and grants are kept nowhere is refused wherever a wa
   assert.deepEqual(!resumed.ok && [resumed.failedAtSeq, resumed.reason], [second.checkpoint.seq + 1, 'its tally keeps its members and grants in entry 0, which holds none']);
 });
 
+test('two checkpoints at once, catching up from the same tally, sign one prefix each, never the same nor a shorter one', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world({}, { walks: { checkpoint: 40 } });
+  await reads(200);
+  const other = await w.twin();
+  for (let round = 0; round < 8; round++) {
+    const both = await Promise.all([w.vault.checkpoint(), other.checkpoint()]);
+    assert.ok(both.every((result) => result.ok), JSON.stringify(both));
+  }
+  const { auditLog } = tablesOf(db.owner);
+  const signed = (await db.owner.select({ signs: auditLog.relatedSeq }).from(auditLog)
+    .where(and(eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'))).orderBy(asc(auditLog.seq)))
+    .map(({ signs }) => Number(signs));
+  assert.ok(signed.length >= 5, JSON.stringify(signed));
+  assert.ok(signed.every((seq, i) => i === 0 || seq > signed[i - 1]!), `prefixes signed out of order: ${JSON.stringify(signed)}`);
+  assert.equal((await w.vault.verifyLog({ from: 'start' })).ok, true);
+});
+
 /** Reads in the vault's name, as the vault logs them, many at once. */
 async function reads(entries: number) {
   await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, Array.from({ length: entries }, () => ({

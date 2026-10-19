@@ -2677,6 +2677,8 @@ class VaultService implements Vault {
         return holding.get(carrier)!;
       };
       const expected: Expected[] = [];
+      // The hash the stretch's own checkpoint signed, as it is read among the others.
+      let endSigned: string | null = null;
       for (let after = from.entry ?? -1n, last = passed.at(-1)?.seq; last !== undefined && after < last; ) {
         const batch = await store.talliedWithin(tx, after, last, walks.verify + 1);
         if (batch.length === 0) break;
@@ -2687,6 +2689,7 @@ class VaultService implements Vault {
             expected.push({ ...point, unreadable: read });
             continue;
           }
+          if (entry.seq === to) endSigned = read.hash;
           const { access } = read.tally;
           if (!('at' in access)) holding.set(entry.seq, keptDigest(access));
           const kept = 'at' in access ? (BigInt(access.at) < entry.seq ? await carried(BigInt(access.at)) : null) : holding.get(entry.seq)!;
@@ -2740,9 +2743,7 @@ class VaultService implements Vault {
       if (walk.mismatch !== null) return { ok: false, failedAtSeq: Number(walk.mismatch.entry), reason: walk.mismatch.reason };
       if (ends !== null) {
         // The walk ends at the prefix the stretch's checkpoint signed, by its hash too: a chain made again from before it is not.
-        const end = await this.#resume(tx, to!);
-        if (!end.ok) return end;
-        if ((upTo === null && through !== ends) || headOf(end.at).hash !== reached) {
+        if ((upTo === null && through !== ends) || endSigned !== reached) {
           return { ok: false, failedAtSeq: Number(to), reason: `the log up to entry ${ends} is not the prefix this checkpoint signed: it was rewritten` };
         }
         return { ok: true, entries: walk.entries, through: Number(ends) };

@@ -40,9 +40,11 @@ export function AuditPage() {
   // Not suspended: the table shows while the log is verified.
   const verification = useQuery(queries.auditChain(client));
   // The walk from the first entry, once someone ran it, stands over the check from the newest checkpoint, which
-  // reads nothing before it and refetches as the page is looked at again: until the page is left.
+  // reads nothing before it and refetches as the page is looked at again: until the page is left. A break either
+  // finds stands over both: what the walk found stays, and what a later check finds is newer.
   const [whole, setWhole] = useState<ChainResult | null>(null);
-  const chain = whole ?? verification.data;
+  const quick = verification.data;
+  const chain = whole?.integrity === 'broken' || quick?.integrity === 'broken' ? (whole?.integrity === 'broken' ? whole : quick) : (whole ?? quick);
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
   const [walked, setWalked] = useState<{ through: number | null } | null>(null);
   const [walkFailed, setWalkFailed] = useState<string | null>(null);
