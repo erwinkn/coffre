@@ -69,11 +69,6 @@ export const forbidden = (message = 'you do not have permission to do that') =>
 export const notFound = (message = 'not found') => new ApiError('not_found', message);
 export const conflict = (message: string) => new ApiError('conflict', message);
 
-/** What a member whose record failed the vault's integrity check is told, wherever they ask. */
-export function accessTamperedError(): ApiError {
-  return new ApiError('vault_refused', "your access record failed coffre's integrity check: it was changed outside coffre. An owner must remove you and add you again", 'tampered');
-}
-
 /** The vault's refusal, as the API answers it. */
 export function vaultRefused(refusal: { code: string; message: string }): ApiError {
   if (refusal.code === 'bulk_limit') {

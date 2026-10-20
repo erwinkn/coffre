@@ -329,6 +329,11 @@ const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and us
  */
 const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS } };
 
+/** A service token 0.4 made, or a run's credential its binding issued, that carries no scope until its first use seals one (`sealCredentials`). */
+function sealsOnUse(row: { kind: string; scope: string | null }): boolean {
+  return row.kind === 'service' && row.scope === null;
+}
+
 /**
  * coffre's own sign-in: who may come in, and the credentials they hold.
  *
@@ -348,11 +353,6 @@ const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, viewer: HA
  * The app audit head serializes bindings. The unique index over
  * `(provider, issuerHash, subject)` also prevents binding an account twice.
  */
-/** A service token 0.4 made, or a run's credential its binding issued, that carries no scope until its first use seals one (`sealCredentials`). */
-function sealsOnUse(row: { kind: string; scope: string | null }): boolean {
-  return row.kind === 'service' && row.scope === null;
-}
-
 export class SigninService {
   readonly #deps: SigninServiceDeps;
   readonly #stateKey: Buffer;
