@@ -198,7 +198,10 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     const place = await locate(ctx, def, found.params, query);
     // `dev@me` for a route that handles it, made or not: its handler checks what that takes.
     const handled = place?.personal !== undefined && def.personal === 'handles';
-    for (const check of handled ? [] : checks(def, input, query)) {
+    const routeChecks = handled ? [] : checks(def, input, query);
+    // A caller not asked of the vault yet holds nothing: a route whose standing its own work learns checks none first.
+    if (ctx.caller.pending !== undefined && routeChecks.length > 0) throw new Error(`${route.method} ${route.shape} checks its caller before the vault was asked about them`);
+    for (const check of routeChecks) {
       const anyOf = typeof check === 'string' ? [check] : 'anyOf' in check ? check.anyOf : [check.permission];
       const onProject = typeof check === 'object' && 'on' in check;
       const scope = placeOf(place!.project, onProject ? null : place!.environment);

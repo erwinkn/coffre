@@ -898,12 +898,12 @@ class VaultService implements Vault {
   // cannot be wiped, so this is best-effort memory hygiene.
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }> {
     const outcome = await this.#unwrap(input);
-    // As `access` does: a person the deployment names who owns nothing of the instance becomes an Owner of all of it. A
-    // read refused before is decided again, once, as they are now.
+    // As `access` does: a person the deployment names who owns nothing of the instance becomes an Owner of all of it.
     const { access } = outcome;
     if (access === undefined || this.#prepared.superseded !== null || !this.#listed(input.principal) || (access.status === 'active' && ownsInstance(access))) return outcome;
-    if (!(await this.#declare([input.principal])) || outcome.ok) return outcome;
-    return this.#unwrap(input);
+    if (!(await this.#declare([input.principal]))) return outcome;
+    // Allowed, the read stands, answered with what they hold now. Refused, it is decided again, and logged again.
+    return outcome.ok ? { ...outcome, access: await this.#read(input.principal, null) } : this.#unwrap(input);
   }
 
   async #unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }> {

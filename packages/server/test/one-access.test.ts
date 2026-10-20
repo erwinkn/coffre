@@ -166,7 +166,7 @@ test("a reveal the vault refuses is worded as the app words it, and logged once,
   const token = await cliToken(QA);
   asked = [];
   const refused = await reveal(token, 'market/prod');
-  assert.equal(refused.status, 403);
+  assert.deepEqual([refused.status, refused.body.reason], [403, 'missing_secret_read'], 'as the app words it, the reason a client branches on included');
   assert.deepEqual(await readsBy(`user:${QA}`), [['vault', 'deny', 'no_grant']], 'the vault refused it, and nothing else logged it again');
   assert.deepEqual(asked, [], 'its answer said who asked');
 });
@@ -180,7 +180,8 @@ test("a fork's inherited values take read on the fork too, decided by the vault 
   const token = await cliToken(QA);
   // Every value of dev-eu is dev's, which QA reads; dev-eu itself, QA does not.
   assert.equal((await reveal(token, 'market/dev')).status, 200);
-  assert.equal((await reveal(token, 'market/dev-eu')).status, 403);
+  const fork = await reveal(token, 'market/dev-eu');
+  assert.deepEqual([fork.status, fork.body.reason], [403, 'missing_secret_read']);
   await root.access.set(`user:${QA}`, { 'market/dev-eu': 'viewer' });
   assert.deepEqual((await reveal(token, 'market/dev-eu')).body.values, { API_KEY: 'dev-key' });
 });
@@ -201,6 +202,7 @@ test('a session of an earlier membership reveals nothing: removed and admitted a
 
 test("a reveal's caller is settled before anything is answered: whoever the vault turns away learns nothing of what is there", async () => {
   const STRANGER = 'stranger@acme.example';
+  await clientFor(deps, ROOT).secrets.set('market/dev', { API_KEY: 'dev-key' });
   // Access in front: every token is the email of whoever holds it, and only the vault says who is a member.
   const access: CoffreRuntime = { ...runtime, signin: null, verifier: { verify: async (token: string) => ({ type: 'user', id: token, email: token, subject: token }) } };
   const ask = async (path: string) => {
@@ -212,7 +214,8 @@ test("a reveal's caller is settled before anything is answered: whoever the vaul
   assert.deepEqual(await ask('market/dev'), [403, 'registration_required']);
   assert.deepEqual(await ask('nope/dev'), [403, 'registration_required'], 'the same, whether or not the place exists');
   assert.deepEqual(await ask('not a path'), [403, 'registration_required'], 'and for a request it could not even parse');
-  assert.deepEqual(await readsBy(`user:${STRANGER}`), []);
+  // Behind Access, anyone reaches the app: the vault is asked who they are first, and decides no read of theirs.
+  assert.deepEqual([await readsBy(`user:${STRANGER}`), unwrapped], [[], []]);
 });
 
 test('a session of an earlier membership that reaches the vault, before its revocation commits, is refused there', async () => {
@@ -224,8 +227,9 @@ test('a session of an earlier membership that reaches the vault, before its revo
   const { projects } = tablesOf(db.owner);
   const [project] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
   assert.ok((await deps.vault.setAccess({ actor: `user:${ROOT}`, principal: `user:${DEV}`, changes: [{ projectId: project!.id, environmentId: null, role: 'developer', expiresAt: null }] })).ok);
+  asked = [];
   const stale = await reveal(token, 'market/dev');
-  assert.deepEqual([stale.status, unwrapped.at(-1)], [401, `user:${DEV}`]);
+  assert.deepEqual([stale.status, unwrapped.at(-1), asked], [401, `user:${DEV}`, []], 'answered by the read, and asked nothing again');
   assert.deepEqual((await readsBy(`user:${DEV}`)).at(-1), ['vault', 'deny', 'removed']);
 });
 

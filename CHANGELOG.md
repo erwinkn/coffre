@@ -43,7 +43,7 @@
   `request-cost.test.ts` now holds each of these requests to its exact
   number of statements and vault calls.
 
-- **A reveal asks the vault once.** It used to ask who its caller is
+- **A reveal asks the vault once.** On a coffre credential, it used to ask who its caller is
   (`access`), then open the values (`unwrap`): two vault calls, each a
   Worker invocation with its own database connection. `unwrap` now says
   what the caller holds, decided under their row with the read, and the
@@ -52,7 +52,9 @@
   decides there too: a fork whose values are all inherited takes read on
   the fork, as well as on its parent. It takes the credential's
   `generation`, and refuses one of an earlier membership. A refused read
-  is worded as before and logged once, by the vault.
+  is worded as before and logged once, by the vault. Behind Cloudflare
+  Access, which vouches for anyone, the vault is asked who they are
+  first, as before.
 
   **Deploy the vault with or before the app.** An app of this release
   that gets no answer of what the caller holds from `unwrap`, from an

@@ -354,7 +354,7 @@ export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'>, refusal: 
  * (`principal_not_registered`, `referenced`, …): what a client branches on,
  * never the message's words.
  */
-function answered({ error, entry }: Refusal): ApiError | Error {
+export function answered({ error, entry }: Refusal): ApiError | Error {
   const reason = entry.metadata?.reason;
   if (!(error instanceof ApiError) || error.reason !== undefined || typeof reason !== 'string') return error;
   return new ApiError(error.code, error.message, reason);

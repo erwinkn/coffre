@@ -184,8 +184,9 @@ export async function authenticateRequest(
   try {
     const asked = { type: principal.type, id: principal.id };
     // A coffre credential was checked against what the vault says of its member: that answer, not a second call. Deferred,
-    // the request's own vault call answers it, and checks the credential's generation (`settled`).
-    const caller = checked === undefined && options.deferStanding === true
+    // the request's own vault call answers it, and checks the credential's generation (`settle`). Only for a credential
+    // whose row vouched for a member: behind Access, anyone at all reaches here, and the vault is asked who they are first.
+    const caller = checked === undefined && options.deferStanding === true && credentialGeneration !== undefined
       ? pendingCaller(asked, policySeq, credentialScope, credentialGeneration)
       : callerFrom(asked, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope);
     // Removal may have raced the credential verification above.

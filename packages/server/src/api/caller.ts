@@ -19,7 +19,7 @@ import type { Access, Vault } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { newestVaultSeq } from '@coffre/db/log';
 
-import { accessTamperedError, ApiError } from './errors.ts';
+import { ApiError } from './errors.ts';
 import { logged } from '../logged.ts';
 import { formatMember } from './paths.ts';
 
@@ -73,12 +73,12 @@ export type Caller = {
   /** A service account's: it holds each role's normal column, in a protected environment too. */
   service: boolean;
   /**
-   * Not asked of the vault yet: a reveal learns what its caller holds from
-   * the call that opens its values (`pendingCaller`), which checks the
-   * generation a coffre credential was issued under (null for any other).
-   * Until then it holds nothing.
+   * Not asked of the vault yet: a reveal on a coffre credential learns what
+   * its caller holds from the call that opens its values (`pendingCaller`),
+   * which checks the generation the credential was issued under. Until
+   * then it holds nothing, and no check is made of it (`serveApi`).
    */
-  pending?: { generation: number | null };
+  pending?: { generation: number };
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -99,12 +99,12 @@ export function newestPolicySeq(db: Queryable): Promise<bigint | null> {
  * A caller who holds nothing until the request's one vault call says what
  * they hold (`settled`): a reveal's, whose `unwrap` answers it.
  */
-export function pendingCaller(principal: PrincipalRef, policySeq: bigint | null, credentialScope: CredentialScope | null, generation: number | undefined): Caller {
+export function pendingCaller(principal: PrincipalRef, policySeq: bigint | null, credentialScope: CredentialScope | null, generation: number): Caller {
   return {
     principal,
     registered: true,
     tampered: false,
-    generation: generation ?? 0,
+    generation,
     role: 'member',
     scope: NOWHERE,
     grants: [],
@@ -112,27 +112,26 @@ export function pendingCaller(principal: PrincipalRef, policySeq: bigint | null,
     policy: DEFAULT_POLICY,
     policySeq,
     service: principal.type === 'service',
-    pending: { generation: generation ?? null },
+    pending: { generation },
   };
 }
 
 const NOWHERE: Scope = { projects: { only: [] }, environments: { only: [] } };
 
 /**
- * A pending caller, as the vault answered: or why they are turned away, as
- * a request that asked first would have been, its credential of an
- * earlier membership included.
+ * A pending caller, as the vault answered: the request's caller from now
+ * on, refused or not, so that nothing asks about them again. Then why they
+ * are turned away, as a request that asked first would have been: a
+ * credential of a member no longer active, or of an earlier membership,
+ * is no credential.
  */
-export function settled(pending: Caller, access: Access): Caller {
-  const caller = callerFrom(pending.principal, access, pending.policySeq, pending.credentialScope);
-  // A coffre credential lives only while its member is active, at its generation: as its verification, asking first, would have said.
-  const generation = pending.pending?.generation ?? null;
-  if (generation !== null && (access.status !== 'active' || access.generation !== generation)) {
+export function settle(ctx: { caller: Caller }, access: Access): void {
+  const { pending, principal, policySeq, credentialScope } = ctx.caller;
+  if (pending === undefined) throw new Error('only a pending caller is settled');
+  ctx.caller = callerFrom(principal, access, policySeq, credentialScope);
+  if (access.status !== 'active' || access.generation !== pending.generation) {
     throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
   }
-  if (caller.tampered) throw accessTamperedError();
-  if (!caller.registered) throw new ApiError('registration_required', 'you are signed in, but not a member here');
-  return caller;
 }
 
 /**
@@ -140,14 +139,14 @@ export function settled(pending: Caller, access: Access): Caller {
  * first: when the request's work did not say. One the vault cannot answer
  * about is an outage, as at authentication.
  */
-export async function askedOf(vault: Vault, pending: Caller, requestId: string): Promise<Caller> {
+export async function askOf(ctx: { caller: Caller; vault: Vault; requestId: string }): Promise<void> {
   let access: Access;
   try {
-    access = await vault.access(formatMember(pending.principal));
+    access = await ctx.vault.access(formatMember(ctx.caller.principal));
   } catch (error) {
-    throw callerUncheckable(requestId, error);
+    throw callerUncheckable(ctx.requestId, error);
   }
-  return settled(pending, access);
+  settle(ctx, access);
 }
 
 /**

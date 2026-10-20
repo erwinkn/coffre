@@ -350,10 +350,17 @@ what it decides on in one more.
 
 `access(principal)`, which the app asks once per request, takes no lock:
 one statement reads the member, the grants, the freshness check and the
-policy. A reveal does not ask it: its `unwrap` answers the same, read
-under the reader's row with the decision, and decides the environment
-asked of and the credential's generation, so that every check the app
-makes of it holds wherever the vault allowed. On SQLite,
+policy. A reveal on a coffre credential does not ask it: its `unwrap`
+answers the same, read under the reader's row with the decision, and
+decides the environment asked of and the credential's generation, so
+that every check the app makes of it holds wherever the vault allowed.
+Behind Access, where anyone reaches the app, `access` is asked first, as
+before. One window is left: the app resolves a path by slug before the
+vault reads its places under the head, so a rename between the two (an
+Owner scoped to `dev` reading `dev2` as it is renamed `dev`) can see the
+vault allow, and log, a read the app then refuses. Both refuse whatever
+the other does not reach, so it fails closed, with an allow in the log
+for a read nobody got. On SQLite,
 every transaction holds the file's write lock, so the locks above do
 nothing there; the tests run two processes on one file to cover it.
 
