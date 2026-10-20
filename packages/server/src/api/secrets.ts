@@ -1637,7 +1637,7 @@ export async function reveal(
         early = { read, rows, opened: null };
         if (use === undefined && rows.length > 0 && read.unreadable.length === 0 && !rows.some(plain)) {
           const purpose = path.key === undefined ? 'run' : 'reveal';
-          const { generation } = ctx.caller.pending;
+          const { generation } = ctx.caller;
           // The request's first word with the vault: one it cannot reach is an outage, as at authentication. One that fails
           // once reached, unable to log the read, say, fails as it did after authentication.
           const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, asked: environment.environmentId, generation }, rows)

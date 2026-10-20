@@ -52,9 +52,11 @@
   decides there too: a fork whose values are all inherited takes read on
   the fork, as well as on its parent. It takes the credential's
   `generation`, and refuses one of an earlier membership. A refused read
-  is worded as before and logged once, by the vault. Behind Cloudflare
-  Access, which vouches for anyone, the vault is asked who they are
-  first, as before.
+  is worded as before and logged once, by the vault. A read with a value
+  the app opens itself (a plain value, or a reference to one), or with
+  nothing for the vault to open, still asks who is asking first. Behind
+  Cloudflare Access, which vouches for anyone, the vault is asked who
+  they are first, as before.
 
   **Deploy the vault with or before the app.** An app of this release
   that gets no answer of what the caller holds from `unwrap`, from an

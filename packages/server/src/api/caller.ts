@@ -75,10 +75,11 @@ export type Caller = {
   /**
    * Not asked of the vault yet: a reveal on a coffre credential learns what
    * its caller holds from the call that opens its values (`pendingCaller`),
-   * which checks the generation the credential was issued under. Until
-   * then it holds nothing, and no check is made of it (`serveApi`).
+   * which checks `generation`, until then the one the credential was issued
+   * under. Until then it holds nothing, and no check is made of it
+   * (`serveApi`).
    */
-  pending?: { generation: number };
+  pending?: true;
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -112,7 +113,7 @@ export function pendingCaller(principal: PrincipalRef, policySeq: bigint | null,
     policy: DEFAULT_POLICY,
     policySeq,
     service: principal.type === 'service',
-    pending: { generation },
+    pending: true,
   };
 }
 
@@ -126,10 +127,10 @@ const NOWHERE: Scope = { projects: { only: [] }, environments: { only: [] } };
  * is no credential.
  */
 export function settle(ctx: { caller: Caller }, access: Access): void {
-  const { pending, principal, policySeq, credentialScope } = ctx.caller;
+  const { pending, principal, policySeq, credentialScope, generation } = ctx.caller;
   if (pending === undefined) throw new Error('only a pending caller is settled');
   ctx.caller = callerFrom(principal, access, policySeq, credentialScope);
-  if (access.status !== 'active' || access.generation !== pending.generation) {
+  if (access.status !== 'active' || access.generation !== generation) {
     throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
   }
 }
