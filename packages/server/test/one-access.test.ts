@@ -200,7 +200,7 @@ test('a session of an earlier membership reveals nothing: removed and admitted a
   assert.equal((await reveal(await cliToken(DEV), 'market/dev')).status, 200);
 });
 
-test("a reveal's caller is settled before anything is answered: whoever the vault turns away learns nothing of what is there", async () => {
+test("behind Access, a reveal's caller is asked of the vault first, and whoever it turns away learns nothing of what is there", async () => {
   const STRANGER = 'stranger@acme.example';
   await clientFor(deps, ROOT).secrets.set('market/dev', { API_KEY: 'dev-key' });
   // Access in front: every token is the email of whoever holds it, and only the vault says who is a member.
@@ -231,5 +231,20 @@ test('a session of an earlier membership that reaches the vault, before its revo
   const stale = await reveal(token, 'market/dev');
   assert.deepEqual([stale.status, unwrapped.at(-1), asked], [401, `user:${DEV}`, []], 'answered by the read, and asked nothing again');
   assert.deepEqual((await readsBy(`user:${DEV}`)).at(-1), ['vault', 'deny', 'removed']);
+});
+
+test("a session the vault no longer vouches for learns nothing of what is there: every answer waits for the vault's", async () => {
+  await clientFor(deps, ROOT).secrets.set('market/dev', { API_KEY: 'dev-key' });
+  const token = await cliToken(DEV);
+  // Removed by the vault alone: the app's revocation of the session has not happened yet.
+  assert.ok((await deps.vault.remove({ actor: `user:${ROOT}`, principal: `user:${DEV}` })).ok);
+  for (const path of ['nope/dev', 'not a path', 'market/dev/MISSING', 'market/dev']) {
+    asked = [];
+    unwrapped = [];
+    const answer = await reveal(token, path);
+    assert.equal(answer.status, 401, path);
+    // Nothing the vault decides on to open, it is asked who they are; something to open, the read itself says.
+    assert.deepEqual([asked.length + unwrapped.length], [1], path);
+  }
 });
 

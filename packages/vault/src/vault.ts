@@ -1305,7 +1305,7 @@ class VaultService implements Vault {
         }], [], d.reads);
         return { seq: appended.seqStart };
       }, false, reads);
-      if (!intent.ok) return { ...intent, access: holds };
+      if (!intent.ok) return action === 'secret.read' ? { ...intent, access: holds } : intent;
       intentSeq = intent.seq;
     }
 
@@ -1381,7 +1381,8 @@ class VaultService implements Vault {
         for (const value of done) value.wipe();
       }
     }, late, reads);
-    return { ...outcome, access: holds };
+    // A read answers who asked (`unwrap`); a write asks the vault who they are first, and wants none of it back.
+    return action === 'secret.read' ? { ...outcome, access: holds } : outcome;
   }
 
   /** Whether `n` more keys would take the reader past the bulk limit; counted under their row's lock, so exactly (`Reads`). */

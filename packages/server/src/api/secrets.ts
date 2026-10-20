@@ -1642,8 +1642,8 @@ export async function reveal(
             .catch((error: unknown) => { throw isUnreachable(error) ? callerUncheckable(ctx.requestId, error) : error; });
           // A vault older than this app decided without the asked environment or the credential's generation: nothing it opened is handed back.
           if (opened.ok && opened.access === undefined) throw new ApiError('unavailable', 'the vault is older than this app: deploy the vault first');
-          // Refused before it decided anything of who asks, as a vault given the wrong key is: its refusal is the answer.
-          if (!opened.ok && opened.access === undefined) throw vaultRefused(opened.refusal);
+          // Refused before it decided who asks (a vault given the wrong key, a claim it cannot read), it is asked below, as
+          // any request asks first, and the checks word its refusal as they would have.
           ({ access } = opened);
           early.opened = opened;
         }
