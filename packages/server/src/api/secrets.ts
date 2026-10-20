@@ -1605,7 +1605,7 @@ export async function reveal(
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence) => {
     // A pending caller's read, and its values when opened with the call that says what they hold (below).
-    let early: { read: Awaited<ReturnType<typeof readableValues>>; opened: Awaited<ReturnType<typeof openValues>> | null } | null = null;
+    let early: { read: Awaited<ReturnType<typeof readableValues>>; rows: Readable[]; opened: Awaited<ReturnType<typeof openValues>> | null } | null = null;
     // Refused by the vault, which logged it, a check of the app's words the refusal and logs nothing more (below).
     try {
       // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1634,7 +1634,7 @@ export async function reveal(
         const read = await readableValues(ctx.db, place, environment, path.key);
         const rows = read.items.filter((item) => !withheld(item));
         let access: Access | undefined;
-        early = { read, opened: null };
+        early = { read, rows, opened: null };
         if (use === undefined && rows.length > 0 && read.unreadable.length === 0 && !rows.some(plain)) {
           const purpose = path.key === undefined ? 'run' : 'reveal';
           const { generation } = ctx.caller.pending;
@@ -1679,7 +1679,8 @@ export async function reveal(
         recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
       }))) : use.keys;
       const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
-      const rows = read.items.filter((item) => wanted(item) && !withheld(item));
+      // Opened early, the values are the early rows', in their order: the rows below are those.
+      const rows = early?.opened != null ? early.rows : read.items.filter((item) => wanted(item) && !withheld(item));
       const sensitive = read.items.filter(withheld).map((item) => item.key);
       const unreadable = read.unreadable.filter(wanted);
       // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.

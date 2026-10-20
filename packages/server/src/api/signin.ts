@@ -348,6 +348,11 @@ const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, viewer: HA
  * The app audit head serializes bindings. The unique index over
  * `(provider, issuerHash, subject)` also prevents binding an account twice.
  */
+/** A service token 0.4 made, or a run's credential its binding issued, that carries no scope until its first use seals one (`sealCredentials`). */
+function sealsOnUse(row: { kind: string; scope: string | null }): boolean {
+  return row.kind === 'service' && row.scope === null;
+}
+
 export class SigninService {
   readonly #deps: SigninServiceDeps;
   readonly #stateKey: Buffer;
@@ -595,7 +600,7 @@ export class SigninService {
 
   /** A live service token 0.4 made, or a run's credential its binding issued, that carries no scope yet. */
   #unsealed(row: NonNullable<Awaited<ReturnType<typeof findCredential>>>, access: Access, now: Date): boolean {
-    return row.kind === 'service' && row.scope === null && this.#liveCredential(row, access, now);
+    return sealsOnUse(row) && this.#liveCredential(row, access, now);
   }
 
   async #issue(
@@ -655,7 +660,8 @@ export class SigninService {
       row = await findCredential(db, chainKey, { tokenHash });
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
-      deferred = request.deferStanding === true && row !== null && !(row.kind === 'service' && row.scope === null);
+      // One sealed on its first use is sealed with what the vault answers here: it asks first.
+      deferred = request.deferStanding === true && row !== null && !sealsOnUse(row);
       if (row !== null && !deferred) access = await this.#deps.vault.access(row.principal);
       // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
