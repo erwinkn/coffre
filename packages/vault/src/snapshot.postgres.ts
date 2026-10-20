@@ -72,7 +72,7 @@ export function snapshotQuery(asked: Asked): SQL {
           UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL
           -- What the newest policy protects, by the ids its JSON names; one that is no UUID names nothing.
           UNION SELECT (place #>> '{}')::uuid FROM policy, jsonb_path_query(policy.metadata::jsonb, '$.policy.protected[*].environmentId') AS place
-          WHERE (place #>> '{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          WHERE (place #>> '{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         ))
       ),
       'ended', (

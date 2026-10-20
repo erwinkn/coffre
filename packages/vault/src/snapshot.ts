@@ -1,6 +1,6 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { Queryable, Transaction } from '@coffre/db';
-import { lockLogHead } from '@coffre/db/log';
+import { LogHeadMismatch, lockLogHead } from '@coffre/db/log';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import type { GrantRow } from '@coffre/db/grants';
 
@@ -79,6 +79,10 @@ export async function snapshot(db: Queryable, asked: Asked): Promise<Snapshot> {
   if (first.head === null) await lockLogHead(db as Transaction);
   const again = await read();
   if (again.head === null) throw new Error("the log's head, held by this transaction, was read as held by another");
+  // Held, nothing appends: a head that names another last entry was moved, or the log written, around it (`appendEntries`).
+  if (!current(again.head)) {
+    throw new LogHeadMismatch(`the log's head says entry ${again.head.nextSeq} comes next, but the log ends ${again.head.last === null ? 'empty' : `at entry ${again.head.last.seq}`}, or with another hash`);
+  }
   return again;
 }
 

@@ -101,7 +101,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, isUnreachable, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
-import { appendEntries, lockLogHead, missingEntry, newestAuthentic, newestVaultSeq, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
@@ -2172,7 +2172,8 @@ class VaultService implements Vault {
       // Under the log's head, as the actor's standing above: two changes at once each start from the one before. One the
       // caller weighed from a revision of the policy, its newest change and its protected environments' rows, starts
       // from that one, or is refused, to be asked again: a protected prod renamed since is a policy changed too.
-      const newest = await newestVaultSeq(d.tx, POLICY);
+      // The newest change in the vault's name, read with the decision, as the app reads it: by its number, unchecked.
+      const newest = d.reads.newestPolicy?.seq ?? null;
       const { policy: before, edits, readable } = await this.#policyAt(d.tx, d.reports, d.at, d.reads);
       if (revision !== undefined && policyRevision(newest, before) !== revision) throw refused('policy_changed');
       const owner = acting.live.credentialScope == null && ownsInstance(acting.live);
