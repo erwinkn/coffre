@@ -6,7 +6,7 @@ import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coff
 import { isTombstone } from '@coffre/core/schemas';
 import type { Access, HolderRef, SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
-import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
+import { isUniqueViolation, isUnreachable, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
 import {
@@ -1636,9 +1636,10 @@ export async function reveal(
         if (use === undefined && rows.length > 0 && read.unreadable.length === 0 && !rows.some(plain)) {
           const purpose = path.key === undefined ? 'run' : 'reveal';
           const { generation } = ctx.caller.pending;
-          // The request's first word with the vault: one it cannot answer is an outage, as at authentication.
+          // The request's first word with the vault: one it cannot reach is an outage, as at authentication. One that fails
+          // once reached, unable to log the read, say, fails as it did after authentication.
           const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, asked: environment.environmentId, ...(generation === null ? {} : { generation }) }, rows)
-            .catch((error: unknown) => { throw callerUncheckable(ctx.requestId, error); });
+            .catch((error: unknown) => { throw isUnreachable(error) ? callerUncheckable(ctx.requestId, error) : error; });
           // A vault older than this app decided without the asked environment or the credential's generation: nothing it opened is handed back.
           if (opened.ok && opened.access === undefined) throw new ApiError('unavailable', 'the vault is older than this app: deploy the vault first');
           // Refused before it decided anything of who asks, as a vault given the wrong key is: its refusal is the answer.
