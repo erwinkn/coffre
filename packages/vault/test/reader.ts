@@ -6,13 +6,12 @@ import { openDatabase } from '@coffre/db/connect';
 
 import { openVault, prepareVault } from '../src/vault.ts';
 
-const { url, kek, signingKey, bulkLimit, input, reads } = JSON.parse(process.argv[2]!) as {
+const { url, kek, signingKey, bulkLimit, inputs } = JSON.parse(process.argv[2]!) as {
   url: string;
   kek: string;
   signingKey: string;
   bulkLimit: { count: number; windowMs: number };
-  input: UnwrapInput;
-  reads: number;
+  inputs: UnwrapInput[];
 };
 const { db, close } = await openDatabase(url);
 const vault = openVault(
@@ -24,6 +23,6 @@ const vault = openVault(
     bulkLimit,
   }),
 );
-const outcomes = await Promise.all(Array.from({ length: reads }, () => vault.unwrap(input)));
+const outcomes = await Promise.all(inputs.map((input) => vault.unwrap(input)));
 process.stdout.write(JSON.stringify(outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal.code))));
 await close();

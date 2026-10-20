@@ -2,13 +2,14 @@ import { hkdfSync } from 'node:crypto';
 
 import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
-/** At most `count` data keys unwrapped per principal in any `windowMs`. */
+/** At most `count` distinct data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };
 
 /**
- * 1000 keys in 15 minutes: twenty `coffre run`s of a 50-key environment
- * back to back, which no person or deploy pipeline does, while a script
- * pulling every secret it can reach stops within a few seconds.
+ * 1000 different keys in 15 minutes, which no person or deploy pipeline
+ * reads, while a script pulling every secret it can reach stops within a
+ * few seconds. A key read again counts once: a 50-key `coffre run` is 50
+ * however often it runs.
  */
 export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_000 };
 
@@ -62,7 +63,7 @@ export type VaultConfig = {
    * service holds the KEK, as AWS KMS does: the vault never sees that key.
    */
   signingKey?: string;
-  /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
+  /** At most `count` distinct data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
   /**
    * @deprecated Gone in 0.10, and refused: each key says who sees it now. Mark

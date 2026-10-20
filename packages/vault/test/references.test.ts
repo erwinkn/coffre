@@ -11,6 +11,7 @@ import { and, asc, eq, gte } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
+import { snapshot } from '../src/snapshot.ts';
 import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase } from './database.ts';
 
 // References (docs/design/environments.md): the vault's `reference.create`
@@ -123,6 +124,17 @@ test('a read through several references held in one environment is one entry of 
   const listed = entry!.metadata.secrets as { secretId: string; via: { reference: string; path: string }; also: { secretId: string } }[];
   assert.deepEqual(listed.map((secret) => [secret.secretId, secret.via.reference, secret.via.path, secret.also.secretId]), [first, second].map(({ via, holder }) =>
     [w.source.secretId, via.reference, holder.path, holder.secretId]));
+});
+
+test('the bulk limit counts a source read through references once, however many hold it', async () => {
+  const w = await world();
+  const first = await made(w, ADA, w.holder('FIRST'));
+  const second = await made(w, ADA, w.holder('SECOND'));
+  // One read naming the source alone, then one listing it through both holders, its holders' own ids beside it.
+  assert.ok((await read(w, BO, first.via)).ok);
+  assert.ok((await w.vault.unwrap({ principal: BO, purpose: 'run', items: [first, second].map(({ via }) => ({ secretVersionId: w.secretVersionId, via })) })).ok);
+  const counted = await snapshot(db.owner, { principals: [BO], released: { principal: BO, keys: [w.source.secretId], windowMs: 15 * 60_000, clockOffsetMs: 0 } });
+  assert.equal(counted.released, 1, 'one key released, the source: never a holder');
 });
 
 test("a reference reads by its holder's grants alone: its source protected after it was made, it reads on for whoever reads the holder", async () => {

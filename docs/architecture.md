@@ -582,12 +582,24 @@ flight; the next read is refused before KMS is called.
 
 ### The bulk limit
 
-At most `bulkLimit` data keys unwrapped per principal in any rolling window,
-`{ count: 1000, windowMinutes: 15 }` by default: twenty `coffre run`s of a 50-key environment
-back to back, which no person or pipeline does, while a script pulling every
-value it can reach stops within seconds. Each unwrapped key counts, so one
-50-key run is 50, though it is one entry in the log. A refusal is logged and answers 403 `bulk_limit`; the
-principal reads again as the window rolls on.
+At most `bulkLimit` distinct data keys unwrapped per principal in any rolling window,
+`{ count: 1000, windowMinutes: 15 }` by default: a thousand different secrets, which no
+person or pipeline reads in a quarter of an hour, while a script pulling every
+value it can reach stops within seconds. A key counts once in the window however
+often it is read, and whatever its version: a 50-key run is 50, though it is one
+entry in the log, and the same run again adds nothing, as it exposes nothing new.
+Tools that export one environment on every command never trip it. A refusal is
+logged and answers 403 `bulk_limit`; the principal reads new keys again as the
+window rolls on.
+
+The vault counts from its own allowed `secret.read` entries in the window,
+under the reader's row lock, in the statement that reads the rest of the
+decision: a read of one key names it in `secret_id`, a read of several at one
+place lists each in its `secrets`. That is a pass over the reader's own reads in
+the window. On Postgres a full window of 1000 distinct keys costs about 4 ms,
+whether 25 reads of 40 keys or 1000 of one; a read of 40 keys repeated adds
+about 0.1 ms, so a principal reading the same 40 keys every two seconds for the
+whole window, 500 reads, pays about 55 ms a read.
 
 ### One log, two authors
 

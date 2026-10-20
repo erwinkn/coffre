@@ -46,7 +46,11 @@ export type Snapshot = {
   environments: Map<string, EnvironmentRow>;
   /** Of the asked `reference.create` entries, those a `reference.end` of the vault's names, allowed. */
   ended: Set<bigint>;
-  /** How many keys the vault released to `asked.released.principal` within its window. */
+  /**
+   * How many distinct keys `asked.released.principal` holds released within
+   * its window once it is given `asked.released.keys` too: a key released
+   * again, or asked for again, counts once.
+   */
   released: number;
   /** The log's head, locked, with the last entry and the newest `key.rotate`; null unless asked, or held by another. */
   head: LockedHead | null;
@@ -68,8 +72,11 @@ export type Asked = {
   members?: boolean;
   environments?: readonly string[];
   references?: readonly bigint[];
-  /** One principal's releases within the last `windowMs` of the clock, moved on by `clockOffsetMs` as the vault's is. */
-  released?: { principal: string; windowMs: number; clockOffsetMs: number };
+  /**
+   * One principal's releases within the last `windowMs` of the clock, moved
+   * on by `clockOffsetMs` as the vault's is, with `keys`, secret ids, besides.
+   */
+  released?: { principal: string; keys: readonly string[]; windowMs: number; clockOffsetMs: number };
   /** Lock the log's head first. */
   head?: boolean;
 };
