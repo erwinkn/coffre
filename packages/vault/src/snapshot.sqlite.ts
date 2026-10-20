@@ -88,7 +88,8 @@ export function snapshotQuery(asked: Asked): SQL {
       'released', ${released === undefined
         ? sql`0`
         : sql`(
-          SELECT SUM(COALESCE(json_array_length(metadata, '$.secrets'), 1)) FROM audit_log
+          -- An entry about several keys lists them; any other counts one, whatever it holds.
+          SELECT SUM(CASE WHEN json_type(metadata, '$.secrets') = 'array' THEN json_array_length(metadata, '$.secrets') ELSE 1 END) FROM audit_log
           WHERE author = 'vault' AND actor = ${released.principal} AND action = 'secret.read' AND decision = 'allow'
             AND occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
         )`}

@@ -4,7 +4,7 @@ import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
-import type { HolderRef, SecretRef } from '@coffre/core/vault';
+import type { Access, HolderRef, SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
@@ -35,7 +35,7 @@ import {
   fileSecrets,
   secretFolderOf,
 } from '../db/queries.ts';
-import { can, lists, permissionsAt, placeOf } from './caller.ts';
+import { askedOf, can, lists, permissionsAt, placeOf, settled } from './caller.ts';
 import { protectedFor } from './roles.ts';
 import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
@@ -1604,101 +1604,131 @@ export async function reveal(
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence) => {
-    // `market/dev@me`: your personal config of dev, or dev while you have none.
-    const place = await resolveRead(ctx, path);
-    const environment = place === null ? null : liveEnvironment(place);
-    if (place === null || environment === null) {
-      throw new Refusal(
-        notFound('unknown project or environment'),
-        denied(ctx, 'secret.read', 'unknown_environment', {
-          projectId: place?.project.id ?? null,
-          operationId,
-          metadata: { path: formatPath(path) },
-        }),
-      );
+    // A pending caller's read, opened with the call that says what they hold (below).
+    let early: { read: Awaited<ReturnType<typeof readableValues>>; opened: Awaited<ReturnType<typeof openValues>> } | null = null;
+    // Refused by the vault, which logged it, a check of the app's words the refusal and logs nothing more.
+    try {
+      // `market/dev@me`: your personal config of dev, or dev while you have none.
+      const place = await resolveRead(ctx, path);
+      const environment = place === null ? null : liveEnvironment(place);
+      if (place === null || environment === null) {
+        throw new Refusal(
+          notFound('unknown project or environment'),
+          denied(ctx, 'secret.read', 'unknown_environment', {
+            projectId: place?.project.id ?? null,
+            operationId,
+            metadata: { path: formatPath(path) },
+          }),
+        );
+      }
+      // A caller the request has not asked the vault about yet (`pendingCaller`): one vault call decides the read and says
+      // what they hold, when the vault opens every value of it, as it decides all the checks below do, the asked
+      // environment's included (`asked`). Those checks then run on its answer: where it allowed, they pass; where it refused,
+      // and logged it, they only word the refusal. Anything else asks the vault who they are first, as any request does.
+      if (ctx.caller.pending !== undefined) {
+        const read = await readableValues(ctx.db, place, environment, path.key);
+        const person = ctx.caller.principal.type === 'user';
+        const rows = read.items.filter((item) => !(use === undefined && path.key === undefined && person && item.secret.sensitive === true));
+        let access: Access | undefined;
+        if (use === undefined && rows.length > 0 && read.unreadable.length === 0 && !rows.some(plain)) {
+          const purpose = path.key === undefined ? 'run' : 'reveal';
+          const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, asked: environment.environmentId, ...(ctx.caller.pending.generation === null ? {} : { generation: ctx.caller.pending.generation }) }, rows);
+          // A vault older than this app decided without the asked environment or the credential's generation: nothing it opened is handed back.
+          if (opened.ok && opened.access === undefined) throw new ApiError('unavailable', 'the vault is older than this app: deploy the vault first');
+          // Refused before it decided anything of who asks, as a vault given the wrong key is: its refusal is the answer.
+          if (!opened.ok && opened.access === undefined) throw vaultRefused(opened.refusal);
+          ({ access } = opened);
+          early = { read, opened };
+        }
+        // On the request's own context: what `recorded` fences with, too, reads the policy the vault answered.
+        ctx.caller = access === undefined ? await askedOf(ctx.vault, ctx.caller, ctx.requestId) : settled(ctx.caller, access);
+      }
+      // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.
+      need(ctx, use === undefined ? 'secret.read' : 'secret.use', placeOf(place.project, place.environment), 'secret.read', {
+        operationId,
+        metadata: path.key === undefined ? {} : { key: path.key },
+      });
+      const read = early?.read ?? (await readableValues(ctx.db, place, environment, path.key));
+      const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
+      // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
+      // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
+      // else, its key is a key like any other.
+      const parentOf = (item: Readable) => ({ projectId: environment.projectId, environmentId: item.parent!.environmentId, environmentSlug: item.parent!.slug });
+      const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
+      // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
+      const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
+      const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
+      const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
+        key: item.key,
+        inherited: item.parent !== undefined,
+        from: item.parent?.slug ?? null,
+        plain: plain(item) && told(item),
+        sensitive: item.secret.sensitive === true,
+        reads: readsAt(item),
+        versionId: told(item) ? item.secretVersionId : null,
+        recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
+      }))) : use.keys;
+      const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
+      // What a person's read of a whole environment leaves out: its sensitive values, which nobody is handed.
+      const withheld = (item: Readable) => use === undefined && path.key === undefined && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
+      const rows = read.items.filter((item) => wanted(item) && !withheld(item));
+      const sensitive = read.items.filter(withheld).map((item) => item.key);
+      const unreadable = read.unreadable.filter(wanted);
+      // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
+      if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
+        throw new Refusal(
+          notFound('unknown secret'),
+          denied(ctx, 'secret.read', 'unknown_secret', { ...environment, operationId, metadata: { key: path.key } }),
+        );
+      }
+      // Before any other refusal: past a key's name, a fork says nothing of what its reader cannot read.
+      // The proxy's: what it uses takes use on each parent, and what it hands back was chosen only where its reader reads.
+      const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable }, use === undefined ? ['secret.read'] : ['secret.read', 'secret.use']);
+      if (unread.size > 0) {
+        const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
+        throw new Refusal(
+          forbidden(`${formatPath(path)} inherits ${which.join('; ')}, which you cannot read`),
+          denied(ctx, 'secret.read', 'parent_unreadable', { ...environment, operationId, metadata: { parents: [...unread.keys()] } }),
+        );
+      }
+      // A reference or a parent that cannot be read stops the whole read, saying why, rather than run without it.
+      if (unreadable.length > 0) {
+        throw new Refusal(
+          conflict(unreadable.map((unread) => unread.reason).join('; ')),
+          denied(ctx, 'secret.read', 'reference_unreadable', { ...environment, operationId, metadata: { references: unreadable.length } }),
+        );
+      }
+      // A key with nothing to read, no version of its own and no reference the vault sealed, as a row written around it: no value.
+      if (path.key !== undefined && rows.length === 0) {
+        throw new Refusal(
+          notFound(`${formatPath(path)} holds no value`),
+          denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
+        );
+      }
+      const opened = early?.opened ?? (await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: use?.purpose ?? (path.key === undefined ? 'run' : 'reveal') }, rows));
+      if (!opened.ok) throw vaultRefused(opened.refusal);
+      // A null-prototype record: a key named __proto__ is a key like any other.
+      const values: Record<string, string> = Object.create(null);
+      for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
+      // The keys whose values are plain: no secret, for the proxy to hand on as they are and leave unredacted. The app
+      // opened them itself, as no vault call did: handed back only as the policy is now (`fenced`).
+      const plainKeys = rows.filter(plain).map((row) => row.key);
+      if (plainKeys.length > 0) fence();
+      if (use !== undefined) {
+        // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
+        log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
+        return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: null, environment: named, keys: read.items.map((item) => item.key) };
+      }
+      if (rows.length === 0) {
+        // An empty environment still produced a read. Log the attempt rather than nothing.
+        log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
+      }
+      // An environment's version, of exactly what was read: what a watch compares the next one with.
+      return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
+    } catch (error) {
+      if (error instanceof Refusal && early?.opened.ok === false) throw error.error;
+      throw error;
     }
-    // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.
-    need(ctx, use === undefined ? 'secret.read' : 'secret.use', placeOf(place.project, place.environment), 'secret.read', {
-      operationId,
-      metadata: path.key === undefined ? {} : { key: path.key },
-    });
-    const read = await readableValues(ctx.db, place, environment, path.key);
-    const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
-    // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
-    // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
-    // else, its key is a key like any other.
-    const parentOf = (item: Readable) => ({ projectId: environment.projectId, environmentId: item.parent!.environmentId, environmentSlug: item.parent!.slug });
-    const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
-    // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
-    const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
-    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
-    const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
-      key: item.key,
-      inherited: item.parent !== undefined,
-      from: item.parent?.slug ?? null,
-      plain: plain(item) && told(item),
-      sensitive: item.secret.sensitive === true,
-      reads: readsAt(item),
-      versionId: told(item) ? item.secretVersionId : null,
-      recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
-    }))) : use.keys;
-    const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
-    // What a person's read of a whole environment leaves out: its sensitive values, which nobody is handed.
-    const withheld = (item: Readable) => use === undefined && path.key === undefined && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
-    const rows = read.items.filter((item) => wanted(item) && !withheld(item));
-    const sensitive = read.items.filter(withheld).map((item) => item.key);
-    const unreadable = read.unreadable.filter(wanted);
-    // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
-    if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
-      throw new Refusal(
-        notFound('unknown secret'),
-        denied(ctx, 'secret.read', 'unknown_secret', { ...environment, operationId, metadata: { key: path.key } }),
-      );
-    }
-    // Before any other refusal: past a key's name, a fork says nothing of what its reader cannot read.
-    // The proxy's: what it uses takes use on each parent, and what it hands back was chosen only where its reader reads.
-    const unread = unreadParents(ctx, environment.projectId, { items: rows, unreadable }, use === undefined ? ['secret.read'] : ['secret.read', 'secret.use']);
-    if (unread.size > 0) {
-      const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);
-      throw new Refusal(
-        forbidden(`${formatPath(path)} inherits ${which.join('; ')}, which you cannot read`),
-        denied(ctx, 'secret.read', 'parent_unreadable', { ...environment, operationId, metadata: { parents: [...unread.keys()] } }),
-      );
-    }
-    // A reference or a parent that cannot be read stops the whole read, saying why, rather than run without it.
-    if (unreadable.length > 0) {
-      throw new Refusal(
-        conflict(unreadable.map((unread) => unread.reason).join('; ')),
-        denied(ctx, 'secret.read', 'reference_unreadable', { ...environment, operationId, metadata: { references: unreadable.length } }),
-      );
-    }
-    // A key with nothing to read, no version of its own and no reference the vault sealed, as a row written around it: no value.
-    if (path.key !== undefined && rows.length === 0) {
-      throw new Refusal(
-        notFound(`${formatPath(path)} holds no value`),
-        denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
-      );
-    }
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: use?.purpose ?? (path.key === undefined ? 'run' : 'reveal') }, rows);
-    if (!opened.ok) throw vaultRefused(opened.refusal);
-    // A null-prototype record: a key named __proto__ is a key like any other.
-    const values: Record<string, string> = Object.create(null);
-    for (const [i, row] of rows.entries()) values[row.key] = opened.values[i];
-    // The keys whose values are plain: no secret, for the proxy to hand on as they are and leave unredacted. The app
-    // opened them itself, as no vault call did: handed back only as the policy is now (`fenced`).
-    const plainKeys = rows.filter(plain).map((row) => row.key);
-    if (plainKeys.length > 0) fence();
-    if (use !== undefined) {
-      // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
-      log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
-      return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: null, environment: named, keys: read.items.map((item) => item.key) };
-    }
-    if (rows.length === 0) {
-      // An empty environment still produced a read. Log the attempt rather than nothing.
-      log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
-    }
-    // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
 }
 

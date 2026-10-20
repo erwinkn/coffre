@@ -24,7 +24,7 @@
   uploads through a real VPC Service are untested
   ([design](docs/design/credential-proxy.md), section 5, "Egress").
 
-- **A reveal runs 11 statements, not 30.** Each is a round trip through
+- **A reveal runs 10 statements on 2 connections, not 30 on 3.** Each is a round trip through
   Hyperdrive. A vault decision locks its member's row, then takes the
   log's head in the one statement that reads everything it decides on,
   and appends its entries and moves the head in one more. `access` is one
@@ -33,7 +33,7 @@
 
   | Request, warm | App | Vault | Total |
   |---|---|---|---|
-  | `POST /api/reveals` (one key, an environment, a service's export) | 5 → 3 | 25 → 8 | 30 → 11 |
+  | `POST /api/reveals` (one key, an environment, a service's export) | 5 → 3 | 25 → 7, one call (next) | 30 → 10 |
   | `GET /api/me` | 3 → 2 | 7 → 2 | 10 → 4 |
 
   The locks and their order are unchanged. The head is taken `SKIP
@@ -42,6 +42,23 @@
   again ([single-database.md](docs/design/single-database.md), rule 4).
   `request-cost.test.ts` now holds each of these requests to its exact
   number of statements and vault calls.
+
+- **A reveal asks the vault once.** It used to ask who its caller is
+  (`access`), then open the values (`unwrap`): two vault calls, each a
+  Worker invocation with its own database connection. `unwrap` now says
+  what the caller holds, decided under their row with the read, and the
+  app's checks run on that answer. So that the vault's allow is always one the app's checks agree with,
+  `unwrap` takes the environment the read was asked of, `asked`, and
+  decides there too: a fork whose values are all inherited takes read on
+  the fork, as well as on its parent. It takes the credential's
+  `generation`, and refuses one of an earlier membership. A refused read
+  is worded as before and logged once, by the vault.
+
+  **Deploy the vault with or before the app.** An app of this release
+  that gets no answer of what the caller holds from `unwrap`, from an
+  older vault, hands back none of the values and answers 503. With
+  Workers Builds both Workers deploy from one push; `coffre migrate`
+  runs first either way.
 
 ## 0.10.1 (2026-10-19)
 

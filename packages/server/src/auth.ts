@@ -2,9 +2,9 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@
 import type { CredentialScope } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
-import { callerFrom, newestPolicySeq, type Caller } from './api/caller.ts';
+import { callerFrom, newestPolicySeq, pendingCaller, type Caller } from './api/caller.ts';
 import { formatMember } from './api/paths.ts';
-import { ApiError } from './api/errors.ts';
+import { accessTamperedError, ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
 import { CredentialUncheckable, type HandlePlace, type PersonalToken } from './api/signin.ts';
 import { errorResponse } from './http.ts';
@@ -117,11 +117,7 @@ export function unauthenticated(auth: AuthConfig): Response {
 export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
-/** What a member whose record failed the vault's integrity check is told, wherever they ask. */
-export const TAMPERED_MESSAGE =
-  "your access record failed coffre's integrity check: it was changed outside coffre. An owner must remove you and add you again";
-
-export const accessTampered = () => errorResponse(new ApiError('vault_refused', TAMPERED_MESSAGE, 'tampered'));
+export const accessTampered = () => errorResponse(accessTamperedError());
 
 export async function authenticateRequest(
   request: Request,
@@ -129,8 +125,11 @@ export async function authenticateRequest(
   requestId: string = crypto.randomUUID(),
   token = accessTokenForRequest(request, runtime.auth),
   sourceIp: string | null = null,
-  /** `handle`: the credential proxy's, which takes a handle and nothing else; everything else takes anything but one. */
-  options: { handle?: boolean } = {},
+  /**
+   * `handle`: the credential proxy's, which takes a handle and nothing else; everything else takes anything but one.
+   * `deferStanding`: the request's one vault call says what its caller holds (a reveal's `unwrap`): it is not asked here.
+   */
+  options: { handle?: boolean; deferStanding?: boolean } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
@@ -153,7 +152,7 @@ export async function authenticateRequest(
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
   try {
-    const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
+    const verified = (await runtime.verifier.verify(token, { sourceIp, deferStanding: options.deferStanding === true })) as Principal & {
       credentialId?: string;
       credentialGeneration?: number;
       access?: Access;
@@ -183,8 +182,12 @@ export async function authenticateRequest(
   }
 
   try {
-    // A coffre credential was checked against what the vault says of its member: that answer, not a second call.
-    const caller = callerFrom({ type: principal.type, id: principal.id }, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope);
+    const asked = { type: principal.type, id: principal.id };
+    // A coffre credential was checked against what the vault says of its member: that answer, not a second call. Deferred,
+    // the request's own vault call answers it, and checks the credential's generation (`settled`).
+    const caller = checked === undefined && options.deferStanding === true
+      ? pendingCaller(asked, policySeq, credentialScope, credentialGeneration)
+      : callerFrom(asked, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope);
     // Removal may have raced the credential verification above.
     if (credentialGeneration !== undefined && caller.generation !== credentialGeneration) {
       return unauthenticated(runtime.auth);

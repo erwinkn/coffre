@@ -19,6 +19,8 @@ import type { Access, Vault } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { newestVaultSeq } from '@coffre/db/log';
 
+import { accessTamperedError, ApiError } from './errors.ts';
+import { logged } from '../logged.ts';
 import { formatMember } from './paths.ts';
 
 /**
@@ -70,6 +72,13 @@ export type Caller = {
   policySeq: bigint | null;
   /** A service account's: it holds each role's normal column, in a protected environment too. */
   service: boolean;
+  /**
+   * Not asked of the vault yet: a reveal learns what its caller holds from
+   * the call that opens its values (`pendingCaller`), which checks the
+   * generation a coffre credential was issued under (null for any other).
+   * Until then it holds nothing.
+   */
+  pending?: { generation: number | null };
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -84,6 +93,62 @@ export async function loadCaller(db: Queryable, vault: Vault, principal: Princip
  */
 export function newestPolicySeq(db: Queryable): Promise<bigint | null> {
   return newestVaultSeq(db, 'policy.change');
+}
+
+/**
+ * A caller who holds nothing until the request's one vault call says what
+ * they hold (`settled`): a reveal's, whose `unwrap` answers it.
+ */
+export function pendingCaller(principal: PrincipalRef, policySeq: bigint | null, credentialScope: CredentialScope | null, generation: number | undefined): Caller {
+  return {
+    principal,
+    registered: true,
+    tampered: false,
+    generation: generation ?? 0,
+    role: 'member',
+    scope: NOWHERE,
+    grants: [],
+    credentialScope,
+    policy: DEFAULT_POLICY,
+    policySeq,
+    service: principal.type === 'service',
+    pending: { generation: generation ?? null },
+  };
+}
+
+const NOWHERE: Scope = { projects: { only: [] }, environments: { only: [] } };
+
+/**
+ * A pending caller, as the vault answered: or why they are turned away, as
+ * a request that asked first would have been, its credential of an
+ * earlier membership included.
+ */
+export function settled(pending: Caller, access: Access): Caller {
+  const caller = callerFrom(pending.principal, access, pending.policySeq, pending.credentialScope);
+  if (caller.tampered) throw accessTamperedError();
+  // A coffre credential lives only while its member does, at its generation: as its verification, asking first, would have said.
+  const generation = pending.pending?.generation ?? null;
+  if (generation !== null && (access.status !== 'active' || access.generation !== generation)) {
+    throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
+  }
+  if (!caller.registered) throw new ApiError('registration_required', 'you are signed in, but not a member here');
+  return caller;
+}
+
+/**
+ * A pending caller, asked of the vault on their own, as any request asks
+ * first: when the request's work did not say. One the vault cannot answer
+ * about is an outage, as at authentication.
+ */
+export async function askedOf(vault: Vault, pending: Caller, requestId: string): Promise<Caller> {
+  let access: Access;
+  try {
+    access = await vault.access(formatMember(pending.principal));
+  } catch (error) {
+    console.error('checking who called failed', { requestId, error: logged(error) });
+    throw new ApiError('unavailable', 'coffre cannot check who you are right now');
+  }
+  return settled(pending, access);
 }
 
 export function callerFrom(principal: PrincipalRef, access: Access, policySeq: bigint | null, credentialScope: CredentialScope | null = null): Caller {

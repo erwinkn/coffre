@@ -168,7 +168,8 @@ export type SigninResult =
 export type CredentialPrincipal = Principal & {
   credentialId: string;
   credentialGeneration: number;
-  access: Access;
+  /** What the vault says its member holds; absent when the request's own vault call will say (`deferStanding`). */
+  access?: Access;
   /** The newest `policy.change` as the credential was read, before the vault was asked for `access`; null for none. */
   policySeq: bigint | null;
   /** Its scope, a service or personal token's or its binding's, past which nothing it asks reaches; null for a session's. */
@@ -580,8 +581,12 @@ export class SigninService {
   }
 
   #liveCredential(row: Awaited<ReturnType<typeof findCredential>>, access: Access, now: Date): boolean {
+    return this.#liveRow(row, now) && access.status === 'active' && row!.generation === access.generation;
+  }
+
+  /** What the row alone says of a credential's life: all of `#liveCredential` but its member's standing. */
+  #liveRow(row: Awaited<ReturnType<typeof findCredential>>, now: Date): boolean {
     return row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null
-      && access.status === 'active' && row.generation === access.generation
       // One a trust binding issued lives no longer than the binding: removed, replaced or put back, it ends.
       && row.bindingStands !== false
       && (row.kind !== 'browser' || (row.identityIssuerHash !== null
@@ -628,8 +633,11 @@ export class SigninService {
    * A token dies with its person: every request asks the vault who its
    * caller is, and a removed member is turned away on the next request
    * whatever credentials they still hold, before any revocation sweep.
+   * With `deferStanding`, the request's own vault call asks, checking the
+   * credential's generation: `access` is then absent, but for a token of
+   * 0.4 that has its scope sealed here, from what the vault answers.
    */
-  async verify(token: string, request: { sourceIp: string | null } = { sourceIp: null }): Promise<CredentialPrincipal> {
+  async verify(token: string, request: { sourceIp: string | null; deferStanding?: boolean } = { sourceIp: null }): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
     const now = new Date();
@@ -638,6 +646,7 @@ export class SigninService {
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
     let policySeq: bigint | null = null;
+    let deferred = false;
     try {
       if (!this.#scopes.sealed) {
         await sealScopes(db, chainKey, this.#deps.vault);
@@ -646,7 +655,8 @@ export class SigninService {
       row = await findCredential(db, chainKey, { tokenHash });
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
-      if (row !== null) access = await this.#deps.vault.access(row.principal);
+      deferred = request.deferStanding === true && row !== null && !(row.kind === 'service' && row.scope === null);
+      if (row !== null && !deferred) access = await this.#deps.vault.access(row.principal);
       // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
         const binding = issuingBinding(row.createdBy);
@@ -658,7 +668,9 @@ export class SigninService {
       if (error instanceof AuthRowTampered) throw error;
       throw new CredentialUncheckable(error);
     }
-    if (row === null || access === null || !this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');
+    if (row === null || !(deferred ? this.#liveRow(row, now) : access !== null && this.#liveCredential(row, access, now))) {
+      throw new Error('unknown, expired or revoked credential');
+    }
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {
@@ -675,7 +687,7 @@ export class SigninService {
           commonName: member.id,
           credentialId: row.id,
           credentialGeneration: row.generation,
-          access,
+          ...(access === null ? {} : { access }),
           policySeq,
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
@@ -691,7 +703,7 @@ export class SigninService {
           credentialId: row.id,
           credentialGeneration: row.generation,
           exchanged: false,
-          access,
+          ...(access === null ? {} : { access }),
           policySeq,
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
           credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,

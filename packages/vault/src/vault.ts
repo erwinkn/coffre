@@ -896,9 +896,11 @@ class VaultService implements Vault {
 
   // Raw DEKs are cleared on every path. JSON and base64 leave strings that
   // cannot be wiped, so this is best-effort memory hygiene.
-  async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
+  async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }> {
     const { principal } = input;
     validateText(input.purpose);
+    if (input.asked != null && (typeof input.asked !== 'string' || !UUID.test(input.asked))) throw new Error("the environment asked of must be a lowercase UUID");
+    if (input.generation !== undefined && (!Number.isSafeInteger(input.generation) || input.generation < 0)) throw new Error('a generation is a whole number');
     if (input.keepsSensitive !== undefined && typeof input.keepsSensitive !== 'boolean') throw new Error('keepsSensitive is true, false or absent');
     const vias = input.items.map((item) => validateVia(item.via));
     const throughs = input.items.map((item) => validateThrough(item.through));
@@ -958,6 +960,8 @@ class VaultService implements Vault {
         remote,
         entry,
         input,
+        asked: input.asked ?? null,
+        ...(input.generation === undefined ? {} : { generation: input.generation }),
       },
       (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
@@ -1156,6 +1160,10 @@ class VaultService implements Vault {
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
+      /** The environment the call was asked of: `permission` there too, decided as for one of its own values. */
+      asked?: string | null;
+      /** The generation the caller's credential was issued under: refused, `removed`, unless it is their row's. */
+      generation?: number;
     },
     /**
      * One per secret; null for a bad claim, an error for an outage or an
@@ -1164,7 +1172,7 @@ class VaultService implements Vault {
      */
     operations: (context: (secret: SecretRef) => SecretContext) => ((operation: KeyOperation) => Promise<T | null>)[],
     result: (done: T[]) => R,
-  ): Promise<Outcome<R>> {
+  ): Promise<Outcome<R> & { access?: Access }> {
     const { action, principal, secrets, entry } = call;
     for (const secret of secrets) entry(secret, 'allow', null);
     const wrongKek = await this.#kekMismatch();
@@ -1175,8 +1183,14 @@ class VaultService implements Vault {
     }
     // Each personal config's owner, hashed, by environment, as the decision read them: what its keys' contexts bind.
     const owners = new Map<string, string>();
+    // What the caller holds, as the last check read it under the reader's row: the call answers it, decided or refused.
+    let holds: Access | undefined;
     const check = async (d: Decision) => {
-      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads), call.input);
+      const row = d.members.get(principal);
+      const standing = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
+      const policy = standing.live.policy ?? (await this.#policyAt(d.tx, d.reports, d.at, d.reads)).policy;
+      holds = this.#access(principal, row, standing.stored, d.at, standing.status === 'tampered', policy);
+      const reader = through(standing, call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
       // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
       // matches the slug there, and a place deleted on either side opens for none.
@@ -1201,6 +1215,19 @@ class VaultService implements Vault {
         // the source's nature asks when it was made (`reference`).
         return refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
       });
+      // The environment asked of, as one of its own values would be: a value inherited there is decided at its parent,
+      // and the fork it is read in takes the permission too. One the store does not hold is no claim the vault takes.
+      if (call.asked != null) {
+        const environment = environments.get(call.asked);
+        const place = { projectId: environment?.projectId ?? '', environmentId: call.asked };
+        const personal = environment === undefined ? undefined : personalRefusal(reader, principal, call.permission, place, place, environments);
+        const refused = environment === undefined
+          ? 'bad_claim'
+          : personal !== undefined ? personal : refuses(reader, call.permission, placeIn(place, environments), environment.deleted);
+        if (refused !== null) codes.forEach((code, i) => (codes[i] = code ?? refused));
+      }
+      // A credential of an earlier membership: its member was removed since, whatever they hold now.
+      if (call.generation !== undefined && reader.status === 'active' && row?.generation !== call.generation) codes.fill('removed');
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx, d.reads)).forEach((code, i) => (codes[i] = code));
       }
@@ -1226,7 +1253,7 @@ class VaultService implements Vault {
 
     // Every decision below reads the places it is about with the reader's standing; a read, the reader's releases too.
     const reads: Reads = {
-      environments: [...secrets, ...secrets.map((secret, i) => call.places?.[i] ?? secret)].map((place) => place.environmentId),
+      environments: [...[...secrets, ...secrets.map((secret, i) => call.places?.[i] ?? secret)].map((place) => place.environmentId), ...(call.asked == null ? [] : [call.asked])],
       references: call.references ?? [],
       ...(action === 'secret.read' ? { released: { principal } } : {}),
     };
@@ -1268,7 +1295,7 @@ class VaultService implements Vault {
         }], [], d.reads);
         return { seq: appended.seqStart };
       }, false, reads);
-      if (!intent.ok) return intent;
+      if (!intent.ok) return { ...intent, access: holds };
       intentSeq = intent.seq;
     }
 
@@ -1288,7 +1315,7 @@ class VaultService implements Vault {
         throw error;
       }
     };
-    return this.#decide([principal], async (d) => {
+    const outcome = await this.#decide([principal], async (d) => {
       await decided(d);
       // A reference ended while this decided refuses it, rather than a read logged after its end.
       const { vet } = call;
@@ -1344,6 +1371,7 @@ class VaultService implements Vault {
         for (const value of done) value.wipe();
       }
     }, late, reads);
+    return { ...outcome, access: holds };
   }
 
   /** Whether `n` more keys would take the reader past the bulk limit; counted under their row's lock, so exactly (`Reads`). */

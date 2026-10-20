@@ -108,6 +108,12 @@ async function reads(token: string, environment: string): Promise<string | numbe
   }
 }
 
+
+/** A read's outcome, less what its reader holds, which it answers too. */
+function outcome<T extends object>({ access: _, ...rest }: T & { access?: unknown }): Omit<T, 'access'> {
+  return rest;
+}
+
 test("an Admin who widens an account widens none of the tokens made before: a request holds what both its scope and the account hold", async () => {
   const issued = await ada.tokens.issue(CI, { label: 'deploy', expiresInDays: 30 });
   assert.deepEqual(issued.scope, { 'market/dev': 'developer' }, 'all the account held, left out');
@@ -126,7 +132,7 @@ test("an Admin who widens an account widens none of the tokens made before: a re
   const [{ scope }] = await db.owner.select({ scope: credentials.scope }).from(credentials);
   const ask = (credentialScope: unknown) =>
     deps.vault.unwrap({ principal: CI, purpose: 'reveal', items: [{ secretVersionId: version!.id }], credentialScope: credentialScope as never });
-  assert.deepEqual(await ask(JSON.parse(scope!)), { ok: false, refusal: { code: 'no_grant', message: 'no grant covers this' } });
+  assert.deepEqual(outcome(await ask(JSON.parse(scope!))), { ok: false, refusal: { code: 'no_grant', message: 'no grant covers this' } });
   const [refused] = await db.owner
     .select({ actor: auditLog.actor, code: auditLog.code })
     .from(auditLog)

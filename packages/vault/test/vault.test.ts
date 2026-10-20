@@ -148,6 +148,12 @@ function signedOf(detail: Record<string, unknown>): Checkpoint {
 /** What an append-only refusal looks like through Drizzle, which wraps the database's error. */
 const appendOnly = (error: unknown) => /append-only/.test(`${error} ${(error as { cause?: unknown }).cause}`);
 
+
+/** A read's outcome, less what its reader holds, which it answers too. */
+function outcome<T extends object>({ access: _, ...rest }: T & { access?: unknown }): Omit<T, 'access'> {
+  return rest;
+}
+
 test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'developer']]);
@@ -156,7 +162,7 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret: devSecret, key }] });
   assert.ok(wrap.ok);
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret: devSecret, wrapped: wrap.wrapped[0] }]) });
-  assert.deepEqual(read, { ok: true, keys: [key] });
+  assert.deepEqual(outcome(read), { ok: true, keys: [key] });
 
   const prodSecret = await w.secret(w.prod);
   const refused = await w.vault.unwrap({
@@ -185,8 +191,8 @@ test("a sensitive value is never handed back to a person, an Owner included: use
       const refused = await w.vault.unwrap({ principal, purpose, items });
       assert.equal(!refused.ok && refused.refusal.code, 'sensitive', `${principal} to ${purpose}`);
     }
-    assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'use', items }), { ok: true, keys: [key] });
-    assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
+    assert.deepEqual(outcome(await w.vault.unwrap({ principal, purpose: 'use', items })), { ok: true, keys: [key] });
+    assert.deepEqual(outcome(await w.vault.unwrap({ principal, purpose: 'copy', keepsSensitive: true, items })), { ok: true, keys: [key] });
     // A copy by an app before 0.10, which would write the value as a secret anyone with read sees.
     const old = await w.vault.unwrap({ principal, purpose: 'copy', items });
     assert.equal(!old.ok && old.refusal.code, 'sensitive', `${principal}'s copy that keeps nothing sensitive`);
@@ -194,11 +200,11 @@ test("a sensitive value is never handed back to a person, an Owner included: use
   // A purpose a later app may name is one that hands values back.
   const unknown = await w.vault.unwrap({ principal: ADA, purpose: 'peek' as 'reveal', items });
   assert.equal(!unknown.ok && unknown.refusal.code, 'sensitive');
-  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items }), { ok: true, keys: [key] });
+  assert.deepEqual(outcome(await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items })), { ok: true, keys: [key] });
   // A service account's fork, through an app of 0.9 that would write the copy as a secret, copies nothing sensitive either.
   const serviceCopy = await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', items });
   assert.equal(!serviceCopy.ok && serviceCopy.refusal.code, 'sensitive');
-  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
+  assert.deepEqual(outcome(await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', keepsSensitive: true, items })), { ok: true, keys: [key] });
   // A batch is all or nothing: a secret beside it is refused with it, its own entry saying why.
   const plain = await w.secret(w.dev);
   const both = [...items, ...(await versionItems([{ secret: plain, wrapped: await wrapped(w, plain) }]))];
@@ -282,7 +288,7 @@ test('a read records the stored version instead of the app claim', async () => {
   const input = { principal: ROOT, purpose: 'reveal' as const, items: [{
     secretVersionId: id, secret: { ...secret, version: 9 }, wrapped: sealed.wrapped[0],
   }] };
-  assert.deepEqual(await w.vault.unwrap(input), { ok: true, keys: [key] });
+  assert.deepEqual(outcome(await w.vault.unwrap(input)), { ok: true, keys: [key] });
   const [entry] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'secret.read'));
   assert.equal(JSON.parse(entry.metadata!).version, 1);
   assert.equal(entry.secretVersionId, id);
@@ -930,6 +936,27 @@ test('a removed member is refused everything until admitted again, with no grant
   assert.deepEqual(access.grants, []);
   const again = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!again.ok && again.refusal.code, 'no_grant');
+});
+
+test("a read answers what its reader holds, allowed or refused, and refuses a credential of an earlier membership", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items, generation: 0 });
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.access, await w.vault.access(ADA), 'as `access` answers');
+  // Removed and admitted again, at generation 1: what a credential of generation 0 asks is refused, whatever they hold now.
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: ADA })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })).ok);
+  const stale = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items, generation: 0 });
+  assert.deepEqual([!stale.ok && stale.refusal.code, stale.access?.generation, stale.access?.status], ['removed', 1, 'active']);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items, generation: 1 })).ok, true);
+  // Asked of an environment they do not read, the read is refused there, whatever its values' own places allow.
+  const asked = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items, asked: w.prod });
+  assert.equal(!asked.ok && asked.refusal.code, 'no_grant');
 });
 
 test('access is managed with the same rules as the app, and the last Owner stays one', async () => {

@@ -341,7 +341,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     expiresAt: result.credential.expiresAt,
   });
   // What the vault said of them, which the request's caller is: no second call.
-  assert.deepEqual([access.principal, access.status, access.generation], [`user:${DEV}`, 'active', 0]);
+  assert.deepEqual([access?.principal, access?.status, access?.generation], [`user:${DEV}`, 'active', 0]);
 });
 
 test('any verified email on the account may match, not only the primary one', async () => {
@@ -800,7 +800,7 @@ test('owners issue service tokens that verify as the service', async () => {
     handlePlaces: null,
     expiresAt: issued.expiresAt,
   });
-  assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
+  assert.deepEqual([access?.principal, access?.status], [`token:${SERVICE}`, 'active']);
 
   const byRoot = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 366 });
   assert.equal((await signin.verify(byRoot.token)).id, SERVICE);
@@ -971,7 +971,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     handlePlaces: null,
     expiresAt: approved.credential.expiresAt,
   });
-  assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);
+  assert.deepEqual([access?.principal, access?.status], [`user:${DEV}`, 'active']);
 
   // Exactly once.
   assert.deepEqual(await poll(started.deviceCode), { status: 'expired' });

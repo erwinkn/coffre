@@ -1,5 +1,5 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
-import type { Purpose, Refusal, SecretRef, Through, Vault, Via, WrappedKey } from '@coffre/core/vault';
+import type { Access, Purpose, Refusal, SecretRef, Through, Vault, Via, WrappedKey } from '@coffre/core/vault';
 
 import { ApiError } from './errors.ts';
 
@@ -72,9 +72,9 @@ function boundAsAsked(items: readonly { secret: SecretRef }[], result: { sensiti
  */
 export async function openValues(
   vault: Vault,
-  asking: Asking & { purpose: Purpose; keepsSensitive?: boolean },
+  asking: Asking & { purpose: Purpose; keepsSensitive?: boolean; asked?: string; generation?: number },
   items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string }[],
-): Promise<Keyed<string>> {
+): Promise<Keyed<string> & { access?: Access }> {
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const result = await vault.unwrap({
@@ -86,6 +86,7 @@ export async function openValues(
     })),
   });
   if (!result.ok) return result;
+  const { access } = result;
   const opened = sealed.map(({ secret, envelope }, i) => {
     const dek = Buffer.from(result.keys[i], 'base64');
     try {
@@ -95,7 +96,7 @@ export async function openValues(
     }
   });
   let next = 0;
-  return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)) };
+  return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), ...(access === undefined ? {} : { access }) };
 }
 
 /**

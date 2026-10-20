@@ -23,8 +23,15 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
  * the vault has already logged. Only a fault (a bug, the store down) throws.
  */
 export interface Vault {
-  /** Unwrap data keys for `principal`: all of them, or none. */
-  unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>>;
+  /**
+   * Unwrap data keys for `principal`: all of them, or none. The answer
+   * carries what `principal` holds, as `access` would answer, read under
+   * their row with the decision, allowed or refused: a request that reads
+   * values asks the vault nothing else (`access` is absent from a vault
+   * older than 0.11, and when the call is refused before it decides, for a
+   * claim it cannot read).
+   */
+  unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }>;
   /**
    * Wrap fresh data keys for new versions `principal` writes: all, or none.
    * `seqs` are the `key.wrap` entries, one per key, which the app's
@@ -64,7 +71,8 @@ export interface Vault {
 
   /**
    * What one principal holds right now: the app asks once per request,
-   * and at sign-in for each verified email. A decision, its rows checked:
+   * but for a reveal, whose `unwrap` answers it, and at sign-in for each
+   * verified email. A decision, its rows checked:
    * lists of who holds what read the rows themselves, and need not ask.
    * A person the vault's `owners` names who is no Owner of all of it
    * becomes one here, logged (`reason: 'owners'`).
@@ -354,6 +362,18 @@ export type UnwrapInput = Correlation & Through & {
    * logs the read there too, and decides on the value's own environment.
    */
   items: { secretVersionId: string; via?: Via; through?: string }[];
+  /**
+   * The environment the read was asked of, by id: the vault decides the
+   * permission there too, as for one of its own values, so that a read of a
+   * fork whose values are all inherited takes read on the fork as well as
+   * on its parent. Left out, each value is decided where it is.
+   */
+  asked?: string | null;
+  /**
+   * The generation the caller's credential was issued under: refused,
+   * `removed`, unless it is the member's now. Left out, unchecked.
+   */
+  generation?: number;
 };
 
 /** A reference, as a read names it: its id, and the seq of the vault's `reference.create` entry. */

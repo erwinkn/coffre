@@ -70,6 +70,11 @@ export const notFound = (message = 'not found') => new ApiError('not_found', mes
 export const conflict = (message: string) => new ApiError('conflict', message);
 
 /** The vault's refusal, as the API answers it. */
+/** What a member whose record failed the vault's integrity check is told, wherever they ask. */
+export function accessTamperedError(): ApiError {
+  return new ApiError('vault_refused', "your access record failed coffre's integrity check: it was changed outside coffre. An owner must remove you and add you again", 'tampered');
+}
+
 export function vaultRefused(refusal: { code: string; message: string }): ApiError {
   if (refusal.code === 'bulk_limit') {
     return new ApiError('bulk_limit', 'too many secrets read in too short a time; try again later', refusal.code);

@@ -1,7 +1,8 @@
 // One call to the vault for each request: checking a coffre credential asks
 // the vault who its member is, and that answer is the caller, rather than
-// a second call; and a page's render, which makes several API calls in
-// process, checks its credential once for all of them. Every vault call
+// a second call; a reveal asks nothing but the call that opens its values,
+// whose answer says who is asking; and a page's render, which makes several
+// API calls in process, checks its credential once for all of them. Every vault call
 // costs a round trip to the vault Worker, and on Cloudflare the page that
 // made seven of them was the slowest, and the likeliest to meet a hang.
 import test, { after, before, beforeEach } from 'node:test';
@@ -10,6 +11,8 @@ import { randomUUID } from 'node:crypto';
 
 import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
+import { tablesOf } from '@coffre/db';
+import { and, asc, eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
@@ -19,12 +22,15 @@ import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitU
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
+const QA = 'qa@acme.example';
 const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }).resolve(ORIGIN);
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 /** Each principal the vault was asked about, in order. */
 let asked: string[];
+/** Each call that opened values, by its principal, in order. */
+let unwrapped: string[];
 let runtime: CoffreRuntime;
 
 before(async () => {
@@ -35,6 +41,10 @@ before(async () => {
     access: (principal: string) => {
       asked.push(principal);
       return deps.vault.access(principal);
+    },
+    unwrap: (input) => {
+      unwrapped.push(input.principal);
+      return deps.vault.unwrap(input);
     },
   };
   if (auth.mode !== 'signin') throw new Error('unreachable');
@@ -70,6 +80,7 @@ beforeEach(async () => {
   await root.environments.create('market/dev', { name: 'Development' });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
   asked = [];
+  unwrapped = [];
 });
 
 /** A CLI session for `email`, from an approved device login. */
@@ -118,3 +129,73 @@ test("a page's render, its loaders calling the API at once, asks the vault once 
     [401, 401],
   );
 });
+
+/** A reveal of `path` with `token`, as the CLI asks: the status and the body. */
+async function reveal(token: string, path: string): Promise<{ status: number; body: { values?: Record<string, string>; message?: string; reason?: string } }> {
+  const response = await fetchApi(
+    new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }),
+    runtime,
+    { sourceIp: null },
+  );
+  return { status: response.status, body: (await response.json()) as never };
+}
+
+/** The log's reads by `principal`, each its author, decision and code. */
+async function readsBy(principal: string): Promise<[string, string, string | null][]> {
+  const { auditLog } = tablesOf(db.owner);
+  const rows = await db.owner.select().from(auditLog).where(and(eq(auditLog.actor, principal), eq(auditLog.action, 'secret.read'))).orderBy(asc(auditLog.seq));
+  return rows.map((row) => [row.author, row.decision, row.code]);
+}
+
+test('a reveal asks the vault nothing but the call that opens its values, which says who is asking', async () => {
+  await clientFor(deps, ROOT).secrets.set('market/dev', { API_KEY: 'dev-key' });
+  const token = await cliToken(DEV);
+  asked = [];
+  const read = await reveal(token, 'market/dev/API_KEY');
+  assert.deepEqual([read.status, read.body.values], [200, { API_KEY: 'dev-key' }]);
+  assert.deepEqual([asked, unwrapped], [[], [`user:${DEV}`]]);
+});
+
+test("a reveal the vault refuses is worded as the app words it, and logged once, by the vault", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.secrets.set('market/dev', { API_KEY: 'dev-key' });
+  await root.environments.create('market/prod', { name: 'Prod' });
+  await root.secrets.set('market/prod', { API_KEY: 'prod-key' });
+  await root.members.add(`user:${QA}`);
+  await root.access.set(`user:${QA}`, { 'market/dev': 'viewer' });
+  const token = await cliToken(QA);
+  asked = [];
+  const refused = await reveal(token, 'market/prod');
+  assert.equal(refused.status, 403);
+  assert.deepEqual(await readsBy(`user:${QA}`), [['vault', 'deny', 'no_grant']], 'the vault refused it, and nothing else logged it again');
+  assert.deepEqual(asked, [], 'its answer said who asked');
+});
+
+test("a fork's inherited values take read on the fork too, decided by the vault with them", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.secrets.set('market/dev', { API_KEY: 'dev-key' });
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  await root.members.add(`user:${QA}`);
+  await root.access.set(`user:${QA}`, { 'market/dev': 'viewer' });
+  const token = await cliToken(QA);
+  // Every value of dev-eu is dev's, which QA reads; dev-eu itself, QA does not.
+  assert.equal((await reveal(token, 'market/dev')).status, 200);
+  assert.equal((await reveal(token, 'market/dev-eu')).status, 403);
+  await root.access.set(`user:${QA}`, { 'market/dev-eu': 'viewer' });
+  assert.deepEqual((await reveal(token, 'market/dev-eu')).body.values, { API_KEY: 'dev-key' });
+});
+
+test('a session of an earlier membership reveals nothing: removed and admitted again, its member signs in again', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.secrets.set('market/dev', { API_KEY: 'dev-key' });
+  const token = await cliToken(DEV);
+  await root.members.remove(`user:${DEV}`);
+  await root.members.add(`user:${DEV}`);
+  await root.access.set(`user:${DEV}`, { market: 'developer' });
+  unwrapped = [];
+  // Its credential went with the removal; were it read before the revocation committed, the vault would refuse its generation.
+  const stale = await reveal(token, 'market/dev');
+  assert.deepEqual([stale.status, unwrapped], [401, []]);
+  assert.equal((await reveal(await cliToken(DEV), 'market/dev')).status, 200);
+});
+
