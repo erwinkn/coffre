@@ -380,9 +380,11 @@ that take the request's method.
 
 Behind it, a request asks the vault once who the caller is to this instance:
 whether they are still a member, and the grants they hold
-(`vault.access`). A reveal asks nothing else of it: the `unwrap` that
-opens its values answers the same, and decides the environment asked of
-and the credential's generation with the read. Every permission check after that is a plain function,
+(`vault.access`). A reveal on a coffre credential whose values the vault
+opens asks nothing else of it: the `unwrap` that opens them answers the
+same, and decides the environment asked of and the credential's
+generation with the read. One with a value the app opens itself (a plain
+one), or nothing to open, and any reveal behind Access, asks first. Every permission check after that is a plain function,
 `can()`, over that answer, and a path resolves to its project, environment
 and secret in one read.
 

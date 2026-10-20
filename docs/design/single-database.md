@@ -350,7 +350,8 @@ what it decides on in one more.
 
 `access(principal)`, which the app asks once per request, takes no lock:
 one statement reads the member, the grants, the freshness check and the
-policy. A reveal on a coffre credential does not ask it: its `unwrap`
+policy. A reveal on a coffre credential, of values the vault opens, does
+not ask it (a plain value, or nothing to open, still asks first): its `unwrap`
 answers the same, read under the reader's row with the decision, and
 decides the environment asked of and the credential's generation, so
 that every check the app makes of it holds wherever the vault allowed.
