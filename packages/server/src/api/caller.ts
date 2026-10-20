@@ -125,12 +125,12 @@ const NOWHERE: Scope = { projects: { only: [] }, environments: { only: [] } };
  */
 export function settled(pending: Caller, access: Access): Caller {
   const caller = callerFrom(pending.principal, access, pending.policySeq, pending.credentialScope);
-  if (caller.tampered) throw accessTamperedError();
-  // A coffre credential lives only while its member does, at its generation: as its verification, asking first, would have said.
+  // A coffre credential lives only while its member is active, at its generation: as its verification, asking first, would have said.
   const generation = pending.pending?.generation ?? null;
   if (generation !== null && (access.status !== 'active' || access.generation !== generation)) {
     throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
   }
+  if (caller.tampered) throw accessTamperedError();
   if (!caller.registered) throw new ApiError('registration_required', 'you are signed in, but not a member here');
   return caller;
 }
