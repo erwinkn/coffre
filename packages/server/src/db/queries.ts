@@ -4,7 +4,7 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { withinBytes } from '@coffre/db/log';
+import { newestSeqQuery, withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1003,7 +1003,8 @@ export async function findCredential(db: Queryable, chainKey: Buffer, by: { toke
 
 function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL) {
   const { credentials, identities } = tablesOf(db);
-  const newestPolicy = sql<string | number | null>`(SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'policy.change' AND decision = 'allow' ORDER BY seq DESC LIMIT 1)`;
+  // The newest policy change, as `newestPolicySeq` reads it on its own.
+  const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`;
   return db
     .select({ credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy })
     .from(credentials)

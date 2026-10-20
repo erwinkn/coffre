@@ -1,5 +1,5 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
@@ -343,15 +343,22 @@ export async function newestVaultSeq(db: Queryable, action: string): Promise<big
   return (row?.seq as bigint | undefined) ?? null;
 }
 
-const newestSeq = prepared((db) => {
+const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));
+
+/**
+ * `newestVaultSeq`'s query, to run or to read inside another, as a
+ * credential's read takes the newest `policy.change` with it: one rule for
+ * what the newest is, wherever it is read.
+ */
+export function newestSeqQuery(db: Queryable, action: string | Placeholder) {
   const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, sql.placeholder('action')), eq(auditLog.decision, 'allow')))
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
     .orderBy(desc(auditLog.seq))
     .limit(1);
-});
+}
 
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
 export const LOOK_BACK = { page: 32, pages: 32 };
