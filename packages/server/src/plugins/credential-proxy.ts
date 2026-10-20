@@ -30,7 +30,9 @@
  *
  * Each credential names the keys its rule reads, from the environment the
  * request names, and one upstream: the request goes there or nowhere, over
- * HTTPS, its redirects never followed, and a value the upstream echoes is
+ * HTTPS, through the global `fetch` or the credential's `egress` (a VPC
+ * Service binding, for an upstream that allowlists the addresses it lets
+ * in), its redirects never followed, and a value the upstream echoes is
  * redacted from its answer. A handle opens values for its person as a read
  * does, by their grants and its scope, logged once per credential a minute
  * (`cacheSeconds`), never handed back. The app holds as they are the
@@ -110,6 +112,15 @@ export function prefix(prefix: string): Placeholder {
   return { kind: 'prefix', prefix };
 }
 
+/**
+ * What a credential's requests leave through, in place of the global
+ * `fetch`: a Workers VPC Service binding (`env.SCHUMAN_EGRESS`), a service
+ * binding, or the deployment's own `{ fetch }`. It is given the request as
+ * the proxy made it, real key and all, and its answer goes back to the app
+ * as the upstream's would, redacted.
+ */
+export type Egress = { fetch(input: URL, init: RequestInit): Promise<Response> };
+
 /** One credential: its upstream, how its keys reach it, and what of it a caller may ask. */
 export type Credential = {
   /** Where its requests go, `https://api.schumann.example/v1`: `/use/<name>/<path>` goes to `<upstream>/<path>`, and nowhere else. */
@@ -135,6 +146,14 @@ export type Credential = {
   methods?: readonly string[];
   /** The paths under `upstream` it may be used on, by prefix, `['/companies']`; any, unless set. */
   paths?: readonly string[];
+  /**
+   * What its requests leave through, for an upstream that lets in only
+   * known addresses: `env.SCHUMAN_EGRESS`, a VPC Service binding whose
+   * host is `upstream`'s. The global `fetch` unless set; named but missing
+   * (a binding the Worker lacks is `undefined`), the configuration fails,
+   * and never falls back to it.
+   */
+  egress?: Egress;
 };
 
 /** A database the proxy tunnels to: the key that holds its URL, and the hosts that URL may name. */
@@ -818,18 +837,6 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(400, `the handle is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
   }
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(target, {
-      method: request.method,
-      headers,
-      body: streamed ? scanned(request.body!, Number(declared)) : body,
-      redirect: 'manual',
-      ...(streamed ? { duplex: 'half' } : {}),
-    } as RequestInit);
-  } catch (error) {
-    return failure(502, `${target.host} did not answer: ${error instanceof Error ? error.message : String(error)}`);
-  }
   // What the request carried: each secret value, and what the rule made of them, Basic's base64, as stored and as they went
   // out (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`). A plain
   // value is no secret, and an upstream quotes an account's id back as a matter of course: it stays.
@@ -839,6 +846,22 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // What the rule made of them too, unless it is made of plain values alone: an account's id in a header is quoted back.
   const made = credential.keys.some((key) => !plain.includes(key)) ? [injected] : [];
   const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
+
+  let upstream: Response;
+  try {
+    upstream = await (credential.egress ?? globalThis).fetch(target, {
+      method: request.method,
+      headers,
+      body: streamed ? scanned(request.body!, Number(declared)) : body,
+      redirect: 'manual',
+      ...(streamed ? { duplex: 'half' } : {}),
+    } as RequestInit);
+  } catch (error) {
+    // The error may quote the request, its URL a query rule's value and all, an egress's more so: redacted, as its UTF-8 bytes.
+    const said = binary(new TextEncoder().encode(error instanceof Error ? error.message : String(error)));
+    const message = new TextDecoder().decode(Uint8Array.from(redact.whole(said), (char) => char.charCodeAt(0)));
+    return failure(502, `${target.host} did not answer${credential.egress === undefined ? '' : ` through ${credential.name}'s egress`}: ${message}`);
+  }
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
   // Redacted as the bytes it came in, before a URL encodes them again.
   const raw = upstream.headers.get('location');
@@ -957,7 +980,7 @@ async function valuesFor(
   proxy: Proxy,
   handle: string,
   path: string,
-  credential: { name: string; keys: readonly string[] },
+  credential: { name: string; keys: readonly string[]; egress?: Egress },
   host: string | null,
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
@@ -966,7 +989,7 @@ async function valuesFor(
   const now = Date.now();
   const kept = proxy.cache.get(key);
   if (kept !== undefined && kept.until > now) return kept;
-  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }) } });
+  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }), ...(credential.egress === undefined ? {} : { egress: true }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
   decided?.();
@@ -1159,6 +1182,12 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   if (credential.standIn !== undefined) throw new Error(`credentialProxy: ${name}'s standIn is called placeholder in 0.10: rename it`);
   if (credential.identifiers !== undefined) {
     throw new Error(`credentialProxy: ${name}'s identifiers are gone in 0.10: mark each key plain instead, coffre set <env>/<KEY> <value> --plain, and remove identifiers`);
+  }
+  // A binding the Worker lacks is `undefined`, the key still there: refused, never the global fetch in its place.
+  if ('egress' in credential && typeof credential.egress?.fetch !== 'function') {
+    throw new Error(credential.egress === undefined
+      ? `credentialProxy: ${name}'s egress is undefined, as a Worker's binding is when wrangler.jsonc lacks it: add the binding, or remove egress. ${name}'s requests never leave without it`
+      : `credentialProxy: ${name}'s egress has no fetch method: give it a VPC Service binding, a service binding, or { fetch(url, init) }`);
   }
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
