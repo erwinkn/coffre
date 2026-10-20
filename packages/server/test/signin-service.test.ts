@@ -328,6 +328,8 @@ test('a first sign-in with an invited email binds the account and opens a browse
   assert.deepEqual(verified, {
     type: 'user',
     id: DEV,
+    // No policy change yet: none to read with the credential.
+    policySeq: null,
     email: DEV,
     subject: '101',
     credentialId: result.credential.id,
@@ -787,6 +789,8 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.deepEqual(verified, {
     type: 'service',
     id: SERVICE,
+    // No policy change yet: none to read with the credential.
+    policySeq: null,
     commonName: SERVICE,
     credentialId: issued.id,
     credentialGeneration: 0,
@@ -955,6 +959,8 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
   assert.deepEqual(verified, {
     type: 'user',
     id: DEV,
+    // No policy change yet: none to read with the credential.
+    policySeq: null,
     email: DEV,
     subject: DEV,
     credentialId: approved.credential.id,

@@ -361,7 +361,7 @@ export async function listSecrets(
   });
   // A parent archived or deleted, which only a write around coffre leaves in a chain, cuts it: a read refuses there, and no
   // plain value is listed from it or past it.
-  const cut = inherited.parents.findIndex((parent) => parent.archivedAt !== null || parent.deleted);
+  const cut = inherited.parents.findIndex((parent) => parent.archived || parent.deleted);
   const live = (from: { slug: string }) => cut === -1 || inherited.parents.findIndex((parent) => parent.slug === from.slug) < cut;
   for (const [key, held] of inherited.held) {
     if (own.has(key)) continue;

@@ -149,14 +149,9 @@ export async function authenticateRequest(
   let personalToken: PersonalToken | null = null;
   let handlePlaces: readonly HandlePlace[] | null = null;
   let checked: Access | undefined;
-  // Before the vault is asked, by the verifier or below: the policy it answers with is this one or newer (`policyStill`).
-  let policySeq: bigint | null;
-  try {
-    policySeq = await newestPolicySeq(runtime.db);
-  } catch (error) {
-    console.error('checking a credential failed', { requestId, error: logged(error) });
-    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
-  }
+  // The newest policy change before the vault is asked: the policy it answers with is this one or newer (`policyStill`).
+  // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
+  let policySeq: bigint | null | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
       credentialId?: string;
@@ -167,8 +162,9 @@ export async function authenticateRequest(
       personalToken?: PersonalToken | null;
       handlePlaces?: readonly HandlePlace[] | null;
       expiresAt?: string;
+      policySeq?: bigint | null;
     };
-    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, ...principal } = verified);
+    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
@@ -177,6 +173,13 @@ export async function authenticateRequest(
       return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
     }
     return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
+  }
+
+  try {
+    if (policySeq === undefined) policySeq = await newestPolicySeq(runtime.db);
+  } catch (error) {
+    console.error('checking a credential failed', { requestId, error: logged(error) });
+    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
 
   try {

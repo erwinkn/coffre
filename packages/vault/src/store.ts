@@ -88,10 +88,10 @@ function memberColumns(db: Queryable) {
 }
 
 /** A row as stored: `role` and `scope` as their columns hold them. */
-type StoredMember = Omit<Member, 'role' | 'scope'> & { owner: boolean; role: string | null; scope: string | null };
+export type StoredMember = Omit<Member, 'role' | 'scope'> & { owner: boolean; role: string | null; scope: string | null };
 
 /** A member as their row says (`storedRole`). */
-function memberOf({ owner, role, scope, ...row }: StoredMember): Member {
+export function memberOf({ owner, role, scope, ...row }: StoredMember): Member {
   return { ...row, ...storedRole({ owner, role, scope }) };
 }
 

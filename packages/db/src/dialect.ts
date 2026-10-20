@@ -49,6 +49,16 @@ export function forUpdate<Query extends { for: (strength: 'update' | 'no key upd
   return query.for(strength) as ReturnType<Query['for']>;
 }
 
+/**
+ * The rows a hand-written query answers, as the driver gives them: what
+ * Postgres's `execute` and SQLite's `all` each call a result. Column names
+ * are the query's own, unmapped.
+ */
+export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
+  if (engineOf(db) === 'postgres') return (await (db as unknown as { execute(query: SQL): Promise<{ rows: Row[] }> }).execute(query)).rows;
+  return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
+}
+
 /** Insert the rows whose unique keys are free; returns how many that was. */
 export async function insertIfAbsent(db: Queryable, table: Table, rows: object[]): Promise<number> {
   return changedRows(await db.insert(table).values(rows as never).onConflictDoNothing());

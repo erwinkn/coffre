@@ -398,10 +398,13 @@ ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
 \* `secret.read` and commit; then the key leaves the vault. Without the
 \* rechecks, a place deleted or a reference ended since the check above is
 \* read all the same. This is the read with a key service, which takes the
-\* head only once the keys are open. With a key in memory, the vault takes
-\* the head right after the row and checks once, under both: the run here
-\* in which no step comes between ReadCheck and ReadHead, so its rechecks
-\* find what the check found.
+\* head only once the keys are open, and reads it all again with it. With a
+\* key in memory, the vault takes the head right after the row, in the one
+\* statement that reads all the check decides on, and checks once, under
+\* both: the run here in which no step comes between ReadCheck and
+\* ReadHead, so its rechecks find what the check found. That statement
+\* never waits for the head (SKIP LOCKED; held, the vault waits in a
+\* statement of its own and reads again), so it reads as of the lock.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
     /\ IF \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))

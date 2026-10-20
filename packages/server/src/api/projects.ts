@@ -528,7 +528,7 @@ export async function patchEnvironment(
     // A fork is restored only while every environment it inherits from is live.
     if (archivedAt === null && environment.parentId !== null) {
       const parents = await parentsOf(tx, environment.id);
-      const gone = parents === null ? { slug: '(a chain made around coffre)', deleted: true } : parents.find((parent) => parent.archivedAt !== null || parent.deleted);
+      const gone = parents === null ? { slug: '(a chain made around coffre)', deleted: true } : parents.find((parent) => parent.archived || parent.deleted);
       if (gone !== undefined) {
         throw new Refusal(
           conflict(`${project.slug}/${environment.slug} inherits from ${project.slug}/${gone.slug}, which is ${gone.deleted ? 'deleted' : 'archived'}: restore that first`),
