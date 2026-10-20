@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.2 (2026-10-20)
+
 - **The bulk limit counts different keys, not reads.** It counted every
   key the vault released, repeats included, so a tool that exports the
   same 40 keys on every command tripped it on the 26th run within 15
