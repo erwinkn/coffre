@@ -51,14 +51,6 @@ export type { GrantRow };
 export { accessEntriesAbout, insertGrant, liveProjects } from '@coffre/db/grants';
 export { newestVaultEntries } from '@coffre/db/log';
 
-/**
- * On Postgres, fail a lock wait in this transaction after `ms`, rather than
- * wait for ever behind a transaction that never ends.
- */
-export async function boundLockWaits(tx: Transaction, ms: number): Promise<void> {
-  if (engineOf(tx) === 'postgres') await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${Math.trunc(ms)}`));
-}
-
 /** The database's clock, now. */
 export async function now(db: Queryable): Promise<number> {
   const [{ at }] = await clock(db);
@@ -307,38 +299,6 @@ export async function everyProjectHolders(db: Queryable): Promise<string[]> {
 }
 
 // --- the log --------------------------------------------------------------------
-
-/** The action of an entry that releases a key, which the bulk limit counts. */
-export const RELEASE = 'secret.read';
-
-/**
- * How many keys the vault has released to `principal` since `after`: one
- * for an entry about one secret, and as many as it lists for one about
- * several (`secrets`), a read logged once per place.
- */
-export async function releasesSince(db: Queryable, principal: string, after: number): Promise<number> {
-  const [{ n }] = await released(db, { principal, after });
-  return Number(n ?? 0);
-}
-
-const released = prepared((db) => {
-  const { auditLog } = tablesOf(db);
-  const listed = engineOf(db) === 'postgres'
-    ? sql`jsonb_array_length((${auditLog.metadata})::jsonb -> 'secrets')`
-    : sql`json_array_length(${auditLog.metadata}, '$.secrets')`;
-  return db
-    .select({ n: sql<string | number | null>`SUM(COALESCE(${listed}, 1))` })
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.actor, sql.placeholder('principal')),
-        eq(auditLog.action, RELEASE),
-        eq(auditLog.decision, 'allow'),
-        gt(auditLog.occurredAt, sql.placeholder('after')),
-      ),
-    );
-});
 
 /** Rows of the log as the chain's codec reads them: `author` and `decision` are checked by the table. */
 function stored(rows: object[]): StoredEntry[] {

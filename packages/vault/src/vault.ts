@@ -863,7 +863,7 @@ class VaultService implements Vault {
    * that an instance still running with the replaced KEK, as during a
    * deploy, cannot write after the rotation.
    */
-  #append(
+  async #append(
     tx: Transaction,
     entries: readonly NewEntry[],
     underLock: readonly ((locked: Queryable) => Promise<void>)[] = [],
@@ -872,7 +872,7 @@ class VaultService implements Vault {
   ): Promise<Appended> {
     const prepared = this.#prepared;
     const head = held?.head ?? undefined;
-    return appendEntries(tx, prepared.logKey, entries, async (locked) => {
+    const appended = await appendEntries(tx, prepared.logKey, entries, async (locked) => {
       const rotation = head === undefined ? await store.latestVaultEntry(locked, [KEY_ROTATE]) : head.rotation ?? undefined;
       if (rotation !== undefined && !prepared.logKeys.some((key) => key.keyId === rotation.keyId)) {
         prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
@@ -880,6 +880,12 @@ class VaultService implements Vault {
       }
       for (const check of underLock) await check(locked);
     }, head === undefined ? undefined : { head, last: head.last, at: held!.at });
+    // The head still held, as this append left it, for the next append of the same transaction: a remote key's intent,
+    // then the decision's reports.
+    if (head !== undefined) {
+      held!.head = { ...head, nextSeq: appended.nextSeq, headHash: appended.headHash, last: { seq: appended.nextSeq - 1n, hash: appended.headHash } };
+    }
+    return appended;
   }
 
   // --- keys -------------------------------------------------------------------
