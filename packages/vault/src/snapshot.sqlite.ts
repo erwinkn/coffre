@@ -89,9 +89,11 @@ export function snapshotQuery(asked: Asked): SQL {
         ? sql`0`
         : sql`(
           SELECT count(DISTINCT key) FROM (
-            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts).
-            SELECT coalesce(e.secret_id, json_extract(one.value, '$.secretId')) AS key FROM audit_log e
-            LEFT JOIN json_each(CASE WHEN e.secret_id IS NULL THEN e.metadata END, '$.secrets') AS one ON one.type = 'object'
+            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts). An entry, or an
+            -- item of its list, that names no key, which only a forged entry is, counts as one key of its own.
+            SELECT coalesce(e.secret_id, CASE one.type WHEN 'object' THEN json_extract(one.value, '$.secretId') END, 'entry:' || e.seq) AS key
+            FROM audit_log e
+            LEFT JOIN json_each(CASE WHEN e.secret_id IS NULL AND json_type(e.metadata, '$.secrets') = 'array' THEN e.metadata END, '$.secrets') AS one
             WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
               AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
             UNION ALL SELECT value FROM json_each(${JSON.stringify(released.keys)})

@@ -790,6 +790,24 @@ test('the bulk limit counts a key once across reads of one key and reads of seve
   assert.ok(entries.some((entry) => entry.secretId === null) && entries.some((entry) => entry.secretId !== null), 'both shapes of entry are counted');
 });
 
+test('a forged read that names no key counts against the bulk limit as one key, on either engine', async () => {
+  const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const [a, b, c] = await keys(w, 3);
+  // Entries the vault never writes: a list that is no list, a list with items that name nothing, and no list at all.
+  for (const detail of [{ secrets: { secretId: randomUUID() } }, { secrets: [{ secretId: a!.secret.secretId }, 'item', { item: 1 }] }, {}]) {
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify(detail) }]));
+  }
+  // Each forged entry is one key for what it fails to name, and a is one more: four.
+  const read = async (item: typeof a) => {
+    const outcome = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([item!]) });
+    return outcome.ok ? 'ok' : outcome.refusal.code;
+  };
+  assert.equal(await read(a), 'ok', 'still four');
+  assert.equal(await read(b), 'ok', 'five');
+  assert.equal(await read(c), 'bulk_limit');
+});
+
 test('a thousand keys, the default limit, then one more trips it', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
