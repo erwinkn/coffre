@@ -79,6 +79,12 @@ export type Route<Key extends string, S extends Schema, Output, Q extends Schema
    * the handler (`handles`), which checks what it takes. Otherwise none: 404.
    */
   personal?: 'falls back' | 'makes' | 'handles';
+  /**
+   * Its caller is not asked of the vault first, on a coffre credential: its
+   * work's one vault call says what they hold (`pendingCaller`, a reveal's
+   * `unwrap`). Such a route checks nothing of its caller before it runs.
+   */
+  defersStanding?: true;
   run: (
     ctx: ApiContext,
     call: { params: Params<Key>; place: PlaceOf<Key>; input: Parsed<S>; query: Parsed<Q> },
@@ -455,6 +461,7 @@ export const routes = {
   }),
   ...route('POST /reveals', {
     input: z.object({ path: z.string().max(400) }),
+    defersStanding: true,
     run: async (ctx, { input }) => {
       // A person's read of a whole environment names the sensitive values it left out.
       const { operationId, values, sensitive, version } = await reveal(ctx, parsePath(input.path, [2, 3]));

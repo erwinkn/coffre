@@ -248,3 +248,21 @@ test("a session the vault no longer vouches for learns nothing of what is there:
   }
 });
 
+test('a vault older than the app, whose read says nothing of who asked, hands back nothing: deploy the vault first', async () => {
+  await clientFor(deps, ROOT).secrets.set('market/dev', { API_KEY: 'dev-key' });
+  const token = await cliToken(DEV);
+  // A vault of 0.10 decides the values alone, not the environment asked of nor the credential's generation.
+  const older: Vault = { ...runtime.vault, unwrap: async (input) => {
+    const { access: _, ...answer } = await runtime.vault.unwrap(input);
+    return answer;
+  } };
+  const response = await fetchApi(
+    new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/dev' }) }),
+    { ...runtime, vault: older },
+    { sourceIp: null },
+  );
+  const body = await response.text();
+  assert.equal(response.status, 503);
+  assert.doesNotMatch(body, /dev-key/);
+});
+

@@ -131,6 +131,18 @@ async function locate(
  * dropped, each percent-decoded. Throws on percent-encoding that does not
  * decode, which no route matches.
  */
+/** Whether the route a request asks for learns its caller's standing from its own work (`defersStanding`). */
+export function defersStanding(request: Request): boolean {
+  let parts: string[];
+  try {
+    parts = routeParts(new URL(request.url).pathname);
+  } catch {
+    return false;
+  }
+  const found = match(parts, request.method);
+  return found !== null && 'route' in found && found.route.def.defersStanding === true;
+}
+
 export function routeParts(pathname: string): string[] {
   return pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent);
 }
@@ -199,8 +211,8 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     // `dev@me` for a route that handles it, made or not: its handler checks what that takes.
     const handled = place?.personal !== undefined && def.personal === 'handles';
     const routeChecks = handled ? [] : checks(def, input, query);
-    // A caller not asked of the vault yet holds nothing: a route whose standing its own work learns checks none first.
-    if (ctx.caller.pending !== undefined && routeChecks.length > 0) throw new Error(`${route.method} ${route.shape} checks its caller before the vault was asked about them`);
+    // A caller not asked of the vault yet holds nothing: only a route whose own work learns their standing has one.
+    if (ctx.caller.pending !== undefined && def.defersStanding !== true) throw new Error(`${route.method} ${route.shape} was served a caller the vault was not asked about`);
     for (const check of routeChecks) {
       const anyOf = typeof check === 'string' ? [check] : 'anyOf' in check ? check.anyOf : [check.permission];
       const onProject = typeof check === 'object' && 'on' in check;

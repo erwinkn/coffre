@@ -1606,7 +1606,7 @@ export async function reveal(
   return recorded(ctx, async (log, fence) => {
     // A pending caller's read, and its values when opened with the call that says what they hold (below).
     let early: { read: Awaited<ReturnType<typeof readableValues>>; opened: Awaited<ReturnType<typeof openValues>> | null } | null = null;
-    // Refused by the vault, which logged it, a check of the app's words the refusal and logs nothing more.
+    // Refused by the vault, which logged it, a check of the app's words the refusal and logs nothing more (below).
     try {
       // `market/dev@me`: your personal config of dev, or dev while you have none.
       const place = await resolveRead(ctx, path);
@@ -1627,10 +1627,12 @@ export async function reveal(
       // what they hold, when the vault opens every value of it, as it decides all the checks below do, the asked
       // environment's included (`asked`). Those checks then run on its answer: where it allowed, they pass; where it refused,
       // and logged it, they only word the refusal. Anything else asks the vault who they are first, as any request does.
+      // What a person's read of a whole environment leaves out: its sensitive values, which nobody is handed. The vault
+      // decides exactly what the checks below are about, so both read the rows through this.
+      const withheld = (item: Readable) => use === undefined && path.key === undefined && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
       if (ctx.caller.pending !== undefined) {
         const read = await readableValues(ctx.db, place, environment, path.key);
-        const person = ctx.caller.principal.type === 'user';
-        const rows = read.items.filter((item) => !(use === undefined && path.key === undefined && person && item.secret.sensitive === true));
+        const rows = read.items.filter((item) => !withheld(item));
         let access: Access | undefined;
         early = { read, opened: null };
         if (use === undefined && rows.length > 0 && read.unreadable.length === 0 && !rows.some(plain)) {
@@ -1677,8 +1679,6 @@ export async function reveal(
         recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
       }))) : use.keys;
       const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
-      // What a person's read of a whole environment leaves out: its sensitive values, which nobody is handed.
-      const withheld = (item: Readable) => use === undefined && path.key === undefined && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
       const rows = read.items.filter((item) => wanted(item) && !withheld(item));
       const sensitive = read.items.filter(withheld).map((item) => item.key);
       const unreadable = read.unreadable.filter(wanted);
@@ -1734,7 +1734,9 @@ export async function reveal(
       // An environment's version, of exactly what was read: what a watch compares the next one with.
       return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
     } catch (error) {
-      if (error instanceof Refusal && early?.opened?.ok === false) throw answered(error);
+      // Only a refusal the vault decided under the reader's row, answering what they hold, is one it logged: one before it
+      // asked who they are (a vault on a superseded key) is the app's to log, as it was.
+      if (error instanceof Refusal && early?.opened?.ok === false && early.opened.access !== undefined) throw answered(error);
       throw error;
     }
   });

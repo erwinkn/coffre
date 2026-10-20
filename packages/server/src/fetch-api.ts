@@ -3,7 +3,7 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from 
 
 import { askOf } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
-import { routeParts, serveApi } from './api/router.ts';
+import { defersStanding, routeParts, serveApi } from './api/router.ts';
 import {
   authenticateRequest,
   bearerToken,
@@ -116,7 +116,7 @@ export async function apiCaller(
   runtime: CoffreRuntime,
   sourceIp: string | null,
   authenticate: Authenticate = (token) =>
-    authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, { deferStanding: revealsValues(request) }),
+    authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, { deferStanding: defersStanding(request) }),
   inProcess = false,
 ): Promise<AuthenticatedIdentity | Response> {
   const credential = apiCredential(request, runtime.auth);
@@ -132,15 +132,6 @@ export async function apiCaller(
     return errorResponse(new ApiError('forbidden', 'open this on coffre, signed in in your browser', 'browser_only'));
   }
   return authenticate(credential.token);
-}
-
-/**
- * A reveal, whose one vault call, the one that opens its values, says what
- * its caller holds: it does not ask the vault who they are first
- * (`pendingCaller`).
- */
-function revealsValues(request: Request): boolean {
-  return request.method === 'POST' && new URL(request.url).pathname === '/api/reveals';
 }
 
 /** How a credential becomes its caller, or the response that turns them away. */
