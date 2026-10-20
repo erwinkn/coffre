@@ -116,6 +116,7 @@ export async function apiCaller(
   runtime: CoffreRuntime,
   sourceIp: string | null,
   authenticate: Authenticate = (token) =>
+    // The route is matched here and again in `serveApi`: a scan of a short list, cheaper to repeat than to thread through.
     authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, { deferStanding: defersStanding(request) }),
   inProcess = false,
 ): Promise<AuthenticatedIdentity | Response> {

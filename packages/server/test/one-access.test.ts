@@ -15,6 +15,7 @@ import { tablesOf } from '@coffre/db';
 import { and, asc, eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { authenticateRequest } from '../src/auth.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -264,5 +265,42 @@ test('a vault older than the app, whose read says nothing of who asked, hands ba
   const body = await response.text();
   assert.equal(response.status, 503);
   assert.doesNotMatch(body, /dev-key/);
+});
+
+test('a reveal answers alike whether its caller is asked of the vault first or by the read itself, and logs no allow behind a refusal', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.secrets.set('market/dev', { API_KEY: 'dev-key', TOKEN: { value: 'dev-token', sensitivity: 'sensitive' } });
+  await root.environments.create('market/prod', { name: 'Prod' });
+  await root.secrets.set('market/prod', { API_KEY: 'prod-key', REGION: { value: 'eu-west-3', plain: true } });
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  await root.environments.protect('market/prod');
+  await root.members.add(`user:${QA}`);
+  await root.access.set(`user:${QA}`, { 'market/dev': 'viewer' });
+  await clientFor(deps, DEV).secrets.set('market/dev@me', { API_KEY: 'dev-own' });
+  const paths = ['market/dev', 'market/dev/API_KEY', 'market/dev/TOKEN', 'market/dev/MISSING', 'market/prod', 'market/prod/REGION', 'market/dev-eu', 'market/dev@me', 'nope/dev'];
+  const { auditLog } = tablesOf(db.owner);
+  const allows = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow')))).length;
+  for (const email of [DEV, QA]) {
+    const token = await cliToken(email);
+    for (const path of paths) {
+      const ask = (eager: boolean) => fetchApi(
+        new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }),
+        runtime,
+        // The eager way: the vault is asked who they are when the credential is checked, as for any other request.
+        { sourceIp: null, ...(eager ? { authenticate: (credential: string) => authenticateRequest(new Request(ORIGIN), runtime, randomUUID(), credential, null) } : {}) },
+      );
+      const allowed = await allows();
+      const deferred = await ask(false);
+      const answer = { status: deferred.status, body: (await deferred.json()) as Record<string, unknown> };
+      if (!deferred.ok) assert.equal(await allows(), allowed, `${email} ${path}: no allow behind a refusal`);
+      const eager = await ask(true);
+      const expected = { status: eager.status, body: (await eager.json()) as Record<string, unknown> };
+      // An operation's id is each read's own.
+      delete answer.body.operationId;
+      delete expected.body.operationId;
+      assert.deepEqual(answer, expected, `${email} ${path}`);
+    }
+  }
 });
 
