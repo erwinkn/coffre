@@ -126,11 +126,6 @@ async function locate(
   return place;
 }
 
-/**
- * A path's segments as the router matches them: after `/api`, empty ones
- * dropped, each percent-decoded. Throws on percent-encoding that does not
- * decode, which no route matches.
- */
 /** Whether the route a request asks for learns its caller's standing from its own work (`defersStanding`). */
 export function defersStanding(request: Request): boolean {
   let parts: string[];
@@ -143,6 +138,11 @@ export function defersStanding(request: Request): boolean {
   return found !== null && 'route' in found && found.route.def.defersStanding === true;
 }
 
+/**
+ * A path's segments as the router matches them: after `/api`, empty ones
+ * dropped, each percent-decoded. Throws on percent-encoding that does not
+ * decode, which no route matches.
+ */
 export function routeParts(pathname: string): string[] {
   return pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent);
 }
@@ -211,8 +211,11 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     // `dev@me` for a route that handles it, made or not: its handler checks what that takes.
     const handled = place?.personal !== undefined && def.personal === 'handles';
     const routeChecks = handled ? [] : checks(def, input, query);
-    // A caller not asked of the vault yet holds nothing: only a route whose own work learns their standing has one.
-    if (ctx.caller.pending !== undefined && def.defersStanding !== true) throw new Error(`${route.method} ${route.shape} was served a caller the vault was not asked about`);
+    // A caller not asked of the vault yet holds nothing: only a route whose own work learns their standing has one, and it
+    // checks nothing of them first.
+    if (ctx.caller.pending !== undefined && (def.defersStanding !== true || routeChecks.length > 0)) {
+      throw new Error(`${route.method} ${route.shape} was served a caller the vault was not asked about`);
+    }
     for (const check of routeChecks) {
       const anyOf = typeof check === 'string' ? [check] : 'anyOf' in check ? check.anyOf : [check.permission];
       const onProject = typeof check === 'object' && 'on' in check;

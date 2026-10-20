@@ -901,9 +901,10 @@ class VaultService implements Vault {
     // As `access` does: a person the deployment names who owns nothing of the instance becomes an Owner of all of it.
     const { access } = outcome;
     if (access === undefined || this.#prepared.superseded !== null || !this.#listed(input.principal) || (access.status === 'active' && ownsInstance(access))) return outcome;
-    if (!(await this.#declare([input.principal]))) return outcome;
-    // Allowed, the read stands, answered with what they hold now. Refused, it is decided again, and logged again.
-    return outcome.ok ? { ...outcome, access: await this.#read(input.principal, null) } : this.#unwrap(input);
+    // Allowed, the read stands as decided, answered with what the decision read under their row: the declaration counts
+    // from their next request. Refused, it is decided again, as they are now, and logged again.
+    if (!(await this.#declare([input.principal])) || outcome.ok) return outcome;
+    return this.#unwrap(input);
   }
 
   async #unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }> {

@@ -189,9 +189,10 @@ export async function fetchApi(
     }
     const ctx = apiContext(runtime, identity);
     const response = await serveApi(request, ctx);
-    // A caller whose standing the request deferred, and never learned (`pendingCaller`): its error is answered only once
-    // the vault says who they are, so that nobody it would turn away learns, from a 400 or a 404, what is there.
-    if (response.ok || ctx.caller.pending === undefined) return response;
+    // A caller whose standing the request deferred, and never learned (`pendingCaller`): its refusal is answered only once
+    // the vault says who they are, so that nobody it would turn away learns, from a 400 or a 404, what is there. A fault
+    // tells nobody anything, and is answered as it is.
+    if (response.ok || response.status >= 500 || ctx.caller.pending === undefined) return response;
     await askOf(ctx);
     return response;
   } catch (error) {
