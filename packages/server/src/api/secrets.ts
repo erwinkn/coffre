@@ -35,7 +35,7 @@ import {
   fileSecrets,
   secretFolderOf,
 } from '../db/queries.ts';
-import { askedOf, can, lists, permissionsAt, placeOf, settled } from './caller.ts';
+import { askedOf, callerUncheckable, can, lists, permissionsAt, placeOf, settled } from './caller.ts';
 import { protectedFor } from './roles.ts';
 import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
@@ -1604,14 +1604,16 @@ export async function reveal(
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence) => {
-    // A pending caller's read, opened with the call that says what they hold (below).
-    let early: { read: Awaited<ReturnType<typeof readableValues>>; opened: Awaited<ReturnType<typeof openValues>> } | null = null;
+    // A pending caller's read, and its values when opened with the call that says what they hold (below).
+    let early: { read: Awaited<ReturnType<typeof readableValues>>; opened: Awaited<ReturnType<typeof openValues>> | null } | null = null;
     // Refused by the vault, which logged it, a check of the app's words the refusal and logs nothing more.
     try {
       // `market/dev@me`: your personal config of dev, or dev while you have none.
       const place = await resolveRead(ctx, path);
       const environment = place === null ? null : liveEnvironment(place);
       if (place === null || environment === null) {
+        // Told only to someone the vault lets in: nobody it turns away learns what is there.
+        if (ctx.caller.pending !== undefined) ctx.caller = await askedOf(ctx.vault, ctx.caller, ctx.requestId);
         throw new Refusal(
           notFound('unknown project or environment'),
           denied(ctx, 'secret.read', 'unknown_environment', {
@@ -1630,15 +1632,19 @@ export async function reveal(
         const person = ctx.caller.principal.type === 'user';
         const rows = read.items.filter((item) => !(use === undefined && path.key === undefined && person && item.secret.sensitive === true));
         let access: Access | undefined;
+        early = { read, opened: null };
         if (use === undefined && rows.length > 0 && read.unreadable.length === 0 && !rows.some(plain)) {
           const purpose = path.key === undefined ? 'run' : 'reveal';
-          const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, asked: environment.environmentId, ...(ctx.caller.pending.generation === null ? {} : { generation: ctx.caller.pending.generation }) }, rows);
+          const { generation } = ctx.caller.pending;
+          // The request's first word with the vault: one it cannot answer is an outage, as at authentication.
+          const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, asked: environment.environmentId, ...(generation === null ? {} : { generation }) }, rows)
+            .catch((error: unknown) => { throw callerUncheckable(ctx.requestId, error); });
           // A vault older than this app decided without the asked environment or the credential's generation: nothing it opened is handed back.
           if (opened.ok && opened.access === undefined) throw new ApiError('unavailable', 'the vault is older than this app: deploy the vault first');
           // Refused before it decided anything of who asks, as a vault given the wrong key is: its refusal is the answer.
           if (!opened.ok && opened.access === undefined) throw vaultRefused(opened.refusal);
           ({ access } = opened);
-          early = { read, opened };
+          early.opened = opened;
         }
         // On the request's own context: what `recorded` fences with, too, reads the policy the vault answered.
         ctx.caller = access === undefined ? await askedOf(ctx.vault, ctx.caller, ctx.requestId) : settled(ctx.caller, access);
@@ -1726,7 +1732,7 @@ export async function reveal(
       // An environment's version, of exactly what was read: what a watch compares the next one with.
       return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
     } catch (error) {
-      if (error instanceof Refusal && early?.opened.ok === false) throw error.error;
+      if (error instanceof Refusal && early?.opened?.ok === false) throw error.error;
       throw error;
     }
   });

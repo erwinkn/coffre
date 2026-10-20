@@ -199,3 +199,33 @@ test('a session of an earlier membership reveals nothing: removed and admitted a
   assert.equal((await reveal(await cliToken(DEV), 'market/dev')).status, 200);
 });
 
+test("a reveal's caller is settled before anything is answered: whoever the vault turns away learns nothing of what is there", async () => {
+  const STRANGER = 'stranger@acme.example';
+  // Access in front: every token is the email of whoever holds it, and only the vault says who is a member.
+  const access: CoffreRuntime = { ...runtime, signin: null, verifier: { verify: async (token: string) => ({ type: 'user', id: token, email: token, subject: token }) } };
+  const ask = async (path: string) => {
+    const response = await fetchApi(new Request(`${ORIGIN}/api/reveals`, {
+      method: 'POST', headers: { authorization: `Bearer ${STRANGER}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }),
+    }), access, { sourceIp: null });
+    return [response.status, ((await response.json()) as { error: string }).error];
+  };
+  assert.deepEqual(await ask('market/dev'), [403, 'registration_required']);
+  assert.deepEqual(await ask('nope/dev'), [403, 'registration_required'], 'the same, whether or not the place exists');
+  assert.deepEqual(await ask('not a path'), [403, 'registration_required'], 'and for a request it could not even parse');
+  assert.deepEqual(await readsBy(`user:${STRANGER}`), []);
+});
+
+test('a session of an earlier membership that reaches the vault, before its revocation commits, is refused there', async () => {
+  await clientFor(deps, ROOT).secrets.set('market/dev', { API_KEY: 'dev-key' });
+  const token = await cliToken(DEV);
+  // Removed and admitted again by the vault alone: the app's revocation of the session has not happened yet.
+  assert.ok((await deps.vault.remove({ actor: `user:${ROOT}`, principal: `user:${DEV}` })).ok);
+  assert.ok((await deps.vault.admit({ actor: `user:${ROOT}`, principal: `user:${DEV}` })).ok);
+  const { projects } = tablesOf(db.owner);
+  const [project] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
+  assert.ok((await deps.vault.setAccess({ actor: `user:${ROOT}`, principal: `user:${DEV}`, changes: [{ projectId: project!.id, environmentId: null, role: 'developer', expiresAt: null }] })).ok);
+  const stale = await reveal(token, 'market/dev');
+  assert.deepEqual([stale.status, unwrapped.at(-1)], [401, `user:${DEV}`]);
+  assert.deepEqual((await readsBy(`user:${DEV}`)).at(-1), ['vault', 'deny', 'removed']);
+});
+

@@ -1,6 +1,7 @@
 import { createClient, type CoffreClient } from '@coffre/client';
 import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
 
+import { askedOf } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { routeParts, serveApi } from './api/router.ts';
 import {
@@ -195,7 +196,13 @@ export async function fetchApi(
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
-    return await serveApi(request, apiContext(runtime, identity));
+    const ctx = apiContext(runtime, identity);
+    const response = await serveApi(request, ctx);
+    // A caller whose standing the request deferred, and never learned (`pendingCaller`): its error is answered only once
+    // the vault says who they are, so that nobody it would turn away learns, from a 400 or a 404, what is there.
+    if (response.ok || ctx.caller.pending === undefined) return response;
+    await askedOf(runtime.vault, ctx.caller, identity.requestId);
+    return response;
   } catch (error) {
     return errorResponse(error);
   }

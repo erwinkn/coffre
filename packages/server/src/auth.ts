@@ -2,7 +2,7 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@
 import type { CredentialScope } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
-import { callerFrom, newestPolicySeq, pendingCaller, type Caller } from './api/caller.ts';
+import { callerFrom, callerUncheckable, newestPolicySeq, pendingCaller, type Caller } from './api/caller.ts';
 import { formatMember } from './api/paths.ts';
 import { accessTamperedError, ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
@@ -206,8 +206,6 @@ export async function authenticateRequest(
       via: null,
     };
   } catch (error) {
-    // Logged, so a bug of ours is not read as an outage of the vault or the database.
-    console.error('checking who called failed', { requestId, error: logged(error) });
-    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+    return errorResponse(callerUncheckable(requestId, error));
   }
 }

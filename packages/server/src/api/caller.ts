@@ -145,10 +145,19 @@ export async function askedOf(vault: Vault, pending: Caller, requestId: string):
   try {
     access = await vault.access(formatMember(pending.principal));
   } catch (error) {
-    console.error('checking who called failed', { requestId, error: logged(error) });
-    throw new ApiError('unavailable', 'coffre cannot check who you are right now');
+    throw callerUncheckable(requestId, error);
   }
   return settled(pending, access);
+}
+
+/**
+ * Who called could not be checked: an outage, never a verdict on them,
+ * logged with what failed, so that a bug of ours is not read as an outage
+ * of the vault or the database.
+ */
+export function callerUncheckable(requestId: string, error: unknown): ApiError {
+  console.error('checking who called failed', { requestId, error: logged(error) });
+  return new ApiError('unavailable', 'coffre cannot check who you are right now');
 }
 
 export function callerFrom(principal: PrincipalRef, access: Access, policySeq: bigint | null, credentialScope: CredentialScope | null = null): Caller {

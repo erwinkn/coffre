@@ -3407,6 +3407,18 @@ test('an Owner the deployment names whose row was changed around the vault is st
   assert.equal((await deployed.verifyLog({})).ok, true);
 });
 
+test('an Owner the deployment names whose row was changed around the vault, and whose next request is a read, is made one again first (review of #279)', async () => {
+  const w = await world();
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const { vaultMembers } = tablesOf(db.owner);
+  await db.owner.update(vaultMembers).set({ role: 'developer', owner: false }).where(eq(vaultMembers.principal, ROOT));
+  // Their read finds them changed, as \`access\` would: started over, an Owner again, and read as one.
+  const read = await w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items });
+  assert.equal(read.ok, true);
+  assert.deepEqual([read.access?.status, read.access?.role, read.access?.generation], ['active', 'owner', 1]);
+});
+
 test('a row edited to an Owner\'s around the vault makes nobody an Owner, nor anyone the deployment names', async () => {
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);

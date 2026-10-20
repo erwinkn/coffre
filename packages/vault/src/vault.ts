@@ -897,6 +897,16 @@ class VaultService implements Vault {
   // Raw DEKs are cleared on every path. JSON and base64 leave strings that
   // cannot be wiped, so this is best-effort memory hygiene.
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }> {
+    const outcome = await this.#unwrap(input);
+    // As `access` does: a person the deployment names who owns nothing of the instance becomes an Owner of all of it. A
+    // read refused before is decided again, once, as they are now.
+    const { access } = outcome;
+    if (access === undefined || this.#prepared.superseded !== null || !this.#listed(input.principal) || (access.status === 'active' && ownsInstance(access))) return outcome;
+    if (!(await this.#declare([input.principal])) || outcome.ok) return outcome;
+    return this.#unwrap(input);
+  }
+
+  async #unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }> & { access?: Access }> {
     const { principal } = input;
     validateText(input.purpose);
     if (input.asked != null && (typeof input.asked !== 'string' || !UUID.test(input.asked))) throw new Error("the environment asked of must be a lowercase UUID");

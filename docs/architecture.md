@@ -380,7 +380,9 @@ that take the request's method.
 
 Behind it, a request asks the vault once who the caller is to this instance:
 whether they are still a member, and the grants they hold
-(`vault.access`). Every permission check after that is a plain function,
+(`vault.access`). A reveal asks nothing else of it: the `unwrap` that
+opens its values answers the same, and decides the environment asked of
+and the credential's generation with the read. Every permission check after that is a plain function,
 `can()`, over that answer, and a path resolves to its project, environment
 and secret in one read.
 
@@ -470,9 +472,9 @@ and membership generations. The interface:
 
 | Call | Does |
 |---|---|
-| `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment |
+| `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment; `unwrap` also answers what the principal holds, as `access` does |
 | `reference`, `endReferences` | make references, each a `reference.create` entry of its own, which every read through one is checked against; end them, each a `reference.end` naming it ([design](design/environments.md#references)) |
-| `access(principal)` | one principal's status, instance role and grants, their rows checked; the app asks once per request, and it makes someone the deployment names an Owner when they own nothing |
+| `access(principal)` | one principal's status, instance role and grants, their rows checked; the app asks once per request but a reveal, and it makes someone the deployment names an Owner when they own nothing |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
