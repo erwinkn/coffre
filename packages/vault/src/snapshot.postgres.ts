@@ -85,7 +85,7 @@ export function snapshotQuery(asked: Asked): SQL {
           SELECT count(DISTINCT key) FROM (
             -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts). An entry, or an
             -- item of its list, that names no key, which only a forged entry is, counts as one key of its own.
-            SELECT coalesce(e.secret_id::text, one ->> 'secretId', 'entry:' || e.seq) FROM audit_log e
+            SELECT coalesce(e.secret_id::text, CASE jsonb_typeof(one -> 'secretId') WHEN 'string' THEN one ->> 'secretId' END, 'entry:' || e.seq) FROM audit_log e
             -- Each item of a list, never what lax paths would make of an object; silent, as strict paths fail on what is missing.
             LEFT JOIN LATERAL jsonb_path_query(CASE WHEN e.secret_id IS NULL THEN e.metadata::jsonb END, 'strict $.secrets ? (@.type() == "array")[*]', '{}', true) AS one ON true
             WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'

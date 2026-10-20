@@ -795,7 +795,7 @@ test('a forged read that names no key counts against the bulk limit as one key, 
   await member(w, ADA, [[w.dev, 'viewer']]);
   const [a, b, c] = await keys(w, 3);
   // Entries the vault never writes: a list that is no list, a list with items that name nothing, and no list at all.
-  for (const detail of [{ secrets: { secretId: randomUUID() } }, { secrets: [{ secretId: a!.secret.secretId }, 'item', { item: 1 }] }, {}]) {
+  for (const detail of [{ secrets: { secretId: randomUUID() } }, { secrets: [{ secretId: a!.secret.secretId }, 'item', { item: 1 }, { secretId: 1 }] }, {}]) {
     await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify(detail) }]));
   }
   // Each forged entry is one key for what it fails to name, and a is one more: four.
