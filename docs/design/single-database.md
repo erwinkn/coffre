@@ -219,7 +219,7 @@ transaction of its own:
 | Sync | the lease in one short transaction; the vault authorises and releases; the result in another. A new sync is committed disabled, its principal granted, then enabled |
 | Heartbeat | the app's heartbeat entry commits; then the vault checkpoints |
 
-**Three more rules.**
+**Four more rules.**
 
 1. **Locks in one order: a member row, then the log's head, then the app's
    rows.** The vault locks the member a decision is about, then the head for
@@ -230,12 +230,29 @@ transaction of its own:
 2. **Time is read after the lock.** Postgres's `CURRENT_TIMESTAMP` is the
    transaction's start, so a transaction that waited would date its entry
    before an earlier one's (S9's probe). The append reads
-   `clock_timestamp()` in a statement after the lock.
+   `clock_timestamp()` in a statement after the lock, or in the statement
+   that took it without waiting (4).
 3. **READ COMMITTED, Postgres's default.** At REPEATABLE READ, a transaction
    whose snapshot predates a concurrent commit fails its `FOR UPDATE` with
    `40001 could not serialize access`. At READ COMMITTED, the spike's
    transaction that waited on the head then saw the grant committed while it
    waited.
+4. **A statement that locks reads as of its lock, or it waits apart.** A
+   statement's snapshot is taken when it starts: one that waited for a row
+   lock sees the newest version of that row, and every other table as it
+   was before the wait. A vault decision takes the head and reads all it
+   decides on (the grants, the newest access entry, the policy, the places,
+   the references' ends, the bulk count, the clock) in one statement, so it
+   takes the head `SKIP LOCKED`: free, the statement never waited, and what
+   it read is what holds under the lock. Held by another, it waits for it
+   in a statement of its own, then reads again. It checks, too, that the
+   head names the last entry it read: one appended in the instant between
+   its snapshot and its lock is read again (`snapshot` in the vault). That
+   check sees a commit only through the head it moved, so it rests on one
+   invariant: every change a decision reads commits with an entry under the
+   head, the vault's decisions and the app's `audited` writes to places
+   alike. A write to a place that logged nothing could slip into that
+   instant unseen.
 
 #### Releasing a key, and the race with KMS
 
@@ -327,12 +344,13 @@ per round trip, each append holding the head for about four:
 
 So one log halves the ceiling, to about 50 appends a second. Each event is
 now appended once, which gives some back. erwinkn.com, or a team of fifty,
-is two orders of magnitude below. Folding the insert and the head update
-into one statement would take a round trip off every append if it were ever
-needed.
+is two orders of magnitude below. An append inserts its entries and moves
+the head in one statement, and a vault decision locks the head and reads
+what it decides on in one more.
 
 `access(principal)`, which the app asks once per request, takes no lock:
-one read of the member, the grants and the freshness check. On SQLite,
+one statement reads the member, the grants, the freshness check and the
+policy. On SQLite,
 every transaction holds the file's write lock, so the locks above do
 nothing there; the tests run two processes on one file to cover it.
 

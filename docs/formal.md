@@ -134,7 +134,13 @@ Traces are shortened here; the script prints every step.
 - **Steps.** Each step is one SQL statement, or a run of statements that
   nothing can interleave with, because the step holds the lock they need.
   Isolation is READ COMMITTED: a statement reads what was committed when it
-  ran, and a transaction's writes become visible when it commits.
+  ran, and a transaction's writes become visible when it commits. A
+  statement that takes a lock and reads other tables in the same go, as a
+  vault decision takes the head with all it decides on, reads them as of
+  the lock only because it never waits for it (`SKIP LOCKED`; held, it
+  waits in a statement of its own and reads again:
+  [single-database.md](design/single-database.md), rule 4). So the model
+  takes the lock and the reads in one step, or the lock and then the reads.
 - **Locks.** Two kinds, each held to the end of its transaction:
   - a member's row, taken one row at a time, in principal order;
   - the log's head.

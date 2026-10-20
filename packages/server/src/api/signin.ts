@@ -39,7 +39,7 @@ import {
   update,
   updateAuth,
 } from '../db/queries.ts';
-import { callerFrom, newestPolicySeq, type PrincipalRef } from './caller.ts';
+import { callerFrom, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
@@ -169,6 +169,8 @@ export type CredentialPrincipal = Principal & {
   credentialId: string;
   credentialGeneration: number;
   access: Access;
+  /** The newest `policy.change` as the credential was read, before the vault was asked for `access`; null for none. */
+  policySeq: bigint | null;
   /** Its scope, a service or personal token's or its binding's, past which nothing it asks reaches; null for a session's. */
   credentialScope: CredentialScope | null;
   /** Whether a trust binding issued it, for a CI run: the request's entries then name it. */
@@ -635,15 +637,15 @@ export class SigninService {
 
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
+    let policySeq: bigint | null = null;
     try {
       if (!this.#scopes.sealed) {
         await sealScopes(db, chainKey, this.#deps.vault);
         this.#scopes.sealed = true;
       }
       row = await findCredential(db, chainKey, { tokenHash });
-      // Before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
-      // Read only for a row that may need one, which no session and no token sealed since 0.5 does.
-      const policySeq = row !== null && row.kind === 'service' && row.scope === null ? await newestPolicySeq(db) : null;
+      // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
+      policySeq = row?.policySeq ?? null;
       if (row !== null) access = await this.#deps.vault.access(row.principal);
       // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
@@ -674,6 +676,7 @@ export class SigninService {
           credentialId: row.id,
           credentialGeneration: row.generation,
           access,
+          policySeq,
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
           personalToken: null,
@@ -689,6 +692,7 @@ export class SigninService {
           credentialGeneration: row.generation,
           exchanged: false,
           access,
+          policySeq,
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
           credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,
           personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,

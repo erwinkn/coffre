@@ -4,7 +4,7 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { withinBytes } from '@coffre/db/log';
+import { newestSeqQuery, withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -764,9 +764,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
     kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
     environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
   };
-  const rows: Row[] = dialect.engineOf(db) === 'postgres'
-    ? ((await (db as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(query)).rows as Row[])
-    : await (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
+  const rows = await dialect.rowsOf<Row>(db, query);
   const [first] = rows;
   if (first === undefined) return { member: null, grants: [], projectSlugs: new Map() };
   const seq = (value: string | number | null) => (value === null ? -1n : BigInt(value));
@@ -998,13 +996,17 @@ export async function findCredential(db: Queryable, chainKey: Buffer, by: { toke
     identityIssuerHash: row.identity?.issuerHash ?? null,
     subject: row.identity?.subject ?? null,
     now: row.now,
+    /** The newest `policy.change` there was as the credential was read, by its number: before the vault is asked (`policyStill`). */
+    policySeq: row.policySeq === null ? null : BigInt(row.policySeq),
   };
 }
 
 function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL) {
   const { credentials, identities } = tablesOf(db);
+  // The newest policy change, as `newestPolicySeq` reads it on its own.
+  const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`;
   return db
-    .select({ credential: credentials, identity: identities, now: clock(db) })
+    .select({ credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy })
     .from(credentials)
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where(by(credentials));
@@ -1616,31 +1618,37 @@ export async function secretHistory(
 export const MAX_PARENTS = 3;
 
 /** An environment a fork inherits from, as a read needs it. */
-export type ParentRow = { id: string; slug: string; archivedAt: Date | null; deleted: boolean };
+export type ParentRow = { id: string; slug: string; archived: boolean; deleted: boolean };
 
 /**
  * The environments `environmentId` inherits from, nearest first: its
- * parent, that one's, and so on. The app makes a parent before its child
- * and never changes it, so its chains neither loop nor run past
- * `MAX_PARENTS`. Null for one that does, written around it.
+ * parent, that one's, and so on, in one statement. The app makes a parent
+ * before its child and never changes it, so its chains neither loop nor run
+ * past `MAX_PARENTS`. Null for one that does, written around it.
  */
 export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[] | null> {
-  const { environments } = tablesOf(db);
+  // One level past the most there may be, so that a chain too long, or a loop, shows.
+  const chain = await dialect.rowsOf<{ id: string; slug: string; archived: boolean | number; parent_id: string | null }>(db, sql`
+    WITH RECURSIVE chain (id, slug, archived, parent_id, depth) AS (
+      SELECT id, slug, archived_at IS NOT NULL, parent_id, 0 FROM environments WHERE id = ${environmentId}
+      UNION ALL
+      SELECT parent.id, parent.slug, parent.archived_at IS NOT NULL, parent.parent_id, chain.depth + 1
+      FROM chain JOIN environments parent ON parent.id = chain.parent_id
+      WHERE chain.depth <= ${MAX_PARENTS}
+    )
+    SELECT id, slug, archived, parent_id FROM chain ORDER BY depth`);
+  const [self, ...above] = chain;
+  if (self === undefined) return [];
   const parents: ParentRow[] = [];
   const seen = new Set([environmentId]);
-  let [next] = await db.select({ parentId: environments.parentId }).from(environments).where(eq(environments.id, environmentId));
-  while (next?.parentId != null) {
-    if (seen.has(next.parentId) || parents.length === MAX_PARENTS) return null;
-    seen.add(next.parentId);
-    const [row] = await db
-      .select({ id: environments.id, slug: environments.slug, archivedAt: environments.archivedAt, parentId: environments.parentId })
-      .from(environments)
-      .where(eq(environments.id, next.parentId));
-    if (row === undefined) return null;
-    parents.push({ id: row.id, slug: row.slug, archivedAt: row.archivedAt, deleted: isTombstone(row.slug) });
-    next = row;
+  for (const row of above) {
+    if (seen.has(row.id) || parents.length === MAX_PARENTS) return null;
+    seen.add(row.id);
+    parents.push({ id: row.id, slug: row.slug, archived: Boolean(row.archived), deleted: isTombstone(row.slug) });
   }
-  return parents;
+  // A parent named and not found: the chain was cut around the app.
+  const last = chain.at(-1)!;
+  return last.parent_id === null ? parents : null;
 }
 
 /** Whether an environment, and its project, are neither archived nor deleted. */

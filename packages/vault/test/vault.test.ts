@@ -2473,6 +2473,30 @@ test('an entry forged in the vault\'s name about a member is passed over and rep
   assert.deepEqual(verdict.ok ? null : [verdict.failedAtSeq, verdict.reason], [Number(fields.seq), 'not written by the vault: its MAC does not match']);
 });
 
+test("through a key service, a read that finds a forged entry logs its intent, then its report, in one transaction (review r1 of #278)", async () => {
+  const { keks } = service();
+  const w = await world({ keks });
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+  const [head] = await db.owner.select().from(auditChainHead);
+  const fields = {
+    seq: head.nextSeq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: ROOT,
+    action: 'member.remove', decision: 'allow', code: null, subjectPrincipal: ADA, projectId: null, environmentId: null,
+    secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: '{}',
+  };
+  const mac = Buffer.alloc(32, 7);
+  const hash = entryHash(head.headHash, fields, mac);
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+  await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
+
+  // The intent's decision appends its intent, then the report it found, each after the other under the one head it holds.
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) })).ok, true);
+  assert.deepEqual(await tamperings(w), [[ADA, 'forged_entry']]);
+  assert.deepEqual((await vaultLog(w)).filter((entry) => entry.actor === ADA).map((entry) => entry.action), ['key.intent', 'secret.read']);
+});
+
 test('the newest entries cut from the log without its head stop the next decision', async () => {
   const w = await world();
   const { auditLog } = tablesOf(db.owner);

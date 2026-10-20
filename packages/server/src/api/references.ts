@@ -307,16 +307,17 @@ export async function resolveValues(
   key?: string,
 ): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
   const here = `${place.project.slug}/${place.environment!.slug}`;
-  const parents = await parentsOf(tx, environment.environmentId);
+  // An environment that names no parent has none: nothing to read.
+  const parents = place.environment!.parentId === null ? [] : await parentsOf(tx, environment.environmentId);
   if (parents === null) return { items: [], unreadable: [{ reason: `${here}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre` }] };
-  const layers = [{ id: environment.environmentId, slug: place.environment!.slug, archivedAt: null, deleted: false }, ...parents];
+  const layers = [{ id: environment.environmentId, slug: place.environment!.slug, archived: false, deleted: false }, ...parents];
   const items: Readable[] = [];
   const refused: Unreadable[] = [];
   // The keys a nearer environment settled: holds, or removed.
   const settled = new Set<string>();
   for (const [depth, layer] of layers.entries()) {
     const parent = depth === 0 ? undefined : { environmentId: layer.id, slug: layer.slug };
-    if (layer.deleted || layer.archivedAt !== null) {
+    if (layer.deleted || layer.archived) {
       refused.push({ reason: `${here} inherits from ${place.project.slug}/${layer.slug}, which is ${layer.deleted ? 'deleted' : 'archived'}` });
       break;
     }

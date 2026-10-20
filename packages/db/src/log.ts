@@ -1,10 +1,10 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { prepared } from './prepared.ts';
-import { clockMillis, forUpdate } from './dialect.ts';
+import { clockMillis, engineOf, forUpdate } from './dialect.ts';
 
 /**
  * Appending to the audit log, the one table both the app and the vault
@@ -124,15 +124,21 @@ export async function appendEntries(
   key: LogKey,
   entries: readonly NewEntry[],
   check?: (tx: Transaction) => Promise<void>,
+  /**
+   * The head as a statement of the caller's locked it, with the log's last
+   * entry and the clock as that statement read them once it held the lock:
+   * nothing to read again.
+   */
+  locked?: HeldHead,
 ): Promise<Appended> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
 
   // Every append queues here, if its transaction has not already.
-  const head = await lockLogHead(tx);
+  const head = locked?.head ?? (await lockLogHead(tx));
   await check?.(tx);
-  const [{ now }] = await clockNow(tx);
-  const [last] = await lastEntry(tx);
+  const now = locked?.at ?? (await clockNow(tx))[0]!.now;
+  const last = locked === undefined ? (await lastEntry(tx))[0] : locked.last ?? undefined;
 
   const expected = last === undefined ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
   if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
@@ -179,12 +185,24 @@ export async function appendEntries(
     seq += 1n;
   }
 
-  await tx.insert(auditLog).values(rows);
-  await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
+  if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
+    // The entries and the head that names the last of them, in one statement.
+    await tx.execute(sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
+      UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`);
+  } else {
+    await tx.insert(auditLog).values(rows);
+    await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
+  }
   const written = { nextSeq: seq, headHash: prevHash };
   afterCommit(tx, () => remember(key, written));
   return { seqStart: head.nextSeq, ...written, occurredAt: now };
 }
+
+/** A head locked by a statement of the caller's, and what it read under the lock (`appendEntries`). */
+export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { seq: bigint; hash: Buffer } | null; at: number };
+
+/** Entries one statement inserts at most, at 21 parameters each: Postgres takes 65,535. */
+const ROWS_AT_ONCE = 3000;
 
 const clockNow = prepared((db) => db.select({ now: clockMillis(db) }).from(tablesOf(db).auditChainHead));
 
@@ -325,15 +343,22 @@ export async function newestVaultSeq(db: Queryable, action: string): Promise<big
   return (row?.seq as bigint | undefined) ?? null;
 }
 
-const newestSeq = prepared((db) => {
+const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));
+
+/**
+ * `newestVaultSeq`'s query, to run or to read inside another, as a
+ * credential's read takes the newest `policy.change` with it: one rule for
+ * what the newest is, wherever it is read.
+ */
+export function newestSeqQuery(db: Queryable, action: string | Placeholder) {
   const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, sql.placeholder('action')), eq(auditLog.decision, 'allow')))
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
     .orderBy(desc(auditLog.seq))
     .limit(1);
-});
+}
 
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */
 export const LOOK_BACK = { page: 32, pages: 32 };
