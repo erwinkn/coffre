@@ -88,9 +88,14 @@ export function snapshotQuery(asked: Asked): SQL {
       'released', ${released === undefined
         ? sql`0`
         : sql`(
-          SELECT SUM(COALESCE(json_array_length(metadata, '$.secrets'), 1)) FROM audit_log
-          WHERE author = 'vault' AND actor = ${released.principal} AND action = 'secret.read' AND decision = 'allow'
-            AND occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
+          SELECT count(DISTINCT key) FROM (
+            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts).
+            SELECT coalesce(e.secret_id, json_extract(one.value, '$.secretId')) AS key FROM audit_log e
+            LEFT JOIN json_each(CASE WHEN e.secret_id IS NULL THEN e.metadata END, '$.secrets') AS one ON one.type = 'object'
+            WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
+              AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
+            UNION ALL SELECT value FROM json_each(${JSON.stringify(released.keys)})
+          )
         )`}
     ) AS snapshot`;
 }

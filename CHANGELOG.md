@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The bulk limit counts different keys, not reads.** It counted every
+  key the vault released, repeats included, so a tool that exports the
+  same 40 keys on every command tripped it on the 26th run within 15
+  minutes, and locked out everyone signed in as that person. A key read
+  again exposes nothing new: it now counts once in the window, whatever
+  its version. The limit is still 1000 keys per principal in any 15
+  minutes, counted exactly under the reader's row, in the statement that
+  already read the decision: no statement more. On Postgres, a full
+  window of 1000 different keys costs about 4 ms to count, as before; a
+  read of 40 keys repeated adds about 0.1 ms to every later read in the
+  window ([architecture.md](docs/architecture.md), "The bulk limit").
+  No migration and no change to the configuration, the refusal or its
+  entries.
+
 - **A proxied credential can leave through the deployment's egress.** An
   upstream that lets in only the addresses it knows, as Schuman's API
   does, cannot allowlist a Worker's `fetch`, which leaves from

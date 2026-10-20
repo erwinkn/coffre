@@ -383,10 +383,10 @@ type Decision = {
 
 /**
  * What a decision reads besides its members' standing, with it (`Snapshot`):
- * places, references' ends, and whether a principal's releases count to the
- * bulk limit, in the vault's window.
+ * places, references' ends, and the distinct keys a principal would hold
+ * released in the vault's window, with `keys` too: the bulk limit's count.
  */
-type Reads = Pick<Asked, 'environments' | 'references'> & { released?: { principal: string } };
+type Reads = Pick<Asked, 'environments' | 'references'> & { released?: { principal: string; keys: readonly string[] } };
 
 /** The actions of the entries the vault writes about keys. */
 type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
@@ -1215,7 +1215,7 @@ class VaultService implements Vault {
         });
       }
       let first = codes.find((code) => code !== null) ?? null;
-      if (first === null && action === 'secret.read' && this.#overBulkLimit(d, secrets.length)) first = 'bulk_limit';
+      if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
       if (first !== null) {
         throw new Refused(
           refusal(first, MESSAGES[first]),
@@ -1228,7 +1228,7 @@ class VaultService implements Vault {
     const reads: Reads = {
       environments: [...secrets, ...secrets.map((secret, i) => call.places?.[i] ?? secret)].map((place) => place.environmentId),
       references: call.references ?? [],
-      ...(action === 'secret.read' ? { released: { principal } } : {}),
+      ...(action === 'secret.read' ? { released: { principal, keys: secrets.map((secret) => secret.secretId) } } : {}),
     };
     // The intent's own identity; `operationId` is the app's, for the whole action.
     const intentId = call.remote ? randomUUID() : null;
@@ -1346,9 +1346,14 @@ class VaultService implements Vault {
     }, late, reads);
   }
 
-  /** Whether `n` more keys would take the reader past the bulk limit; counted under their row's lock, so exactly (`Reads`). */
-  #overBulkLimit(d: Decision, n: number): boolean {
-    return d.reads.released + n > this.#config.bulkLimit.count;
+  /**
+   * Whether this read's keys would take the reader past the bulk limit: the
+   * distinct keys released to them in the window, these among them. A key
+   * read again exposes nothing new, so it counts once, whatever its version.
+   * Counted under their row's lock, so exactly (`Reads`).
+   */
+  #overBulkLimit(d: Decision): boolean {
+    return d.reads.released > this.#config.bulkLimit.count;
   }
 
   // --- references ---------------------------------------------------------------

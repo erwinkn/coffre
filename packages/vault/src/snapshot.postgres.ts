@@ -82,9 +82,14 @@ export function snapshotQuery(asked: Asked): SQL {
       'released', ${released === undefined
         ? sql`0`
         : sql`(
-          SELECT SUM(COALESCE(jsonb_array_length(metadata::jsonb -> 'secrets'), 1)) FROM audit_log
-          WHERE author = 'vault' AND actor = ${released.principal} AND action = 'secret.read' AND decision = 'allow'
-            AND occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
+          SELECT count(DISTINCT key) FROM (
+            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts).
+            SELECT coalesce(e.secret_id::text, one #>> '{}') FROM audit_log e
+            LEFT JOIN LATERAL jsonb_path_query(CASE WHEN e.secret_id IS NULL THEN e.metadata::jsonb END, '$.secrets[*].secretId') AS one ON true
+            WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
+              AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
+            UNION ALL SELECT unnest(${sql.param([...released.keys])}::text[])
+          ) AS released (key)
         )`}
     ) AS snapshot`;
 }

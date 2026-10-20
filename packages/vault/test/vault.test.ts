@@ -527,6 +527,7 @@ test('only a call the rules allow reaches the KEK', async () => {
     { secret: dev, wrapped: await wrapped(w, dev) },
     { secret: prod, wrapped: await wrapped(w, prod) },
   ];
+  const others = await Promise.all([await w.secret(w.dev), await w.secret(w.dev)].map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
   const before = { ...seen };
   const code = (outcome: { ok: boolean; refusal?: { code: string } }) => outcome.refusal?.code;
 
@@ -538,8 +539,8 @@ test('only a call the rules allow reaches the KEK', async () => {
   assert.deepEqual({ wrap: seen.wrap, unwrap: seen.unwrap }, { wrap: before.wrap, unwrap: before.unwrap }, 'refused, so no key was wrapped or unwrapped');
 
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) })).ok, true);
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) })).ok, true);
-  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) })), 'bulk_limit');
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(others.slice(0, 1)) })).ok, true);
+  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(others.slice(1)) })), 'bulk_limit');
   assert.equal(seen.unwrap, before.unwrap + 2, 'past the bulk limit, nothing reaches the KEK either');
 
   // With a key service, each call that reaches it is announced first, and a
@@ -710,26 +711,95 @@ test('a read that waits for the log\'s head is decided as of when it holds it: a
   assert.equal(!result.ok && result.refusal.code, 'expired');
 });
 
-test('the bulk limit counts keys per principal over a rolling window', async () => {
+/** `n` new secrets at `environmentId`, each its key wrapped. */
+async function keys(w: World, n: number, environmentId = w.dev) {
+  const secrets: SecretRef[] = [];
+  for (let i = 0; i < n; i += 1) secrets.push(await w.secret(environmentId));
+  const result = await w.vault.wrap({ principal: ROOT, items: secrets.map((secret) => ({ secret, key: randomBytes(32).toString('base64') })) });
+  assert.ok(result.ok, JSON.stringify(result));
+  return secrets.map((secret, i) => ({ secret, wrapped: result.wrapped[i]! }));
+}
+
+test('the bulk limit counts the distinct keys released to each principal over a rolling window', async () => {
   const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   await member(w, ADA, [[w.dev, 'viewer']]);
   await member(w, BOB, [[w.dev, 'viewer']]);
-  const secrets = [await w.secret(w.dev), await w.secret(w.dev), await w.secret(w.dev)];
-  const items = await Promise.all(secrets.map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
+  const [first, second] = [await keys(w, 3), await keys(w, 3)];
+  const read = async (principal: string, items: typeof first) => {
+    const outcome = await w.vault.unwrap({ principal, purpose: 'run', items: await versionItems(items) });
+    return outcome.ok ? 'ok' : outcome.refusal.code;
+  };
 
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok, true);
-  const over = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) });
-  assert.equal(!over.ok && over.refusal.code, 'bulk_limit');
+  assert.equal(await read(ADA, first), 'ok');
+  // The same three keys again are no new ones.
+  assert.equal(await read(ADA, first), 'ok');
+  assert.equal(await read(ADA, second), 'bulk_limit', 'three keys, then three others: six');
   // Refusals do not count, and neither does anyone else's reading.
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 2)) })).ok, true);
-  assert.equal((await w.vault.unwrap({ principal: BOB, purpose: 'run', items: await versionItems(items) })).ok, true);
-  const stillOver = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) });
-  assert.equal(!stillOver.ok && stillOver.refusal.code, 'bulk_limit');
+  assert.equal(await read(ADA, second.slice(0, 2)), 'ok');
+  assert.equal(await read(BOB, second), 'ok');
+  assert.equal(await read(ADA, second.slice(2)), 'bulk_limit');
+  assert.equal(await read(ADA, [...first, ...second.slice(0, 2)]), 'ok', 'the five it holds, again');
 
   w.clock.offset += 60_001;
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok, true);
+  assert.equal(await read(ADA, second), 'ok');
   // Each refused read is one entry, its keys listed.
   assert.deepEqual((await vaultLog(w)).filter((entry) => entry.code === 'bulk_limit').map((entry) => (entry.detail.secrets as unknown[] | undefined)?.length ?? 1), [3, 1]);
+});
+
+test('reading the same keys again never trips the bulk limit, nor a new version of one of them', async () => {
+  const w = await world({ bulkLimit: { count: 3, windowMs: 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const items = await keys(w, 3);
+  const versions = await versionItems(items);
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: versions })).ok, true, `the whole set, read ${i + 1}`);
+    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: versions.slice(i % 3, i % 3 + 1) })).ok, true, `one of them, read ${i + 1}`);
+  }
+  // Asked twice in one read, a key is still one.
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: [...versions, ...versions] })).ok, true);
+  // A rotated key is the same key: its new version counts as it did.
+  const rotated = { ...items[0]!.secret, version: 2 };
+  const [again] = await versionItems([{ secret: rotated, wrapped: await wrapped(w, rotated) }]);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [again!] })).ok, true);
+  const [other] = await keys(w, 1);
+  const refused = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([other!]) });
+  assert.equal(!refused.ok && refused.refusal.code, 'bulk_limit', 'a fourth key is one too many');
+});
+
+test('the bulk limit counts a key once across reads of one key and reads of several, at one place or more', async () => {
+  const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer'], [w.prod, 'viewer']]);
+  const [a, b, c, d, e, f] = await keys(w, 6);
+  const [p] = await keys(w, 1, w.prod);
+  const read = async (items: { secret: SecretRef; wrapped: WrappedKey }[]) => {
+    const outcome = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) });
+    return outcome.ok ? 'ok' : outcome.refusal.code;
+  };
+
+  // One entry listing a, b at dev, and one naming p alone at prod: three keys.
+  assert.equal(await read([a!, b!, p!]), 'ok');
+  assert.equal(await read([a!]), 'ok');
+  assert.equal(await read([p!, c!]), 'ok', 'four');
+  assert.equal(await read([d!]), 'ok', 'five');
+  assert.equal(await read([b!, c!, d!, p!]), 'ok', 'all of them again');
+  assert.equal(await read([a!, e!]), 'bulk_limit', 'six');
+  assert.equal(await read([f!]), 'bulk_limit');
+  const { auditLog } = tablesOf(db.owner);
+  const entries = await db.owner.select().from(auditLog)
+    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.actor, ADA), eq(auditLog.decision, 'allow')));
+  assert.ok(entries.some((entry) => entry.secretId === null) && entries.some((entry) => entry.secretId !== null), 'both shapes of entry are counted');
+});
+
+test('a thousand keys, the default limit, then one more trips it', async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const items = await keys(w, 1001);
+  const versions = await versionItems(items);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: versions.slice(0, 1000) })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: versions.slice(0, 1000) })).ok, true, 'the same thousand again');
+  const over = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: versions.slice(1000) });
+  assert.equal(!over.ok && over.refusal.code, 'bulk_limit');
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: versions.slice(999, 1000) })).ok, true);
 });
 
 test('two instances share one log, one bulk limit and one set of generations', async () => {
@@ -738,11 +808,10 @@ test('two instances share one log, one bulk limit and one set of generations', a
   const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   const other = await w.twin();
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const secret = await w.secret(w.dev);
-  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+  const items = await keys(w, 12);
 
   const reads = await Promise.all(
-    Array.from({ length: 12 }, async (_, i) => (i % 2 === 0 ? w.vault : other).unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })),
+    items.map(async (item, i) => (i % 2 === 0 ? w.vault : other).unwrap({ principal: ADA, purpose: 'run', items: await versionItems([item]) })),
   );
   assert.equal(reads.filter((read) => read.ok).length, 5, 'exactly the limit, across both');
   assert.ok(reads.filter((read) => !read.ok).every((read) => !read.ok && read.refusal.code === 'bulk_limit'));
@@ -763,15 +832,15 @@ test('two processes on one SQLite file share the bulk limit exactly', { skip: EN
   const bulkLimit = { count: 6, windowMs: 60_000 };
   const w = await world({ keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')), bulkLimit });
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const secret = await w.secret(w.dev);
-  const input = { principal: ADA, purpose: 'run' as const, items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) };
+  // Twelve keys, one a read: the same key again would count once.
+  const inputs = await Promise.all((await keys(w, 12)).map(async (item) => ({ principal: ADA, purpose: 'run' as const, items: await versionItems([item]) })));
 
   const reader = spawn(
     process.execPath,
     [
       '--conditions=coffre:source',
       fileURLToPath(new URL('reader.ts', import.meta.url)),
-      JSON.stringify({ url: process.env.COFFRE_TEST_DATABASE_URL, kek: kek.toString('base64'), signingKey: SIGNING_KEY.toString('base64'), bulkLimit, input, reads: 6 }),
+      JSON.stringify({ url: process.env.COFFRE_TEST_DATABASE_URL, kek: kek.toString('base64'), signingKey: SIGNING_KEY.toString('base64'), bulkLimit, inputs: inputs.slice(6) }),
     ],
     { stdio: ['ignore', 'pipe', 'inherit'] },
   );
@@ -780,7 +849,7 @@ test('two processes on one SQLite file share the bulk limit exactly', { skip: EN
     reader.stdout.on('data', (chunk: Buffer) => (out += chunk));
     reader.once('exit', (code) => (code === 0 ? resolve(JSON.parse(out) as string[]) : reject(new Error(`the reader exited ${code}`))));
   });
-  const ours = Promise.all(Array.from({ length: 6 }, () => w.vault.unwrap(input))).then((outcomes) =>
+  const ours = Promise.all(inputs.slice(0, 6).map((input) => w.vault.unwrap(input))).then((outcomes) =>
     outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal.code)),
   );
   const all = [...(await theirs), ...(await ours)];

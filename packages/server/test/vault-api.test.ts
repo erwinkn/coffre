@@ -132,7 +132,7 @@ test('an expired grant refuses: in the app, and in the vault if the app were wro
   assert.equal((await vaultEntries())[0].reason, 'expired');
 });
 
-test('the bulk limit counts one read per secret, trips with its own code, and is logged', async () => {
+test('the bulk limit counts each secret read once in its window, trips with its own code, and is logged', async () => {
   const limited = testDeps(db.runtime, [ROOT], {
     vault: testVault([ROOT], { bulkLimit: { count: 3, windowMinutes: 1 } }, deps.vault),
   });
@@ -143,15 +143,18 @@ test('the bulk limit counts one read per secret, trips with its own code, and is
   // Written again, so this vault's key wraps them.
   await admin.secrets.set('market/dev', { API_KEY: 'sk_test', DB_URL: 'postgres://dev' });
 
-  // Two keys, then two more: four reads in the window, over three.
+  // Two keys, then the same two again: still two in the window. A third is three, and a fourth over three.
   assert.deepEqual(Object.keys((await dev.secrets.reveal('market/dev')).values).sort(), ['API_KEY', 'DB_URL']);
-  await assert.rejects(dev.secrets.reveal('market/dev'), { status: 403, code: 'bulk_limit', reason: 'bulk_limit' });
+  assert.deepEqual(Object.keys((await dev.secrets.reveal('market/dev')).values).sort(), ['API_KEY', 'DB_URL']);
+  await admin.secrets.set('market/dev', { REDIS_URL: 'redis://dev', SMTP_URL: 'smtp://dev' });
+  assert.equal((await dev.secrets.reveal('market/dev/REDIS_URL')).values.REDIS_URL, 'redis://dev');
+  await assert.rejects(dev.secrets.reveal('market/dev/SMTP_URL'), { status: 403, code: 'bulk_limit', reason: 'bulk_limit' });
   const [refused] = await vaultEntries(admin);
   assert.deepEqual([refused.action, refused.decision, refused.reason], ['secret.read', 'deny', 'bulk_limit']);
 
   // A rolling window: a minute later the same read goes through.
   limited.vault.advance(61_000);
-  assert.equal((await dev.secrets.reveal('market/dev')).values.API_KEY, 'sk_test');
+  assert.equal((await dev.secrets.reveal('market/dev/SMTP_URL')).values.SMTP_URL, 'smtp://dev');
 });
 
 test('a vault given the wrong KEK answers every request with 503, its entries stop verifying, and readiness goes red', async () => {
