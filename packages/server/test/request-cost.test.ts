@@ -13,7 +13,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
-import type { Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { localVault } from '@coffre/vault/node';
 import type pg from 'pg';
@@ -95,7 +94,7 @@ before(async () => {
     owners: [ROOT],
   });
   // Every call the app makes of the vault: on Workers, each its own invocation and connection.
-  const vault = new Proxy(opened as unknown as Vault, {
+  const vault = new Proxy(opened as unknown as FixtureDeps['vault'], {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (typeof value !== 'function') return value;

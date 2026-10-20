@@ -34,7 +34,7 @@ const uiBoundaries = {
 };
 
 /**
- * What each of the vault's files may import: Drizzle only in its store, and
+ * What each of the vault's files may import: Drizzle only in its queries, and
  * what opens a database from a URL only in its Node entry, since the Worker
  * cannot load it. SQLite only ever through @coffre/db.
  */
@@ -49,7 +49,7 @@ function vaultBoundaries({ drizzle = false, connect = false } = {}) {
           },
         ],
     patterns: [
-      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts; add or extend one there." }]),
+      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts, and a decision's read in src/snapshot.<dialect>.ts; add or extend one there." }]),
       { regex: '^(node:sqlite|@libsql/)', message: 'The vault reaches SQLite only through @coffre/db, and only on Node.' },
     ],
   };
@@ -122,7 +122,7 @@ export default defineConfig([
     // opens a database on Node.
     name: 'coffre/vault-boundaries',
     files: ['packages/vault/src/**/*.ts'],
-    ignores: ['packages/vault/src/store.ts', 'packages/vault/src/node.ts'],
+    ignores: ['packages/vault/src/store.ts', 'packages/vault/src/snapshot.*.ts', 'packages/vault/src/node.ts'],
     ...parsing,
     rules: {
       'no-restricted-imports': ['error', vaultBoundaries()],
@@ -130,7 +130,8 @@ export default defineConfig([
   },
   {
     name: 'coffre/vault-store',
-    files: ['packages/vault/src/store.ts'],
+    // Its store, and a decision's one read, a statement per dialect (snapshot.ts).
+    files: ['packages/vault/src/store.ts', 'packages/vault/src/snapshot.*.ts'],
     ...parsing,
     rules: {
       'no-restricted-imports': ['error', vaultBoundaries({ drizzle: true })],
