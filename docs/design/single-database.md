@@ -247,7 +247,12 @@ transaction of its own:
    it read is what holds under the lock. Held by another, it waits for it
    in a statement of its own, then reads again. It checks, too, that the
    head names the last entry it read: one appended in the instant between
-   its snapshot and its lock is read again (`snapshot` in the vault).
+   its snapshot and its lock is read again (`snapshot` in the vault). That
+   check sees a commit only through the head it moved, so it rests on one
+   invariant: every change a decision reads commits with an entry under the
+   head, the vault's decisions and the app's `audited` writes to places
+   alike. A write to a place that logged nothing could slip into that
+   instant unseen.
 
 #### Releasing a key, and the race with KMS
 

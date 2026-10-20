@@ -22,7 +22,11 @@ import type { EnvironmentRow, Member } from './store.ts';
  * transaction holds the head, the decision waits for it in a statement of
  * its own, then reads again, holding it. The read checks that the head names
  * the last entry it saw, too (`current`): one taken between the snapshot and
- * the lock, by an append that committed in that instant, is read again.
+ * the lock, by an append that committed in that instant, is read again. That
+ * check sees a commit only through the head it moved, which holds because
+ * every change a decision reads commits with an entry under the head: the
+ * vault's own decisions, and the app's writes to places, each `audited`
+ * with its entry.
  */
 export type Snapshot = {
   /** The database's clock, milliseconds since the epoch. */
@@ -71,11 +75,14 @@ export type Asked = {
 };
 
 /** One statement's read, as `Snapshot` says; with the head, two more when another holds it. */
+export async function snapshot(tx: Transaction, asked: Asked): Promise<Snapshot>;
+export async function snapshot(db: Queryable, asked: Asked & { head?: false }): Promise<Snapshot>;
 export async function snapshot(db: Queryable, asked: Asked): Promise<Snapshot> {
   const read = () => readOnce(db, asked);
   const first = await read();
   if (asked.head !== true || (first.head !== null && current(first.head))) return first;
   // Held by another, or moved in the instant before the lock: everything again, once the head is this transaction's.
+  // Asked for the head, `db` is a transaction (the overloads above).
   if (first.head === null) await lockLogHead(db as Transaction);
   const again = await read();
   if (again.head === null) throw new Error("the log's head, held by this transaction, was read as held by another");
