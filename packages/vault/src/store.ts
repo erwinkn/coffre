@@ -51,6 +51,14 @@ export type { GrantRow };
 export { accessEntriesAbout, insertGrant, liveProjects } from '@coffre/db/grants';
 export { newestVaultEntries } from '@coffre/db/log';
 
+/**
+ * On Postgres, fail a lock wait in this transaction after `ms`, rather than
+ * wait for ever behind a transaction that never ends.
+ */
+export async function boundLockWaits(tx: Transaction, ms: number): Promise<void> {
+  if (engineOf(tx) === 'postgres') await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${Math.trunc(ms)}`));
+}
+
 /** The database's clock, now. */
 export async function now(db: Queryable): Promise<number> {
   const [{ at }] = await clock(db);

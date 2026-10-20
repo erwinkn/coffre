@@ -44,10 +44,9 @@ class CountingPool {
   }
 
   async #counted(query: pg.Pool['query'] | pg.PoolClient['query'], args: unknown[]): Promise<unknown> {
-    const answered = await (query as (...queryArgs: unknown[]) => Promise<pg.QueryResult | pg.QueryResult[]>)(...args);
+    const answered = await (query as (...queryArgs: unknown[]) => Promise<pg.QueryResult>)(...args);
     this.count.statements += 1;
-    // A simple query of several statements answers each: BEGIN and its lock timeout, one round trip.
-    for (const result of [answered].flat()) this.count.rows += result.rows?.length ?? 0;
+    this.count.rows += answered.rows?.length ?? 0;
     return answered;
   }
 
@@ -151,14 +150,14 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
  *
  * A reveal: the credential, with the newest policy change; the path; the
  * environment's rows. The vault's `access`: one statement. Its `unwrap`:
- * the versions, then BEGIN with its lock timeout, the reader's row locked,
+ * the versions, then BEGIN, its lock timeout, the reader's row locked,
  * the head locked with everything the decision reads, the entries and the
  * head in one statement, COMMIT.
  */
 const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 3, vault: 7, vaultCalls: 2 } },
-  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 3, vault: 7, vaultCalls: 2 } },
-  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 3, vault: 7, vaultCalls: 2 } },
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 3, vault: 8, vaultCalls: 2 } },
+  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 3, vault: 8, vaultCalls: 2 } },
+  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 3, vault: 8, vaultCalls: 2 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
 };
 

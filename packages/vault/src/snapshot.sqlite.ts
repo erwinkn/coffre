@@ -77,7 +77,8 @@ export function snapshotQuery(asked: Asked): SQL {
           OR env.id IN (
             SELECT json_extract(place.value, '$.environmentId')
             FROM policy, json_each(policy.metadata, '$.policy.protected') AS place
-            WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array'
+            -- Of a forged entry's, an element that is no object names nothing: json_extract would fail on a string.
+            WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'
           )
       )),
       'ended', json((

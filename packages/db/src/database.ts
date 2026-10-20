@@ -2,7 +2,6 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
   createTableRelationsHelpers,
-  sql,
   extractTablesRelationalConfig,
   getTableName,
   is,
@@ -10,8 +9,8 @@ import {
   type ExtractTablesWithRelations,
   type RelationalSchemaConfig,
 } from 'drizzle-orm';
-import { NodePgDatabase, NodePgSession, NodePgTransaction } from 'drizzle-orm/node-postgres';
-import { PgDialect, type PgTransactionConfig } from 'drizzle-orm/pg-core';
+import { NodePgDatabase, NodePgDriver } from 'drizzle-orm/node-postgres';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type pg from 'pg';
 
 import { trackCommits } from './commits.ts';
@@ -27,58 +26,6 @@ export type Database = NodePgDatabase<typeof schema>;
 export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Anything a read can run on: the database, or an open transaction. */
 export type Queryable = Database | Transaction;
-
-/**
- * A transaction's options: Postgres's own, and how long a lock wait in it
- * may last before it fails, rather than wait for ever behind a transaction
- * that never ends. SQLite, one transaction at a time, ignores both.
- */
-export type TransactionConfig = PgTransactionConfig & { lockTimeoutMs?: number };
-
-/**
- * Drizzle's session, but for its BEGIN: a lock timeout is set in the same
- * round trip, one simple query, rather than in a statement of its own.
- * Otherwise the transaction is Drizzle's, step for step.
- */
-class Session extends NodePgSession<typeof schema, ExtractTablesWithRelations<typeof schema>> {
-  readonly #pool: pg.Pool;
-  readonly #dialect: PgDialect;
-  readonly #schema: Relational;
-
-  constructor(pool: pg.Pool, dialect: PgDialect, relational: Relational) {
-    super(pool, dialect, relational);
-    this.#pool = pool;
-    this.#dialect = dialect;
-    this.#schema = relational;
-  }
-
-  override async transaction<T>(work: (tx: NodePgTransaction<typeof schema, ExtractTablesWithRelations<typeof schema>>) => Promise<T>, config: TransactionConfig = {}): Promise<T> {
-    const client = await this.#pool.connect();
-    const tx = new NodePgTransaction<typeof schema, ExtractTablesWithRelations<typeof schema>>(this.#dialect, new NodePgSession(client, this.#dialect, this.#schema), this.#schema);
-    await tx.execute(sql.raw(begin(config)));
-    try {
-      const result = await work(tx);
-      await tx.execute(sql`commit`);
-      return result;
-    } catch (error) {
-      await tx.execute(sql`rollback`);
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-}
-
-/** BEGIN, with the transaction's modes and its lock timeout: `begin isolation level repeatable read read only; set local lock_timeout = 15000`. */
-function begin({ isolationLevel, accessMode, deferrable, lockTimeoutMs }: TransactionConfig): string {
-  const modes = [
-    isolationLevel === undefined ? null : `isolation level ${isolationLevel}`,
-    accessMode ?? null,
-    deferrable === undefined ? null : deferrable ? 'deferrable' : 'not deferrable',
-  ].filter((mode) => mode !== null);
-  const statement = ['begin', ...modes].join(' ');
-  return lockTimeoutMs === undefined ? statement : `${statement}; set local lock_timeout = ${Math.trunc(lockTimeoutMs)}`;
-}
 
 /**
  * What Drizzle needs from a connection pool. A `pg.Pool` fits, and so does the
@@ -158,12 +105,12 @@ export function createDatabase(pool: PoolLike): Database {
   // What `drizzle(pool, { schema })` builds, but for the schema's config, made once.
   const dialect = new PgDialect();
   const config = relationalSchema();
-  const db: Database = new NodePgDatabase(dialect, new Session(guarded(pool) as pg.Pool, dialect, config), config);
+  const db: Database = new NodePgDatabase(dialect, new NodePgDriver(guarded(pool) as pg.Pool, dialect).createSession(config), config);
   // Each transaction's work runs knowing which one it is in, until that work is done. Not until
   // the COMMIT comes back: the transaction waits on nothing then, so what the work left running
   // may ask for a query, which waits for the transaction to end rather than for itself.
   const run = db.transaction.bind(db);
-  db.transaction = (async (work, config?: TransactionConfig) => {
+  db.transaction = (async (work, config) => {
     const open = { pool, open: true };
     try {
       return await run(

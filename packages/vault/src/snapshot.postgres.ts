@@ -66,13 +66,14 @@ export function snapshotQuery(asked: Asked): SQL {
           'deleted', env.slug LIKE ${tomb} OR project.slug LIKE ${tomb},
           'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL)), '[]')
         FROM environments env JOIN projects project ON project.id = env.project_id
-        WHERE env.id = ANY(${environments})
-          OR env.id IN (SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL)
+        -- One list of ids, each found by the primary key.
+        WHERE env.id = ANY(ARRAY(
+          SELECT unnest(${environments})
+          UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL
           -- What the newest policy protects, by the ids its JSON names; one that is no UUID names nothing.
-          OR env.id IN (
-            SELECT (place #>> '{}')::uuid FROM policy, jsonb_path_query(policy.metadata::jsonb, '$.policy.protected[*].environmentId') AS place
-            WHERE (place #>> '{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-          )
+          UNION SELECT (place #>> '{}')::uuid FROM policy, jsonb_path_query(policy.metadata::jsonb, '$.policy.protected[*].environmentId') AS place
+          WHERE (place #>> '{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        ))
       ),
       'ended', (
         SELECT coalesce(json_agg(related_seq::text), '[]') FROM audit_log

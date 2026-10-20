@@ -77,7 +77,9 @@ export async function snapshot(db: Queryable, asked: Asked): Promise<Snapshot> {
   if (asked.head !== true || (first.head !== null && current(first.head))) return first;
   // Held by another, or moved in the instant before the lock: everything again, once the head is this transaction's.
   if (first.head === null) await lockLogHead(db as Transaction);
-  return read();
+  const again = await read();
+  if (again.head === null) throw new Error("the log's head, held by this transaction, was read as held by another");
+  return again;
 }
 
 /** Whether the head names the last entry the same statement saw: nothing was appended between its snapshot and its lock. */

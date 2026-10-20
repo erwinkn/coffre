@@ -24,16 +24,16 @@
   uploads through a real VPC Service are untested
   ([design](docs/design/credential-proxy.md), section 5, "Egress").
 
-- **A reveal runs 10 statements, not 30.** Each is a round trip through
+- **A reveal runs 11 statements, not 30.** Each is a round trip through
   Hyperdrive. A vault decision locks its member's row, then takes the
   log's head in the one statement that reads everything it decides on,
-  and appends its entries and moves the head in one more; BEGIN carries
-  its lock timeout. `access` is one statement. The app reads the newest
+  and appends its entries and moves the head in one more. `access` is one
+  statement. The app reads the newest
   policy change with the credential, and a fork's parents in one query.
 
   | Request, warm | App | Vault | Total |
   |---|---|---|---|
-  | `POST /api/reveals` (one key, an environment, a service's export) | 5 → 3 | 25 → 7 | 30 → 10 |
+  | `POST /api/reveals` (one key, an environment, a service's export) | 5 → 3 | 25 → 8 | 30 → 11 |
   | `GET /api/me` | 3 → 2 | 7 → 2 | 10 → 4 |
 
   The locks and their order are unchanged. The head is taken `SKIP

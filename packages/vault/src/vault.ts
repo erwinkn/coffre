@@ -98,7 +98,7 @@ import {
   type WrapInput,
   type WrappedKey,
 } from '@coffre/core/vault';
-import type { Database, Queryable, Transaction, TransactionConfig } from '@coffre/db';
+import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, isUnreachable, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, missingEntry, newestAuthentic, newestVaultSeq, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
@@ -201,9 +201,6 @@ const KEY_BUDGET_MS = 5_000;
 
 /** How long a decision waits for a lock: above the key budget, so a removal outwaits a read in flight. */
 const LOCK_TIMEOUT_MS = 15_000;
-
-/** A decision's transaction: its lock waits bounded, in its BEGIN's round trip. */
-const BOUNDED: TransactionConfig = { lockTimeoutMs: LOCK_TIMEOUT_MS };
 
 /** A member: `user:<email>` or `token:<name>`. */
 const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
@@ -513,6 +510,7 @@ class VaultService implements Vault {
   async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], late: boolean, asked: Reads): Promise<Outcome<T>> {
     try {
       const result = await this.#db.transaction(async (tx) => {
+        await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
         // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
         const reads = await this.#snapshot(tx, principals, asked, !late);
@@ -526,7 +524,9 @@ class VaultService implements Vault {
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
         if (entries.length > 0) {
-          const appended = await this.#append(tx, entries, d.underLock, d.reads.head === null ? undefined : d.reads);
+          // Under the head the decision's reads took: a remote key's decision takes it late, and reads again with it.
+          if (d.reads.head === null) throw new Error('a decision appends only under the head it read with');
+          const appended = await this.#append(tx, entries, d.underLock, d.reads);
           at = appended.occurredAt;
           entries.forEach((entry, i) => {
             if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
@@ -539,14 +539,17 @@ class VaultService implements Vault {
           await this.#seal(d, principal, accessSeq.get(principal));
         }
         return result;
-      }, BOUNDED);
+      });
       this.#reported(reports);
       return { ok: true, ...result };
     } catch (error) {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
       const entries = [...reports, ...readsByPlace(error.entries)];
       if (entries.length > 0) {
-        await this.#db.transaction((tx) => this.#append(tx, entries), BOUNDED);
+        await this.#db.transaction(async (tx) => {
+          await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+          await this.#append(tx, entries);
+        });
       }
       this.#reported(reports);
       if (error instanceof Outage) throw error.error;
@@ -836,6 +839,7 @@ class VaultService implements Vault {
   async #rotate(from: string): Promise<bigint> {
     const reports: NewEntry[] = [];
     const since = await this.#db.transaction(async (tx) => {
+      await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
       const principals = (await store.allMembers(tx)).map((row) => row.principal);
       const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
       await lockLogHead(tx);
@@ -851,7 +855,7 @@ class VaultService implements Vault {
       }
       const rotated = { actor: VAULT_ACTOR, action: KEY_ROTATE, decision: 'allow' as const, metadata: JSON.stringify({ from }) };
       return (await this.#append(tx, [rotated, ...reports])).seqStart;
-    }, BOUNDED);
+    });
     this.#reported(reports);
     return since;
   }

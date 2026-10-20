@@ -184,6 +184,17 @@ test("a policy entry forged in the vault's name is passed over; with none of its
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: prod })).ok, false);
 });
 
+test("a forged policy entry whose protected places are no objects is passed over, as any other: it stops no decision (review of #278)", async () => {
+  const w = await world();
+  await w.grant(ADA, w.dev, 'viewer');
+  const dev = await w.stored(w.dev);
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  // Read with every decision, by the ids it names: a string, a number and null name none, on either engine.
+  await forge({ policy: { roles: {}, instanceRoles: {}, protected: ['abc', 7, null] } });
+  assert.equal((await w.vault.access(ADA)).status, 'active');
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, true);
+});
+
 test('a role that holds nothing is given by whoever manages access alone: so a policy the vault cannot read leaves every service account to Owners', async () => {
   const w = await world();
   await w.grant(ADA, null, 'developer');
