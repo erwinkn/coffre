@@ -57,12 +57,12 @@
   A read of a whole environment that holds one is refused whole, naming
   the keys, rather than run without them; a dry run of a write does not
   compare them. Everything else reads as before.
-  - Issuing a token or binding says which places of its scope hold a
-    sensitive value it will not read: `withheld` in the API, a line in
-    `coffre tokens issue` and `coffre trust`, a warning in the token and
-    binding dialogs.
-  - A binding that replaces another, inheriting its scope, reads them only
-    where both did.
+  - Issuing a token or binding, or replacing a binding's keys, says which
+    places of its scope hold a sensitive value it will not read: `withheld`
+    in the API, a line in `coffre tokens issue` and `coffre trust`, a
+    warning in the token, binding and key dialogs.
+  - A binding that replaces another, inheriting its scope or with new keys,
+    reads them only where both did.
   - **Tokens and bindings issued before this release** are sealed once,
     on the first credential this version checks, as 0.4's scopes were:
     each reads them where whoever issued it is an Owner of the project

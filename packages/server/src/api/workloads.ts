@@ -201,11 +201,12 @@ export type BindingInput = {
 };
 
 /**
- * What replacing a service's keys for an issuer would do: the keys, and
- * the bindings on the issuer that new ones, the same but for those keys,
- * take the place of.
+ * What replacing a service's keys for an issuer would do: the keys, the
+ * bindings on the issuer that new ones, the same but for those keys, take
+ * the place of, and the places of their scopes that hold a sensitive value
+ * the new ones will not read: one an Owner bound, re-keyed by anyone else.
  */
-export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[] };
+export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[]; withheld: string[] };
 
 /**
  * A workload's ID token, verified for a service: the binding of the service
@@ -442,7 +443,8 @@ export class WorkloadService {
       for (const row of replaced) {
         scopes.set(row.id, await issuedScope(this.#deps.db, ctx, setting, standing, undefined, { action: 'token.bind', metadata: details }, inheritedScope([row])));
       }
-      const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id) };
+      const withheld = [...new Set([...scopes.values()].flatMap((issued) => issued.withheld))].sort();
+      const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id), withheld };
       if (options.dryRun) return plan;
 
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).

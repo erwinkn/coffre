@@ -213,6 +213,7 @@ function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGran
             </div>
             <ScopePicker grants={grants} value={scope} onChange={setScope} />
             {unread !== null && <Notice tone="warn">{unread}</Notice>}
+            {plan.isError && <Notice tone="warn">Coffre could not check which sensitive values this token would read.</Notice>}
             <ErrorLine error={error} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={close}>

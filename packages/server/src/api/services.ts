@@ -282,7 +282,7 @@ export async function issuedScope(
  * that it will not read: one of a project no Owner of which issued it
  * (`readsSensitive`), its own, a reference's source's, or one a fork
  * inherits from its parents, theirs. A project's, in any of its
- * environments.
+ * environments but personal configs, which no service reads.
  */
 async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly PlaceRow[]): Promise<string[]> {
   const owned = new Set(scope.filter((grant) => grant.sensitive === true).map((grant) => grant.projectId));
@@ -294,7 +294,8 @@ async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly
     return chain;
   };
   const environmentsOf = (grant: ScopeGrant) => known.find((project) => project.id === grant.projectId)?.environments
-    .filter((environment) => grant.environmentId === null || environment.id === grant.environmentId).flatMap((environment) => lineage(environment.id)) ?? [];
+    .filter((environment) => environment.owner === null && (grant.environmentId === null || environment.id === grant.environmentId))
+    .flatMap((environment) => lineage(environment.id)) ?? [];
   const from = await sensitiveFrom(db, scope.flatMap(environmentsOf));
   const withholds = (grant: ScopeGrant) => environmentsOf(grant).some((id) => [...(from.get(id) ?? [])].some((project) => !owned.has(project)));
   return Object.keys(scopeByPath(scope.filter(withholds), known)!);

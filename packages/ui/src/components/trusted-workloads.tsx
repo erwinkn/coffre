@@ -179,6 +179,7 @@ function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issue
   // The plan, with the keys it was made for: Save sends those, whatever the field says by then.
   const [preview, setPreview] = useState<{ plan: KeysPlan; jwks: KeySet } | null>(null);
   const plan = preview?.plan ?? null;
+  const unread = withheldInWords(plan?.withheld, 'binding');
   const coffre = useCoffre();
   const member = memberRef('service', serviceId);
   const { pending, error, setError, run } = useAction();
@@ -269,6 +270,7 @@ function ReplaceKeys({ serviceId, issuer, bindings }: { serviceId: string; issue
                 ))}
               </tbody>
             </table>
+            {unread !== null && <Notice tone="warn">{unread}</Notice>}
             <ErrorLine error={error} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={() => setPreview(null)}>

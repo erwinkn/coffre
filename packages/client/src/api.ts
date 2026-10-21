@@ -1343,6 +1343,7 @@ export type Api = {
         thumbprint: string;
       }[];
       replaces: string[];
+      withheld: string[];
     } | {
       bindings: {
         id: string;
@@ -1778,6 +1779,7 @@ export type KeysPlan = {
     thumbprint: string;
   }[];
   replaces: string[];
+  withheld: string[];
 };
 
 export type Deletion = {

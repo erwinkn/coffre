@@ -302,6 +302,7 @@ export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: 
       : `Gave ${shownMember(member)}'s ${count} on ${plan.issuer} these keys:`,
     `  keys     ${keysLine(plan)}`,
     ...replaced.map((id, i) => (saved === null ? `  replaces ${id}` : `  ${saved.bindings[i]!.id} replaces ${id}`)),
+    ...[withheldLine(plan.withheld)].flatMap((unread) => (unread === null ? [] : [`  ${unread}`])),
     saved === null
       ? 'Credentials those bindings issued, five minutes each at most, would end at once.'
       : 'Credentials the bindings replaced issued have ended.',

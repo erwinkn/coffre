@@ -168,7 +168,7 @@ test('uploaded keys show by kid, or by thumbprint without one; replacing them na
   ];
   assert.equal(keysLine({ jwksUri: `sha256:${'a'.repeat(64)}`, keys }), 'uploaded: k8s-2026 (RS256), thumbprint tp2 (ES256)');
   assert.equal(keysLine({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');
-  const plan = { issuer: ISSUER, jwksUri: `sha256:${'b'.repeat(64)}`, keys: keys.slice(0, 1), replaces: ['old-1', 'old-2'] };
+  const plan = { issuer: ISSUER, jwksUri: `sha256:${'b'.repeat(64)}`, keys: keys.slice(0, 1), replaces: ['old-1', 'old-2'], withheld: [] };
   assert.equal(
     describeKeys('token:api', plan, null),
     [
@@ -181,6 +181,8 @@ test('uploaded keys show by kid, or by thumbprint without one; replacing them na
     ].join('\n'),
   );
   assert.match(describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }, { id: 'new-2' }] as BindingView[], replaced: ['old-1', 'old-2'] }), /\n  new-1 replaces old-1\n  new-2 replaces old-2\n/);
+  // Bindings an Owner made, re-keyed by someone else: told what the new ones will not read.
+  assert.match(describeKeys('token:api', { ...plan, withheld: ['market/prod'] }, null), /\n  replaces old-2\n  reads no sensitive value of market\/prod: only one an Owner of its project issues does\nCredentials/);
   // One of those planned was removed before the save: what the server answered, not the plan.
   const raced = describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }] as BindingView[], replaced: ['old-1'] });
   assert.match(raced, /^Gave service:api's binding on .*\n  keys .*\n  new-1 replaces old-1\nCredentials/);

@@ -166,13 +166,19 @@ export const queries = {
    * What a service's token would reach, as the server would issue it now,
    * and the sensitive values it would not read (`withheld`); issues
    * nothing. A scope the server refuses plans nothing: issuing says why.
+   * Any other failure is one, asked once.
    */
   tokenPlan: (client: CoffreClient, member: string, scope: Record<string, string>) =>
     queryOptions({
       queryKey: keys.tokenPlan(member, scope),
-      queryFn: () => client.tokens.preview(member, { label: null, expiresInDays: 1, scope }).catch(() => null),
+      queryFn: () => client.tokens.preview(member, { label: null, expiresInDays: 1, scope }).catch((failure: unknown) => {
+        const status = statusOf(failure);
+        if (status !== undefined && status >= 400 && status < 500) return null;
+        throw failure;
+      }),
       staleTime: 60_000,
       refetchOnWindowFocus: false,
+      retry: false,
     }),
 
   /** Who holds what in a project, for those who manage its access. */
