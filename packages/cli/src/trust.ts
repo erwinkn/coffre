@@ -302,6 +302,7 @@ export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: 
       : `Gave ${shownMember(member)}'s ${count} on ${plan.issuer} these keys:`,
     `  keys     ${keysLine(plan)}`,
     ...replaced.map((id, i) => (saved === null ? `  replaces ${id}` : `  ${saved.bindings[i]!.id} replaces ${id}`)),
+    ...[withheldLine(plan.withheld)].flatMap((unread) => (unread === null ? [] : [`  ${unread}`])),
     saved === null
       ? 'Credentials those bindings issued, five minutes each at most, would end at once.'
       : 'Credentials the bindings replaced issued have ended.',
@@ -315,7 +316,19 @@ export function describePlan(member: string, plan: BindingPlan, applied: Binding
   for (const replaced of plan.replaces) {
     lines.push(`  replaces ${replaced.id}${replaced.why === 'keys_moved' ? ': the issuer moved its keys' : ''}`);
   }
+  const unread = withheldLine(plan.withheld);
+  if (unread !== null) lines.push(`  ${unread}`);
   return `${lines.join('\n')}\n`;
+}
+
+/**
+ * What a service's new token or binding will not read, as the server said
+ * (`withheld`): the sensitive values of these places, which only one an
+ * Owner of their project issues reads. Null when there are none.
+ */
+export function withheldLine(withheld: readonly string[] | undefined): string | null {
+  if (withheld === undefined || withheld.length === 0) return null;
+  return `reads no sensitive value of ${withheld.join(', ')}: only one an Owner of ${withheld.length === 1 ? 'its project' : 'their projects'} issues does`;
 }
 
 /** `refs/heads/main` as `branch main`, `refs/tags/v1` as `tag v1`; anything else as it is. */

@@ -65,6 +65,7 @@ import {
   readScope,
   scopeByPath,
   sealCredentials,
+  unsealedScope,
   serviceSettingFor,
   setsUp,
   storedScope,
@@ -176,6 +177,8 @@ export type BindingPlan = {
   keys: KeySummary[] | null;
   claims: BindingClaims;
   scope: ScopeByPath;
+  /** The places of `scope` that hold a sensitive value its credentials will not read: only an Owner of their project binds one that does (R32). */
+  withheld: string[];
   /** `asked`: named in `replaces`. `keys_moved`: the service's bindings on the issuer, under its old keys' URL. */
   replaces: { id: string; why: 'asked' | 'keys_moved' }[];
 };
@@ -198,11 +201,12 @@ export type BindingInput = {
 };
 
 /**
- * What replacing a service's keys for an issuer would do: the keys, and
- * the bindings on the issuer that new ones, the same but for those keys,
- * take the place of.
+ * What replacing a service's keys for an issuer would do: the keys, the
+ * bindings on the issuer that new ones, the same but for those keys, take
+ * the place of, and the places of their scopes that hold a sensitive value
+ * the new ones will not read: one an Owner bound, re-keyed by anyone else.
  */
-export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[] };
+export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[]; withheld: string[] };
 
 /**
  * A workload's ID token, verified for a service: the binding of the service
@@ -260,6 +264,27 @@ export class WorkloadService {
     return live.map((row) => view(row, scopeByPath(readScope(row.scope), known)));
   }
 
+  /**
+   * A service's live bindings, those an older release made sealed first
+   * (`sealCredentials`), as a request's own credential check seals them:
+   * one that inherits their scope keeps what their issuer could give,
+   * sensitive values included, never less than the seal would say. A dry
+   * run seals nothing, as it writes nothing: its plan inherits their
+   * scopes as read, and one a release before 0.11 made reads no sensitive
+   * value there, so the plan may withhold more than the binding will.
+   */
+  async #sealedBindings(member: string, generation: number, { dryRun }: { dryRun: boolean }): Promise<BindingRow[]> {
+    const { db, chainKey, vault } = this.#deps;
+    const live = await liveBindings(db, chainKey, member, generation);
+    const unsealed = live.filter((row) => unsealedScope(row.scope));
+    if (dryRun || unsealed.length === 0) return live;
+    const policySeq = await newestPolicySeq(db);
+    const access = await vault.access(member);
+    if (access.status !== 'active') return live;
+    await sealCredentials(db, chainKey, vault, access, policySeq, unsealed.map((row) => ({ kind: 'binding' as const, id: row.id, principal: member, createdBy: row.createdBy, scope: row.scope })));
+    return liveBindings(db, chainKey, member, generation);
+  }
+
   /** Check a binding and ask its issuer where its keys are; with `dryRun`, write nothing and log nothing. */
   async bind(ctx: Asker, serviceId: string, input: BindingInput, options: { dryRun: boolean }): Promise<BindingPlan | { binding: BindingView; replaced: string[] }> {
     const member = `token:${serviceId}`;
@@ -309,14 +334,14 @@ export class WorkloadService {
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
         return replaces;
       };
-      const replaced = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation, options));
       // Left out, its scope is what those it replaces reached, so that trusting a workload again never widens it.
       const inherits = input.scope === undefined && replaced.length > 0;
-      const { scope, byPath } = await issuedScope(
+      const { scope, byPath, withheld } = await issuedScope(
         this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.bind', metadata: details }, inherits ? inheritedScope(replaced) : undefined,
       );
       const plan = (replaces: typeof replaced): BindingPlan => ({
-        ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, replaces: replaces.map(({ id, why }) => ({ id, why })),
+        ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, withheld, replaces: replaces.map(({ id, why }) => ({ id, why })),
       });
       if (options.dryRun) return plan(replaced);
 
@@ -412,13 +437,14 @@ export class WorkloadService {
         }
         return on;
       };
-      const replaced = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation, options));
       // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
       const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
       for (const row of replaced) {
         scopes.set(row.id, await issuedScope(this.#deps.db, ctx, setting, standing, undefined, { action: 'token.bind', metadata: details }, inheritedScope([row])));
       }
-      const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id) };
+      const withheld = [...new Set([...scopes.values()].flatMap((issued) => issued.withheld))].sort();
+      const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id), withheld };
       if (options.dryRun) return plan;
 
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
@@ -677,8 +703,10 @@ export class WorkloadService {
     const policySeq = await newestPolicySeq(db);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
-    // One 0.4 made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
-    if (binding.scope === null) await sealCredentials(db, chainKey, standing, policySeq, [{ kind: 'binding', id: binding.id, principal: member }]);
+    // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
+    if (unsealedScope(binding.scope)) {
+      await sealCredentials(db, chainKey, vault, standing, policySeq, [{ kind: 'binding', id: binding.id, principal: member, createdBy: binding.createdBy, scope: binding.scope }]);
+    }
 
     const service = member.slice('token:'.length);
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;

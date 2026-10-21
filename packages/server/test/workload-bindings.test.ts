@@ -102,7 +102,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   const plan = await as(LEAD).bindings.preview(MEMBER, { profile: 'github', claims: { ...DEPLOY } });
   // What its runs reach, left out: all the account holds.
   const scope = { [`${SERVICE}-reads`]: 'viewer' as const };
-  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, replaces: [] });
+  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, withheld: [], replaces: [] });
   assert.deepEqual(await live(), [], 'a preview writes nothing');
   assert.deepEqual(await entries(), [], 'and logs nothing');
 
@@ -130,7 +130,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
       issuer: GITHUB,
       jwksUri: KEYS,
       claims: plan.claims,
-      scope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }],
+      scope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }],
       replaces: [],
     },
   });

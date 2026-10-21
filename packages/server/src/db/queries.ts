@@ -1880,6 +1880,35 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
   return new Set(rows.map((row) => row.id));
 }
 
+/**
+ * The sensitive values these environments hold now, as the projects they
+ * are from, by environment: a live key's own current version, its
+ * project's; or a reference's source's, which it reads as (R23), the
+ * source's project's. A hint for whoever issues a service's credential that
+ * will not read them, so a reference ended since may still count.
+ */
+export async function sensitiveFrom(db: Queryable, environmentIds: readonly string[]): Promise<Map<string, Set<string>>> {
+  if (environmentIds.length === 0) return new Map();
+  const { secrets, secretVersions, secretReferences } = tablesOf(db);
+  const ids = [...new Set(environmentIds)];
+  const [own, referred] = await Promise.all([
+    db
+      .selectDistinct({ environmentId: secrets.environmentId, projectId: secrets.projectId })
+      .from(secrets)
+      .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+      .where(and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt), eq(secretVersions.sensitive, true))),
+    db
+      .selectDistinct({ environmentId: secretReferences.environmentId, projectId: secretReferences.sourceProjectId })
+      .from(secretReferences)
+      .innerJoin(secrets, eq(secrets.id, secretReferences.sourceSecretId))
+      .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+      .where(and(inArray(secretReferences.environmentId, ids), eq(secretVersions.sensitive, true))),
+  ]);
+  const from = new Map<string, Set<string>>();
+  for (const { environmentId, projectId } of [...own, ...referred]) from.set(environmentId, (from.get(environmentId) ?? new Set()).add(projectId));
+  return from;
+}
+
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
 export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean; plaintext: string | null }>> {
   if (ids.length === 0) return new Map();

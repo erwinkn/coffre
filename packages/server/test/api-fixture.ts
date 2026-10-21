@@ -1,12 +1,13 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
+import { issuedGrant } from '@coffre/core/access';
 import type { Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, type LocalVault, type VaultConfig } from '@coffre/vault/node';
 
-import { loadCaller } from '../src/api/caller.ts';
+import { loadCaller, type Caller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
@@ -142,7 +143,7 @@ export async function contextFor(
     signin: deps.signin ?? null,
     workloads: deps.workloads ?? null,
     mcp: null,
-    caller: await loadCaller(deps.db, deps.vault, { type, id }),
+    caller: await serviceScoped(await loadCaller(deps.db, deps.vault, { type, id })),
     requestId: randomUUID(),
     sourceIp: null,
     credentialId: null,
@@ -152,6 +153,17 @@ export async function contextFor(
     credentialExpiresAt: null,
     rotateAfterDays: 365,
   };
+}
+
+/**
+ * A service signs in only on a token or a trust binding, whose scope is
+ * sealed: here, everything the account holds now, as an Owner of the
+ * instance would issue it, so it reads its sensitive values too
+ * (`readsSensitive`). A person's caller is left as it is, a session's.
+ */
+function serviceScoped(caller: Caller): Caller {
+  if (!caller.service) return caller;
+  return { ...caller, credentialScope: caller.grants.map((grant) => ({ ...issuedGrant(grant, caller.policy), sensitive: true })) };
 }
 
 /**

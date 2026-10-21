@@ -63,7 +63,7 @@ with three levels, loosest first:
 |---|---|---|
 | `plain` | Anyone who can list the environment | Visible to anyone who can see this environment |
 | `secret`, the default | People whose role can read secrets | Visible to people whose role can read secrets |
-| `sensitive` | No person, Owners included. Their apps get a placeholder and use it through the proxy; service accounts read it. An Owner of the project may make it a secret, its value kept (loosening, below) | Never shown to anyone, Owners included. Used through the proxy or by services |
+| `sensitive` | No person, Owners included. Their apps get a placeholder and use it through the proxy; service accounts read it, on a token or binding an Owner of the project issued. An Owner of the project may make it a secret, its value kept (loosening, below) | Never shown to anyone, Owners included. Used through the proxy or by services |
 
 ```sh
 $ coffre set market/prod/STRIPE_SECRET_KEY --sensitive   # a new value, shown to nobody from here on
@@ -88,7 +88,7 @@ decide what a read hands back:
 | Who | A `secret` key | A `sensitive` key |
 |---|---|---|
 | A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection, a handle | The value, where their role reads it | **A placeholder.** The value is opened only for coffre to use for them: the vault refuses a read that would hand it back (`sensitive`), and allows the proxy's `use` and a fork's `copy` |
-| A service account: a service token, a CI run's or a cluster's ID token | The value | The value: CI and production read their environment once, at full speed |
+| A service account: a service token, a CI run's or a cluster's ID token | The value | The value, on a token or binding an Owner of its project issued: CI and production read their environment once, at full speed. On anyone else's, refused (`not_owner_issued`, R32) |
 
 The rule is in the vault, the one place every read goes through, not in
 the CLI or the API's routes. `coffre get`, the UI's reveal, `POST
@@ -97,7 +97,7 @@ the CLI or the API's routes. `coffre get`, the UI's reveal, `POST
 same way, and each refusal is in the vault's log. So is an import's dry
 run (`compare`): its `changed` or `unchanged` tells whoever sent a guess
 whether it was right, so a sensitive value is compared with no person's
-guess (`changed`). A fork's `copy` hands nothing back, and stays. Every
+guess (`changed`), nor a service's on a credential no Owner issued. A fork's `copy` hands nothing back, and stays. Every
 purpose but `use` and `copy` counts as handing back, one a later app
 might name included.
 
@@ -365,12 +365,31 @@ and leave it sensitive, the escape
 is the one coffre already has: a service account. An Owner gives one read
 on the place, issues it a token, and reads with it (`coffre --url …
 --service …`, or `coffre login --token`). Each step is logged: the
-account's admission, its grant, the token's creation and every read. A
-personal token or a handle cannot take that path. The route that issues
-service tokens and bindings refuses both, and a test holds this. An
-instance that wants even that narrower sets its service setting
-(`settings.serviceAccounts`), so that only those who run it set accounts
-up. A page that reveals behind a fresh sign-in, for Owners, is possible
+account's admission, its grant, the token's creation and every read.
+
+Only an Owner of the project takes that path (R32). Anyone may set up a
+service account where the instance lets them, and give it what they hold
+(`givesService`), so a Developer of `market/dev`, who does not read its
+sensitive `STRIPE_SECRET_KEY`, could otherwise give an account read
+there, issue it a token, and read the key with it; or issue one while
+nothing there is sensitive, and read a key marked sensitive later. So each
+place of a service token's or binding's scope says whether it reads the
+sensitive values there, true only where its issuer was an Owner of the
+project, of the whole instance or by a grant or role scoped to it, as a
+person on no credential's scope (`ownsProject`). The vault hands a
+service a sensitive value only on a credential that says so for the
+value's own project (`readsSensitive`, `not_owner_issued`): a fork's
+parent's for what it inherits, and a reference's source's, whose value
+it lends. Its permission is still decided where it is held: a token an
+Owner of `billing` issued for `billing/dev` reads a reference there into
+`backend/prod` only if it says so for `backend` too, else Bo, a
+Developer of `backend` and an Owner of `billing`, would read prod's
+sensitive values that way. Everything else the account
+reads as before, and its credential's maker is told, when it is made,
+which places hold a sensitive value it will not read (`withheld`). A
+personal token or a handle cannot take the path at all: the route that
+issues service tokens and bindings refuses both, and a test holds this.
+A page that reveals behind a fresh sign-in, for Owners, is possible
 later (decision 3).
 
 ## 3. What a deployment writes
@@ -1340,8 +1359,10 @@ is reversible.
    never read values anyway. It would also need a migration of the grants'
    role check.
 3. **Break-glass is a service account, no new path.** It is explicit,
-   logged at each step, and already exists. *Alternative:* a reveal page
-   for Owners behind a fresh sign-in.
+   logged at each step, and already exists. Only an Owner of the project
+   issues a token or binding that reads sensitive values (R32, Erwin
+   2026-10-21). *Alternative:* a reveal page for Owners behind a fresh
+   sign-in.
 4. **One handle per run, for all its environments' credentials.**
    *Alternative:* one per credential, if a leaked handle's reach matters
    more than the extra rows.

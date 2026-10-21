@@ -23,6 +23,7 @@ import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema
 import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
+  findBinding,
   findCredential,
   findDeviceAuthorizations,
   findIdentity,
@@ -53,6 +54,7 @@ import {
   sealCredentials,
   sealScopes,
   storedScope,
+  unsealedScope,
   type ScopeByPath,
 } from './services.ts';
 
@@ -132,10 +134,14 @@ const PENDING_TTL_SECONDS = 10 * 60;
 export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
 /** A service or personal token as issued: its value, once, and what it reaches, by path. */
-export type IssuedToken = IssuedCredential & { scope: ScopeByPath };
+export type IssuedToken = IssuedCredential & TokenPlan;
 
-/** What issuing a token would make: what it reaches, by path. */
-export type TokenPlan = { scope: ScopeByPath };
+/**
+ * What issuing a token would make: what it reaches, by path; and, a
+ * service's, the places of those that hold a sensitive value it will not
+ * read, which only an Owner of their project issues one that does (R32).
+ */
+export type TokenPlan = { scope: ScopeByPath; withheld?: string[] };
 
 /** What a personal token is made with: all three said, none assumed. */
 export type PersonalTokenInput = { label: string; expiresInMinutes: number; scope: ScopeByPath };
@@ -590,7 +596,7 @@ export class SigninService {
 
   /** A live service token 0.4 made, or a run's credential its binding issued, that carries no scope yet. */
   #unsealed(row: NonNullable<Awaited<ReturnType<typeof findCredential>>>, access: Access, now: Date): boolean {
-    return row.kind === 'service' && row.scope === null && this.#liveCredential(row, access, now);
+    return row.kind === 'service' && unsealedScope(row.scope) && this.#liveCredential(row, access, now);
   }
 
   async #issue(
@@ -647,10 +653,13 @@ export class SigninService {
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
       if (row !== null) access = await this.#deps.vault.access(row.principal);
-      // A token or binding 0.4 made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
+      // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
         const binding = issuingBinding(row.createdBy);
-        await sealCredentials(db, chainKey, access, policySeq, [binding === null ? { kind: 'token', id: row.id, principal: row.principal } : { kind: 'binding', id: binding, principal: row.principal }]);
+        const issued = binding === null ? row : await findBinding(db, chainKey, row.principal, binding);
+        if (issued !== null) {
+          await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: binding === null ? 'token' : 'binding', id: binding ?? row.id, principal: row.principal, createdBy: issued.createdBy, scope: issued.scope }]);
+        }
         row = await findCredential(db, chainKey, { tokenHash });
         if (row !== null && this.#unsealed(row, access, now)) throw new Error('its scope could not be sealed');
       }
@@ -874,7 +883,7 @@ export class SigninService {
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
-      const { standing, scope, byPath, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
+      const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
@@ -891,7 +900,7 @@ export class SigninService {
             metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
           }),
         );
-        return { ...credential, scope: byPath };
+        return { ...credential, scope: byPath, withheld };
       });
     });
   }
@@ -899,7 +908,10 @@ export class SigninService {
   /** What a token issued now would reach, checked as issuing one is (`issueServiceToken`); issues nothing. */
   async planServiceToken(ctx: Asker, serviceId: string, input: { label: string | null; scope?: ScopeByPath }): Promise<TokenPlan> {
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
-    return withRefusals(this.#deps, async () => ({ scope: (await this.#tokenScope(ctx, serviceId, input.scope, details)).byPath }));
+    return withRefusals(this.#deps, async () => {
+      const { byPath, withheld } = await this.#tokenScope(ctx, serviceId, input.scope, details);
+      return { scope: byPath, withheld };
+    });
   }
 
   /** Who may issue the service's tokens (`managesService`), and what one would reach (`issuedScope`). */

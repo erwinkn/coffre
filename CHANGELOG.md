@@ -40,6 +40,44 @@
   already needed the same handle; now its key must also name a session of
   the tunnel it came on, so it is sent the way that tunnel dials.
 
+- **Only an Owner hands a service account sensitive values** (R32).
+  Anyone may set up a service account where the instance lets them, and
+  give it what they hold; a service reads sensitive values. So a Developer
+  of `backend/dev`, who does not read its sensitive `STRIPE_SECRET_KEY`,
+  could give an account read there, issue it a token, and read the key
+  with it; or issue one while nothing was sensitive, and read a key marked
+  sensitive later. Now each place of a service token's or trust binding's
+  scope says whether it reads the sensitive values there: only where whoever
+  issued it is an Owner of the project, of the whole instance or by a
+  grant or role scoped to it, on no credential's scope. The vault refuses
+  anything else (`not_owner_issued`). The project is the value's own: a
+  reference's source's, whose value it lends, so a token an Owner of
+  `billing` issued reads no sensitive value of `backend` through a
+  reference in `billing/dev`; a fork's inherited value, its parent's.
+  A read of a whole environment that holds one is refused whole, naming
+  the keys, rather than run without them; a dry run of a write does not
+  compare them. Everything else reads as before.
+  - Issuing a token or binding, or replacing a binding's keys, says which
+    places of its scope hold a sensitive value it will not read: `withheld`
+    in the API, a line in `coffre tokens issue` and `coffre trust`, a
+    warning in the token, binding and key dialogs.
+  - A binding that replaces another, inheriting its scope or with new keys,
+    reads them only where both did.
+  - **Tokens and bindings issued before this release** are sealed once,
+    on the first credential this version checks, as 0.4's scopes were:
+    each reads them where whoever issued it is an Owner of the project
+    then, logged as `token.seal`: their standing when this version first
+    checks a credential, project by project, not when they issued it. CI
+    an Owner set up keeps working; one a Developer set up reads every other
+    value, and an Owner issues it a new token or binding to read the
+    sensitive ones; so does one whose issuer has left, or is no Owner of
+    the project by then. `coffre migrate` lists them first, by account and
+    issuer: check each issuer is an Owner of the projects their CI reads
+    sensitive values in before you deploy.
+  No database migration. Roll back across this release and the tokens and
+  bindings it issued or sealed reach nothing until it is back: deploy it
+  once you mean to keep it.
+
 - **Protection shows where you are, and changes there.** A protected
   environment's tag is amber now, on its card and in its page's header,
   where it was grey, and changed only from the card's menu. For whoever

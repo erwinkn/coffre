@@ -10,7 +10,7 @@ import pg from 'pg';
 
 import { managedObjects, migrateDatabase, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
-import { describeEveryProject, describeFirstRun, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
+import { describeEveryProject, describeFirstRun, describeIssuers, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { asSuperuser, database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -125,10 +125,10 @@ test("migrate lists 0.4's tokens and bindings by account, which keep what their 
   assert.equal(describeUnsealed([]), '');
   assert.equal(
     describeUnsealed([
-      { kind: 'token', id: 't1', principal: 'token:ci-web' },
-      { kind: 'token', id: 't2', principal: 'token:ci-web' },
-      { kind: 'binding', id: 'b1', principal: 'token:ci-web' },
-      { kind: 'binding', id: 'b2', principal: 'token:deploy' },
+      { kind: 'token', id: 't1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
+      { kind: 'token', id: 't2', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
+      { kind: 'binding', id: 'b1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
+      { kind: 'binding', id: 'b2', principal: 'token:deploy', createdBy: 'erwin@acme.example', scope: null },
     ]),
     [
       '',
@@ -142,12 +142,33 @@ test("migrate lists 0.4's tokens and bindings by account, which keep what their 
   );
 });
 
+test('migrate lists the tokens and bindings of a release before 0.11 by account and issuer, which read sensitive values where their issuer owns the project', () => {
+  assert.equal(describeIssuers([]), '');
+  const scope = '[{"projectId":"p","environmentId":null,"role":"viewer"}]';
+  assert.equal(
+    describeIssuers([
+      { kind: 'token', id: 't1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope },
+      { kind: 'binding', id: 'b1', principal: 'token:ci-web', createdBy: 'ada@acme.example', scope },
+      { kind: 'binding', id: 'b2', principal: 'token:deploy', createdBy: 'erwin@acme.example', scope },
+    ]),
+    [
+      '',
+      'A service token or trust binding now reads a sensitive value only where an Owner of its project issued it.',
+      'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then, project by project:',
+      '  service:ci-web: 1 token and 1 trust binding, issued by erwin@acme.example, ada@acme.example',
+      '  service:deploy: 1 trust binding, issued by erwin@acme.example',
+      "Anyone else's, one whose issuer has left included, read every other value; an Owner of the project issues one that reads them too.",
+      '',
+    ].join('\n'),
+  );
+});
+
 test('migrate says which accounts hold nothing, whose tokens and bindings would reach nothing for good', () => {
   const unsealed = [
-    { kind: 'token' as const, id: 't1', principal: 'token:ci-web' },
-    { kind: 'token' as const, id: 't2', principal: 'token:idle' },
-    { kind: 'binding' as const, id: 'b1', principal: 'token:idle' },
-    { kind: 'token' as const, id: 't3', principal: 'token:old' },
+    { kind: 'token' as const, id: 't1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
+    { kind: 'token' as const, id: 't2', principal: 'token:idle', createdBy: 'erwin@acme.example', scope: null },
+    { kind: 'binding' as const, id: 'b1', principal: 'token:idle', createdBy: 'erwin@acme.example', scope: null },
+    { kind: 'token' as const, id: 't3', principal: 'token:old', createdBy: 'erwin@acme.example', scope: null },
   ];
   const conversion = (grants: number) => ({ role: 'member', scope: { projects: 'all', environments: 'all' }, grants: Array.from({ length: grants }, () => ({ projectId: 'p', environmentId: null, role: 'viewer' })), narrowed: [] });
   const said = describeFirstRun({

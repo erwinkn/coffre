@@ -1,9 +1,11 @@
 import type { TokenRow } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
+import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
-import { affects } from '../lib/queries';
+import { affects, queries } from '../lib/queries';
+import { withheldInWords } from '../lib/service-setup';
 import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from './row-state';
@@ -144,6 +146,10 @@ function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGran
   const [issued, setIssued] = useState<{ token: string; expiresAt: string } | null>(null);
   const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
+  const member = memberRef('service', serviceId);
+  // Told before it is issued: the sensitive values it would not read, as the server decides (R32).
+  const plan = useQuery({ ...queries.tokenPlan(coffre, member, scope), enabled: open && issued === null && Object.keys(scope).length > 0 });
+  const unread = withheldInWords(plan.data?.withheld, 'token');
 
   function close() {
     setOpen(false);
@@ -206,6 +212,8 @@ function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGran
               </label>
             </div>
             <ScopePicker grants={grants} value={scope} onChange={setScope} />
+            {unread !== null && <Notice tone="warn">{unread}</Notice>}
+            {plan.isError && <Notice tone="warn">Coffre could not check which sensitive values this token would read.</Notice>}
             <ErrorLine error={error} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={close}>

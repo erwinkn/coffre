@@ -51,3 +51,17 @@ export function serviceProjects(holder: Holder): ProjectSummary[] {
     givable(holder, project, null).length > 0 ||
     project.environments.some((environment) => givable(holder, project, environment.slug).length > 0));
 }
+
+/**
+ * What a service's new token or binding will not read, as the server said
+ * (`withheld`), in a sentence: the sensitive values of these places, which
+ * only one an Owner of their project issues reads (R32). Null for none.
+ *
+ *   ['backend/dev']   It will not read the sensitive values of backend/dev: only one an Owner of backend issues does.
+ */
+export function withheldInWords(withheld: readonly string[] | undefined, what: 'token' | 'binding'): string | null {
+  if (withheld === undefined || withheld.length === 0) return null;
+  const projects = [...new Set(withheld.map((path) => path.split('/')[0]!))];
+  const by = projects.length === 1 ? `an Owner of ${projects[0]}` : 'an Owner of their project';
+  return `This ${what} will not read the sensitive values of ${withheld.join(', ')}: only one ${by} ${what === 'token' ? 'issues' : 'saves'} does.`;
+}

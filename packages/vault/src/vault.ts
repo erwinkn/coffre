@@ -25,6 +25,7 @@ import {
   ownsInstance,
   ownsProject,
   PROJECT_ONLY_PERMISSIONS,
+  readsSensitive,
   ROLE_ID,
   ROLES,
   runsInstance,
@@ -336,6 +337,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   ended: 'the reference read through was ended',
   personal: "a personal config's values are its owner's alone",
   sensitive: "a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it",
+  not_owner_issued: 'a service account reads a sensitive value only on a token or trust binding an Owner of its project issued',
   not_allowed: 'not allowed to change this',
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
@@ -1223,16 +1225,18 @@ class VaultService implements Vault {
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx, d.reads)).forEach((code, i) => (codes[i] = code));
       }
-      // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks. And
-      // a fork copies one, for anyone, a service account too, only where its app says it keeps it sensitive: an app of
-      // 0.9, mid-deploy, would write the copy as a secret its people read.
+      // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks; and
+      // handed back to a service account only on a credential an Owner of its own project issued, a reference's
+      // source's too, whose value it is (`readsSensitive`, R32). And a fork copies one, for anyone, a service account too, only where its app says it
+      // keeps it sensitive: an app of 0.9, mid-deploy, would write the copy as a secret its people read.
       const copying = action === 'secret.read' && call.input.purpose === 'copy';
-      const handedBack = action === 'secret.read' && principal.startsWith('user:') && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true });
-      if (handedBack || (copying && call.input.keepsSensitive !== true)) {
-        secrets.forEach((secret, i) => {
-          if (codes[i] === null && secret.sensitive === true) codes[i] = 'sensitive';
-        });
-      }
+      const handedBack = action === 'secret.read' && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true });
+      const person = principal.startsWith('user:');
+      secrets.forEach((secret, i) => {
+        if (codes[i] !== null || secret.sensitive !== true) return;
+        if ((copying && call.input.keepsSensitive !== true) || (handedBack && person)) codes[i] = 'sensitive';
+        else if (handedBack && !readsSensitive(reader.live, secret.projectId)) codes[i] = 'not_owner_issued';
+      });
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
       if (first !== null) {

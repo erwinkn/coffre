@@ -755,16 +755,18 @@ export type Api = {
       };
     };
     output: {
+      scope: {
+        [key: string]: string;
+      };
+      withheld?: string[];
+    } | {
       id: string;
       token: string;
       expiresAt: string;
       scope: {
         [key: string]: string;
       };
-    } | {
-      scope: {
-        [key: string]: string;
-      };
+      withheld?: string[];
     };
   };
   "DELETE /members/:member/tokens/:id": {
@@ -832,6 +834,7 @@ export type Api = {
       scope: {
         [key: string]: string;
       };
+      withheld: string[];
       replaces: {
         id: string;
         why: "asked" | "keys_moved";
@@ -1340,6 +1343,7 @@ export type Api = {
         thumbprint: string;
       }[];
       replaces: string[];
+      withheld: string[];
     } | {
       bindings: {
         id: string;
@@ -1391,6 +1395,7 @@ export type Api = {
       scope: {
         [key: string]: string;
       };
+      withheld?: string[];
     };
   };
   "GET /roles": {
@@ -1724,6 +1729,7 @@ export type BindingPlan = {
   scope: {
     [key: string]: string;
   };
+  withheld: string[];
   replaces: {
     id: string;
     why: "asked" | "keys_moved";
@@ -1773,6 +1779,7 @@ export type KeysPlan = {
     thumbprint: string;
   }[];
   replaces: string[];
+  withheld: string[];
 };
 
 export type Deletion = {
@@ -2341,6 +2348,7 @@ export type TokenPlan = {
   scope: {
     [key: string]: string;
   };
+  withheld?: string[];
 };
 
 export type TokenRow = {

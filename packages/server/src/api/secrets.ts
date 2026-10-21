@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ownsProject, type Permission } from '@coffre/core/access';
+import { ownsProject, readsSensitive, type Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
-import type { HolderRef, SecretRef } from '@coffre/core/vault';
+import { handsBack, type HolderRef, type SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
@@ -1216,7 +1216,8 @@ export async function dryRunSecrets(
       // A reference, or a value over a reference: what it is now is not a value to compare.
       // A generated value is new by making, and opens nothing to say so. A value is unchanged
       // only as it was held, plain, secret or sensitive: a plain one compares with no read, being no
-      // secret, and a sensitive one never with a person's guess, which nobody is told is right.
+      // secret, and a sensitive one never with the guess of whoever does not read it, a person or a
+      // service on a credential no Owner of the project issued (`readsSensitive`), who is not told it is right.
       const { current } = secret;
       const now = current === null ? null : sensitivityOf(current);
       if (isMark(value)) {
@@ -1229,7 +1230,7 @@ export async function dryRunSecrets(
       }
       const level = askedSensitivity(value) ?? bareLevel(now, { personal: place.environment!.owner !== null, generated: typeof value === 'object' && 'generated' in value });
       if (current === null || level !== now || (typeof value === 'object' && ('generated' in value || 'ref' in value))
-        || (now === 'sensitive' && ctx.caller.principal.type === 'user')) {
+        || (now === 'sensitive' && !readsSensitive(ctx.caller, place.project.id))) {
         keys[key] = 'changed';
         continue;
       }
@@ -1637,7 +1638,9 @@ export type PickKeys = (
  * A person's read of a whole environment leaves its sensitive values out,
  * naming them in `sensitive`: nobody is handed one, and the vault refuses
  * any read that asks it to. A read of one sensitive key is refused whole,
- * as the vault's own refusal. A service account reads them all.
+ * as the vault's own refusal. A service account reads them on a token or
+ * trust binding an Owner of their project issued (R32); on any other, its
+ * read of one is refused whole, naming them, as the vault would refuse it.
  */
 export async function reveal(
   ctx: ApiContext,
@@ -1728,7 +1731,22 @@ export async function reveal(
         denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: use?.purpose ?? (path.key === undefined ? 'run' : 'reveal') }, rows);
+    // A service's credential reads no sensitive value but of a project an Owner of which issued it: the value's own, a
+    // reference's source's (`readsSensitive`). Refused whole, as the vault would, naming them, and who can.
+    const purpose = use?.purpose ?? (path.key === undefined ? 'run' : 'reveal');
+    const notIssued = ctx.caller.principal.type === 'service' && handsBack({ purpose })
+      ? rows.filter((item) => item.secret.sensitive === true && !readsSensitive(ctx.caller, item.secret.projectId))
+      : [];
+    if (notIssued.length > 0) {
+      const keys = notIssued.map((item) => item.key);
+      // A reference's value is its source's project's to hand out.
+      const whose = notIssued.every((item) => item.secret.projectId === place.project.id) ? place.project.slug : 'the project each value is from';
+      throw new Refusal(
+        forbidden(`${named.path} holds ${keys.join(', ')}, sensitive: a service account reads ${keys.length === 1 ? 'it' : 'them'} only on a token or trust binding an Owner of ${whose} issued`),
+        denied(ctx, 'secret.read', 'not_owner_issued', { ...environment, operationId, metadata: { keys } }),
+      );
+    }
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);

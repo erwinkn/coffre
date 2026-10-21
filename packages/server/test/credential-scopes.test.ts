@@ -259,7 +259,8 @@ test("a binding that replaces a Viewer's keeps what the Viewer held, both column
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   for (const binding of [first, again, moved]) {
     const [row] = await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.binding.id));
-    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }], binding.binding.id);
+    // Ada, a Developer, made the first: none reads dev's sensitive values, Root's included, which keep what it held (R32).
+    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }], binding.binding.id);
   }
 });
 
@@ -276,7 +277,7 @@ test("a binding that replaces one whose role was widened since keeps what that o
   for (const binding of [moved, again]) {
     assert.deepEqual(binding.binding.scope, { 'market/dev': 'viewer' });
     const [row] = await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.binding.id));
-    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
+    assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }]);
   }
   assert.notEqual(first.binding.id, again.binding.id);
 });
@@ -294,7 +295,7 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow')));
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   // With what viewer held when it was issued, both columns: a role widened later widens no credential.
-  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
+  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }]);
 });
 
 test("a scope changed or cleared around the app fails the row's MAC, and the token is refused", async () => {
@@ -388,7 +389,7 @@ test('on Workers, where each request builds its runtime, the isolate seals once:
     assert.equal(answered.status, 200);
     return [...asked];
   };
-  assert.deepEqual(await request(config), ['token:ci-old', CI], 'the first request seals, then checks its own token');
+  assert.deepEqual(await request(config), ['token:ci-old', 'user:ada@acme.example', CI], 'the first request seals, asking who issued what it seals, then checks its own token');
   assert.notEqual(await scope(first.id), null);
   // A token 0.4 makes while both run: no request of this isolate reads it, nor asks the vault about its account.
   const second = await legacyToken('token:ci-old');
@@ -396,7 +397,7 @@ test('on Workers, where each request builds its runtime, the isolate seals once:
   assert.equal(await scope(second.id), null);
   // Another isolate, or process, seals it on its first request.
   const another = resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
-  assert.deepEqual(await request(another), ['token:ci-old', CI]);
+  assert.deepEqual(await request(another), ['token:ci-old', 'user:ada@acme.example', CI]);
   assert.notEqual(await scope(second.id), null);
 });
 
@@ -426,8 +427,8 @@ test('a token 0.4 makes after this process sealed is sealed on its first use, wi
 });
 
 test("a token's dry run says what it would reach, checked as issuing it is, and issues and logs nothing", async () => {
-  assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30 }), { scope: { 'market/dev': 'developer' } });
-  assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/dev': 'viewer' } }), { scope: { 'market/dev': 'viewer' } });
+  assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30 }), { scope: { 'market/dev': 'developer' }, withheld: [] });
+  assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/dev': 'viewer' } }), { scope: { 'market/dev': 'viewer' }, withheld: [] });
   await assert.rejects(ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/prod': 'viewer' } }), { status: 403 });
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
   assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.create')).then((rows) => rows.filter((row) => row.decision === 'allow')), []);
@@ -467,7 +468,10 @@ test("0.4's tokens and bindings keep exactly what they reached: sealed with the 
     await db.owner.insert(serviceBindings).values({ ...each, label: null, createdBy: 'ada@acme.example', authMac: authMac(deps.chainKey, 'service_bindings', each) });
   }
   const listed = await unsealedCredentials(db.owner, new Date());
-  assert.deepEqual(listed, [{ kind: 'binding', id: bound.id, principal: CI }, { kind: 'token', id: row.id, principal: CI }]);
+  assert.deepEqual(listed, [
+    { kind: 'binding', id: bound.id, principal: CI, createdBy: 'ada@acme.example', scope: null },
+    { kind: 'token', id: row.id, principal: CI, createdBy: 'ada@acme.example', scope: null },
+  ]);
 
   // The first credential this process checks seals it, before anything else.
   await root.access.set(CI, { 'market/prod': 'viewer' });
