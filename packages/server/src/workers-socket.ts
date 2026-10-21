@@ -24,30 +24,45 @@ const pipeOf = (socket: WorkersSocket): Pipe => ({
 });
 
 /**
- * `socket` once open, as a tunnel's; closed and refused if `signal` ends
- * the session first. `startTls` takes no name: workerd checks the
- * certificate against the host dialled, and refuses one of the caller's
- * (`expectedServerHostname`).
+ * The socket a dial gives, once open, as a tunnel's: `dialled` as the
+ * platform hands it, at once (`cloudflare:sockets`) or later (a binding's
+ * `connect()`). If `signal` ends the session first, whatever comes is
+ * closed and refused, the TLS that `startTls` begins included. `startTls`
+ * takes no name: workerd checks the certificate against the host
+ * dialled, and refuses one of the caller's (`expectedServerHostname`).
  */
-export async function workersSocket(socket: WorkersSocket, signal?: AbortSignal): Promise<Socket> {
-  const abort = () => void socket.close().catch(() => undefined);
-  signal?.addEventListener('abort', abort, { once: true });
-  try {
-    await socket.opened;
-  } finally {
-    signal?.removeEventListener('abort', abort);
-  }
-  // Ended while it opened, or before it was handed here: closed either way.
-  if (signal?.aborted) {
-    abort();
-    throw new Error('the session ended');
-  }
+export async function workersSocket(dialled: WorkersSocket | Promise<WorkersSocket>, signal?: AbortSignal): Promise<Socket> {
+  const socket = await opened(dialled, signal);
   return {
     ...pipeOf(socket),
-    startTls: async () => {
-      const secure = socket.startTls();
-      await secure.opened;
-      return pipeOf(secure);
-    },
+    startTls: async () => pipeOf(await opened(socket.startTls(), signal)),
   };
+}
+
+/** `dialled`, open; closed as soon as it comes if `signal` has ended the session, which then waits for it no longer. */
+function opened(dialled: WorkersSocket | Promise<WorkersSocket>, signal?: AbortSignal): Promise<WorkersSocket> {
+  const coming = Promise.resolve(dialled);
+  const open = coming.then(async (socket) => {
+    await socket.opened;
+    return socket;
+  });
+  if (signal === undefined) return open;
+  return new Promise<WorkersSocket>((resolve, reject) => {
+    const abort = () => {
+      reject(new Error('the session ended'));
+      coming.then((socket) => socket.close().catch(() => undefined), () => undefined);
+    };
+    if (signal.aborted) return abort();
+    signal.addEventListener('abort', abort, { once: true });
+    open.then(
+      (socket) => {
+        signal.removeEventListener('abort', abort);
+        resolve(socket);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
 }

@@ -20,10 +20,11 @@
   back what they took, and neither sends more than 1 MiB the other has
   not counted: a large `SELECT *` read by a slow client, or a large `COPY
   FROM STDIN`, waits in the database's socket, not in the object's
-  memory. The CLI's listener sends a count every 30 seconds, so a psql
-  left at its prompt outlives Cloudflare's 100-second idle timeout. A
-  Workers coffre refuses an older CLI with 426: update it. Node is
-  unchanged, and the 0.11 CLI still works against an older or Node one.
+  memory, and a client that ignores the window is ended. The CLI's
+  listener sends a count every 30 seconds, so a psql left at its prompt
+  outlives Cloudflare's 100-second idle timeout. A Workers coffre refuses
+  an older CLI with 426: update it. Node is unchanged, and the 0.11 CLI
+  still works against an older or Node one.
 - **A tunnel through a private network**, for a database with no public
   address: `postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect:
   env.REPLICA_NET })`, a Workers VPC Network binding to a Cloudflare
@@ -34,7 +35,8 @@
   configuration, never a direct dial. Without `connect`, nothing changes.
 - **A cancel request reaches only a session of the same database.** It
   already needed the same handle; now its key must also name a session of
-  the database it came for, so it is sent the way that tunnel dials.
+  the database (host, port and name) it came for, so it is sent the way
+  that tunnel dials.
 
 - **Protection shows where you are, and changes there.** A protected
   environment's tag is amber now, on its card and in its page's header,

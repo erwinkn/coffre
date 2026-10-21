@@ -33,8 +33,9 @@ export type CoffrePlugin = {
      * A WebSocket asked for under `prefix`: a refusal, or what carries the
      * connection's bytes once it is open (`SocketSession`). On Node, the
      * server's `upgrade` events reach it (`createCoffre(…).upgrade`); on
-     * Workers, a Durable Object per bearer and path hosts it
-     * (`cloudflare-sockets.ts`).
+     * Workers, a Durable Object per bearer and path hosts it, and its
+     * client paces the bytes by credit, as `coffre run`'s listener does
+     * (`cloudflare-sockets.ts`): a socket's client is coffre's own.
      */
     socket?: (request: Request, coffre: PluginContext) => Promise<Response | SocketSession>;
   };

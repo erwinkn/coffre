@@ -346,7 +346,7 @@ async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => v
 async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) => void, signal: AbortSignal): Promise<void> {
   const target = cancels.get(given);
   // The same handle and database: a cancel goes out the way its session's connection did, through its tunnel's network.
-  const same = target !== undefined && target.database.host === session.database.host && target.database.port === session.database.port;
+  const same = target !== undefined && (['host', 'port', 'database'] as const).every((part) => target.database[part] === session.database[part]);
   if (target === undefined || target.handle !== session.handle || !same) return;
   const socket = await open(session, target.database, own, signal);
   const writer = new Writer(socket.writable);

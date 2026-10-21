@@ -72,11 +72,14 @@ test("a plugin's WebSocket goes to the Durable Object its path and bearer name; 
     ...(withSockets ? { sockets } : {}),
   });
   const hosted = createCoffre(config(true));
-  const socket = (path: string, handle: string) => new Request(`https://coffre.test${path}`, { headers: { upgrade: 'websocket', authorization: `Bearer ${handle}` } });
+  const socket = (path: string, handle: string, flow = 'credit') => new Request(`https://coffre.test${path}`, { headers: { upgrade: 'websocket', authorization: `Bearer ${handle}`, 'coffre-tunnel-flow': flow } });
 
   // Not a WebSocket, or one no plugin takes: Start's.
   assert.equal(hosted.upgrade(new Request('https://coffre.test/use/market/dev/db'), {}), null);
   assert.equal(hosted.upgrade(socket('/api/projects', 'a'), {}), null);
+  // A client that does not pace its bytes, an older CLI's: refused by the Worker, no object made for it.
+  assert.equal((await hosted.upgrade(socket('/use/market/dev/db', 'a', 'none'), {}))!.status, 426);
+  assert.equal(sent.length, 0);
 
   // One object per run and database: the same handle and path, the same object; another handle or another path, another.
   for (const [path, handle] of [['/use/market/dev/db', 'a'], ['/use/market/dev/db', 'a'], ['/use/market/dev/db', 'b'], ['/use/market/prod/db', 'a']] as const) {

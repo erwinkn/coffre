@@ -21,15 +21,15 @@ const COUNT_EVERY = 128 * 1024;
 const servers: Server[] = [];
 after(() => servers.forEach((server) => server.close()));
 
-/** A stand-in coffre: each WebSocket the listener opens, with whether it asked for credit flow; answered with it if `credit`. */
+/** A stand-in coffre: each WebSocket the listener opens, with whether it asked for credit flow; paced if `credit`, which it says with a first `0`. */
 async function coffre(credit: boolean): Promise<{ url: string; next: () => Promise<{ ws: WebSocket; asked: boolean }> }> {
   const http = createServer();
   const sockets = new WebSocketServer({ server: http });
   const opened: { ws: WebSocket; asked: boolean }[] = [];
   let waiting: (() => void) | null = null;
-  sockets.on('headers', (headers) => credit && headers.push('coffre-tunnel-flow: credit'));
   sockets.on('connection', (ws, request) => {
     assert.equal(request.headers.authorization, `Bearer ${HANDLE}`);
+    if (credit) ws.send('0');
     opened.push({ ws, asked: request.headers['coffre-tunnel-flow'] === 'credit' });
     waiting?.();
   });
@@ -96,7 +96,7 @@ test("the listener counts back what the app took, so that coffre sends on", asyn
   close();
 });
 
-test('with a coffre that does not pace it (Node), the listener holds nothing back for want of a count', async () => {
+test('with a coffre that does not pace it (Node), the listener holds nothing back for want of a count, and counts back all the same', async () => {
   const stand = await coffre(false);
   const { url, close } = await listen({ key: 'DATABASE_URL', url: stand.url }, HANDLE);
   const socket = await app(url);
@@ -107,10 +107,10 @@ test('with a coffre that does not pace it (Node), the listener holds nothing bac
   socket.write(Buffer.alloc(4 * WINDOW));
   for (let tries = 0; received < 4 * WINDOW && tries < 50; tries += 1) await settle();
   assert.equal(received, 4 * WINDOW);
-  // And it counts nothing back, though it would be ignored.
+  // Its counts go to a coffre that ignores them: none waits on a header a proxy could drop.
   ws.send(Buffer.alloc(COUNT_EVERY * 2));
   await settle();
-  assert.deepEqual(texts, []);
+  assert.deepEqual(texts, [String(COUNT_EVERY * 2)]);
   socket.destroy();
   close();
 });

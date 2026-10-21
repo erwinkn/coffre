@@ -1260,7 +1260,8 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
 function through(network: Network): Connect {
   return async (host, port, signal) => {
     if (signal?.aborted) throw new Error('the session ended');
-    return workersSocket(await network.connect(`${host.includes(':') ? `[${host}]` : host}:${port}`), signal);
+    // Not awaited here: a dial the binding has not answered when the session ends is given up, and closed if it comes.
+    return workersSocket(network.connect(`${host.includes(':') ? `[${host}]` : host}:${port}`), signal);
   };
 }
 

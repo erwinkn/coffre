@@ -15,12 +15,14 @@ export type Tunnel = { key: string; url: string };
 const HIGH_WATER = 1024 * 1024;
 
 /**
- * Credit flow, with a coffre that answers the upgrade with it (on Workers,
- * whose WebSockets have no back-pressure: packages/server/src/cloudflare-sockets.ts):
- * each side counts back what it took, in text messages, each the bytes
- * taken from binary messages since its last, and sends at most `WINDOW`
- * bytes the other has not counted. A coffre on Node reads its socket only
- * as fast as it writes, and ignores the counts.
+ * Credit flow, asked for in a header (on Workers, whose WebSockets have no
+ * back-pressure: packages/server/src/cloudflare-sockets.ts): each side
+ * counts back what it took, in text messages, each the bytes taken from
+ * binary messages since its last, and sends at most `WINDOW` bytes the
+ * other has not counted. A coffre that paces says so with a first count,
+ * `0`, before any byte; from then on the listener holds itself to the
+ * window. It counts back whatever coffre it reaches: a coffre on Node
+ * reads its socket only as fast as it writes, and ignores the counts.
  */
 const FLOW = 'coffre-tunnel-flow';
 const WINDOW = 1024 * 1024;
@@ -42,21 +44,22 @@ export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: str
     socket.pause();
     // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it.
     const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: 15_000 });
+    /** Whether coffre paces, as its first count says. */
     let credit = false;
     /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
     let uncounted = 0;
     let taken = 0;
     const held = () => ws.bufferedAmount >= HIGH_WATER || (credit && uncounted >= WINDOW);
     const count = () => {
-      ws.send(String(taken));
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(String(taken), () => undefined);
       taken = 0;
     };
-    ws.on('upgrade', (response) => (credit = response.headers[FLOW] === 'credit'));
     ws.on('open', () => socket.resume());
-    const keepalive = setInterval(() => ws.readyState === WebSocket.OPEN && count(), KEEPALIVE_MS);
+    const keepalive = setInterval(count, KEEPALIVE_MS);
     keepalive.unref();
     socket.on('data', (chunk: Buffer) => {
-      if (credit) uncounted += chunk.length;
+      uncounted += chunk.length;
       ws.send(chunk, { binary: true }, () => {
         if (!held()) socket.resume();
       });
@@ -64,13 +67,13 @@ export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: str
     });
     ws.on('message', (data: Buffer, binary: boolean) => {
       if (!binary) {
-        // coffre's count of what it took.
+        // coffre's count of what it took, the first saying that it paces.
+        credit = true;
         uncounted = Math.max(0, uncounted - (Number(data.toString()) || 0));
         if (!held()) socket.resume();
         return;
       }
       const flushed = socket.write(data, () => {
-        if (!credit) return;
         taken += data.length;
         if (taken >= COUNT_EVERY) count();
       });

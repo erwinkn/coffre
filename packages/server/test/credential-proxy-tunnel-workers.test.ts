@@ -150,20 +150,41 @@ test("a revoked handle's session ends at the object's recheck", { skip, timeout:
   assert.ok(Date.now() - started < 5000);
 });
 
-test('a WebSocket that does not ask for credit flow is refused: an older CLI would let a large result fill the object', { skip, timeout: 30_000 }, async () => {
-  const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}` } });
-  ws.on('error', () => undefined);
-  const [, response] = (await once(ws, 'unexpected-response')) as [unknown, { statusCode: number }];
-  assert.equal(response.statusCode, 426);
-  ws.terminate();
+test('a WebSocket that does not ask for credit flow, or names no bearer, is refused before any object: an older CLI would let a large result fill one', { skip, timeout: 30_000 }, async () => {
+  for (const [headers, status] of [[{ authorization: `Bearer ${HANDLE}` }, 426], [{ 'coffre-tunnel-flow': 'credit' }, 401]] as const) {
+    const ws = new WebSocket(`${at}/use/market/dev/db`, { headers });
+    ws.on('error', () => undefined);
+    const [, response] = (await once(ws, 'unexpected-response')) as [unknown, { statusCode: number }];
+    assert.equal(response.statusCode, status);
+    ws.terminate();
+  }
+});
+
+test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { skip, timeout: 30_000 }, async () => {
+  // The app itself, say, speaking WebSocket with its handle, and no listener in between; the database not reading yet.
+  const flood = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
+  await once(flood, 'open');
+  const flooded = once(flood, 'close');
+  // A startup that claims a long first message, so the session waits for bytes that never make one; then 3 MiB more.
+  const startup = Buffer.alloc(4);
+  startup.writeInt32BE(9_000);
+  flood.send(startup);
+  for (let sent = 0; sent < 3 * WINDOW; sent += 256 * 1024) flood.send(Buffer.alloc(256 * 1024));
+  await flooded;
+
+  const greedy = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
+  await once(greedy, 'open');
+  const ended = once(greedy, 'close');
+  // Nothing was sent to it yet: a count of anything opens the window past what it took.
+  greedy.send('1000000');
+  await ended;
 });
 
 test("a large result goes no faster than the app counts it: uncounted, the object holds back all but a window", { skip, timeout: 120_000 }, async () => {
   const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
-  let flow: string | undefined;
-  ws.on('upgrade', (response) => (flow = response.headers['coffre-tunnel-flow'] as string));
-  await once(ws, 'open');
-  assert.equal(flow, 'credit');
+  // The object says it paces, with a count of nothing, before any byte.
+  const [first, binary] = (await once(ws, 'message')) as [Buffer, boolean];
+  assert.deepEqual([first.toString(), binary], ['0', false]);
   let received = 0;
   let counting = false;
   let tail = Buffer.alloc(0);

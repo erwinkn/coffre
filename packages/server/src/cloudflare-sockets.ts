@@ -27,18 +27,24 @@ type ObjectState = { waitUntil(promise: Promise<unknown>): void };
 export type Admit = (request: Request, sourceIp: string | null) => Promise<Response | SocketSession>;
 
 /**
- * The header a WebSocket asks for credit flow with, and the object's 101
- * answers with: `coffre-tunnel-flow: credit`. A Workers WebSocket has no
- * back-pressure, either way: what one side sends faster than the other
- * takes waits in the object's memory, 128 MB, a large `SELECT *` included.
- * So each side counts back what it took, in text messages, each the bytes
- * taken from binary messages since its last, and holds at most `WINDOW`
- * bytes the other has not counted; `0` counts nothing, and keeps an idle
- * connection's WebSocket alive (`coffre run`'s listener, packages/cli/src/tunnels.ts).
+ * How a plugin's WebSocket carries its bytes on Workers, its client saying
+ * it will with a header, `coffre-tunnel-flow: credit`. A Workers WebSocket
+ * has no back-pressure, either way: what one side sends faster than the
+ * other takes waits in the object's memory, 128 MB, a large `SELECT *`
+ * included. So each side counts back what it took, in text messages, each
+ * the bytes taken from binary messages since its last, and sends at most
+ * `WINDOW` bytes the other has not counted; `0` counts nothing. The object
+ * says it paces so with a first `0`, before any byte, and ends a client
+ * that sends past its window or counts what it was never sent: a peer that
+ * ignores the window could otherwise fill the object. The client's `0`
+ * every 30 seconds keeps an idle connection alive (`coffre run`'s
+ * listener, packages/cli/src/tunnels.ts).
  */
 export const FLOW = 'coffre-tunnel-flow';
 /** What either side may send that the other has not counted back. */
 const WINDOW = 1024 * 1024;
+/** What the object takes from a client before it ends it: a window, and the message that crossed it. */
+const MOST_HELD = 2 * WINDOW;
 /** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
 const COUNT_EVERY = 128 * 1024;
 
@@ -48,14 +54,32 @@ const COUNT_EVERY = 128 * 1024;
  * object anyone can read.
  */
 export async function forwardSocket(request: Request, sockets: SocketsNamespace): Promise<Response> {
+  const refused = refusal(request);
+  if (refused !== null) return refused;
   const { pathname } = new URL(request.url);
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${pathname}\n${request.headers.get('authorization') ?? ''}`));
   const name = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   return sockets.get(sockets.idFromName(name)).fetch(request);
 }
 
-/** How long the object's database client stays open once idle: a check's queries share it, and a session holds none between checks. */
-export const IDLE_DATABASE_MS = 1_000;
+/**
+ * A WebSocket no object is made for: one whose client paces nothing, which
+ * a coffre before 0.11 is, or that carries no bearer, which names its object.
+ */
+function refusal(request: Request): Response | null {
+  if (request.headers.get(FLOW) !== 'credit') {
+    return new Response(`this coffre's WebSockets pace their bytes (${FLOW}: credit), as coffre 0.11 and later do: update the CLI`, { status: 426 });
+  }
+  if (!/^Bearer\s+\S+$/i.test(request.headers.get('authorization') ?? '')) return new Response('send a bearer token', { status: 401 });
+  return null;
+}
+
+/**
+ * How long the object's database client stays open once idle: a check's
+ * queries share it, its vault calls between them included (ten seconds at
+ * most, `RECHECK_DEADLINE_MS`), and a session holds none between checks.
+ */
+export const IDLE_DATABASE_MS = 10_000;
 
 /**
  * The Durable Object class the deployment exports, `export const
@@ -73,9 +97,9 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       this.#env = env;
     }
     async fetch(request: Request): Promise<Response> {
-      if (request.headers.get(FLOW) !== 'credit') {
-        return new Response('this coffre tunnels for coffre 0.11 or later, whose `coffre run` paces its tunnel: update the CLI', { status: 426 });
-      }
+      // The Worker refuses these first (`refusal`); an object asked otherwise refuses them too.
+      const refused = refusal(request);
+      if (refused !== null) return refused;
       this.#admit ??= admission(this.#env, this.#state);
       const answer = await this.#admit(request, cloudflareSourceIp(request));
       if (answer instanceof Response) return answer;
@@ -86,7 +110,7 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       server.binaryType = 'arraybuffer';
       const client = fromWebSocket(server);
       this.#state.waitUntil(answer(client, connect).catch(() => undefined).finally(client.close));
-      return new Response(null, { status: 101, webSocket: pair[0], headers: { [FLOW]: 'credit' } } as ResponseInit);
+      return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
     }
   };
 }
@@ -112,8 +136,9 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
   let ended!: () => void;
   const closed = new Promise<void>((resolve) => (ended = resolve));
   let done = false;
-  /** What the app sent that the session has not taken. */
+  /** What the app sent that the session has not taken, and its bytes. */
   const queue: Uint8Array[] = [];
+  let queued = 0;
   /** Bytes the session took, not yet counted back to the app. */
   let taken = 0;
   /** Bytes sent to the app that it has not counted back. */
@@ -139,24 +164,31 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
     if (done) return;
     if (typeof data === 'string') {
       // The app's count of what it took: a count that is no count ends the connection, as a broken frame would.
+      // So is one for more than it was sent: it would open the window past what the app took.
       const count = Number(data);
-      if (!/^\d{1,10}$/.test(data) || !Number.isSafeInteger(count)) return end();
-      uncounted = Math.max(0, uncounted - count);
+      if (!/^\d{1,10}$/.test(data) || count > uncounted) return end();
+      uncounted -= count;
       wake();
       return;
     }
     if (data.byteLength === 0) return;
+    // Past its window, uncounted: a client that ignores it is ended, never queued for.
+    if (queued + taken + data.byteLength > MOST_HELD) return end();
     queue.push(new Uint8Array(data));
+    queued += data.byteLength;
     wake();
   });
   ws.addEventListener('close', end);
   ws.addEventListener('error', end);
+  // That the object paces: the client holds itself to the window from here.
+  ws.send('0');
   const readable = new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
         while (queue.length === 0 && !done) await new Promise<void>((resolve) => (arrived = resolve));
         const chunk = queue.shift();
         if (chunk === undefined) return controller.close();
+        queued -= chunk.length;
         controller.enqueue(chunk);
         taken += chunk.length;
         if (taken < COUNT_EVERY) return;

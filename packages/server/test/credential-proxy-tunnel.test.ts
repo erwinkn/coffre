@@ -24,6 +24,7 @@ import { upgrade } from '../src/node-sockets.ts';
 import { checkPlugins, pluginSocket } from '../src/plugins.ts';
 import { credentialProxy, postgres, type Network } from '../src/plugins/credential-proxy.ts';
 import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
+import type { WorkersSocket } from '../src/workers-socket.ts';
 
 const postgresOnly = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false };
 // The suite's database, as the app's would name it: no TLS to a database on loopback.
@@ -617,6 +618,36 @@ test("a tunnel's network binding is checked with the configuration: missing, it 
   // Private hosts, with a binding and without insecureUpstreams; never without it.
   assert.doesNotThrow(tunnel({ hosts: ['10.0.1.5'], connect: { connect: () => Promise.reject(new Error('unused')) } }));
   assert.throws(tunnel({ hosts: ['10.0.1.5'] }), /names a private host/);
+});
+
+test("a dial through a network binding still under way when the app leaves is given up: the socket that comes after is closed", postgresOnly, async () => {
+  // A binding that answers only when told, with a socket that says when it is closed.
+  let answer!: (socket: WorkersSocket) => void;
+  const asked = new Promise<void>((resolve) => {
+    const network: Network = {
+      connect: () => {
+        resolve();
+        return new Promise<WorkersSocket>((done) => (answer = done));
+      },
+    };
+    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) }, cacheSeconds: 0 })]);
+  });
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@10.9.8.7:5432/d?sslmode=disable' });
+  const raw = tcp({ host: '127.0.0.1', port: listenerPort });
+  await once(raw, 'connect');
+  const startup = Buffer.concat([Buffer.from([0, 3, 0, 0]), cstring('user'), cstring('app'), Buffer.from([0])]);
+  const length = Buffer.alloc(4);
+  length.writeInt32BE(startup.length + 4);
+  raw.write(Buffer.concat([length, startup]));
+  await once(raw, 'data');
+  raw.write(message('p', cstring(handle)));
+  await asked;
+  raw.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  let closed = false;
+  answer({ readable: new ReadableStream(), writable: new WritableStream(), opened: Promise.resolve(), closed: new Promise(() => undefined), close: async () => void (closed = true), startTls: () => { throw new Error('unused'); } });
+  for (let waited = 0; !closed && waited < 2000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(closed, 'the late socket was closed');
 });
 
 /** The tunnel's refusal of a WebSocket, as the plugin answers it: its status and message. */

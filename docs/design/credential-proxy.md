@@ -783,7 +783,7 @@ and its `credential.use` entry), and the session runs the same `tunnel()`,
 with TCP out through `cloudflare:sockets` (`cloudflare-sockets.ts`). The
 object holds nothing an instance decides: access, the vault and the log
 are reached through the plugin's context, by a coffre of the object's own
-whose database client opens with a query and closes a second after
+whose database client opens with a query and closes ten seconds after its last
 (`closeIdleMs`). The object is given its admission as a function
 (`socketsObject(env => admit)`), so that a session held by the Worker
 itself, with only the cancel map in an object, would change the routing
@@ -816,10 +816,19 @@ the database socket, and TCP holds the database back. A message from the
 app is counted when the session takes it, so the database socket's own
 pace reaches the app. `coffre run`'s listener does the same on its side
 (`packages/cli/src/tunnels.ts`). The listener asks for it in a header,
-`coffre-tunnel-flow: credit`, and the object answers its 101 with it. A
-coffre on Node answers without it, reads its WebSocket only as fast as it
-writes, and ignores the counts. An older CLI, which does not ask, is
-refused with 426 rather than let through unpaced. Measured with `vite
+`coffre-tunnel-flow: credit`, and the object says it paces with a first
+count, `0`, before any byte: in-band, so no proxy that drops a header
+leaves the two waiting on each other. The listener counts back whatever
+coffre it reaches, and holds itself to the window from that first count.
+A coffre on Node never sends one, reads its WebSocket only as fast as it
+writes, and ignores the counts. The object holds a client to its window:
+one that sends two windows uncounted, or counts more than it was sent, is
+ended, so a client that ignores the window, the app itself speaking
+WebSocket with its handle, cannot fill the object. A WebSocket without
+the header, an older CLI's, or without a bearer, is refused by the
+Worker, with 426 or 401, before any object is made. This is how any
+plugin's WebSocket carries its bytes on Workers, not the tunnel's own:
+a session is given a byte pipe (`Pipe`), and this is the pipe. Measured with `vite
 dev` and the real CLI, 200 MB through the object at about 48 MB/s: with
 the app stalled 10 s mid-result, workerd's memory rose 2 MB (41 MB with the
 window off), and the test holds the object to a window: an app that
