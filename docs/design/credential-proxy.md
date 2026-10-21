@@ -61,12 +61,13 @@ with three levels, loosest first:
 |---|---|---|
 | `plain` | Anyone who can list the environment | Visible to anyone who can see this environment |
 | `secret`, the default | People whose role can read secrets | Visible to people whose role can read secrets |
-| `sensitive` | No person, Owners included. Their apps get a placeholder and use it through the proxy; service accounts read it | Never shown to anyone, Owners included. Used through the proxy or by services |
+| `sensitive` | No person, Owners included. Their apps get a placeholder and use it through the proxy; service accounts read it. An Owner of the project may make it a secret, its value kept (loosening, below) | Never shown to anyone, Owners included. Used through the proxy or by services |
 
 ```sh
 $ coffre set market/prod/STRIPE_SECRET_KEY --sensitive   # a new value, shown to nobody from here on
 $ coffre mark market/prod/DATABASE_URL sensitive         # the value as it is, made stricter
 $ coffre mark market/prod sensitive                      # every value of market/prod's own that is looser now
+$ coffre mark market/prod/DATABASE_URL secret            # an Owner of market: sensitive made a secret, its value kept
 $ coffre list market/prod
 DATABASE_URL	v4	admin@acme.example	today  sensitive
 STRIPE_SECRET_KEY	v2	admin@acme.example	today  sensitive
@@ -116,17 +117,35 @@ might name included.
   which nobody is handed: STRIPE_SECRET_KEY`. A read of one sensitive key
   is refused whole, 403 `sensitive`. `coffre version` answers, for a
   person, the version of what their read would open.
-- **Stricter at any time, looser only by a new value.** Making a key
-  stricter keeps its value: `{ "sensitivity": "sensitive" }`, with no
-  value, in `PATCH /secrets/…`, is a new version of the same ciphertext,
-  its data key wrapped again as the new level (the vault's `rewrap`), which
-  takes write and opens nothing. Making one looser takes the value written
-  again (`coffre set … --secret`), so nobody ever shows a value they could
-  not read by flipping it (decision 17's rule, for every level). The vault
-  holds rewraps to it: a new version is never less sensitive than the one
-  it is made from, nor than its secret's newest (`invalid`). A rollback
-  brings the old value back as it was held, plain or secret, and sensitive
-  while the key is.
+- **Stricter at any time, looser only by a new value, or by an Owner.**
+  Making a key stricter keeps its value: `{ "sensitivity": "sensitive" }`,
+  with no value, in `PATCH /secrets/…`, is a new version of the same
+  ciphertext, its data key wrapped again as the new level (the vault's
+  `rewrap`), which takes write and opens nothing. Making one looser takes
+  the value written again (`coffre set … --secret`), so nobody ever shows
+  a value they could not read by flipping it (decision 17's rule, for
+  every level). The vault holds rewraps to it: a new version is never
+  less sensitive than the one it is made from, nor than its secret's
+  newest (`invalid`). A rollback brings the old value back as it was
+  held, plain or secret, and sensitive while the key is.
+- **Loosening, in place (R30).** One flip is allowed: an Owner of the
+  project, or of the whole instance, as a person on no credential's
+  scope, makes a sensitive value a secret, `{ "sensitivity": "secret" }`
+  with no value (`coffre mark market/prod/DATABASE_URL secret`, or the
+  row's Who sees it › Secret, behind a confirmation). They could read it
+  anyway (break-glass, below), so retyping protected nothing from them.
+  It is a new version of the same ciphertext, its key opened as sensitive
+  and wrapped again without the binding, by the vault, which refuses it
+  to anyone else (`not_allowed`): the value never reaches the app, nor
+  its caller, by it. Only the key's current version: its older ones stay
+  sensitive, and a rollback to one brings it back sensitive, as any
+  rollback brings a value back as it was held. Its own entry,
+  `secret.loosen` (`from: 'sensitive'`, `to: 'secret'`, and the version
+  whose value it `kept`; a refusal, `not_owner`, is one too), beside the
+  vault's `key.rewrap` (`was: 'sensitive'`), so no reader of the log takes it for a value written or
+  seen. A reference reads its source loosened, live (R23), and a fork's
+  inherited key its parent's: each is loosened where it is held.
+  Secret to plain stays a reveal, then a write (decision 17).
 - **A write that says nothing keeps the key as strict.** It is a secret,
   or sensitive where the key is sensitive now: rotating a sensitive key
   with `coffre set` leaves it sensitive. Plain is still said by each write
@@ -134,10 +153,10 @@ might name included.
   sensitive unless it says otherwise.
 - **Logged.** A write's `secret.write` says `sensitive: true` (or `plain:
   true`), and `was`, the level before, when it changed one; a mark also
-  says the version whose value it `kept`.
+  says the version whose value it `kept`. A loosening is `secret.loosen`.
 - **Personal tokens count as people**, as does a handle. A personal
-  config's values stay readable by their owner (R8): none is sensitive, or
-  plain, there.
+  config's own values are plain, secret or sensitive, as anywhere, and
+  read by their owner alone, a sensitive one used (R8, R20, decision 27).
 - **A fork's copy keeps each value's level**, as it keeps plain.
 
 0.8 and 0.9 had one switch for the whole deployment, `people:
@@ -337,7 +356,10 @@ them, `market/dev` and `market/prod`, and their apps use those through the
 proxy.
 
 **Break-glass.** A person who must see a value (an Owner pasting a key
-into a provider's dashboard) has no path to it as themselves. The escape
+into a provider's dashboard) has no path to it as themselves while it is
+sensitive. An Owner of its project may make it a secret (loosening,
+above), which shows it to everyone who reads secrets there; to read it
+and leave it sensitive, the escape
 is the one coffre already has: a service account. An Owner gives one read
 on the place, issues it a token, and reads with it (`coffre --url …
 --service …`, or `coffre login --token`). Each step is logged: the
@@ -1293,6 +1315,21 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     Named and missing, it refuses the configuration rather than leave by
     the global `fetch`. HTTP credentials only: a tunnel's `connect()` and a
     signer reach no upstream through it.
+
+29. **An Owner loosens a sensitive value in place (R30, Erwin
+    2026-10-21).** An Owner of the project, or of the whole instance,
+    makes a sensitive value a secret with its value kept, as marking
+    stricter does, rather than typing it again: they read it anyway
+    through break-glass, so retyping protected nothing from them, and a
+    project's Owner holds that inside their project. Decided by the
+    vault, for the key's current version alone: older versions keep
+    their binding, and come back sensitive, as a rollback brings any
+    value back as it was held. The simplest consistent rule: a loosening
+    is one new version, as a tightening is, and no version is rewritten.
+    Its own entry, `secret.loosen`, not a `secret.write`, which the
+    offboarding report reads as a value its writer saw. *Alternatives:*
+    retyping, always (R16); loosening the key's history too, which would
+    rewrite versions in place, unlike everything else.
 
 ## 9. Plan
 

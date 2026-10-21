@@ -110,7 +110,8 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
 
 /**
  * Every version the app says it stored names the vault's entry for the key
- * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore:
+ * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore,
+ * a mark and a loosening:
  * the same member, request and operation, the same secret and version. And
  * every value read is the vault's to log: the app keeps no reads of its own.
  */
@@ -123,12 +124,13 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
     }>('SELECT * FROM audit_log ORDER BY seq');
     const bySeq = new Map(entries.map((entry) => [String(entry.seq), entry]));
     const writes = entries.filter((entry) => entry.author === 'app' && entry.decision === 'allow'
-      && (entry.action === 'secret.write' || entry.action === 'secret.restore'));
+      && (entry.action === 'secret.write' || entry.action === 'secret.restore' || entry.action === 'secret.loosen'));
     for (const entry of entries.filter((row) => row.author === 'app' && row.decision === 'allow')) {
       expect(entry.action !== 'secret.read', 'the app logged an allowed read of a value', entry);
     }
     for (const entry of writes) {
-      const seal = entry.action === 'secret.write' ? 'key.wrap' : 'key.rewrap';
+      // A write of a new value wraps a new key; a restore, a mark (which says the version it `kept`) and a loosening rewrap one.
+      const seal = entry.action === 'secret.write' && JSON.parse(entry.metadata).kept === undefined ? 'key.wrap' : 'key.rewrap';
       const key = entry.related_seq === null ? undefined : bySeq.get(String(entry.related_seq));
       expect(key !== undefined && key.author === 'vault' && key.action === seal && key.decision === 'allow',
         `a ${entry.action} names no ${seal} of the vault's`, { entry, key });

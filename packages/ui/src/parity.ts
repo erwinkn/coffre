@@ -52,7 +52,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PATCH /projects/:project/:environment': {
     ui: [
       { does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project-environments.tsx', call: 'environments.update' },
-      { does: "an environment's card › ⋯ › Protect…, and for an Owner of the whole instance Unprotect…", in: 'pages/project-environments.tsx', call: 'environments.protect' },
+      { does: "an environment's card › ⋯ › Protect…, and for an Owner of its project Unprotect…", in: 'pages/project-environments.tsx', call: 'environments.protect' },
     ],
   },
   'DELETE /projects/:project/:environment': {

@@ -246,6 +246,50 @@ test('a rewrap makes a value stricter, never looser: not from a sensitive versio
   assert.ok((await w.vault.wrap({ principal: ADA, items: [{ secret: { ...base, version: 4 }, key: randomBytes(32).toString('base64') }] })).ok);
 });
 
+test("a key's current sensitive value is made a secret in place by an Owner of its project alone: never by a Maintainer, another project's Owner or a credential, nor from an old version", async () => {
+  const w = await world();
+  const OLGA = 'user:olga@acme.example';
+  const BILL = 'user:bill@acme.example';
+  await member(w, OLGA, [[null, 'owner']]);
+  await member(w, ADA, [[null, 'maintainer']]);
+  const billing = await newProject(db.owner);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BILL, role: 'owner', scope: { projects: { only: [billing] }, environments: 'all' } })).ok);
+  const { secrets } = tablesOf(db.owner);
+  const base = await w.secret(w.prod);
+  const key = randomBytes(32).toString('base64');
+  const sealed = await w.vault.wrap({ principal: ROOT, items: [{ secret: { ...base, sensitive: true }, key }] });
+  assert.ok(sealed.ok);
+  const [v1] = await versionItems([{ secret: { ...base, sensitive: true }, wrapped: sealed.wrapped[0]! }]);
+  await db.owner.update(secrets).set({ currentVersionId: v1!.secretVersionId, currentVersion: 1 }).where(eq(secrets.id, base.secretId));
+  const loosen = { secret: { ...base, version: 2 }, ...v1! };
+
+  for (const [principal, code] of [[ADA, 'not_allowed'], [BILL, 'no_grant']] as const) {
+    const refused = await w.vault.rewrap({ principal, items: [loosen] });
+    assert.equal(!refused.ok && refused.refusal.code, code, principal);
+  }
+  // On a credential's scope, an Owner's own, owner on the project, included: a forged app request as much as a token's.
+  const scoped = await w.vault.rewrap({ principal: OLGA, items: [loosen], credentialScope: [{ projectId: w.project, environmentId: null, role: 'owner' }] });
+  assert.equal(!scoped.ok && scoped.refusal.code, 'not_allowed');
+  const denied = (await vaultLog()).filter((entry) => entry.action === 'key.rewrap' && entry.outcome === 'refuse');
+  assert.deepEqual(denied.map((entry) => entry.code), ['not_allowed', 'no_grant', 'not_allowed']);
+
+  const loosened = await w.vault.rewrap({ principal: OLGA, items: [loosen] });
+  assert.ok(loosened.ok, JSON.stringify(loosened));
+  assert.deepEqual(loosened.sensitive, [false]);
+  const [entry] = (await vaultLog()).filter((each) => each.action === 'key.rewrap' && each.outcome === 'allow');
+  assert.deepEqual([entry?.actor, entry?.detail.from, entry?.detail.was], [OLGA, 1, 'sensitive']);
+  // The same data key, now bound as a secret's: its readers open it, as anyone's reveal of a secret.
+  const [v2] = await versionItems([{ secret: { ...base, version: 2 }, wrapped: loosened.wrapped[0]! }]);
+  assert.deepEqual(await w.vault.unwrap({ principal: OLGA, purpose: 'reveal', items: [v2!] }), { ok: true, keys: [key] });
+  // Its old version is not the current one: brought back, it comes back sensitive, or not at all, for its Owner too.
+  await db.owner.update(secrets).set({ currentVersionId: v2!.secretVersionId, currentVersion: 2 }).where(eq(secrets.id, base.secretId));
+  for (const principal of [OLGA, ROOT]) {
+    const old = await w.vault.rewrap({ principal, items: [{ secret: { ...base, version: 3 }, ...v1! }] });
+    assert.equal(!old.ok && old.refusal.code, 'invalid', principal);
+  }
+  assert.ok((await w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3, sensitive: true }, ...v1! }] })).ok);
+});
+
 test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', postgresOnly('SQLite runs one writer at a time'), async () => {
   const remote = service();
   const w = await world({ keks: remote.keks });
@@ -261,6 +305,27 @@ test('a rewrap is held to its secret\'s newest version as the decision commits: 
   await versionItems([{ secret: sensitive, wrapped: later }]);
   const refused = await rewrap;
   assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
+});
+
+test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", postgresOnly('SQLite runs one writer at a time'), async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  const { secrets } = tablesOf(db.owner);
+  const base = { ...(await w.secret(w.dev)), sensitive: true };
+  const [v1] = await versionItems([{ secret: base, wrapped: await wrapped(w, base) }]);
+  await db.owner.update(secrets).set({ currentVersionId: v1!.secretVersionId, currentVersion: 1 }).where(eq(secrets.id, base.secretId));
+  const next = { ...base, version: 2 };
+  const later = await wrapped(w, next);
+  // The key service takes its time over the sensitive key, as the loosening waits under its decision; meanwhile
+  // another sensitive version is stored and made current.
+  remote.seen.hanging.add(base.secretId);
+  const loosening = w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3, sensitive: false }, ...v1! }] });
+  await sleep(100);
+  const [v2] = await versionItems([{ secret: next, wrapped: later }]);
+  await db.owner.update(secrets).set({ currentVersionId: v2!.secretVersionId, currentVersion: 2 }).where(eq(secrets.id, base.secretId));
+  const refused = await loosening;
+  assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
+  assert.equal((await vaultLog()).filter((entry) => entry.action === 'key.rewrap' && entry.outcome === 'allow').length, 0, 'no loosened key was released');
 });
 
 test('a read records the stored version instead of the app claim', async () => {

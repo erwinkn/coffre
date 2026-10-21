@@ -1,7 +1,7 @@
 // The access policy (docs/design/roles.md): roles in two columns, as an
 // Owner of the whole instance edits and makes them, and the protected
 // environments, which whoever manages a project's environments protects and
-// only an Owner unprotects. The vault keeps it in its newest `policy.change`
+// only an Owner of the project, or of the whole instance, unprotects. The vault keeps it in its newest `policy.change`
 // entry, by its MAC, and decides every read with it: a person holds a role's
 // protected column in a protected environment, a service account never.
 import test, { after, before, beforeEach } from 'node:test';
@@ -18,7 +18,7 @@ import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
-import { emptyDatabase, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase } from './database.ts';
+import { emptyDatabase, newProject, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -82,7 +82,7 @@ test('a protected environment gives a person the protected column of their role,
   assert.deepEqual((await w.vault.access(ADA)).policy?.protected, [w.prod]);
 });
 
-test('whoever manages a project\'s environments protects one, before its row exists too; only an Owner of the whole instance unprotects', async () => {
+test('whoever manages a project\'s environments protects one, before its row exists too; only an Owner unprotects', async () => {
   const w = await world();
   await w.grant(ADA, null, 'maintainer');
   const fork = randomUUID();
@@ -104,6 +104,43 @@ test('whoever manages a project\'s environments protects one, before its row exi
   await w.grant('user:bo@acme.example', null, 'developer');
   const bo = await protect(w.vault, 'user:bo@acme.example', w.project, [w.dev]);
   assert.equal(!bo.ok && bo.refusal.code, 'not_allowed');
+});
+
+test('an Owner of the project unprotects its environments, by a grant or an instance role scoped to it; another project\'s Owner, an Owner of every prod and a credential do not', async () => {
+  const w = await world();
+  const OLGA = 'user:olga@acme.example';
+  const LENA = 'user:lena@acme.example';
+  const PAT = 'user:pat@acme.example';
+  const BILL = 'user:bill@acme.example';
+  await w.grant(OLGA, null, 'owner');
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: LENA, role: 'owner', scope: { projects: { only: [w.project] }, environments: 'all' } })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: PAT, role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } })).ok);
+  const billing = await newProject(db.owner);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BILL, role: 'owner', scope: { projects: { only: [billing] }, environments: 'all' } })).ok);
+  for (const actor of [OLGA, LENA]) {
+    assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+    assert.ok((await protect(w.vault, actor, w.project, [w.prod], false)).ok, actor);
+    assert.deepEqual((await w.vault.policy()).protected, [], actor);
+  }
+  assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
+  for (const actor of [BILL, PAT]) {
+    const refused = await protect(w.vault, actor, w.project, [w.prod], false);
+    assert.equal(!refused.ok && refused.refusal.code, 'not_allowed', actor);
+  }
+  // On a credential's scope, an Owner's own included, nobody unprotects: the vault decides on the scope it is told.
+  const scope = [{ projectId: w.project, environmentId: null, role: 'owner' }];
+  for (const actor of [ROOT, OLGA]) {
+    const scoped = await w.vault.changePolicy({ actor, change: { kind: 'protect', projectId: w.project, environmentIds: [w.prod], protected: false }, credentialScope: scope });
+    assert.equal(!scoped.ok && scoped.refusal.code, 'not_allowed', actor);
+  }
+  assert.deepEqual((await w.vault.policy()).protected, [w.prod]);
+  // A fork's id, with no row yet, protected for billing: market's Owner names it, and it stays protected.
+  const fork = randomUUID();
+  assert.ok((await protect(w.vault, BILL, billing, [fork])).ok);
+  assert.ok((await protect(w.vault, OLGA, w.project, [w.prod, fork], false)).ok);
+  assert.deepEqual((await w.vault.policy()).protected, [fork]);
+  assert.ok((await protect(w.vault, BILL, billing, [fork], false)).ok);
+  assert.deepEqual((await w.vault.policy()).protected, []);
 });
 
 test('an Owner of the whole instance edits a role, resets it, makes one, and deletes it once no grant names it; nobody edits Owner', async () => {
@@ -228,6 +265,9 @@ test("a policy the vault cannot read is written again by an Owner of the whole i
   const ada = await protect(w.vault, ADA, w.project, [w.dev]);
   assert.equal(!ada.ok && ada.refusal.code, 'not_allowed');
   assert.match(!ada.ok ? ada.refusal.message : '', /cannot read its own policy/);
+  // Nor does unprotecting market's prod, though an Owner of market unprotects it while the policy reads (R30).
+  const unprotect = await protect(w.vault, ADA, w.project, [w.prod], false);
+  assert.match(!unprotect.ok ? unprotect.refusal.message : '', /cannot read its own policy/);
   // An Owner of the whole instance writes it again, from the roles as they ship: what the forged rows hid is for them to restore.
   assert.ok((await protect(w.vault, ROOT, w.project, [w.dev])).ok);
   assert.deepEqual((await w.vault.policy()).protected, [w.dev]);

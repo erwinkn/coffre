@@ -7,7 +7,8 @@ import type { SecretChange } from './secret-edit-batch.ts';
  * `sensitive`, no person, Owners included, while their apps use it through
  * the credential proxy and service accounts read it. A key is made
  * stricter with its value kept; looser only with its value typed again, so
- * nobody shows a value by flipping it.
+ * nobody shows a value by flipping it, but for a sensitive value an Owner
+ * of the project makes a secret, from its row's menu (`loosenable`).
  */
 export const SENSITIVITIES = ['plain', 'secret', 'sensitive'] as const satisfies readonly Sensitivity[];
 

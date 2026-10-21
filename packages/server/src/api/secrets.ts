@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import type { Permission } from '@coffre/core/access';
+import { ownsProject, type Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
@@ -35,8 +35,8 @@ import {
   fileSecrets,
   secretFolderOf,
 } from '../db/queries.ts';
-import { can, lists, permissionsAt, placeOf } from './caller.ts';
-import { protectedFor } from './roles.ts';
+import { can, lists, permissionsAt, placeOf, type Caller } from './caller.ts';
+import { protectedFor, unprotects } from './roles.ts';
 import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -136,7 +136,9 @@ export type SecretVersion = {
  * `sensitive`, no person, Owners included, which their apps use through the
  * credential proxy and service accounts read. A key is made stricter at
  * any time, its value kept; looser only by writing a value again, so a
- * value nobody could read is never shown by flipping it.
+ * value nobody could read is never shown by flipping it. But for one: an
+ * Owner of its project makes a sensitive value a secret in place, a value
+ * they read anyway through a service account (`loosens`, R30).
  */
 export type Sensitivity = 'plain' | 'secret' | 'sensitive';
 
@@ -154,6 +156,23 @@ export function stricter(a: Sensitivity, b: Sensitivity): boolean {
 }
 
 /**
+ * Whether the caller makes a sensitive value of the environment's own a
+ * secret in place, its value kept and never shown to them by it: an Owner
+ * of its project, or of the whole instance, as a person on no credential's
+ * scope (`ownsProject`). Anyone else writes the value again. The vault
+ * holds its `rewrap` to the same.
+ */
+export function loosens(caller: Caller, place: ResolvedPath): boolean {
+  return ownsProject(caller, place.project.id);
+}
+
+/** Why a mark looser than the key is refused: its value written again, or an Owner of its project, for a sensitive one made a secret. */
+function looserProblem(key: string, was: Sensitivity, to: Sensitivity, project: string): string {
+  const owner = was === 'sensitive' && to === 'secret' ? `, unless an Owner of ${project} makes it one in place` : '';
+  return `${key} is ${was}: making it ${to} takes its value written again${owner}, never a flip of the one stored`;
+}
+
+/**
  * A value, a value a client generated, with how (`@coffre/core/recipe`), a
  * value with who sees it, the key's value as it is made stricter, or a
  * reference to another secret by path. A value written without a recipe
@@ -164,7 +183,8 @@ export function stricter(a: Sensitivity, b: Sensitivity): boolean {
  * level of the value the key reads now, plain included (`bareLevel`). `{ plain: true }` is 0.9's way to say
  * `sensitivity: 'plain'`. `{ sensitivity }` with no value makes the key's
  * current value stricter, as a new version of it, and never looser: that
- * takes the value written again. A regenerate, or a plain value written
+ * takes the value written again, but for a sensitive value an Owner of its
+ * project makes a secret (`loosens`). A regenerate, or a plain value written
  * over the one its writer revealed, says the version each key's value
  * `replaces`, by its id, and is refused if that is not its current version.
  */
@@ -183,7 +203,7 @@ function askedSensitivity(value: SecretValue | null): Sensitivity | undefined {
   return 'sensitivity' in value ? value.sensitivity : undefined;
 }
 
-/** Whether a patch's value only makes the key's current value stricter, writing no value. */
+/** Whether a patch's value only marks the key's current value, stricter or, by an Owner, looser, writing no value. */
 function isMark(value: SecretValue | null): value is { sensitivity: Sensitivity } {
   return value !== null && typeof value === 'object' && !('value' in value) && 'sensitivity' in value;
 }
@@ -272,7 +292,18 @@ export async function currentEnvelopes(
 export async function listSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
-): Promise<{ permissions: Permission[]; keys: SecretKey[]; parents: string[]; personal: PersonalView | null; protected: boolean; rotateAfterDays: number | null }> {
+): Promise<{
+  permissions: Permission[];
+  keys: SecretKey[];
+  parents: string[];
+  personal: PersonalView | null;
+  protected: boolean;
+  /** Whether you may take its protection off (`unprotects`): an Owner of its project, protected or not; false for a personal config. */
+  unprotectable: boolean;
+  /** Whether you may make a sensitive value of its own a secret in place, its value kept (`loosens`); anyone else writes it again. */
+  loosenable: boolean;
+  rotateAfterDays: number | null;
+}> {
   const environment = requireLive(place);
   const fork = place.environment!.parentId !== null;
   const read = async (db: Queryable) => {
@@ -401,6 +432,8 @@ export async function listSecrets(
     personal: place.personal === undefined ? null : { of: place.personal.of.slug, fallback: place.personal.fallback === true },
     // A person holds their role's protected column here (docs/design/roles.md); a personal config, as its parent is.
     protected: protectedFor(ctx.caller, place.environment!),
+    unprotectable: unprotects(ctx.caller, place.project.id, place.environment!),
+    loosenable: loosens(ctx.caller, place),
     rotateAfterDays: ctx.rotateAfterDays,
   };
 }
@@ -689,7 +722,7 @@ export async function setSecrets(
       const secret = { id: row?.id ?? randomUUID(), key };
       return { key, secret: { ...secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), sensitive: levelOf(key) === 'sensitive' }, value };
     });
-    const tightened = await tightening(ctx, place, environment, marks, prepared, levelNow, operationId);
+    const marked = await marking(ctx, place, environment, marks, prepared, levelNow, operationId);
     const references = (await referenceTargets(ctx, place, environment, refs, prepared, currently, operationId)).filter((item) => {
       archived(item.key);
       return !item.unchanged;
@@ -704,8 +737,9 @@ export async function setSecrets(
     // IDs and versions are provisional until the transaction checks them.
     const sealed = await sealValues(ctx.vault, asking(ctx, operationId), items);
     if (!sealed.ok) throw vaultRefusal(ctx, sealed.refusal, 'secret.write', { ...environment, operationId });
-    const rewrapped = await rewrapValues(ctx.vault, asking(ctx, operationId), tightened.map(({ secret, from }) => ({ secret, from })));
-    if (!rewrapped.ok) throw vaultRefusal(ctx, rewrapped.refusal, 'secret.write', { ...environment, operationId });
+    const rewrapped = await rewrapValues(ctx.vault, asking(ctx, operationId), marked.map(({ secret, from }) => ({ secret, from })));
+    // A loosening the vault refuses is logged as one, as the app's own refusal of it is.
+    if (!rewrapped.ok) throw vaultRefusal(ctx, rewrapped.refusal, marked.some(({ was, to }) => stricter(was, to)) ? 'secret.loosen' : 'secret.write', { ...environment, operationId });
     // Vault calls only for what there is: most writes make and end no reference.
     const made = references.length === 0 ? { ok: true as const, seqs: [] } : await ctx.vault.reference({
       ...asking(ctx, operationId),
@@ -752,7 +786,7 @@ export async function setSecrets(
       const created = new Map([
         ...items.map((item) => [item.key, item.secret.secretId] as const),
         ...references.map((item) => [item.key, item.holder.secretId] as const),
-        ...tightened.map((item) => [item.key, item.secret.secretId] as const),
+        ...marked.map((item) => [item.key, item.secret.secretId] as const),
       ]);
       for (const key of keysIn) {
         const before = prepared.get(key);
@@ -809,12 +843,20 @@ export async function setSecrets(
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: level === 'plain' ? value : null, sensitive: level === 'sensitive',
           };
         }),
-        // The value as it is, made stricter: its ciphertext and how it was made, its key wrapped again as the new level.
-        ...tightened.map(({ key, secret, from, to, was, recipe }, i) => {
-          log.push(allowed(ctx, 'secret.write', {
-            ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
-            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(to, was), kept: from.version },
-          }));
+        // The value as it is, marked: its ciphertext and how it was made, its key wrapped again as the new level. Made
+        // looser, a sensitive value made a secret, it is its own entry, `secret.loosen`, which no reader of the log takes
+        // for a write of a value its maker saw.
+        ...marked.map(({ key, secret, from, to, was, recipe }, i) => {
+          const recipeDetail = recipe === null ? {} : { recipe: recipe.recipe };
+          log.push(stricter(was, to)
+            ? allowed(ctx, 'secret.loosen', {
+              ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
+              metadata: { key, version: secret.version, ...recipeDetail, from: was, to, kept: from.version },
+            })
+            : allowed(ctx, 'secret.write', {
+              ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
+              metadata: { key, version: secret.version, ...recipeDetail, ...sensitivityDetail(to, was), kept: from.version },
+            }));
           keys[key] = { version: secret.version, sensitivity: to };
           return {
             id: randomUUID(), secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
@@ -938,8 +980,8 @@ function sensitivityDetail(level: Sensitivity, was: Sensitivity | null): Record<
   };
 }
 
-/** A key's current value made stricter, as a new version: its key wrapped again as `to`, the rest of it kept. */
-type Tightened = {
+/** A key's current value marked, as a new version: its key wrapped again as `to`, the rest of it kept. */
+type Marked = {
   key: string;
   secret: SecretRef;
   from: { id: string; version: number; envelope: Envelope };
@@ -949,13 +991,15 @@ type Tightened = {
 };
 
 /**
- * The marks of a patch that make a key stricter, each its current value's
- * version and the new one it becomes. One already as strict is left as it
- * is. One looser is refused: that takes the value written again, so nobody
- * ever shows a value by flipping it. A key with no value of its own here,
- * a reference or one a fork inherits, has nothing to make stricter.
+ * The marks of a patch that change a key's level, each its current value's
+ * version and the new one it becomes. One already at that level is left as
+ * it is. One looser is refused: that takes the value written again, so
+ * nobody ever shows a value by flipping it; but for a sensitive value made
+ * a secret by an Owner of its project (`loosens`). A key with no value of
+ * its own here, a reference or one a fork inherits, has nothing to mark:
+ * it is marked, and loosened, where it is held.
  */
-async function tightening(
+async function marking(
   ctx: ApiContext,
   place: ResolvedPath,
   environment: Environment,
@@ -963,10 +1007,10 @@ async function tightening(
   prepared: ReadonlyMap<string, { id: string; key: string; currentVersion: number; currentVersionId: string | null; archivedAt: Date | null }>,
   levelNow: (key: string) => Sensitivity | null,
   operationId: string,
-): Promise<Tightened[]> {
-  const refused = (key: string, message: string, reason: string, metadata: Record<string, unknown> = {}) =>
-    new Refusal(conflict(message), denied(ctx, 'secret.write', reason, { ...environment, operationId, metadata: { key, ...metadata } }));
-  const stricterOnes = marks.filter(({ key, to }) => {
+): Promise<Marked[]> {
+  const refused = (key: string, message: string, reason: string, metadata: Record<string, unknown> = {}, action = 'secret.write') =>
+    new Refusal(conflict(message), denied(ctx, action, reason, { ...environment, operationId, metadata: { key, ...metadata } }));
+  const changing = marks.filter(({ key, to }) => {
     const row = prepared.get(key);
     if (row?.archivedAt != null) throw refused(key, `${key} is archived; unarchive it before marking it`, 'secret_archived');
     const was = levelNow(key);
@@ -979,13 +1023,16 @@ async function tightening(
     }
     if (was === to) return false;
     if (stricter(was!, to)) {
-      throw refused(key, `${key} is ${was}: making it ${to} takes its value written again, never a flip of the one stored`, 'looser', { sensitivity: to, was });
+      // A sensitive value made a secret is a loosening, an Owner's to make, and its refusal is logged as one.
+      const loosening = was === 'sensitive' && to === 'secret';
+      if (loosening && !loosens(ctx.caller, place)) throw refused(key, looserProblem(key, was, to, place.project.slug), 'not_owner', { from: was, to }, 'secret.loosen');
+      if (!loosening) throw refused(key, looserProblem(key, was!, to, place.project.slug), 'looser', { sensitivity: to, was });
     }
     return true;
   });
-  if (stricterOnes.length === 0) return [];
+  if (changing.length === 0) return [];
   const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
-  return stricterOnes.map(({ key, to }) => {
+  return changing.map(({ key, to }) => {
     const head = prepared.get(key)!;
     const current = rows.get(key)?.current;
     // Written meanwhile: the version the write prepared is no longer the one it would keep.
@@ -1174,7 +1221,9 @@ export async function dryRunSecrets(
       const now = current === null ? null : sensitivityOf(current);
       if (isMark(value)) {
         if (now === null) throw conflict(`${key} has no value of its own to mark ${value.sensitivity}: write one`);
-        if (stricter(now, value.sensitivity)) throw conflict(`${key} is ${now}: making it ${value.sensitivity} takes its value written again, never a flip of the one stored`);
+        if (stricter(now, value.sensitivity) && !(now === 'sensitive' && value.sensitivity === 'secret' && loosens(ctx.caller, place))) {
+          throw conflict(looserProblem(key, now, value.sensitivity, place.project.slug));
+        }
         keys[key] = now === value.sensitivity ? 'unchanged' : 'changed';
         continue;
       }

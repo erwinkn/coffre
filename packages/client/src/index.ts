@@ -212,7 +212,7 @@ export function createClient(options: ClientOptions) {
       /**
        * Protected, a person holds their role's protected column there
        * (docs/design/roles.md); whoever manages the project's environments
-       * protects one, and only an Owner of the whole instance unprotects it.
+       * protects one, and only an Owner of its project, or of the whole instance, unprotects it.
        */
       protect: (path: string, on = true) => call('PATCH /projects/:project/:environment', place(path), { protected: on }),
       /** What deleting an archived environment would erase and revoke; changes nothing. */

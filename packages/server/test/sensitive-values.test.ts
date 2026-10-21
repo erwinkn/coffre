@@ -4,7 +4,8 @@
 // Owners included, on any credential of theirs, while their apps use it
 // through the credential proxy and service accounts read it. A key is made
 // stricter at any time, its value kept as a new version; looser only by
-// writing a value again. The vault binds `sensitive` into the wrap of each
+// writing a value again, but for a sensitive value an Owner of its project
+// makes a secret in place (owner-powers.test.ts). The vault binds `sensitive` into the wrap of each
 // version's data key, so a column flipped around coffre opens nothing.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -109,7 +110,7 @@ test('a write that names no sensitivity keeps a sensitive key sensitive and make
   assert.deepEqual((await writesOf('WEBHOOK'))[2], { key: 'WEBHOOK', version: 3, was: 'sensitive' });
 });
 
-test('marking a key stricter keeps its value as a new version; as strict already is unchanged, and looser is refused', async () => {
+test('marking a key stricter keeps its value as a new version; as strict already is unchanged, and looser is refused to all but an Owner', async () => {
   const marked = await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' }, REGION: { sensitivity: 'secret' }, API_KEY: { sensitivity: 'sensitive' } });
   assert.deepEqual({ ...marked.keys }, { WEBHOOK: { version: 2, sensitivity: 'sensitive' }, REGION: { version: 2, sensitivity: 'secret' }, API_KEY: { version: 1, sensitivity: 'sensitive' } });
   assert.deepEqual(await levels('market/dev'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'secret', WEBHOOK: 'sensitive' });
@@ -121,13 +122,18 @@ test('marking a key stricter keeps its value as a new version; as strict already
   assert.deepEqual((await writesOf('WEBHOOK'))[1], { key: 'WEBHOOK', version: 2, sensitive: true, was: 'secret', kept: 1 });
   assert.deepEqual((await writesOf('REGION'))[1], { key: 'REGION', version: 2, was: 'plain', kept: 1 });
 
-  for (const to of ['secret', 'plain'] as const) {
-    const looser = await refusal(root.secrets.set('market/dev', { WEBHOOK: { sensitivity: to } }));
+  // A Developer writes it again; so does an Owner, to make it plain.
+  const dev = clientFor(deps, DEV);
+  for (const [client, to] of [[dev, 'secret'], [dev, 'plain'], [root, 'plain']] as const) {
+    const looser = await refusal(client.secrets.set('market/dev', { WEBHOOK: { sensitivity: to } }));
     assert.equal(looser.status, 409);
     assert.match(looser.message, /WEBHOOK is sensitive: making it .* takes its value written again/);
   }
   const [denied] = (await entries('secret.write')).filter((entry) => entry.decision === 'deny');
-  assert.deepEqual(denied!.metadata, { key: 'WEBHOOK', sensitivity: 'secret', was: 'sensitive', reason: 'looser' });
+  assert.deepEqual(denied!.metadata, { key: 'WEBHOOK', sensitivity: 'plain', was: 'sensitive', reason: 'looser' });
+  // A sensitive value made a secret by anyone but an Owner is a loosening refused, and logged as one.
+  const [loosening] = (await entries('secret.loosen')).filter((entry) => entry.decision === 'deny');
+  assert.deepEqual(loosening!.metadata, { key: 'WEBHOOK', from: 'sensitive', to: 'secret', reason: 'not_owner' });
   assert.equal((await refusal(root.secrets.set('market/dev', { NOTHING: { sensitivity: 'sensitive' } }))).status, 409, 'no value to mark');
   assert.deepEqual(await history('market/dev/WEBHOOK'), [[2, 'sensitive'], [1, 'secret']]);
 });
@@ -163,7 +169,9 @@ test('a dry run never tells a person whether they guessed a sensitive value, and
   assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { WEBHOOK: { value: WEBHOOK, sensitivity: 'sensitive' }, REGION: 'eu-west-3' })).keys }, { WEBHOOK: 'changed', REGION: 'changed' });
   // A mark compares levels, as the write would.
   assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { API_KEY: { sensitivity: 'sensitive' }, WEBHOOK: { sensitivity: 'sensitive' } })).keys }, { API_KEY: 'unchanged', WEBHOOK: 'changed' });
-  assert.equal((await refusal(root.secrets.dryRun('market/dev', { API_KEY: { sensitivity: 'secret' } }))).status, 409);
+  assert.equal((await refusal(dev.secrets.dryRun('market/dev', { API_KEY: { sensitivity: 'secret' } }))).status, 409);
+  // An Owner of the project makes it a secret in place: a change, which compares nothing.
+  assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { API_KEY: { sensitivity: 'secret' } })).keys }, { API_KEY: 'changed' });
   // None of it reads a sensitive value for a person: the vault refused nothing.
   assert.deepEqual((await entries('secret.read')).filter((entry) => entry.decision === 'deny'), []);
 });

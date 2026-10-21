@@ -1010,10 +1010,12 @@ async function set(args: string[]): Promise<void> {
  * Make keys stricter, their values kept (`Sensitivity`): one key, or every
  * key of an environment that is looser now. A key is made looser only by
  * writing its value again (`coffre set … --plain`), never by flipping one
- * nobody could read, so only stricter levels are asked for here. A key of
- * the environment's that is a reference, or that a fork inherits, reads
- * the level of the value where it is held: left as it is, and named, with
- * where to mark it, when it is looser than asked.
+ * nobody could read, so only stricter levels are asked for here; but an
+ * Owner of the project makes a sensitive value secret in place
+ * (`loosenable`), `mark market/prod secret` then every sensitive one of
+ * its own too. A key of the environment's that is a reference, or that a
+ * fork inherits, reads the level of the value where it is held: left as it
+ * is, and named, with where to mark it, when it is not at the level asked.
  */
 async function mark(args: string[]): Promise<void> {
   const { positionals } = parse(args, {}, ['<project>/<environment>[/<KEY>]', '<plain|secret|sensitive>']);
@@ -1022,23 +1024,25 @@ async function mark(args: string[]): Promise<void> {
   const { project, environment, key } = parsePath(target);
   const path = `${project}/${environment}`;
   const coffre = client();
-  const listed = (await coffre.secrets.list(path)).keys;
+  const { keys: listed, loosenable } = await coffre.secrets.list(path);
   const order = ['plain', 'secret', 'sensitive'];
-  // Each key's own value, looser than asked: an instance before 0.10 lists no sensitivity, and marks nothing.
+  // Looser than asked, or, for an Owner of the project asking for secret, sensitive (an older instance lists no `loosenable`).
+  const marks = (sensitivity: string) => order.indexOf(sensitivity) < order.indexOf(level) || (loosenable === true && level === 'secret' && sensitivity === 'sensitive');
+  // Each key's own value, to mark: an instance before 0.10 lists no sensitivity, and marks nothing.
   const own = listed.filter((entry) => !entry.archived && entry.reference === null && entry.version !== null && entry.parent?.state !== 'inherited' && entry.parent?.state !== 'removed');
   if (listed.some((entry) => entry.version !== null && entry.sensitivity === undefined)) fail(`${path}'s instance is older than sensitivity (coffre 0.10): upgrade it first`);
   const marking = key === undefined
-    ? own.filter((entry) => order.indexOf(entry.sensitivity ?? 'secret') < order.indexOf(level)).map((entry) => entry.key)
+    ? own.filter((entry) => marks(entry.sensitivity ?? 'secret')).map((entry) => entry.key)
     : [key];
-  // What the environment reads from elsewhere, looser than asked: its level is where the value is held, so it is marked there.
+  // What the environment reads from elsewhere, to mark: its level is where the value is held, so it is marked there.
   // A reference that reads nothing, and a key a fork removes, have no level to mark.
   const left = key !== undefined ? [] : listed.flatMap((entry) => {
-    if (entry.archived || order.indexOf(entry.sensitivity ?? 'secret') >= order.indexOf(level)) return [];
+    if (entry.archived || !marks(entry.sensitivity ?? 'secret')) return [];
     if (entry.reference !== null) return entry.reference.state === 'live' ? [`${entry.key}, a reference to ${entry.reference.source}: mark it there`] : [];
     if (entry.parent?.state !== 'inherited') return [];
     return [`${entry.key}, inherited from ${project}/${entry.parent.from}: mark it there, or write ${environment}'s own`];
   });
-  if (marking.length === 0) process.stdout.write(`nothing to mark in ${path}: every value of its own is ${level} or stricter\n`);
+  if (marking.length === 0) process.stdout.write(`nothing to mark in ${path}: every value of its own is ${level}${loosenable === true && level === 'secret' ? '' : ' or stricter'}\n`);
   else {
     const before = new Map(listed.map((entry) => [entry.key, entry.sensitivity]));
     const result = await coffre.secrets.set(path, Object.fromEntries(marking.map((name) => [name, { sensitivity: level }])));

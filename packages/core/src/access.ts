@@ -290,6 +290,21 @@ export function ownsInstance(standing: { role: InstanceRole; scope: Scope }): bo
 }
 
 /**
+ * Whether the holder is an Owner of a project, as a person on no
+ * credential's scope: an Owner of the whole instance, one scoped to the
+ * project, or one by a grant on it. They make a sensitive value of its own
+ * a secret in place, and take its environments' protection off (R30): an
+ * Owner reads any value there anyway, through a service account they give
+ * read (break-glass). An Owner scoped to environments by slug, Owner of
+ * every `prod`, owns no project, and an Owner's token, scoped, none.
+ */
+export function ownsProject(holder: Holdings, projectId: string): boolean {
+  if (holder.credentialScope != null || holder.service === true) return false;
+  const place = { projectId };
+  return (holder.role === 'owner' && inScope(holder.scope, place)) || holder.grants.some((grant) => grant.role === 'owner' && covers(grant, place));
+}
+
+/**
  * Which projects, or environments, a scope takes in: all of them, only
  * those listed, or all but those listed. Projects are listed by id, so a
  * rename keeps them; environments by slug, so `dev` is the `dev` of every

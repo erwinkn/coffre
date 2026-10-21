@@ -30,7 +30,7 @@ type Written = { value?: string; generated?: Generation; replaces?: string; plai
  * recipes and keeps what each write sends, answering each key's level. `unsaid` plays an instance
  * before 0.7, whose listing says nothing of recipes.
  */
-async function instance(t: test.TestContext, held: Record<string, Held>, { unsaid = false } = {}) {
+async function instance(t: test.TestContext, held: Record<string, Held>, { unsaid = false, loosenable = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'coffre-generate-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const writes: Record<string, Written>[] = [];
@@ -50,6 +50,7 @@ async function instance(t: test.TestContext, held: Record<string, Held>, { unsai
           parent: parent === null ? null : { changed: false, reset: false, held: true, ...parent },
           ...(unsaid ? {} : { generated, versionId: `${key}-v${version}`, value, sensitivity }),
         })),
+        loosenable,
         rotateAfterDays: null,
       });
     }
@@ -271,6 +272,24 @@ test('mark makes a key stricter, or every looser key of an environment, its valu
   assert.equal(all.stdout, 'ACCOUNT_ID: plain → sensitive, as version 2, its value kept\n');
   assert.equal((await coffre.coffre(['mark', 'app/prod', 'secret'])).stdout, 'nothing to mark in app/prod: every value of its own is secret or stricter\n');
   assert.match((await coffre.coffre(['mark', 'app/prod', 'hidden'])).stderr, /plain, secret or sensitive, not "hidden"/);
+});
+
+test('mark secret, by an Owner of the project, makes sensitive values secret in place too: one key, or every one of the environment\'s own', async (t) => {
+  const coffre = await instance(t, {
+    ACCOUNT_ID: { version: 1, value: 'acct_42', sensitivity: 'plain' },
+    SEAL_KEY: { version: 1, sensitivity: 'sensitive' },
+    WEBHOOK: { version: 2, sensitivity: 'sensitive' },
+    SHARED: { version: null, sensitivity: 'sensitive', reference: { source: 'backend/shared/SHARED', state: 'live' } },
+  }, { loosenable: true });
+  const one = await coffre.coffre(['mark', 'app/prod/SEAL_KEY', 'secret']);
+  assert.equal(one.code, 0, one.stderr);
+  assert.equal(one.stdout, 'SEAL_KEY: sensitive → secret, as version 2, its value kept\n');
+  const all = await coffre.coffre(['mark', 'app/prod', 'secret']);
+  assert.equal(all.code, 0, all.stderr);
+  assert.deepEqual(coffre.writes[1], { ACCOUNT_ID: { sensitivity: 'secret' }, WEBHOOK: { sensitivity: 'secret' } });
+  assert.equal(all.stdout, 'ACCOUNT_ID: plain → secret, as version 2, its value kept\nWEBHOOK: sensitive → secret, as version 3, its value kept\n');
+  assert.equal(all.stderr, 'coffre: left as they are: SHARED, a reference to backend/shared/SHARED: mark it there\n');
+  assert.equal((await coffre.coffre(['mark', 'app/prod', 'secret'])).stdout, 'nothing to mark in app/prod: every value of its own is secret\n');
 });
 
 test('mark of an environment names the keys it reads from elsewhere and leaves, and where to mark them', async (t) => {

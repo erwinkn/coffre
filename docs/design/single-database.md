@@ -656,6 +656,7 @@ default.
 | reads a secret: a reveal, a `coffre run` or export, a sync, an import preview | `secret.read`, one per secret, with the purpose and the batch | the vault, in the transaction that releases the key, before it leaves |
 | is refused a read | `secret.read`, refused, with the reason | whoever refused: the app, when its own check fails; the vault, for no grant, removal or the bulk limit |
 | writes or restores a value | `secret.write` or `secret.restore`, one per version | the app, in the transaction that stores the version |
+| makes a sensitive value a secret in place, an Owner of its project (R30) | `secret.loosen`, one per version, saying both levels; refused, with the reason | the app, in the transaction that stores the version, after the vault's `key.rewrap` |
 | renames or archives a secret, a project, an environment | `secret.rename`, `project.archive`, … | the app |
 | changes someone's access | `access.grant` or `access.revoke`, one per place | the vault, in the transaction that changes it |
 | adds, removes or restores a member, or makes one an owner | `member.add`, `member.remove`, `member.restore`, `member.owner` | the vault, likewise |

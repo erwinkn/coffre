@@ -278,6 +278,16 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => [...place(entry), ...(number(entry.metadata.from) === null ? [] : [` to version ${number(entry.metadata.from)}`])],
     then: ({ entry }) => (entry.version === null ? [] : [`, now ${entry.version}`]),
   },
+  // A sensitive value made a secret in place, by an Owner of its project: its value kept, shown to its readers from then on.
+  'secret.loosen': {
+    did: 'made',
+    tried: 'make',
+    what: ({ entry }) => place(entry),
+    then: ({ entry }) => [
+      ` ${text(entry.metadata.to) ?? 'secret'}, from ${text(entry.metadata.from) ?? 'sensitive'}, its value kept`,
+      ...(entry.version === null ? [] : [`, now version ${entry.version}`]),
+    ],
+  },
   'secret.rename': {
     did: 'renamed',
     tried: 'rename',
@@ -666,6 +676,8 @@ const REASONS: Record<string, string> = {
   stand_ins: 'people get placeholders',
   sensitive: 'the value is sensitive',
   looser: 'making it visible takes a new value',
+  // A sensitive value made a secret in place by anyone but an Owner of its project.
+  not_owner: 'only an Owner of the project does it in place',
   inherited: 'it is inherited',
   expired: 'grant expired',
   removed: 'removed from coffre',
