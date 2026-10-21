@@ -14,7 +14,7 @@ export interface Env {
   PG_PORT: string;
   PG_DATABASE: string;
   PG_USER: string;
-  DEBUG_RO_PASSWORD: string;
+  DEV_READONLY_PASSWORD: string;
   PROBE_KEY: string;
 }
 
@@ -66,7 +66,7 @@ export class Probe extends DurableObject<Env> {
 }
 
 function target(env: Env) {
-  return { host: env.PG_HOST, port: env.PG_PORT, database: env.PG_DATABASE, user: env.PG_USER, password: env.DEBUG_RO_PASSWORD };
+  return { host: env.PG_HOST, port: env.PG_PORT, database: env.PG_DATABASE, user: env.PG_USER, password: env.DEV_READONLY_PASSWORD };
 }
 
 /** `Authorization: Bearer <PROBE_KEY>`, compared in constant time; a missing or short key opens nothing. */

@@ -5,7 +5,7 @@ A Worker that answers three questions before coffre 0.11's tunnel ships:
 1. Does a Workers VPC **Network** binding's `connect("host:port")` work from inside a
    Durable Object? Cloudflare's docs only show it from a Worker.
 2. Does a plaintext Postgres session reach Equisafe's private prod read replica
-   through `cloudflared`, log in as `debug_ro` with SCRAM-SHA-256, and run `select 1`?
+   through `cloudflared`, log in as `dev_readonly` with SCRAM-SHA-256, and run `select 1`?
 3. Do open VPC sockets count toward Workers' limit of six simultaneous open
    connections per request? If they do, does a 7th wait in a queue or stall?
 
@@ -25,9 +25,9 @@ Durable Object for question 3 ([below](#question-3-the-six-connection-limit)).
 | Replica private IP | `vars.PG_HOST` | |
 | Replica port | `vars.PG_PORT` | `5432` unless told otherwise |
 | Database name | `vars.PG_DATABASE` | |
-| `debug_ro` password | `wrangler secret put DEBUG_RO_PASSWORD` | Stored as SCRAM (`password_encryption = scram-sha-256`). ASCII only: the probe skips SASLprep. |
-| Session limit | the replica | `/sockets?n=12` holds up to 13 `debug_ro` sessions at once, for about 3 minutes. A lower `CONNECTION LIMIT` on the role fails the extra ones at `auth` with `53300`. |
-| Access rule | the replica | Allow plaintext SCRAM logins from the `cloudflared` pods' addresses, e.g. `host <db> debug_ro <cloudflared pods CIDR> scram-sha-256` (`host`, not `hostssl`). On a managed database, an ACL that allows those addresses and does not require TLS. |
+| `dev_readonly` password | `wrangler secret put DEV_READONLY_PASSWORD` | Stored as SCRAM (`password_encryption = scram-sha-256`). ASCII only: the probe skips SASLprep. |
+| Session limit | the replica | `/sockets?n=12` holds up to 13 `dev_readonly` sessions at once, for about 3 minutes. A lower `CONNECTION LIMIT` on the role fails the extra ones at `auth` with `53300`. |
+| Access rule | the replica | Allow plaintext SCRAM logins from the `cloudflared` pods' addresses, e.g. `host <db> dev_readonly <cloudflared pods CIDR> scram-sha-256` (`host`, not `hostssl`). On a managed database, an ACL that allows those addresses and does not require TLS. |
 
 The replica sees the connection come from `cloudflared`, not from Cloudflare.
 
@@ -62,7 +62,7 @@ printf %s "$PROBE_KEY" | pnpm exec wrangler secret put PROBE_KEY
 Run this one alone: it prompts for the password, and lines pasted after it would be read as the password.
 
 ```sh
-pnpm exec wrangler secret put DEBUG_RO_PASSWORD
+pnpm exec wrangler secret put DEV_READONLY_PASSWORD
 ```
 
 Then:
@@ -94,7 +94,7 @@ response. `jq` skips the spaces.
   "loginOk": true,
   "loginMs": 95,
   "select1": "1",
-  "session": { "current_user": "debug_ro", "inet_server_addr": "10.0.0.12", "ssl": "f" },
+  "session": { "current_user": "dev_readonly", "inet_server_addr": "10.0.0.12", "ssl": "f" },
   "afterHold": { "seconds": 300, "select1": "1", "ms": 37 },
   "totalMs": 300212
 }
@@ -103,7 +103,7 @@ response. `jq` skips the spaces.
 - **Question 1** is answered yes when `/do` returns `ok: true`. If `/worker` works and
   `/do` fails at `"stage": "dial"`, the binding does not work from a Durable Object.
 - **Question 2** is answered yes when `loginOk` is true, `select1` is `"1"`,
-  `session.current_user` is `debug_ro` and `session.ssl` is `"f"`: a plaintext session.
+  `session.current_user` is `dev_readonly` and `session.ssl` is `"f"`: a plaintext session.
 - `sslRequest`: `N` means the replica has TLS off. `S` means it would take TLS, which
   a VPC socket cannot start. The probe then dials again and starts in plaintext,
   shown by `"redialedPlaintext": true`.
@@ -119,7 +119,7 @@ message. Postgres's own errors come as `<severity> <SQLSTATE>: <message>`.
 
 | `stage` | Likely cause |
 | --- | --- |
-| `config` | A var or `DEBUG_RO_PASSWORD` is missing. |
+| `config` | A var or `DEV_READONLY_PASSWORD` is missing. |
 | `dial` | The binding refused or timed out: the tunnel id, a role, or `cloudflared` cannot reach the IP. Gateway's network logs list the session with **Workers VPC** as its source. |
 | `ssl-request` | Connected, but nothing answered: wrong port, or something that is not Postgres. |
 | `auth` | `28P01`: wrong password. `28000`: no access rule matches the address. Other methods are listed in `authOffered`. The probe answers only SCRAM-SHA-256, and to anything else it sends no password. |

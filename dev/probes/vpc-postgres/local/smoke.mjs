@@ -154,7 +154,7 @@ try {
       await wait(500);
     }
   }
-  sql(`create role debug_ro login password '${password}'`);
+  sql(`create role dev_readonly login password '${password}'`);
   // TLS on through ALTER SYSTEM, not the command line, so a later reload can turn it off.
   sql("alter system set ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'");
   sql("alter system set ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'");
@@ -217,7 +217,7 @@ try {
       assert.deepEqual(json.authOffered, ['SCRAM-SHA-256']);
       assert.equal(json.loginOk, true);
       assert.equal(json.select1, '1');
-      assert.equal(json.session.current_user, 'debug_ro');
+      assert.equal(json.session.current_user, 'dev_readonly');
       assert.equal(json.session.ssl, 'f');
       assert.match(json.serverVersion, /^17/);
     });
@@ -279,9 +279,9 @@ try {
   });
 
   await check('/sockets with no session opened is not ok', async () => {
-    sql("alter role debug_ro password 'not-the-configured-one'");
+    sql("alter role dev_readonly password 'not-the-configured-one'");
     const { json } = await get('/sockets?n=2&hold=0');
-    sql(`alter role debug_ro password '${password}'`);
+    sql(`alter role dev_readonly password '${password}'`);
     assert.equal(json.ok, false);
     assert.equal(json.openedOk, 0);
     assert.deepEqual(json.opened.map((attempt) => attempt.stage), ['auth', 'auth']);
@@ -297,7 +297,7 @@ try {
   });
 
   await check('/sockets under a cap of 3: the 4th socket and a fresh connect stall, and a release lets one through', async () => {
-    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'debug_ro', password };
+    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'dev_readonly', password };
     const report = await holdSockets(capped(nodeDial, 3), target, 4, 0);
     assert.equal(report.ok, true, JSON.stringify(report));
     assert.equal(report.openedOk, 3, JSON.stringify(report.opened));
@@ -314,7 +314,7 @@ try {
   });
 
   await check('/sockets under an evicting cap of 3: the session closed for a fresh connect is evicted, not dead', async () => {
-    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'debug_ro', password };
+    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'dev_readonly', password };
     const report = await holdSockets(evicting(nodeDial, 3), target, 3, 0);
     assert.equal(report.ok, true, JSON.stringify(report));
     assert.equal(report.openedOk, 3);
@@ -324,14 +324,14 @@ try {
     assert.equal(report.beside.alive, 2);
   });
 
-  sql("alter role debug_ro password 'not-the-configured-one'");
+  sql("alter role dev_readonly password 'not-the-configured-one'");
   await check('a wrong password fails at the auth stage with the server error', async () => {
     const { json } = await get('/do');
     assert.equal(json.ok, false);
     assert.equal(json.stage, 'auth');
     assert.match(json.error, /28P01/);
   });
-  sql(`alter role debug_ro password '${password}'`);
+  sql(`alter role dev_readonly password '${password}'`);
 
   docker('exec', container, 'sh', '-c', "sed -i 's/scram-sha-256$/password/' /var/lib/postgresql/data/pg_hba.conf");
   sql('select pg_reload_conf()');

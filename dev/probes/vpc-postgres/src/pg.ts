@@ -102,7 +102,7 @@ export async function login(dial: Dial, target: Target, report: Report): Promise
   try {
     const port = /^\d{1,5}$/.test(target.port) ? Number(target.port) : 0;
     if (!target.host || port < 1 || port > 65535 || !target.database || !target.user || !target.password) {
-      throw new Error('PG_HOST, PG_PORT, PG_DATABASE, PG_USER and the DEBUG_RO_PASSWORD secret must all be set');
+      throw new Error('PG_HOST, PG_PORT, PG_DATABASE, PG_USER and the DEV_READONLY_PASSWORD secret must all be set');
     }
     const address = `${target.host}:${target.port}`;
     const open = async (): Promise<Connection> => {

@@ -19,7 +19,7 @@
     "PG_HOST": "REPLACE_ME-replica-private-ip",
     "PG_PORT": "5432",
     "PG_DATABASE": "REPLACE_ME-database",
-    "PG_USER": "debug_ro"
+    "PG_USER": "dev_readonly"
   }
-  // Secrets, set with `wrangler secret put`: DEBUG_RO_PASSWORD, PROBE_KEY.
+  // Secrets, set with `wrangler secret put`: DEV_READONLY_PASSWORD, PROBE_KEY.
 }
