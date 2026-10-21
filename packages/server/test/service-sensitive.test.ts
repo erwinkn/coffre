@@ -244,9 +244,11 @@ test("a fork's inherited sensitive value is decided where it is held, its parent
   await root.environments.create('backend/dev-eu', { from: 'dev', inherit: true });
   await root.access.set(CI, { 'backend/dev-eu': 'viewer' });
   const theirs = await ada.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/dev': 'viewer', 'backend/dev-eu': 'viewer' } });
+  assert.deepEqual(theirs.withheld, ['backend/dev', 'backend/dev-eu'], 'backend/dev-eu holds none of its own, but inherits one');
   assert.equal(await read(theirs.token, 'backend/dev-eu/STRIPE_SECRET_KEY'), '403 not_owner_issued');
   assert.equal(await read(theirs.token, 'backend/dev-eu/API_URL'), 'https://api.dev.acme.example');
   const owners = await root.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/dev': 'viewer', 'backend/dev-eu': 'viewer' } });
+  assert.deepEqual(owners.withheld, []);
   assert.equal(await read(owners.token, 'backend/dev-eu/STRIPE_SECRET_KEY'), STRIPE);
 });
 
@@ -271,6 +273,11 @@ test("a binding an older release made, replaced before anything sealed it, is se
   const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
   const binding = { id: randomUUID(), principal: CI, generation: member!.generation, profile: 'github', issuer: ISSUER, jwksUri: KEYS, claims: JSON.stringify(DEPLOY), revokedAt: null, scope };
   await db.owner.insert(serviceBindings).values({ ...binding, label: null, createdBy: OWEN, authMac: authMac(deps.chainKey, 'service_bindings', binding) });
+  // A preview seals nothing: it writes and logs nothing, and inherits the scope as read, which says nothing of sensitive values.
+  const planned = await owen.bindings.preview(CI, { profile: 'github', claims: DEPLOY, replaces: [binding.id] });
+  assert.deepEqual(planned.withheld, ['backend/dev']);
+  assert.deepEqual(await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.id)), [{ scope }]);
+  assert.deepEqual(await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'token.seal')), []);
   // Owen trusts the workload again in its place, inheriting its scope.
   const again = await owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [binding.id] });
   assert.deepEqual(await stored(serviceBindings, again.binding.id), [{ role: 'viewer', sensitive: true }]);

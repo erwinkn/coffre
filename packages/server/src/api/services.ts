@@ -280,13 +280,21 @@ export async function issuedScope(
 /**
  * The places of a service's scope, by path, that hold a sensitive value now
  * that it will not read: one of a project no Owner of which issued it
- * (`readsSensitive`), its own or a reference's source's. A project's, in
- * any of its environments.
+ * (`readsSensitive`), its own, a reference's source's, or one a fork
+ * inherits from its parents, theirs. A project's, in any of its
+ * environments.
  */
 async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly PlaceRow[]): Promise<string[]> {
   const owned = new Set(scope.filter((grant) => grant.sensitive === true).map((grant) => grant.projectId));
+  const parentOf = new Map(known.flatMap((project) => project.environments.map((environment) => [environment.id, environment.parentId] as const)));
+  // Each environment and those it inherits from, nearest first: a key it overrides still counts, as a hint may.
+  const lineage = (id: string): string[] => {
+    const chain: string[] = [];
+    for (let at: string | null | undefined = id; at != null && !chain.includes(at); at = parentOf.get(at)) chain.push(at);
+    return chain;
+  };
   const environmentsOf = (grant: ScopeGrant) => known.find((project) => project.id === grant.projectId)?.environments
-    .filter((environment) => grant.environmentId === null || environment.id === grant.environmentId).map((environment) => environment.id) ?? [];
+    .filter((environment) => grant.environmentId === null || environment.id === grant.environmentId).flatMap((environment) => lineage(environment.id)) ?? [];
   const from = await sensitiveFrom(db, scope.flatMap(environmentsOf));
   const withholds = (grant: ScopeGrant) => environmentsOf(grant).some((id) => [...(from.get(id) ?? [])].some((project) => !owned.has(project)));
   return Object.keys(scopeByPath(scope.filter(withholds), known)!);
@@ -429,10 +437,14 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
  * 0.11 keeps its scope. Each then reads the sensitive values of a place
  * where whoever issued it is an Owner of its project now (`ownsProject`,
  * R32), as one they issued now would: those an Owner issued keep reading
- * them, and those anyone else did never do. In one transaction, committed
- * only while the policy is still `policySeq`'s (`policyStill`), with a
- * `token.seal` entry for each scope it wrote, naming those it sealed with
- * it, so a row put back unsealed later, and sealed again, shows in the log.
+ * them, and those anyone else did never do. Each issuer's standing is the
+ * vault's, so it is asked before the transaction and nothing fences it:
+ * an issuer demoted from Owner between that answer and the commit still
+ * seals a row reading them, as a token they issued then would, and the row
+ * keeps it from then on, as any issued scope does. In one transaction,
+ * committed only while the policy is still `policySeq`'s (`policyStill`),
+ * with a `token.seal` entry for each scope it wrote, naming those it sealed
+ * with it, so a row put back unsealed later, and sealed again, shows in the log.
  * Each update matches the row's scope as read, so two at once seal a row
  * once. Returns how many it sealed.
  */

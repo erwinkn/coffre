@@ -267,13 +267,16 @@ export class WorkloadService {
    * A service's live bindings, those an older release made sealed first
    * (`sealCredentials`), as a request's own credential check seals them:
    * one that inherits their scope keeps what their issuer could give,
-   * sensitive values included, never less than the seal would say.
+   * sensitive values included, never less than the seal would say. A dry
+   * run seals nothing, as it writes nothing: its plan inherits their
+   * scopes as read, and one a release before 0.11 made reads no sensitive
+   * value there, so the plan may withhold more than the binding will.
    */
-  async #sealedBindings(member: string, generation: number): Promise<BindingRow[]> {
+  async #sealedBindings(member: string, generation: number, { dryRun }: { dryRun: boolean }): Promise<BindingRow[]> {
     const { db, chainKey, vault } = this.#deps;
     const live = await liveBindings(db, chainKey, member, generation);
     const unsealed = live.filter((row) => unsealedScope(row.scope));
-    if (unsealed.length === 0) return live;
+    if (dryRun || unsealed.length === 0) return live;
     const policySeq = await newestPolicySeq(db);
     const access = await vault.access(member);
     if (access.status !== 'active') return live;
@@ -330,7 +333,7 @@ export class WorkloadService {
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
         return replaces;
       };
-      const replaced = replacing(await this.#sealedBindings(member, standing.generation));
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation, options));
       // Left out, its scope is what those it replaces reached, so that trusting a workload again never widens it.
       const inherits = input.scope === undefined && replaced.length > 0;
       const { scope, byPath, withheld } = await issuedScope(
@@ -433,7 +436,7 @@ export class WorkloadService {
         }
         return on;
       };
-      const replaced = replacing(await this.#sealedBindings(member, standing.generation));
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation, options));
       // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
       const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
       for (const row of replaced) {
