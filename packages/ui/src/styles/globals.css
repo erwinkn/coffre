@@ -1898,6 +1898,16 @@ table.claims-table td {
   opacity: 0.8;
 }
 
+/* A tag that is also the button changing what it says (an environment's
+   protection, for whoever may change it): outlined on hover, as a button. */
+.tag-control {
+  cursor: pointer;
+}
+
+.tag-control:hover {
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
 .dot {
   display: inline-block;
   flex: none;
