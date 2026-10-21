@@ -19,10 +19,11 @@ const HIGH_WATER = 1024 * 1024;
  * back-pressure: packages/server/src/cloudflare-sockets.ts): each side
  * counts back what it took, in text messages, each the bytes taken from
  * binary messages since its last, and sends at most `WINDOW` bytes the
- * other has not counted. A coffre that paces says so with a first count,
- * `0`, before any byte; from then on the listener holds itself to the
- * window. It counts back whatever coffre it reaches: a coffre on Node
- * reads its socket only as fast as it writes, and ignores the counts.
+ * other has not counted. coffre's first message says whether it paces: a
+ * count, `0`, before any byte, or a byte, from a coffre on Node, which
+ * reads its socket only as fast as it writes and ignores the counts. Until
+ * it says, the listener holds the app to the window; it counts back
+ * whatever coffre it reaches.
  */
 const FLOW = 'coffre-tunnel-flow';
 const WINDOW = 1024 * 1024;
@@ -31,33 +32,63 @@ const COUNT_EVERY = 128 * 1024;
 /**
  * How often an open connection says it is there, idle or not: a count,
  * which reaches coffre's end, so that a psql left at its prompt outlives
- * Cloudflare's idle timeout (100 seconds), and keeps its Durable Object.
+ * Cloudflare's idle timeout (100 seconds), and keeps its Durable Object;
+ * and a ping, whose pong must come before the next, or the connection is
+ * gone, as when a laptop's network changes without a word.
  */
 const KEEPALIVE_MS = 30_000;
 
-/** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. */
-export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: string; close: () => void }> {
+/** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. `keepaliveMs` is for tests. */
+export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEEPALIVE_MS } = {}): Promise<{ url: string; close: () => void }> {
   const sockets = new Set<Socket>();
+  /** The refusals said already, by status: once each for the run, however many connections a pool retries. */
+  const said = new Set<number>();
   const server = createServer((socket) => {
     sockets.add(socket);
     // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
     socket.pause();
     // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it.
     const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: 15_000 });
-    /** Whether coffre paces, as its first count says. */
-    let credit = false;
+    /** Whether coffre paces: unknown until its first message says. */
+    let pacing: boolean | null = null;
     /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
     let uncounted = 0;
     let taken = 0;
-    const held = () => ws.bufferedAmount >= HIGH_WATER || (credit && uncounted >= WINDOW);
+    let answered = true;
+    const held = () => ws.bufferedAmount >= HIGH_WATER || (pacing !== false && uncounted >= WINDOW);
     const count = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(String(taken), () => undefined);
       taken = 0;
     };
     ws.on('open', () => socket.resume());
-    const keepalive = setInterval(count, KEEPALIVE_MS);
+    ws.on('pong', () => (answered = true));
+    const keepalive = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (!answered) return ws.terminate();
+      answered = false;
+      ws.ping();
+      count();
+    }, keepaliveMs);
     keepalive.unref();
+    ws.on('unexpected-response', (request, response) => {
+      // coffre's refusal, said once per status: the app sees its connection close, and a driver may retry it at once.
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk: string) => (body = (body + chunk).slice(0, 1000)));
+      response.on('end', () => {
+        if (!said.has(response.statusCode ?? 0)) {
+          said.add(response.statusCode ?? 0);
+          let message = body.trim();
+          try {
+            message = (JSON.parse(body) as { message?: string }).message ?? message;
+          } catch {}
+          process.stderr.write(`coffre: the tunnel for ${tunnel.key} was refused (${response.statusCode})${message === '' ? '' : `: ${message}`}\n`);
+        }
+        request.destroy();
+        socket.destroy();
+      });
+    });
     socket.on('data', (chunk: Buffer) => {
       uncounted += chunk.length;
       ws.send(chunk, { binary: true }, () => {
@@ -67,11 +98,19 @@ export async function listen(tunnel: Tunnel, handle: string): Promise<{ url: str
     });
     ws.on('message', (data: Buffer, binary: boolean) => {
       if (!binary) {
-        // coffre's count of what it took, the first saying that it paces.
-        credit = true;
-        uncounted = Math.max(0, uncounted - (Number(data.toString()) || 0));
+        // coffre's count of what it took, the first saying that it paces: one that is no count of bytes it was sent ends the connection.
+        const text = data.toString();
+        const counted = Number(text);
+        if (pacing === false || !/^\d{1,10}$/.test(text) || counted > uncounted) return ws.terminate();
+        pacing = true;
+        uncounted -= counted;
         if (!held()) socket.resume();
         return;
+      }
+      if (pacing === null) {
+        // A byte first: coffre paces nothing, and the app is held to the window no longer.
+        pacing = false;
+        if (!held()) socket.resume();
       }
       const flushed = socket.write(data, () => {
         taken += data.length;

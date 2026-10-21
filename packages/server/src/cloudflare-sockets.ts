@@ -23,8 +23,8 @@ export type SocketsNamespace = {
 /** What the object is given by the runtime: its `waitUntil`, for the database's closing. */
 type ObjectState = { waitUntil(promise: Promise<unknown>): void };
 
-/** A WebSocket's admission: the plugin's refusal, or its session (`admitSocket`). */
-export type Admit = (request: Request, sourceIp: string | null) => Promise<Response | SocketSession>;
+/** A WebSocket's admission: the plugin's refusal, or its session (`admitSocket`), and the decision itself told to `hold`, if it outlasts the answer. */
+export type Admit = (request: Request, sourceIp: string | null, hold: (deciding: Promise<unknown>) => void) => Promise<Response | SocketSession>;
 
 /**
  * How a plugin's WebSocket carries its bytes on Workers, its client saying
@@ -118,12 +118,14 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       if (this.#open >= MOST_SESSIONS) {
         return new Response(`this run holds ${MOST_SESSIONS} connections here already, each up to three windows of the object's memory: close some, or make the pool smaller`, { status: 503 });
       }
-      // The slot is taken now, before admission waits: a burst of connections counts every one still being admitted.
+      // The slot is taken now, before admission waits: a burst of connections counts every one still being admitted. A
+      // refusal frees it once the decision is done, past a refusal for taking too long included.
       this.#open += 1;
       let session: Promise<void> | undefined;
+      let deciding: Promise<unknown> = Promise.resolve();
       try {
         this.#admit ??= admission(this.#env, this.#state);
-        const answer = await this.#admit(request, cloudflareSourceIp(request));
+        const answer = await this.#admit(request, cloudflareSourceIp(request), (decided) => (deciding = decided));
         if (answer instanceof Response) return answer;
         const pair = new (globalThis as unknown as { WebSocketPair: new () => Record<0 | 1, WorkersWebSocket> }).WebSocketPair();
         const server = pair[1];
@@ -131,7 +133,9 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
         // Binary messages as bytes: at the deployments' compatibility date a Workers WebSocket gives a Blob, as the standard says.
         server.binaryType = 'arraybuffer';
         const client = fromWebSocket(server);
-        session = answer(client, connect)
+        // A session that throws before it is under way, as one that fails after, closes its client and frees the slot.
+        session = Promise.resolve()
+          .then(() => answer(client, connect))
           .catch(() => undefined)
           .finally(() => {
             this.#open -= 1;
@@ -140,8 +144,11 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
         this.#state.waitUntil(session);
         return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
       } finally {
-        // Refused, or failed before its session began: the slot is free again.
-        if (session === undefined) this.#open -= 1;
+        // Refused, or failed before its session began: the slot is free again once nothing decides for it.
+        if (session === undefined) {
+          const free = () => void (this.#open -= 1);
+          void deciding.then(free, free);
+        }
       }
     }
   };
@@ -183,13 +190,17 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
     counted?.();
     arrived = counted = null;
   };
-  /** Ends the pipe; closes the WebSocket unless the client already did (`gone`): workerd answers its close itself, and a close after it fails out of reach. */
-  const end = (gone = false) => {
+  /**
+   * Ends the pipe, closing the WebSocket with `code` and `reason`, or not at
+   * all when the client already did (null): workerd answers its close
+   * itself, and a close after it fails out of reach.
+   */
+  const end = (code: number | null = 1000, reason?: string) => {
     if (done) return;
     done = true;
-    if (!gone) {
+    if (code !== null) {
       try {
-        ws.close(1000);
+        ws.close(code, reason);
       } catch {}
     }
     wake();
@@ -201,20 +212,20 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
       // The app's count of what it took: a count that is no count ends the connection, as a broken frame would.
       // So is one for more than it was sent: it would open the window past what the app took.
       const count = Number(data);
-      if (!/^\d{1,10}$/.test(data) || count > uncounted) return end();
+      if (!/^\d{1,10}$/.test(data) || count > uncounted) return end(1008, 'a count of bytes it was not sent');
       uncounted -= count;
       wake();
       return;
     }
     if (data.byteLength === 0) return;
     // Past its window, uncounted: a client that ignores it is ended, never queued for.
-    if (queued + taken + data.byteLength > MOST_HELD) return end();
+    if (queued + taken + data.byteLength > MOST_HELD) return end(1008, 'past its window');
     queue.push(new Uint8Array(data));
     queued += data.byteLength;
     wake();
   });
-  ws.addEventListener('close', () => end(true));
-  ws.addEventListener('error', () => end(true));
+  ws.addEventListener('close', () => end(null));
+  ws.addEventListener('error', () => end(null));
   // That the object paces: the client holds itself to the window from here.
   ws.send('0');
   const readable = new ReadableStream<Uint8Array>(

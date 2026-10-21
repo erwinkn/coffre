@@ -821,16 +821,21 @@ pace reaches the app. `coffre run`'s listener does the same on its side
 `coffre-tunnel-flow: credit`, and the object says it paces with a first
 count, `0`, before any byte: in-band, so no proxy that drops a header
 leaves the two waiting on each other. The listener counts back whatever
-coffre it reaches, and holds itself to the window from that first count.
-A coffre on Node never sends one, reads its WebSocket only as fast as it
-writes, and ignores the counts. The object holds a client to its window:
-one that sends two windows uncounted, or counts more than it was sent, is
-ended, so a client that ignores the window, the app itself speaking
-WebSocket with its handle, cannot fill the object. A WebSocket without
+coffre it reaches, and holds the app to the window until coffre's first
+message says: a count, and it paces; a byte, a database's answer from a
+coffre on Node, which reads its WebSocket only as fast as it writes and
+ignores the counts, and it does not. A count that is none, or for more
+than was sent, ends the connection, on either side. The object holds a
+client to its window: one that sends two windows uncounted is ended
+(close code 1008), so a client that ignores the window, the app itself
+speaking WebSocket with its handle, cannot fill the object. A WebSocket without
 the header, an older CLI's, or without a bearer, is refused by the
 Worker, with 426 or 401, before any object is made. An object holds 32
 sessions at most, so a pool gone wrong cannot fill it: the 33rd is
-refused with 503. The object's name digests the bearer token alone and
+refused with 503. A connection takes its slot before admission, and one
+refused keeps it until its admission is done, past a refusal for taking
+too long, so neither a burst nor a slow database gets past the 32. The
+listener says a refusal once a run, on stderr, with coffre's reason. The object's name digests the bearer token alone and
 the path's segments decoded, as admission reads them, so no spelling of
 either splits a run's connections. This is how any
 plugin's WebSocket carries its bytes on Workers, not the tunnel's own:
@@ -847,7 +852,10 @@ counts nothing receives about 1 MiB, then nothing until it counts
 edge answers a protocol ping itself, without reaching the object. So the
 listener sends a count every 30 seconds on each open connection, `0` when
 it owes none: a message that reaches the object, so an idle psql at its
-prompt keeps its WebSocket, and its object stays in memory with it.
+prompt keeps its WebSocket, and its object stays in memory with it. It
+sends a ping too, whose pong, the edge's, must come before the next: a
+connection whose network went away without a word ends within a minute,
+and the app's driver sees it drop, rather than a query that hangs.
 
 *A private database, through a VPC Network binding.* `connect()` reaches
 public addresses only. A database inside a private network, a read

@@ -21,11 +21,13 @@
   not counted: a large `SELECT *` read by a slow client, or a large `COPY
   FROM STDIN`, waits in the database's socket, not in the object's
   memory, and a client that ignores the window is ended. One run holds 32
-  connections to a database at most there. The CLI's
-  listener sends a count every 30 seconds, so a psql left at its prompt
-  outlives Cloudflare's 100-second idle timeout. A Workers coffre refuses
-  an older CLI with 426: update it. Node is unchanged, and the 0.11 CLI
-  still works against an older or Node one.
+  connections to a database at most there; the CLI says why once when
+  coffre refuses one. The CLI's listener sends a count every 30 seconds,
+  so a psql left at its prompt outlives Cloudflare's 100-second idle
+  timeout, and a ping, so a connection whose network went away ends
+  within a minute rather than hang. A Workers coffre refuses an older CLI
+  with 426: update it. Node is unchanged, and the 0.11 CLI still works
+  against an older or Node one.
 - **A tunnel through a private network**, for a database with no public
   address: `postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect:
   env.REPLICA_NET })`, a Workers VPC Network binding to a Cloudflare

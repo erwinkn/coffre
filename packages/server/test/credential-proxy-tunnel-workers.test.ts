@@ -143,30 +143,59 @@ test('an object holds 32 connections of a run at most, a burst of them included:
   const closed = once(held[0]!.ws, 'close');
   held[0]!.ws.close();
   await closed;
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  const again = await open();
+  // The slot comes back once the object has seen the session end.
+  let again = await open();
+  for (let tries = 0; again.event !== 'open' && tries < 50; tries += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    again = await open();
+  }
   assert.equal(again.event, 'open');
   for (const { ws } of [...burst, again]) ws.close();
 });
 
+test("a connection refused at admission frees its slot: 33 refused, then one let in", { skip, timeout: 60_000 }, async () => {
+  const refused = `coffre_use_${'f'.repeat(43)}`;
+  const open = async () => {
+    const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${refused}`, 'coffre-tunnel-flow': 'credit' } });
+    ws.on('error', () => undefined);
+    const [event, answer] = (await Promise.race([once(ws, 'open').then(() => ['open']), once(ws, 'unexpected-response').then(([, response]) => ['refused', response])])) as [string, { statusCode: number }?];
+    return { ws, event, status: answer?.statusCode };
+  };
+  // The stand-in refuses this handle 33 times, one after another: past 32, only a slot not given back would refuse with 503.
+  for (let tries = 0; tries < 33; tries += 1) assert.equal((await open()).status, 401);
+  const admitted = await open();
+  assert.equal(admitted.event, 'open');
+  admitted.ws.close();
+});
+
 test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { skip, timeout: 30_000 }, async () => {
-  // The app itself, say, speaking WebSocket with its handle, and no listener in between; the database not reading yet.
-  const flood = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
+  // The app itself, say, speaking WebSocket with its handle, and no listener in between, to a database that takes nothing:
+  // a startup and the password, as a driver sends them, and the session waits on the database, reading no more of the app.
+  const flood = new WebSocket(`${at}/use/market/dev/stall`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
   await once(flood, 'open');
-  const flooded = once(flood, 'close');
-  // A startup that claims a long first message, so the session waits for bytes that never make one; then 3 MiB more.
-  const startup = Buffer.alloc(4);
-  startup.writeInt32BE(9_000);
-  flood.send(startup);
+  const flooded = once(flood, 'close') as Promise<[number, Buffer]>;
+  const params = Buffer.from('user\0app\0database\0app\0\0');
+  const startup = Buffer.alloc(8);
+  startup.writeInt32BE(8 + params.length, 0);
+  startup.writeInt32BE(196608, 4);
+  flood.send(Buffer.concat([startup, params]));
+  const password = Buffer.from(`p\0\0\0\0${HANDLE}\0`);
+  password.writeInt32BE(password.length - 1, 1);
+  flood.send(password);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  // Then 3 MiB, which the session does not take.
   for (let sent = 0; sent < 3 * WINDOW; sent += 256 * 1024) flood.send(Buffer.alloc(256 * 1024));
-  await flooded;
+  // Ended for the window, not for a startup it could not read: the policy's close, and its reason.
+  const [code, reason] = await flooded;
+  assert.deepEqual([code, reason.toString()], [1008, 'past its window']);
 
   const greedy = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
   await once(greedy, 'open');
-  const ended = once(greedy, 'close');
-  // Nothing was sent to it yet: a count of anything opens the window past what it took.
+  const ended = once(greedy, 'close') as Promise<[number, Buffer]>;
+  // Nothing was sent to it yet but the first count's: a count of anything opens the window past what it took.
   greedy.send('1000000');
-  await ended;
+  const [greedyCode, greedyReason] = await ended;
+  assert.deepEqual([greedyCode, greedyReason.toString()], [1008, 'a count of bytes it was not sent']);
 });
 
 test("a large result goes no faster than the app counts it: uncounted, the object holds back all but a window", { skip, timeout: 120_000 }, async () => {

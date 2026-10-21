@@ -113,7 +113,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       const { config, resolved } = configured(env);
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
       const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise));
-      return (request, sourceIp) => admitSocket(request, runtime, sourceIp);
+      return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
   };
 }
