@@ -48,6 +48,8 @@ const SESSION = 'select current_user, inet_server_addr(), (select ssl from pg_st
 
 const STAGE_TIMEOUT_MS = 15_000;
 const MAX_MESSAGE = 1 << 20;
+/** Both fixed queries return one row; more is a server misbehaving. */
+const MAX_ROWS = 16;
 /** Postgres's default is 4096; a count far past it is a server spending our CPU (RFC 5802, section 9). */
 const MAX_ITERATIONS = 100_000;
 
@@ -61,7 +63,8 @@ export async function probe(dial: Dial, target: Target, holdSeconds: number): Pr
   let stage: Stage = 'config';
   let connection: Connection | undefined;
   try {
-    if (!target.host || !/^\d{1,5}$/.test(target.port) || !target.database || !target.user || !target.password) {
+    const port = /^\d{1,5}$/.test(target.port) ? Number(target.port) : 0;
+    if (!target.host || port < 1 || port > 65535 || !target.database || !target.user || !target.password) {
       throw new Error('PG_HOST, PG_PORT, PG_DATABASE, PG_USER and the DEBUG_RO_PASSWORD secret must all be set');
     }
     const address = `${target.host}:${target.port}`;
@@ -279,6 +282,7 @@ async function query(connection: Connection, sql: string): Promise<Record<string
         at += Math.max(length, 0);
       }
       rows.push(row);
+      if (rows.length > MAX_ROWS) throw new Error(`the server sent more than ${MAX_ROWS} rows`);
     } else if (type === 'Z') {
       return rows;
     }

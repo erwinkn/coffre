@@ -48,7 +48,9 @@ const frame = (type, body) => Buffer.concat([Buffer.from(type), int32(body.lengt
 
 /** The probe, from Node, against a fake server that answers SSLRequest with N and then does `misbehave` after StartupMessage. */
 async function hostile(misbehave) {
+  const sockets = new Set();
   const server = net.createServer((socket) => {
+    sockets.add(socket);
     socket.on('error', () => {});
     socket.once('data', () => {
       socket.write('N');
@@ -62,9 +64,14 @@ async function hostile(misbehave) {
     const socket = net.connect(Number(port), host);
     return { ...Duplex.toWeb(socket), opened: once(socket, 'connect'), close: async () => void socket.destroy() };
   };
+  // Bounded here too, so a regressed deadline fails the check instead of hanging the run.
+  let timer;
+  const hung = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error('the probe hung past 20 s')), 20_000)));
   try {
-    return await probe(dial, { host: '127.0.0.1', port: String(server.address().port), database: 'x', user: 'x', password }, 0);
+    return await Promise.race([probe(dial, { host: '127.0.0.1', port: String(server.address().port), database: 'x', user: 'x', password }, 0), hung]);
   } finally {
+    clearTimeout(timer);
+    for (const socket of sockets) socket.destroy();
     server.close();
   }
 }

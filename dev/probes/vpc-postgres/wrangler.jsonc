@@ -1,4 +1,4 @@
-// Fill in the four REPLACE_ME values from Infra before deploying (README.md).
+// Fill in the three REPLACE_ME values from Infra before deploying (README.md).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vpc-postgres-probe",
