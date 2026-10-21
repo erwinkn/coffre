@@ -1046,10 +1046,10 @@ class VaultService implements Vault {
         // and a value loosened is still its key's current one.
         vet: async (db) => {
           const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
-          // Read only for a loosening: what a restore brings back as it was held, null where it is the current value.
-          const current = loosens.includes(true) ? await store.restoredNatures(db, items.map(({ secret }) => ({ secretId: secret.secretId, from: sources.get(secret)!.id }))) : [];
+          // Read only for a loosening: each source again, current as the decision had it, its key's pointer and its newest.
+          const again = loosens.includes(true) ? new Map((await store.versions(db, items.map(({ secret }) => sources.get(secret)!.id))).map((version) => [version.id, version])) : null;
           return items.map(({ secret }, i) => {
-            if (loosens[i]) return current[i] === null ? null : 'invalid';
+            if (loosens[i]) return again?.get(sources.get(secret)!.id)?.current === true ? null : 'invalid';
             return secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null;
           });
         },

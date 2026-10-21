@@ -155,8 +155,8 @@ might name included.
   true`), and `was`, the level before, when it changed one; a mark also
   says the version whose value it `kept`. A loosening is `secret.loosen`.
 - **Personal tokens count as people**, as does a handle. A personal
-  config's values stay readable by their owner (R8): none is sensitive, or
-  plain, there.
+  config's own values are plain, secret or sensitive, as anywhere, and
+  read by their owner alone, a sensitive one used (R8, R20, decision 27).
 - **A fork's copy keeps each value's level**, as it keeps plain.
 
 0.8 and 0.9 had one switch for the whole deployment, `people:

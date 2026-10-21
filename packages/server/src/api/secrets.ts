@@ -738,7 +738,8 @@ export async function setSecrets(
     const sealed = await sealValues(ctx.vault, asking(ctx, operationId), items);
     if (!sealed.ok) throw vaultRefusal(ctx, sealed.refusal, 'secret.write', { ...environment, operationId });
     const rewrapped = await rewrapValues(ctx.vault, asking(ctx, operationId), marked.map(({ secret, from }) => ({ secret, from })));
-    if (!rewrapped.ok) throw vaultRefusal(ctx, rewrapped.refusal, 'secret.write', { ...environment, operationId });
+    // A loosening the vault refuses is logged as one, as the app's own refusal of it is.
+    if (!rewrapped.ok) throw vaultRefusal(ctx, rewrapped.refusal, marked.some(({ was, to }) => stricter(was, to)) ? 'secret.loosen' : 'secret.write', { ...environment, operationId });
     // Vault calls only for what there is: most writes make and end no reference.
     const made = references.length === 0 ? { ok: true as const, seqs: [] } : await ctx.vault.reference({
       ...asking(ctx, operationId),
