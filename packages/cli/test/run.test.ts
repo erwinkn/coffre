@@ -491,7 +491,8 @@ test('a tunnel whose coffre never answers the upgrade gives up on it, closing th
     app.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
     const started = Date.now();
     await once(app, 'close');
-    assert.ok(Date.now() - started < 20_000);
+    // The listener waits 20 s, past the 15 s coffre has to answer with its own refusal.
+    assert.ok(Date.now() - started < 25_000);
     tunnel.close();
   } finally {
     for (const socket of held) socket.destroy();
