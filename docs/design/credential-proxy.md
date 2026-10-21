@@ -765,8 +765,9 @@ Node, so it goes out the way that session's connection did, through the
 tunnel's network binding or not.
 
 **Not yet:**
-- *A check on a deployed Worker* (section 7): six dials at once, an idle
-  object kept alive, a deploy's disconnect.
+- *A check on a deployed Worker* (section 7): whether an open socket
+  counts toward the six connections (a pool of six through two rechecks),
+  an idle object kept alive, a deploy's disconnect.
 - *The privileged-role warning* (section 6): reading `rolsuper` and
   `rolcreaterole` after login, before the app's first query.
 - *Minted short-lived logins* (W108), which replace the shared password.
@@ -1265,15 +1266,25 @@ through a VPC Network binding, section 5) and port 25 is blocked. The
 tunnel runs in a Durable Object (section 5); what the prototype found,
 locally under workerd and in Cloudflare's documentation:
 
-- *Six connections.* Cloudflare counts, per invocation, the connections
-  still *waiting for their first answer* (a `fetch` before its headers, a
-  `connect()` before it opens), and queues the seventh rather than
-  refusing it; an open socket no longer counts. So a pool of ten opens
-  six at once, then four. Locally, twelve connections of one run, one
-  object, all opened within 0.2 s and ran together. To confirm on
-  Cloudflare: a throwaway Worker whose Durable Object opens twelve
-  `connect()` sockets to a public Postgres, holds them a minute, and
-  reports when each opened.
+- *Six connections: assumed, to confirm.* Cloudflare's limits page counts
+  six connections per invocation "simultaneously waiting for response
+  headers", a `connect()` among them, and queues the seventh rather than
+  refusing it; a connection stops counting "once response headers
+  arrive". A TCP socket has no headers, so whether an *open* socket still
+  counts is not said, and local workerd enforces no limit. Read as
+  "until it opens", a pool of ten opens six at once, then four. Read as
+  "while open", it is worse than a queued dial: a pool of six at its
+  prompt holds the budget, and the object's recheck, a Hyperdrive query
+  and a vault call, waits behind it until its 10 s deadline says no,
+  which ends all six, every minute. Locally, twelve connections of one
+  run, one object, opened within 0.2 s and ran together, which settles
+  nothing here. To confirm on Cloudflare, before a release carries a
+  production database: a real `coffre run` with six idle connections
+  held through two rechecks, the log showing both `recheck` entries and
+  the sessions still open, and twelve opened at once. *Fallback, if open
+  sockets count:* `MOST_SESSIONS` drops to four, leaving two for the
+  recheck's database and vault, and deploy.md tells pools to stay under
+  it.
 - *Hibernation* saves nothing here. It frees an object whose WebSockets
   are idle, but an open TCP socket to Postgres cannot survive it, and the
   group's check is a timer. An object holding a run's connections is in

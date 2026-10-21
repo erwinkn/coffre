@@ -47,8 +47,9 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
     sockets.add(socket);
     // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
     socket.pause();
-    // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it.
-    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: 15_000 });
+    // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it. Longer
+    // than coffre's own 15 s to admit (socket-admission.ts), so that its refusal for taking too long is the one said.
+    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: 20_000 });
     /** Whether coffre paces: unknown until its first message says. */
     let pacing: boolean | null = null;
     /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
