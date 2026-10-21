@@ -54,7 +54,11 @@ function nodeDial(address) {
   return { ...Duplex.toWeb(socket), opened: once(socket, 'connect'), close: async () => void socket.destroy() };
 }
 
-/** `dial`, with at most `limit` sockets open: the rest wait, unopened, for one to close, as Workers queues past six. */
+/**
+ * `dial`, with at most `limit` sockets let through: past it, a socket's `opened` waits for one of
+ * those to close, as Workers holds back a connection past six. The TCP connection underneath
+ * is made at once; only `opened` is held back, which is all the probe waits on.
+ */
 function capped(dial, limit) {
   let active = 0;
   const waiting = [];
@@ -82,6 +86,25 @@ function capped(dial, limit) {
           active--;
           waiting.shift()?.();
         }
+        await socket.close();
+      },
+    };
+  };
+}
+
+/** `dial`, with at most `limit` sockets open: past it, the oldest is destroyed to make room, as Workers' deadlock breaker cancels a connection. */
+function evicting(dial, limit) {
+  const open = [];
+  return (address) => {
+    const socket = dial(address);
+    if (open.length >= limit) open.shift().destroy();
+    const entry = { destroy: () => void socket.close() };
+    open.push(entry);
+    return {
+      ...socket,
+      close: async () => {
+        const at = open.indexOf(entry);
+        if (at >= 0) open.splice(at, 1);
         await socket.close();
       },
     };
@@ -228,24 +251,40 @@ try {
       assert.equal(check.connect.ok, true, JSON.stringify(check.connect));
       assert.equal(check.alive, 8);
       assert.deepEqual(check.dead, []);
+      assert.deepEqual(check.evicted, []);
     }
+    assert.equal(json.release.closedSocket, 0);
+    assert.equal(json.release.heldAtClose, 8);
     assert.ok(json.release.closedAtMs >= 5000, JSON.stringify(json.release));
     assert.equal(json.release.connect.ok, true);
     // Locally nothing caps connections, so the release check's connect did not wait for the close.
     assert.ok(json.release.connect.ms < json.release.closedAtMs, JSON.stringify(json.release));
   });
 
-  await check('/sockets: held sessions killed during the hold are reported dead', async () => {
-    const pending = get('/sockets?n=2&hold=6');
-    await wait(3500);
+  await check('/sockets: held sessions killed during the hold are reported dead, not evicted', async () => {
+    // The kill lands mid-hold with a wide margin: `beside` (a fetch over the internet and a connect) has 9 s.
+    const pending = get('/sockets?n=2&hold=20');
+    await wait(10_000);
     sql("select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'vpc-postgres-probe'");
     const { json } = await pending;
     assert.equal(json.ok, true, JSON.stringify(json));
+    assert.ok(json.beside.fetch.ms < 9000, `beside's fetch took ${json.beside.fetch.ms} ms: the kill may have raced it`);
     assert.equal(json.beside.alive, 2);
     assert.equal(json.afterHold.alive, 0, JSON.stringify(json.afterHold));
     assert.deepEqual(json.afterHold.dead.map((dead) => [dead.socket, dead.stage]), [[0, 'query'], [1, 'query']]);
+    assert.deepEqual(json.afterHold.evicted, []);
     assert.equal(json.afterHold.connect.ok, true);
+    assert.deepEqual([json.release.closedSocket, json.release.heldAtClose], [null, 0]);
     assert.equal(json.release.connect.ok, true);
+  });
+
+  await check('/sockets with no session opened is not ok', async () => {
+    sql("alter role debug_ro password 'not-the-configured-one'");
+    const { json } = await get('/sockets?n=2&hold=0');
+    sql(`alter role debug_ro password '${password}'`);
+    assert.equal(json.ok, false);
+    assert.equal(json.openedOk, 0);
+    assert.deepEqual(json.opened.map((attempt) => attempt.stage), ['auth', 'auth']);
   });
 
   sql('alter system set ssl = off');
@@ -269,8 +308,20 @@ try {
     assert.equal(report.beside.connect.ok, false);
     assert.equal(report.beside.connect.stage, 'dial');
     assert.equal(report.beside.alive, 3);
+    assert.deepEqual([report.release.closedSocket, report.release.heldAtClose], [0, 3]);
     assert.equal(report.release.connect.ok, true, JSON.stringify(report.release));
     assert.ok(report.release.connect.ms >= report.release.closedAtMs - 50, JSON.stringify(report.release));
+  });
+
+  await check('/sockets under an evicting cap of 3: the session closed for a fresh connect is evicted, not dead', async () => {
+    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'debug_ro', password };
+    const report = await holdSockets(evicting(nodeDial, 3), target, 3, 0);
+    assert.equal(report.ok, true, JSON.stringify(report));
+    assert.equal(report.openedOk, 3);
+    assert.deepEqual(report.beside.dead, []);
+    assert.equal(report.beside.connect.ok, true);
+    assert.deepEqual(report.beside.evicted.map((evicted) => evicted.socket), [0]);
+    assert.equal(report.beside.alive, 2);
   });
 
   sql("alter role debug_ro password 'not-the-configured-one'");

@@ -107,6 +107,8 @@ export async function login(dial: Dial, target: Target, report: Report): Promise
     const address = `${target.host}:${target.port}`;
     const open = async (): Promise<Connection> => {
       const at = Date.now();
+      // A redial that fails reports no dial time, not the first socket's.
+      report.dialMs = undefined;
       const dialing = Promise.resolve(dial(address));
       let socket: ProbeSocket;
       try {

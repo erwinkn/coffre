@@ -3,8 +3,9 @@
 // sessions (logged in, because Postgres drops a socket that sends no startup
 // message within a minute), then see whether a fresh fetch() and a fresh
 // connect() still go through, right away and after the hold, and whether the
-// held sessions survive. A last fresh connect() waits while one held session
-// is closed: one that goes through just after that close was queued for a slot.
+// held sessions survive: idle, and beside those fresh ones. A last fresh
+// connect() waits while one held session is closed: one that goes through just
+// after that close was queued for a slot.
 import { Connection, describe, login, selectOne, sleep, StageFailure, type Dial, type Report, type Target } from './pg.ts';
 
 /** A small public page: the plain subrequest beside the held sockets. */
@@ -23,14 +24,18 @@ export interface Attempt {
 }
 
 export interface Check {
+  /** Held sessions that no longer answered `select 1` before this check opened anything: dropped while idle. */
+  dead: (Attempt & { socket: number })[];
   fetch: Attempt;
   connect: Attempt;
-  /** How many held sessions still answer `select 1`, and the ones that do not. */
+  /** Held sessions that answered before the fresh fetch() and connect() and not after: closed to make room for them. */
+  evicted: (Attempt & { socket: number })[];
+  /** Held sessions that still answer at the end of the check. */
   alive: number;
-  dead: (Attempt & { socket: number })[];
 }
 
 export interface SocketsReport {
+  /** At least one session opened, so the rest of the report measures something. */
   ok: boolean;
   error?: string;
   count: number;
@@ -40,8 +45,11 @@ export interface SocketsReport {
   openedOk?: number;
   beside?: Check;
   afterHold?: Check;
-  /** A fresh connect() started RELEASE_AFTER_SECONDS before a held session closed. */
-  release?: { closedAtMs: number; connect: Attempt };
+  /**
+   * A fresh connect() started RELEASE_AFTER_SECONDS before held session `closedSocket` closed,
+   * with `heldAtClose` sessions open just before; `closedSocket` is null when none was left to close.
+   */
+  release?: { closedSocket: number | null; heldAtClose: number; closedAtMs: number; connect: Attempt };
   totalMs?: number;
 }
 
@@ -55,6 +63,7 @@ export async function holdSockets(dial: Dial, target: Target, count: number, hol
     report.opened = results.map(({ attempt }, socket) => ({ socket, ...attempt }));
     results.forEach(({ connection }, socket) => connection && held.set(socket, connection));
     report.openedOk = held.size;
+    if (held.size === 0) throw new Error('no session opened: see `opened` for why');
 
     report.beside = await check(dial, target, held);
     if (holdSeconds > 0) {
@@ -65,12 +74,13 @@ export async function holdSockets(dial: Dial, target: Target, count: number, hol
     const at = Date.now();
     const connecting = connect(dial, target);
     await sleep(RELEASE_AFTER_SECONDS);
+    const heldAtClose = held.size;
     const [first] = held;
     if (first) {
       held.delete(first[0]);
       await first[1].close(true);
     }
-    report.release = { closedAtMs: Date.now() - at, connect: await connecting };
+    report.release = { closedSocket: first?.[0] ?? null, heldAtClose, closedAtMs: Date.now() - at, connect: await connecting };
     report.ok = true;
   } catch (error) {
     report.error = describe(error);
@@ -80,10 +90,20 @@ export async function holdSockets(dial: Dial, target: Target, count: number, hol
   return { ...report, totalMs: Date.now() - started };
 }
 
-/** A fresh fetch(), then a fresh connect(), then `select 1` on every held session. Dead sessions are closed and dropped. */
+/**
+ * The held sessions first, so a drop while idle is told apart from an eviction; then a fresh
+ * fetch() and connect(); then the held sessions again. Dead sessions are closed and dropped.
+ */
 async function check(dial: Dial, target: Target, held: Map<number, Connection>): Promise<Check> {
+  const dead = await answer(held);
   const fetched = await fetchOnce();
   const connected = await connect(dial, target);
+  const evicted = await answer(held);
+  return { dead, fetch: fetched, connect: connected, evicted, alive: held.size };
+}
+
+/** `select 1` on every held session; the ones that fail are closed, dropped and returned. */
+async function answer(held: Map<number, Connection>): Promise<(Attempt & { socket: number })[]> {
   const answers = await Promise.all(
     [...held].map(async ([socket, connection]) => {
       const at = Date.now();
@@ -97,8 +117,7 @@ async function check(dial: Dial, target: Target, held: Map<number, Connection>):
       }
     }),
   );
-  const dead = answers.filter((answer) => answer !== null);
-  return { fetch: fetched, connect: connected, alive: held.size, dead };
+  return answers.filter((dead) => dead !== null);
 }
 
 async function open(dial: Dial, target: Target): Promise<{ attempt: Attempt; connection?: Connection }> {

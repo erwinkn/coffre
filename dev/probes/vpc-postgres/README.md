@@ -139,25 +139,30 @@ inside one call to a Durable Object, so it all counts against one request's limi
 
 1. **`opened`:** opens `n` sessions at once (dial and SCRAM login) and keeps them idle.
    A socket that does not open within 15 s fails at `dial` with `no answer within 15 s`.
-2. **`beside`:** with them held, a fresh `fetch()` of a public page, then a fresh
-   `connect()` with a `select 1`. Then `select 1` on every held session: `alive`
-   counts the ones that answer, and `dead` lists the others.
+   `ok` is false only if none opened.
+2. **`beside`:** with them held, `select 1` on each held session (`dead` lists any that
+   fail), then a fresh `fetch()` of a public page and a fresh `connect()` with a
+   `select 1`, then each held session again. `evicted` lists those that answered
+   before the fresh attempts and not after; `alive` counts what is left.
 3. **`afterHold`:** waits `hold` seconds (150 by default, 600 at most), then
-   checks again.
-4. **`release`:** starts one more `connect()`, closes one held session 5 s later
-   (`closedAtMs`), and times the `connect()`.
+   checks again the same way.
+4. **`release`:** starts one more `connect()` and, 5 s later (`closedAtMs`), closes
+   held session `closedSocket` out of `heldAtClose` open. Then it reports how long
+   that `connect()` took.
 
 | What you see | What it means |
 | --- | --- |
-| `openedOk` equals `n` for 12, `beside.connect.ok`, `release.connect.ms` well under `closedAtMs` | Open VPC sockets do not count toward six. |
-| For 12, `openedOk` is 6 and the rest fail at `dial`. With 6, `beside.connect` fails at `dial`. `release.connect.ok` with `ms` just past `closedAtMs` | They count, and a 7th waits in a queue for a slot. |
+| With 12, `openedOk` is 12, every `connect` is ok, and `release.connect.ms` is well under `closedAtMs` | Open VPC sockets do not count toward six. |
+| With 12, `openedOk` is 6 and the rest fail at `dial`. With 6, `beside.connect` fails at `dial`. `release.connect` is ok, with `ms` just past `closedAtMs` | They count, and a 7th waits in a queue for a slot. |
 | The same, but `release.connect` fails too | They count, and a 7th stalls: closing a socket does not let it through. |
 | `beside.fetch` fails with a timeout once 6 are open | Open sockets also hold back plain `fetch()`. |
-| `beside.dead` is not empty | The runtime closed an idle socket to make room for a new one. |
-| Only `afterHold.dead` is not empty | Idle sessions were dropped during the hold (cloudflared, the network, or Postgres), not by the limit. |
+| `evicted` is not empty | The runtime closed an idle socket to make room for the fresh `fetch()` or `connect()`. |
+| `afterHold.dead` is not empty | Idle sessions were dropped during the hold (cloudflared, the network, or Postgres), not by the limit. |
 | `opened` fails at `auth` with `53300` | The role's own connection limit, not Workers'. |
 
-A socket's `dialMs` shows how long it waited to open.
+The `release` rows only mean something when `closedSocket` is a number and
+`heldAtClose` is at least 6. With fewer held, the last `connect()` has a free slot
+anyway. A socket's `dialMs` shows how long it waited to open.
 
 ## Remove it
 
@@ -175,12 +180,16 @@ Postgres 17 of its own on `127.0.0.1:56145`. It runs with TLS on, then off, with
 
 - the gate, and all three routes
 - a 25 s hold, and a session killed mid-hold
-- `/sockets` with 8 sessions, and with held sessions killed mid-hold
+- `/sockets` with 8 sessions, with held sessions killed mid-hold, and with none opening
 - a wrong password, a server that asks for a cleartext password, and a closed port
 
 `wrangler dev` has no six-connection limit, so the probe's handling of one is tested
-from Node, with a fake cap of 3 that queues the rest. The 4th socket and a fresh
-`connect()` stall, and the release lets the waiting `connect()` through. The wire
+from Node, with two fake caps of 3:
+
+- One queues the rest. The 4th socket and a fresh `connect()` stall, and the release
+  lets the waiting `connect()` through.
+- The other closes the oldest socket to make room, and that session shows up in
+  `evicted`, not `dead`. The wire
 code also runs from Node against two hostile fake servers: a malformed error, and an
 endless stream of messages. Then the smoke removes its container. It does not reach
 Cloudflare: a VPC binding only runs there.
