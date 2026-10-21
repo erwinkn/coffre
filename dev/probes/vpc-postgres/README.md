@@ -53,8 +53,17 @@ pnpm exec wrangler deploy       # prints https://vpc-postgres-probe.<subdomain>.
 
 PROBE_KEY=$(openssl rand -hex 32)
 printf %s "$PROBE_KEY" | pnpm exec wrangler secret put PROBE_KEY
-pnpm exec wrangler secret put DEBUG_RO_PASSWORD   # type it at the prompt
+```
 
+Run this one alone: it prompts for the password, and lines pasted after it would be read as the password.
+
+```sh
+pnpm exec wrangler secret put DEBUG_RO_PASSWORD
+```
+
+Then:
+
+```sh
 URL=https://vpc-postgres-probe.<subdomain>.workers.dev
 curl -sS -H "Authorization: Bearer $PROBE_KEY" "$URL/worker" | jq
 curl -sS -H "Authorization: Bearer $PROBE_KEY" "$URL/do" | jq
@@ -124,9 +133,11 @@ Then ask Infra to remove the access rule, if they added one for this probe.
 
 ## Local check
 
-`pnpm smoke` (Docker, Node 22 or later) runs the probe under `wrangler dev` against a
+`pnpm smoke` (Docker, Node 24) runs the probe under `wrangler dev` against a
 Postgres 17 of its own on `127.0.0.1:56145`. It runs with TLS on, then off, with
 `cloudflare:sockets` standing in for the VPC binding (`local/worker.ts`). It checks
 the gate, both routes, a 25 s hold, a session killed mid-hold, a wrong password, a
-server that asks for a cleartext password, and a closed port. Then it removes its
-container. It does not reach Cloudflare: a VPC binding only runs there.
+server that asks for a cleartext password, and a closed port. It then runs the wire
+code from Node against two hostile fake servers: a malformed error, and an endless
+stream of messages. Then it removes its container. It does not reach Cloudflare: a
+VPC binding only runs there.

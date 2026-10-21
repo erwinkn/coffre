@@ -67,11 +67,23 @@ export async function probe(dial: Dial, target: Target, holdSeconds: number): Pr
     const address = `${target.host}:${target.port}`;
     const open = async (): Promise<Connection> => {
       const at = Date.now();
-      const socket = await within(Promise.resolve(dial(address)));
-      const opened = new Connection(socket);
-      await within(socket.opened ?? Promise.resolve());
+      const dialing = Promise.resolve(dial(address));
+      let socket: ProbeSocket;
+      try {
+        socket = await within(dialing);
+      } catch (error) {
+        // A socket that arrives after the timeout is closed, not left open on the tunnel.
+        void dialing.then((late) => late.close()).catch(() => {});
+        throw error;
+      }
+      try {
+        await within(socket.opened ?? Promise.resolve());
+      } catch (error) {
+        await within(socket.close()).catch(() => {});
+        throw error;
+      }
       report.dialMs = Date.now() - at;
-      return opened;
+      return new Connection(socket);
     };
 
     stage = 'dial';
@@ -79,8 +91,9 @@ export async function probe(dial: Dial, target: Target, holdSeconds: number): Pr
 
     stage = 'ssl-request';
     const asked = Date.now();
+    connection.stage();
     await connection.write(int32s(8, 80877103));
-    const answer = decoder.decode(await within(connection.read(1)));
+    const answer = decoder.decode(await connection.read(1));
     report.sslRequest = answer;
     report.sslRequestMs = Date.now() - asked;
     if (answer === 'S') {
@@ -95,6 +108,7 @@ export async function probe(dial: Dial, target: Target, holdSeconds: number): Pr
 
     stage = 'startup';
     const loginStarted = Date.now();
+    connection.stage();
     await connection.write(startup(target));
 
     stage = 'auth';
@@ -136,6 +150,8 @@ class Connection {
   readonly #reader: ReadableStreamDefaultReader<Uint8Array>;
   readonly #writer: WritableStreamDefaultWriter<Uint8Array>;
   #buffer = new Uint8Array(0);
+  /** When the current stage gives up: one deadline for all its reads and writes, however many messages the server sends. */
+  #deadline = Date.now() + STAGE_TIMEOUT_MS;
 
   constructor(socket: ProbeSocket) {
     this.#socket = socket;
@@ -143,11 +159,20 @@ class Connection {
     this.#writer = socket.writable.getWriter();
   }
 
-  write(bytes: Uint8Array): Promise<void> {
-    return within(this.#writer.write(bytes));
+  /** Start a stage: STAGE_TIMEOUT_MS from now. */
+  stage(): void {
+    this.#deadline = Date.now() + STAGE_TIMEOUT_MS;
   }
 
-  async read(length: number): Promise<Uint8Array> {
+  write(bytes: Uint8Array): Promise<void> {
+    return within(this.#writer.write(bytes), this.#deadline);
+  }
+
+  read(length: number): Promise<Uint8Array> {
+    return within(this.#fill(length), this.#deadline);
+  }
+
+  async #fill(length: number): Promise<Uint8Array> {
     while (this.#buffer.length < length) {
       const { value, done } = await this.#reader.read();
       if (done) throw new Error('the server closed the connection');
@@ -160,10 +185,10 @@ class Connection {
 
   /** The next message, its one-byte type and its body; an ErrorResponse is thrown as its fields. */
   async message(): Promise<{ type: string; body: Uint8Array }> {
-    const head = await within(this.read(5));
+    const head = await this.read(5);
     const length = new DataView(head.buffer, head.byteOffset, 5).getInt32(1);
     if (length < 4 || length > MAX_MESSAGE) throw new Error(`the server sent a message of ${length} bytes`);
-    const body = await within(this.read(length - 4));
+    const body = await this.read(length - 4);
     const type = String.fromCharCode(head[0]!);
     if (type === 'E') throw new Error(`the server says: ${serverError(body)}`);
     return { type, body };
@@ -228,6 +253,7 @@ async function untilReady(connection: Connection): Promise<string | undefined> {
 
 /** A simple query's rows, each column by name, as text. */
 async function query(connection: Connection, sql: string): Promise<Record<string, string | null>[]> {
+  connection.stage();
   await connection.write(message('Q', cstring(sql)));
   let columns: string[] = [];
   const rows: Record<string, string | null>[] = [];
@@ -239,6 +265,7 @@ async function query(connection: Connection, sql: string): Promise<Record<string
       let at = 2;
       for (let i = 0; i < view.getInt16(0); i++) {
         const end = body.indexOf(0, at);
+        if (end === -1) throw new Error('the server sent a malformed RowDescription');
         columns.push(decoder.decode(body.slice(at, end)));
         at = end + 1 + 18;
       }
@@ -311,16 +338,19 @@ function serverError(body: Uint8Array): string {
   let at = 0;
   while (at < body.length && body[at] !== 0) {
     const end = body.indexOf(0, at + 1);
+    if (end === -1) break;
     fields.set(String.fromCharCode(body[at]!), decoder.decode(body.slice(at + 1, end)));
     at = end + 1;
   }
   return `${fields.get('V') ?? fields.get('S') ?? 'ERROR'} ${fields.get('C') ?? '?'}: ${fields.get('M') ?? ''}`;
 }
 
-function within<T>(promise: Promise<T>): Promise<T> {
+/** The promise, or a rejection at the deadline: by default STAGE_TIMEOUT_MS from now. */
+function within<T>(promise: Promise<T>, deadline = Date.now() + STAGE_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`no answer within ${STAGE_TIMEOUT_MS / 1000} s`)), STAGE_TIMEOUT_MS);
+    const fail = () => reject(new Error(`no answer within ${STAGE_TIMEOUT_MS / 1000} s`));
+    timer = setTimeout(fail, Math.max(0, deadline - Date.now()));
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
