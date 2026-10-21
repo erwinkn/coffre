@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **The database tunnel runs on Workers.** `coffre run market/dev -- psql
+  "$DATABASE_URL"` now works against a Workers deployment as it does on
+  Node: each run's connections to a database go to a Durable Object of
+  their own, named by a digest of the path and the handle, which admits
+  them as Node does (one `credential.use`, the handle checked again before
+  login, a recheck a minute logged as a use, a revoked handle's sessions
+  ended within it) and runs the same tunnel, cancel requests included.
+  `coffre init` writes the object's wiring: the `SOCKETS` binding and its
+  migration, `sockets: env.SOCKETS`, and `coffre.upgrade(request, env)` in
+  the server entry, idle until the deployment adds the credential proxy
+  with a tunnel. An older deployment adds them by hand
+  ([deploy.md](docs/deploy.md#the-credential-proxys-database-tunnel)).
+  No database migration.
+- **The tunnel paces itself, and keeps an idle connection alive.** A
+  Workers WebSocket has no back-pressure, so the CLI and the object count
+  back what they took, and neither sends more than 1 MiB the other has
+  not counted: a large `SELECT *` read by a slow client, or a large `COPY
+  FROM STDIN`, waits in the database's socket, not in the object's
+  memory. The CLI's listener sends a count every 30 seconds, so a psql
+  left at its prompt outlives Cloudflare's 100-second idle timeout. A
+  Workers coffre refuses an older CLI with 426: update it. Node is
+  unchanged, and the 0.11 CLI still works against an older or Node one.
+- **A tunnel through a private network**, for a database with no public
+  address: `postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect:
+  env.REPLICA_NET })`, a Workers VPC Network binding to a Cloudflare
+  Tunnel in that network. With `connect`, and only then, `hosts` is
+  required and may name private addresses, and the URL says
+  `sslmode=disable`, since the binding carries plaintext TCP only; a URL
+  that asks for TLS is refused. A binding the Worker lacks fails the
+  configuration, never a direct dial. Without `connect`, nothing changes.
+- **A cancel request reaches only a session of the same database.** It
+  already needed the same handle; now its key must also name a session of
+  the database it came for, so it is sent the way that tunnel dials.
+
 - **Protection shows where you are, and changes there.** A protected
   environment's tag is amber now, on its card and in its page's header,
   where it was grey, and changed only from the card's menu. For whoever

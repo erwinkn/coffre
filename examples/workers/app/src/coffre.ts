@@ -2,7 +2,7 @@
 // src/server.ts, and so only on the server. The app reaches the database
 // through Hyperdrive and the keys only through the vault Worker's service
 // binding.
-import { createCoffre, github, githubApp, postgres, signin, type CoffreContext, type Vault } from '@coffre/server/cloudflare';
+import { createCoffre, github, githubApp, postgres, signin, type CoffreContext, type SocketsNamespace, type Vault } from '@coffre/server/cloudflare';
 
 export type Env = {
   HYPERDRIVE: Hyperdrive;
@@ -26,6 +26,8 @@ export type Env = {
   MCP_PER_SOURCE: RateLimit;
   MCP_PER_CONNECTION: RateLimit;
   MCP_TOTAL: RateLimit;
+  /** The Durable Object that hosts plugins' WebSockets, `CoffreSockets` (src/server.ts): the credential proxy's database tunnel. */
+  SOCKETS: SocketsNamespace;
 };
 
 export const coffre = createCoffre((env: Env) => {
@@ -54,6 +56,9 @@ export const coffre = createCoffre((env: Env) => {
       },
     }),
     auditChainKey: env.APP_KEY,
+    // Where plugins' WebSockets run, one object per `coffre run` and database: the
+    // credential proxy's tunnel, once you add it (docs/design/credential-proxy.md).
+    sockets: env.SOCKETS,
   };
 });
 

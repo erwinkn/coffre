@@ -8,6 +8,7 @@ import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace }
 import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
+import { admitSocket } from './socket-admission.ts';
 import { fetchTransport } from './workloads/transport.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -111,7 +112,8 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     Sockets: socketsObject<Env>((env, state) => {
       const { config, resolved } = configured(env);
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
-      return createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise));
+      const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise));
+      return (request, sourceIp) => admitSocket(request, runtime, sourceIp);
     }),
   };
 }

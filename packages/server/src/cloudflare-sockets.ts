@@ -11,9 +11,8 @@
 // instance decides: access, the vault and the log stay where every request
 // reaches them, through the plugin's context.
 import { cloudflareSourceIp } from './auth.ts';
-import type { Connect, Pipe, Socket } from './plugins.ts';
-import type { CoffreRuntime } from './runtime.ts';
-import { admitSocket } from './socket-admission.ts';
+import type { Connect, Pipe, SocketSession } from './plugins.ts';
+import { workersSocket, type WorkersSocket } from './workers-socket.ts';
 
 /** The Durable Object binding the deployment hands coffre: `sockets: env.SOCKETS`. */
 export type SocketsNamespace = {
@@ -23,6 +22,25 @@ export type SocketsNamespace = {
 
 /** What the object is given by the runtime: its `waitUntil`, for the database's closing. */
 type ObjectState = { waitUntil(promise: Promise<unknown>): void };
+
+/** A WebSocket's admission: the plugin's refusal, or its session (`admitSocket`). */
+export type Admit = (request: Request, sourceIp: string | null) => Promise<Response | SocketSession>;
+
+/**
+ * The header a WebSocket asks for credit flow with, and the object's 101
+ * answers with: `coffre-tunnel-flow: credit`. A Workers WebSocket has no
+ * back-pressure, either way: what one side sends faster than the other
+ * takes waits in the object's memory, 128 MB, a large `SELECT *` included.
+ * So each side counts back what it took, in text messages, each the bytes
+ * taken from binary messages since its last, and holds at most `WINDOW`
+ * bytes the other has not counted; `0` counts nothing, and keeps an idle
+ * connection's WebSocket alive (`coffre run`'s listener, packages/cli/src/tunnels.ts).
+ */
+export const FLOW = 'coffre-tunnel-flow';
+/** What either side may send that the other has not counted back. */
+const WINDOW = 1024 * 1024;
+/** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
+const COUNT_EVERY = 128 * 1024;
 
 /**
  * A WebSocket a plugin takes, sent to its object: one per path and bearer,
@@ -41,21 +59,25 @@ export const IDLE_DATABASE_MS = 1_000;
 
 /**
  * The Durable Object class the deployment exports, `export const
- * CoffreSockets = coffre.Sockets`. `runtime` makes coffre for the object,
- * once: its database client opens with a query and closes once idle.
+ * CoffreSockets = coffre.Sockets`. `admission` makes, once for the object,
+ * what admits its WebSockets: coffre's, whose database client opens with a
+ * query and closes once idle.
  */
-export function socketsObject<Env>(runtime: (env: Env, state: ObjectState) => CoffreRuntime) {
+export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => Admit) {
   return class CoffreSockets {
     readonly #state: ObjectState;
     readonly #env: Env;
-    #runtime: CoffreRuntime | undefined;
+    #admit: Admit | undefined;
     constructor(state: ObjectState, env: Env) {
       this.#state = state;
       this.#env = env;
     }
     async fetch(request: Request): Promise<Response> {
-      this.#runtime ??= runtime(this.#env, this.#state);
-      const answer = await admitSocket(request, this.#runtime, cloudflareSourceIp(request));
+      if (request.headers.get(FLOW) !== 'credit') {
+        return new Response('this coffre tunnels for coffre 0.11 or later, whose `coffre run` paces its tunnel: update the CLI', { status: 426 });
+      }
+      this.#admit ??= admission(this.#env, this.#state);
+      const answer = await this.#admit(request, cloudflareSourceIp(request));
       if (answer instanceof Response) return answer;
       const pair = new (globalThis as unknown as { WebSocketPair: new () => Record<0 | 1, WorkersWebSocket> }).WebSocketPair();
       const server = pair[1];
@@ -64,7 +86,7 @@ export function socketsObject<Env>(runtime: (env: Env, state: ObjectState) => Co
       server.binaryType = 'arraybuffer';
       const client = fromWebSocket(server);
       this.#state.waitUntil(answer(client, connect).catch(() => undefined).finally(client.close));
-      return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
+      return new Response(null, { status: 101, webSocket: pair[0], headers: { [FLOW]: 'credit' } } as ResponseInit);
     }
   };
 }
@@ -73,49 +95,89 @@ export function socketsObject<Env>(runtime: (env: Env, state: ObjectState) => Co
 type WorkersWebSocket = {
   accept(): void;
   binaryType: 'blob' | 'arraybuffer';
-  send(data: Uint8Array): void;
+  send(data: Uint8Array | string): void;
   close(code?: number, reason?: string): void;
   addEventListener(type: 'message', listener: (event: { data: ArrayBuffer | string }) => void): void;
   addEventListener(type: 'close' | 'error', listener: () => void): void;
 };
 
 /**
- * A WebSocket's binary messages as a byte stream, each way. Workers give a
- * server-side WebSocket no flow control: what the app sends is queued here
- * as it comes, and what the database sends is handed to the socket at once.
+ * A WebSocket's binary messages as a byte stream, each way, paced by
+ * credit (`FLOW`): what the app sent waits here until the session takes it,
+ * a window at most, and what the session sends waits for the app's count
+ * once a window of it is uncounted, so the session stops reading the
+ * database until then.
  */
 function fromWebSocket(ws: WorkersWebSocket): Pipe {
   let ended!: () => void;
   const closed = new Promise<void>((resolve) => (ended = resolve));
   let done = false;
-  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  /** What the app sent that the session has not taken. */
+  const queue: Uint8Array[] = [];
+  /** Bytes the session took, not yet counted back to the app. */
+  let taken = 0;
+  /** Bytes sent to the app that it has not counted back. */
+  let uncounted = 0;
+  /** The reader waiting for a message, and the writer for the app's count. */
+  let arrived: (() => void) | null = null;
+  let counted: (() => void) | null = null;
+  const wake = () => {
+    arrived?.();
+    counted?.();
+    arrived = counted = null;
+  };
   const end = () => {
     if (done) return;
     done = true;
     try {
-      controller.close();
-    } catch {}
-    try {
       ws.close(1000);
     } catch {}
+    wake();
     ended();
   };
-  const readable = new ReadableStream<Uint8Array>({
-    start(made) {
-      controller = made;
-      ws.addEventListener('message', (event) => {
-        if (done || typeof event.data === 'string' || event.data.byteLength === 0) return;
-        controller.enqueue(new Uint8Array(event.data));
-      });
-      ws.addEventListener('close', end);
-      ws.addEventListener('error', end);
-    },
-    cancel: end,
+  ws.addEventListener('message', ({ data }) => {
+    if (done) return;
+    if (typeof data === 'string') {
+      // The app's count of what it took: a count that is no count ends the connection, as a broken frame would.
+      const count = Number(data);
+      if (!/^\d{1,10}$/.test(data) || !Number.isSafeInteger(count)) return end();
+      uncounted = Math.max(0, uncounted - count);
+      wake();
+      return;
+    }
+    if (data.byteLength === 0) return;
+    queue.push(new Uint8Array(data));
+    wake();
   });
+  ws.addEventListener('close', end);
+  ws.addEventListener('error', end);
+  const readable = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        while (queue.length === 0 && !done) await new Promise<void>((resolve) => (arrived = resolve));
+        const chunk = queue.shift();
+        if (chunk === undefined) return controller.close();
+        controller.enqueue(chunk);
+        taken += chunk.length;
+        if (taken < COUNT_EVERY) return;
+        try {
+          ws.send(String(taken));
+          taken = 0;
+        } catch {
+          end();
+        }
+      },
+      cancel: end,
+    },
+    // Nothing read ahead: a message is taken when the session asks for it, and counted then.
+    { highWaterMark: 0 },
+  );
   const writable = new WritableStream<Uint8Array>({
-    write: (chunk) => {
+    async write(chunk) {
+      while (uncounted >= WINDOW && !done) await new Promise<void>((resolve) => (counted = resolve));
       if (done) throw new Error('the WebSocket closed');
       ws.send(chunk);
+      uncounted += chunk.length;
     },
     close: end,
     abort: end,
@@ -123,51 +185,13 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
   return { readable, writable, close: end, closed };
 }
 
-/** A `cloudflare:sockets` socket, as far as a pipe needs it. */
-type WorkersSocket = {
-  readable: ReadableStream<Uint8Array>;
-  writable: WritableStream<Uint8Array>;
-  opened: Promise<unknown>;
-  closed: Promise<void>;
-  close(): Promise<void>;
-  startTls(): WorkersSocket;
-};
-
-const pipeOf = (socket: WorkersSocket): Pipe => ({
-  readable: socket.readable,
-  writable: socket.writable,
-  close: () => void socket.close().catch(() => undefined),
-  closed: socket.closed.then(
-    () => undefined,
-    () => undefined,
-  ),
-});
-
 /**
  * TCP out, on Workers: `connect()` with STARTTLS, which `startTls` turns to
- * TLS once Postgres has said it will, the certificate checked against the
- * host dialled, the database's; workerd refuses a name of the caller's
- * (`expectedServerHostname`), so `servername` is that host already. Imported when first used, so that Node, where
- * tests load this module, never resolves `cloudflare:sockets`.
+ * TLS once Postgres has said it will. Imported when first used, so that
+ * Node, where tests load this module, never resolves `cloudflare:sockets`.
  */
 const connect: Connect = async (host, port, signal) => {
   if (signal?.aborted) throw new Error('the session ended');
   const { connect: tcp } = (await import('cloudflare:sockets' as string)) as { connect: (address: { hostname: string; port: number }, options: { secureTransport: 'starttls' }) => WorkersSocket };
-  const socket = tcp({ hostname: host, port }, { secureTransport: 'starttls' });
-  const abort = () => void socket.close().catch(() => undefined);
-  signal?.addEventListener('abort', abort, { once: true });
-  try {
-    await socket.opened;
-  } finally {
-    signal?.removeEventListener('abort', abort);
-  }
-  if (signal?.aborted) throw new Error('the session ended');
-  return {
-    ...pipeOf(socket),
-    startTls: async () => {
-      const secure = socket.startTls();
-      await secure.opened;
-      return pipeOf(secure);
-    },
-  } satisfies Socket;
+  return workersSocket(tcp({ hostname: host, port }, { secureTransport: 'starttls' }), signal);
 };

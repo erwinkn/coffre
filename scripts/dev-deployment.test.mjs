@@ -25,10 +25,9 @@ export const INTENDED = {
   'wrangler.jsonc': 'differs',
   // The Vault KV adapter, an optional plugin the example leaves out (docs/design/plugins.md), and its route.
   'src/routes/v1.$.ts': 'dev only',
-  // The credential proxy's tunnel, which the example leaves out too: its route, and the server entry that sends its
-  // WebSockets to their Durable Object (docs/design/credential-proxy.md, "Workers: one Durable Object per run").
+  // The credential proxy, which the example leaves out too, and its route: its tunnel's WebSockets go to the
+  // Durable Object both bind (docs/design/credential-proxy.md, "Workers: one Durable Object per run").
   'src/routes/use.$.ts': 'dev only',
-  'src/server.ts': 'differs',
   'src/routeTree.gen.ts': 'differs',
 };
 

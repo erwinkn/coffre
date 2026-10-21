@@ -183,7 +183,8 @@ const MAX_LOGIN = 65_536;
  * The cancel keys the app was given, by key, for the sessions logged in
  * now: each the database's own, which the app never sees, and the handle
  * that may use it. A cancel request names one of these or reaches nothing.
- * In this process only: a key outlives no session.
+ * In this process only (on Workers, this isolate, which several objects may
+ * share): a key outlives no session.
  */
 const cancels = new Map<string, { processId: number; secret: number; handle: string; database: Database }>();
 
@@ -341,10 +342,12 @@ async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => v
   return secure;
 }
 
-/** A cancel request of the app's: the key it was given, for one of this handle's sessions; to that session's database, with its own. */
+/** A cancel request of the app's: the key it was given, for one of this handle's sessions of this database; to it, with its own key. */
 async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) => void, signal: AbortSignal): Promise<void> {
   const target = cancels.get(given);
-  if (target === undefined || target.handle !== session.handle) return;
+  // The same handle and database: a cancel goes out the way its session's connection did, through its tunnel's network.
+  const same = target !== undefined && target.database.host === session.database.host && target.database.port === session.database.port;
+  if (target === undefined || target.handle !== session.handle || !same) return;
   const socket = await open(session, target.database, own, signal);
   const writer = new Writer(socket.writable);
   await writer.write(concat(int32(16), int32(CANCEL_REQUEST), int32(target.processId), int32(target.secret)));
