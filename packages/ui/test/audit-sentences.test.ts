@@ -233,6 +233,10 @@ test('a sensitive value made a secret in place says both levels', () => {
     said(entry({ action: 'secret.loosen', ...prod, key: 'DATABASE_URL', version: 5, metadata: { from: 'sensitive', to: 'secret', kept: 4 } })),
     'made market/prod/DATABASE_URL secret, from sensitive, its value kept, now version 5',
   );
+  assert.equal(
+    said(entry({ action: 'secret.loosen', ...prod, key: 'DATABASE_URL', decision: 'deny', reason: 'not_owner', metadata: { from: 'sensitive', to: 'secret' } })),
+    'tried to make market/prod/DATABASE_URL: only an Owner of the project does it in place',
+  );
 });
 
 test('places are created, changed, archived and restored', () => {

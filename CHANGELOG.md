@@ -28,7 +28,8 @@
     so the value never reaches the app or its caller by it. It is a new
     version: the older ones stay sensitive, and a rollback to one brings
     it back sensitive. A reference to it reads it as a secret, live.
-    Logged as its own entry, `secret.loosen`, saying both levels;
+    Logged as its own entry, `secret.loosen`, saying both levels, as is a
+    refusal of one (`not_owner`);
   - takes an environment's protection off (`coffre environments
     unprotect`, or the Protected tag), as far as their project protects
     it. Recovering a policy the vault cannot read is still the whole

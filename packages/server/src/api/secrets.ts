@@ -1007,8 +1007,8 @@ async function marking(
   levelNow: (key: string) => Sensitivity | null,
   operationId: string,
 ): Promise<Marked[]> {
-  const refused = (key: string, message: string, reason: string, metadata: Record<string, unknown> = {}) =>
-    new Refusal(conflict(message), denied(ctx, 'secret.write', reason, { ...environment, operationId, metadata: { key, ...metadata } }));
+  const refused = (key: string, message: string, reason: string, metadata: Record<string, unknown> = {}, action = 'secret.write') =>
+    new Refusal(conflict(message), denied(ctx, action, reason, { ...environment, operationId, metadata: { key, ...metadata } }));
   const changing = marks.filter(({ key, to }) => {
     const row = prepared.get(key);
     if (row?.archivedAt != null) throw refused(key, `${key} is archived; unarchive it before marking it`, 'secret_archived');
@@ -1021,8 +1021,11 @@ async function marking(
           : refused(key, `${key} is inherited: mark it where it is held, or write a value of ${place.project.slug}/${place.environment!.slug}'s own`, 'inherited');
     }
     if (was === to) return false;
-    if (stricter(was!, to) && !(was === 'sensitive' && to === 'secret' && loosens(ctx.caller, place))) {
-      throw refused(key, looserProblem(key, was!, to, place.project.slug), 'looser', { sensitivity: to, was });
+    if (stricter(was!, to)) {
+      // A sensitive value made a secret is a loosening, an Owner's to make, and its refusal is logged as one.
+      const loosening = was === 'sensitive' && to === 'secret';
+      if (loosening && !loosens(ctx.caller, place)) throw refused(key, looserProblem(key, was, to, place.project.slug), 'not_owner', { from: was, to }, 'secret.loosen');
+      if (!loosening) throw refused(key, looserProblem(key, was!, to, place.project.slug), 'looser', { sensitivity: to, was });
     }
     return true;
   });

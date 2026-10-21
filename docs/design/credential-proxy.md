@@ -141,8 +141,8 @@ might name included.
   sensitive, and a rollback to one brings it back sensitive, as any
   rollback brings a value back as it was held. Its own entry,
   `secret.loosen` (`from: 'sensitive'`, `to: 'secret'`, and the version
-  whose value it `kept`), beside the vault's `key.rewrap` (`was:
-  'sensitive'`), so no reader of the log takes it for a value written or
+  whose value it `kept`; a refusal, `not_owner`, is one too), beside the
+  vault's `key.rewrap` (`was: 'sensitive'`), so no reader of the log takes it for a value written or
   seen. A reference reads its source loosened, live (R23), and a fork's
   inherited key its parent's: each is loosened where it is held.
   Secret to plain stays a reveal, then a write (decision 17).

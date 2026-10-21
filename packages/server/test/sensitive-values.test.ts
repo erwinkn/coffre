@@ -130,7 +130,10 @@ test('marking a key stricter keeps its value as a new version; as strict already
     assert.match(looser.message, /WEBHOOK is sensitive: making it .* takes its value written again/);
   }
   const [denied] = (await entries('secret.write')).filter((entry) => entry.decision === 'deny');
-  assert.deepEqual(denied!.metadata, { key: 'WEBHOOK', sensitivity: 'secret', was: 'sensitive', reason: 'looser' });
+  assert.deepEqual(denied!.metadata, { key: 'WEBHOOK', sensitivity: 'plain', was: 'sensitive', reason: 'looser' });
+  // A sensitive value made a secret by anyone but an Owner is a loosening refused, and logged as one.
+  const [loosening] = (await entries('secret.loosen')).filter((entry) => entry.decision === 'deny');
+  assert.deepEqual(loosening!.metadata, { key: 'WEBHOOK', from: 'sensitive', to: 'secret', reason: 'not_owner' });
   assert.equal((await refusal(root.secrets.set('market/dev', { NOTHING: { sensitivity: 'sensitive' } }))).status, 409, 'no value to mark');
   assert.deepEqual(await history('market/dev/WEBHOOK'), [[2, 'sensitive'], [1, 'secret']]);
 });

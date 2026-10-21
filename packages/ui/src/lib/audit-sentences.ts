@@ -676,6 +676,8 @@ const REASONS: Record<string, string> = {
   stand_ins: 'people get placeholders',
   sensitive: 'the value is sensitive',
   looser: 'making it visible takes a new value',
+  // A sensitive value made a secret in place by anyone but an Owner of its project.
+  not_owner: 'only an Owner of the project does it in place',
   inherited: 'it is inherited',
   expired: 'grant expired',
   removed: 'removed from coffre',

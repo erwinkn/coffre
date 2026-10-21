@@ -307,6 +307,27 @@ test('a rewrap is held to its secret\'s newest version as the decision commits: 
   assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
 });
 
+test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", postgresOnly('SQLite runs one writer at a time'), async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  const { secrets } = tablesOf(db.owner);
+  const base = { ...(await w.secret(w.dev)), sensitive: true };
+  const [v1] = await versionItems([{ secret: base, wrapped: await wrapped(w, base) }]);
+  await db.owner.update(secrets).set({ currentVersionId: v1!.secretVersionId, currentVersion: 1 }).where(eq(secrets.id, base.secretId));
+  const next = { ...base, version: 2 };
+  const later = await wrapped(w, next);
+  // The key service takes its time over the sensitive key, as the loosening waits under its decision; meanwhile
+  // another sensitive version is stored and made current.
+  remote.seen.hanging.add(base.secretId);
+  const loosening = w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3, sensitive: false }, ...v1! }] });
+  await sleep(100);
+  const [v2] = await versionItems([{ secret: next, wrapped: later }]);
+  await db.owner.update(secrets).set({ currentVersionId: v2!.secretVersionId, currentVersion: 2 }).where(eq(secrets.id, base.secretId));
+  const refused = await loosening;
+  assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
+  assert.equal((await vaultLog()).filter((entry) => entry.action === 'key.rewrap' && entry.outcome === 'allow').length, 0, 'no loosened key was released');
+});
+
 test('a read records the stored version instead of the app claim', async () => {
   const w = await world();
   const secret = await w.secret(w.dev);

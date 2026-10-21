@@ -163,7 +163,8 @@ test('everyone else writes the value again: a Maintainer, an Owner of another pr
   assert.equal(await status(maya.secrets.dryRun('market/prod', { API_KEY: { sensitivity: 'secret' } })), 409);
   assert.deepEqual({ ...(await olga.secrets.dryRun('market/prod', { API_KEY: { sensitivity: 'secret' } })).keys }, { API_KEY: 'changed' });
   assert.equal((await levels('market/prod')).API_KEY, 'sensitive');
-  assert.equal((await entries('secret.loosen')).length, 0);
+  assert.equal((await entries('secret.loosen')).filter((entry) => entry.decision === 'allow').length, 0);
+  assert.ok((await entries('secret.loosen')).some((entry) => entry.decision === 'deny' && entry.actor === MAYA && entry.metadata.reason === 'not_owner'));
   // Plain is never made in place, by anyone: a secret's or a sensitive value's.
   assert.equal(await status(root.secrets.set('market/prod', { API_KEY: { sensitivity: 'plain' } })), 409);
 });
