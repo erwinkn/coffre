@@ -184,7 +184,7 @@ function EnvironmentLedger({
   const coffre = useCoffre();
   const queryClient = useQueryClient();
   const { principal, projects } = useShell();
-  // It as the project tree has it, where its protection changes at once, or says why it did not.
+  // It as the project tree has it, where its protection changes at once: said while on its way, or why it did not.
   const inProject = projects.find((entry) => entry.slug === project)?.environments.find((entry) => entry.slug === environment);
   const { status: projectStatus, dismiss: dismissProject } = useChangeStatus(queryKeys.projects);
   const protecting = projectStatus(environmentId(project, environment));
@@ -549,7 +549,11 @@ function EnvironmentLedger({
             My own {environment}
           </Link>
         )}
-        meta={protecting.state === 'failed' ? <ItemFailure status={protecting} onDismiss={() => dismissProject(protecting.mutationId)} /> : undefined}
+        meta={protecting.state === 'pending' ? (
+          <RowPending status={protecting} />
+        ) : protecting.state === 'failed' ? (
+          <ItemFailure status={protecting} onDismiss={() => dismissProject(protecting.mutationId)} />
+        ) : undefined}
         description={personal ? (
           <span className="inherits">
             Your own{' '}
