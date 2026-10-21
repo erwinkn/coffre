@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Protection shows where you are, and changes there.** A protected
+  environment's tag is amber now, on its card and in its page's header,
+  where it was grey, and changed only from the card's menu. For whoever
+  may change it, the tag is the button that does, on both, behind the
+  same confirmation as before: "Protect…" on an environment that is not,
+  for those who manage the project's environments, and "Protected" on one
+  that is, for an Owner of the whole instance, who alone takes it off. Everyone else sees the tag
+  alone, whose note says what it means and who changes it. The card's ⋯
+  menu no longer offers Protect or Unprotect, which the tag does. Who may
+  protect or unprotect is unchanged, and still decided by the server.
+
 ## 0.10.2 (2026-10-20)
 
 - **The bulk limit counts different keys, not reads.** It counted every

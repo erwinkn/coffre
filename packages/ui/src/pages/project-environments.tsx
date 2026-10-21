@@ -6,7 +6,7 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
-import { archiveEnvironment, createEnvironment, environmentId, protectEnvironment, renameEnvironment } from '../lib/changes';
+import { archiveEnvironment, createEnvironment, environmentId, renameEnvironment } from '../lib/changes';
 import { affects, keys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
@@ -19,10 +19,8 @@ import { Card } from '../components/page';
 import { useAction } from '../lib/use-action';
 import { DeletePlaceDialog } from '../components/delete-place';
 import { PrincipalAvatar } from '../components/principal';
-import { Archive, ChevronRight, Lock, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
-import { ProtectedTag } from '../components/protected';
-import { protectionInWords } from '../lib/roles';
-import { useRoles } from '../lib/use-roles';
+import { Archive, ChevronRight, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
+import { Protection } from '../components/protected';
 import { pageRoute } from '../lib/page-route';
 import { useProject } from '../lib/project-page';
 import type { projectEnvironments } from '../options';
@@ -187,15 +185,11 @@ function EnvironmentCard({
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  // Protecting, or taking it off, waiting for its confirmation.
-  const [guarding, setGuarding] = useState(false);
   const { capabilities } = useShell();
-  const { roles } = useRoles();
   const [slug, setSlug] = useState(environment.slug);
   const coffre = useCoffre();
   const rename = useChange(renameEnvironment(coffre, project));
   const archive = useChange(archiveEnvironment(coffre, project));
-  const protect = useChange(protectEnvironment(coffre, project));
   // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
   const place = `${project}/${environment.slug}`;
   const archiving = confirming && environment.details?.archivedAt == null;
@@ -212,10 +206,6 @@ function EnvironmentCard({
   const manageable = isAdmin && details !== null;
   // Deleting is for those who run the instance, and only once the environment is archived.
   const deletable = manageable && isArchived && capabilities.runsInstance;
-  // Whoever manages environments protects one; only an Owner of the whole instance takes it off.
-  const guarded = environment.protected;
-  const guardable = manageable && environment.personal !== true && (!guarded || capabilities.ownsInstance);
-  const protection = protectionInWords(roles);
   const slugError = slug === '' ? null : environmentSlugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
   // A personal config is its owner's alone: no grant reaches it, so none is shown on its card.
@@ -240,7 +230,7 @@ function EnvironmentCard({
           ) : (
             <span className="env-card-name">{environment.slug}</span>
           )}
-          {guarded && <ProtectedTag />}
+          <Protection project={project} environment={environment} />
           {/* A fork: its keys are its parent's, but for those it sets or removes. An instance before 0.7 says nothing. */}
           {environment.personal === true
             ? <span className="tag tag-blue">yours alone</span>
@@ -314,12 +304,6 @@ function EnvironmentCard({
               <Pencil size={14} />
               Rename
             </Menu.Item>
-            {guardable && (
-              <Menu.Item className="menu-item" onClick={() => setGuarding(true)}>
-                <Lock size={14} />
-                {guarded ? 'Unprotect…' : 'Protect…'}
-              </Menu.Item>
-            )}
             <Menu.Separator className="menu-sep" />
             <Menu.Item
               className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
@@ -440,32 +424,6 @@ function EnvironmentCard({
             onConfirm={() => archive({ slug: environment.slug, archived: !isArchived })}
           />
         </>
-      )}
-
-      {guardable && (
-        <ConfirmDialog
-          open={guarding}
-          onOpenChange={setGuarding}
-          title={
-            <>
-              {guarded ? 'Unprotect' : 'Protect'}{' '}
-              <span className="mono">
-                {project}/{environment.slug}
-              </span>
-              ?
-            </>
-          }
-          body={
-            guarded
-              ? 'People holding a role here get its full column again, as in any other environment. Service accounts are unaffected.'
-              : `People holding a role here get its protected column${protection === null ? ', which for now holds what the other does' : `: ${protection}`}. Service accounts are unaffected.${
-                  capabilities.ownsInstance ? '' : ' Only an Owner of the whole instance takes protection off.'
-                }`
-          }
-          confirmLabel={guarded ? 'Unprotect' : 'Protect'}
-          destructive={guarded}
-          onConfirm={() => protect({ slug: environment.slug, protected: !guarded })}
-        />
       )}
 
       {deletable && (

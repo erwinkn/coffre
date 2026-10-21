@@ -8,11 +8,11 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, forkKey, moveSecret, regenerateSecret, restoreSecret, saveSecrets, UnsavedEdits, type ForkAction, type SaveSecretsVars } from '../lib/changes';
+import { archiveSecret, environmentId, forkKey, moveSecret, regenerateSecret, restoreSecret, saveSecrets, UnsavedEdits, type ForkAction, type SaveSecretsVars } from '../lib/changes';
 import { changeKey, type ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
-import { RowFailure, RowPending, rowClass } from '../components/row-state';
+import { ItemFailure, RowFailure, RowPending, rowClass } from '../components/row-state';
 import { useAction } from '../lib/use-action';
 import type {
   ImportPlanEntry,
@@ -55,7 +55,7 @@ import {
   Tip,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { ProtectedTag } from '../components/protected';
+import { Protection } from '../components/protected';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
 import { RecipeMark, RegenerateSecret } from '../components/regenerate';
@@ -154,7 +154,6 @@ export function EnvironmentPage() {
       keys={result.keys}
       parents={result.parents ?? []}
       personal={result.personal != null}
-      guarded={result.protected}
       rotateAfterDays={result.rotateAfterDays}
     />
   );
@@ -169,7 +168,6 @@ function EnvironmentLedger({
   keys,
   parents,
   personal,
-  guarded,
   rotateAfterDays,
 }: {
   project: string;
@@ -180,14 +178,16 @@ function EnvironmentLedger({
   parents: string[];
   /** Your personal config, `dev@me`: its values yours alone. */
   personal: boolean;
-  /** Protected (docs/design/roles.md): you hold your role's protected column here, a personal config as its parent. */
-  guarded: boolean;
   /** Days a value may go unchanged before it is flagged for rotation; null for no flag. */
   rotateAfterDays: number | null;
 }) {
   const coffre = useCoffre();
   const queryClient = useQueryClient();
-  const { principal } = useShell();
+  const { principal, projects } = useShell();
+  // It as the project tree has it, where its protection changes at once: said while on its way, or why it did not.
+  const inProject = projects.find((entry) => entry.slug === project)?.environments.find((entry) => entry.slug === environment);
+  const { status: projectStatus, dismiss: dismissProject } = useChangeStatus(queryKeys.projects);
+  const protecting = projectStatus(environmentId(project, environment));
   const save = useChange(saveSecrets(coffre, { project, environment }, principal?.id ?? null));
   const restore = useChange(restoreSecret(coffre, { project, environment }));
   const archive = useChange(archiveSecret(coffre, { project, environment }));
@@ -540,7 +540,7 @@ function EnvironmentLedger({
       <PageHeader
         tile={project}
         title={environment}
-        aside={guarded && <ProtectedTag />}
+        aside={inProject !== undefined && <Protection project={project} environment={inProject} />}
         actions={personal ? (
           <DeletePersonal project={project} environment={environment} of={parents[0]!} />
         ) : principal?.type === 'user' && canList && (
@@ -549,6 +549,11 @@ function EnvironmentLedger({
             My own {environment}
           </Link>
         )}
+        meta={protecting.state === 'pending' ? (
+          <RowPending status={protecting} />
+        ) : protecting.state === 'failed' ? (
+          <ItemFailure status={protecting} onDismiss={() => dismissProject(protecting.mutationId)} />
+        ) : undefined}
         description={personal ? (
           <span className="inherits">
             Your own{' '}
