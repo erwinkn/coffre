@@ -86,6 +86,14 @@ an OpenID Connect provider, and asks which person you are. `pnpm dev` runs a
 deployment like `examples/workers` on the packages' sources, so an edit
 anywhere reloads in place; it resets and reseeds its database each time.
 
+To sign in from another machine through a tunnel (`bb connect expose`, ngrok),
+give `pnpm dev` the URLs a browser uses, one per port:
+`COFFRE_DEV_PUBLIC_URL=https://app.example COFFRE_DEV_IDP_PUBLIC_URL=https://idp.example pnpm dev`.
+coffre then takes its cookies, redirect URIs and origin checks from the first,
+and the dev IdP names itself, and sends browsers, to the second; the app's calls
+to the IdP and the seed's to the app stay on loopback. The dev IdP signs anyone
+in as anyone, so tunnel it only behind something that gates who may open it.
+
 The checks:
 
 ```sh

@@ -36,6 +36,8 @@ export default defineConfig({
     // start.sh checks 127.0.0.1 and the seeded links point there, so bind
     // both loopback names rather than only localhost.
     host: '127.0.0.1',
+    // A tunnel (dev/start.sh) reaches it under a host of its own.
+    allowedHosts: process.env.COFFRE_DEV_PUBLIC_URL ? [new URL(process.env.COFFRE_DEV_PUBLIC_URL).hostname] : [],
     // The Agentation feedback toolbar (dev only) talks to its annotation
     // server through the app's own origin, so it also works when the dev
     // server is reached through a tunnel, where the browser's localhost is

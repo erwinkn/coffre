@@ -9,6 +9,18 @@
 #   COFFRE_DEV_PORT=3080 COFFRE_DEV_IDP_PORT=3081 COFFRE_DEV_DATABASE=coffre_two \
 #   COFFRE_STATE_DIR=/tmp/coffre-two pnpm dev
 #
+# Reaching it from another machine (a tunnel such as `bb connect expose`): name
+# the URLs a browser uses, and sign in there.
+#
+#   COFFRE_DEV_PUBLIC_URL=https://app.example COFFRE_DEV_IDP_PUBLIC_URL=https://idp.example pnpm dev
+#
+# coffre then takes its cookies, redirect URIs and origin checks from the first,
+# and the dev IdP sends browsers, and names itself as its issuer, at the second.
+# What one service calls another (the app reaching the IdP, the seed reaching
+# the API) stays on loopback, so a tunnel that only lets a person's browser
+# through is fine. Each is optional; unset, nothing changes. The dev IdP signs
+# anyone in as anyone: expose it only behind a tunnel that gates who may open it.
+#
 # Everything here is local. No Cloudflare calls, no real KMS.
 set -euo pipefail
 
@@ -29,9 +41,15 @@ owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_
 # What deployment/app/src/server.ts, the dev IdP and the seed read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login, and
 # the vault's as its own.
-export COFFRE_PUBLIC_URL="http://127.0.0.1:$port"
-export COFFRE_DEV_URL="$COFFRE_PUBLIC_URL"
+local_url="http://127.0.0.1:$port"
+export COFFRE_DEV_URL="$local_url"
 export COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port"
+# What a browser uses: the tunnels' URLs when given, else the loopback ones.
+export COFFRE_DEV_PUBLIC_URL="${COFFRE_DEV_PUBLIC_URL:-$local_url}"
+export COFFRE_DEV_IDP_PUBLIC_URL="${COFFRE_DEV_IDP_PUBLIC_URL:-$COFFRE_DEV_IDP_URL}"
+COFFRE_DEV_PUBLIC_URL="${COFFRE_DEV_PUBLIC_URL%/}"
+COFFRE_DEV_IDP_PUBLIC_URL="${COFFRE_DEV_IDP_PUBLIC_URL%/}"
+export COFFRE_PUBLIC_URL="$COFFRE_DEV_PUBLIC_URL"
 export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
@@ -95,7 +113,7 @@ sleep 1
 log "starting coffre and its vault on :$port"
 # The packages' sources, for the Vite config's own imports (@coffre/ui/vite) as for the app's.
 NODE_OPTIONS="--conditions=coffre:source ${NODE_OPTIONS:-}" ./dev/node_modules/.bin/vite dev dev/deployment/app --port "$port" --strictPort >"$logs/web.log" 2>&1 &
-until curl -sf "$COFFRE_PUBLIC_URL/livez" >/dev/null 2>&1; do sleep 1; done
+until curl -sf "$COFFRE_DEV_URL/livez" >/dev/null 2>&1; do sleep 1; done
 
 log 'seeding'
 DATABASE_URL="$owner_url" node dev/seed.mjs
@@ -105,13 +123,13 @@ cat <<BANNER
 
   coffre is up.
 
-    web + API   $COFFRE_PUBLIC_URL   (either button, then admin@acme.example
+    web + API   $COFFRE_DEV_PUBLIC_URL   (either button, then admin@acme.example
                 or another persona)
     vault       beside it, reached only through the app's VAULT binding
-    dev IdP     $COFFRE_DEV_IDP_URL
+    dev IdP     $COFFRE_DEV_IDP_PUBLIC_URL
 
   CLI (a device login: approve it in the browser):
-    $cli login $COFFRE_PUBLIC_URL
+    $cli login $COFFRE_DEV_PUBLIC_URL
     $cli run market/dev -- printenv
 
   Logs:

@@ -9,8 +9,20 @@ function cookieOf(response) {
     return response.status === 302 && set !== undefined ? set.split(';')[0] : null;
 }
 
-/** A browser at the coffre at `api`, signing in through the dev IdP at `idp`. */
-export function browser(api, idp) {
+/**
+ * A browser at the coffre at `api`, signing in through the dev IdP at `idp`.
+ *
+ * Behind a tunnel, the stack names itself by its public URLs (`tunnel.api`,
+ * `tunnel.idp`): the redirects point there, and the app checks the origin of a
+ * call against its own. Those answer only a person's browser, so this one sends
+ * everything to `api` and `idp` instead, saying it is at the public origin.
+ */
+export function browser(api, idp, tunnel = {}) {
+    const site = tunnel.api ?? api;
+    const home = tunnel.idp ?? idp;
+    const toLoopback = (url) =>
+        url.startsWith(site) ? api + url.slice(site.length) : url.startsWith(home) ? idp + url.slice(home.length) : url;
+
     /**
      * Sign in as a browser would: leave for the stand-in GitHub, answer its
      * persona page with the email, and come back with a session cookie, or
@@ -21,11 +33,11 @@ export function browser(api, idp) {
         const pending = cookieOf(leave);
         if (pending === null) throw new Error(`leaving for GitHub: expected a redirect with a cookie, got ${leave.status}`);
         const authorize = new URL(leave.headers.get('location'));
-        if (authorize.origin !== new URL(idp).origin) throw new Error(`sign-in went to ${authorize.origin}, not the dev IdP`);
+        if (authorize.origin !== new URL(home).origin) throw new Error(`sign-in went to ${authorize.origin}, not the dev IdP`);
         const form = new URLSearchParams(authorize.searchParams);
         form.set('email', email);
-        const approve = await fetch(authorize.origin + authorize.pathname, { method: 'POST', body: form, redirect: 'manual' });
-        const back = await fetch(approve.headers.get('location') ?? `${api}/`, { headers: { cookie: pending }, redirect: 'manual' });
+        const approve = await fetch(toLoopback(authorize.origin + authorize.pathname), { method: 'POST', body: form, redirect: 'manual' });
+        const back = await fetch(toLoopback(approve.headers.get('location') ?? `${site}/`), { headers: { cookie: pending }, redirect: 'manual' });
         return cookieOf(back);
     }
 
@@ -39,7 +51,7 @@ export function browser(api, idp) {
     function send(session, method, path, body) {
         return fetch(`${api}${path}`, {
             method,
-            headers: { cookie: session, origin: api, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+            headers: { cookie: session, origin: site, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
             body: body === undefined ? undefined : JSON.stringify(body),
             redirect: 'manual',
         });

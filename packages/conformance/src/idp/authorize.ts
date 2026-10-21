@@ -75,8 +75,9 @@ export function randomToken(): string {
 }
 
 /**
- * The built-in client accepts any loopback URI, because local dev ports vary;
- * every other redirect URI must match a registered one exactly.
+ * The built-in client accepts any loopback URI, because local dev ports vary,
+ * and any URI under an origin it was given (a tunnel to the app); every other
+ * redirect URI must match a registered one exactly.
  */
 export function allowsRedirect(client: RegisteredClient, uri: string): boolean {
   if (client.redirectUris.includes(uri)) return true;
@@ -87,13 +88,9 @@ export function allowsRedirect(client: RegisteredClient, uri: string): boolean {
   } catch {
     return false;
   }
-  return (
-    url.protocol === 'http:' &&
-    (url.hostname === '127.0.0.1' || url.hostname === 'localhost') &&
-    url.username === '' &&
-    url.password === '' &&
-    !uri.includes('#')
-  );
+  if (url.username !== '' || url.password !== '' || uri.includes('#')) return false;
+  const loopback = url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
+  return loopback || client.redirectOrigins.includes(url.origin);
 }
 
 /** RFC 7636 §4.6, S256 only. */
