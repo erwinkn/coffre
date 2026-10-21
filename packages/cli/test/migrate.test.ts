@@ -154,10 +154,10 @@ test('migrate lists the tokens and bindings of a release before 0.11 by account 
     [
       '',
       'A service token or trust binding now reads a sensitive value only where an Owner of its project issued it.',
-      'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then:',
+      'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then, project by project:',
       '  service:ci-web: 1 token and 1 trust binding, issued by erwin@acme.example, ada@acme.example',
       '  service:deploy: 1 trust binding, issued by erwin@acme.example',
-      "Anyone else's read every other value; an Owner of the project issues one that reads them too.",
+      "Anyone else's, one whose issuer has left included, read every other value; an Owner of the project issues one that reads them too.",
       '',
     ].join('\n'),
   );

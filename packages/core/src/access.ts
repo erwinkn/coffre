@@ -668,20 +668,25 @@ function scopeHolds(holder: Holdings, permission: Permission, place: Place): boo
 }
 
 /**
- * Whether a sensitive value at `place` is handed to `holder` (R32): never
- * to a person, Owners included (R16); to a service account, only on a
- * credential whose grant there reads, and an Owner of its project issued
- * (`ScopeGrant`'s `sensitive`). A person who could not read the value
- * gets it through no account they set up, nor through a value made
- * sensitive after they issued its token:
+ * Whether a sensitive value of the project `projectId` is handed to
+ * `holder` (R32): never to a person, Owners included (R16); to a service
+ * account, only on a credential an Owner of that project issued, as a
+ * grant of its scope in the project says (`ScopeGrant`'s `sensitive`).
+ * The project is the value's own, wherever it is read: a reference's
+ * source's, which lends its value and nature (R23), while whoever reads it
+ * is decided where it is held. A person who could not read the value gets
+ * it through no account they set up, nor through a value made sensitive
+ * after they issued its token, nor through a reference into a project
+ * they do not own:
  *
  *   ci, a Viewer of backend/dev, which holds STRIPE_SECRET_KEY, sensitive
  *   its token, issued by Ada, a Developer     reads every other value there
  *   its token, issued by an Owner of backend  reads STRIPE_SECRET_KEY too
+ *   billing/dev/LEAK, a reference to it; a token for billing/dev
+ *     issued by an Owner of billing alone     reads every other value there
  */
-export function readsSensitive(holder: Holdings, place: Place): boolean {
-  return holder.service === true
-    && (holder.credentialScope ?? []).some((grant) => grant.sensitive === true && covers(grant, place) && holds(scopeDefinition(grant), 'secret.read', place, holder));
+export function readsSensitive(holder: Holdings, projectId: string): boolean {
+  return holder.service === true && (holder.credentialScope ?? []).some((grant) => grant.sensitive === true && grant.projectId === projectId);
 }
 
 /**

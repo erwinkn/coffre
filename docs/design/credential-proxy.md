@@ -377,9 +377,14 @@ place of a service token's or binding's scope says whether it reads the
 sensitive values there, true only where its issuer was an Owner of the
 project, of the whole instance or by a grant or role scoped to it, as a
 person on no credential's scope (`ownsProject`). The vault hands a
-service a sensitive value only through such a place, where the read is
-decided: a reference's holder, a fork's parent for what it inherits
-(`readsSensitive`, `not_owner_issued`). Everything else the account
+service a sensitive value only on a credential that says so for the
+value's own project (`readsSensitive`, `not_owner_issued`): a fork's
+parent's for what it inherits, and a reference's source's, whose value
+it lends. Its permission is still decided where it is held: a token an
+Owner of `billing` issued for `billing/dev` reads a reference there into
+`backend/prod` only if it says so for `backend` too, else Ada, a
+Developer of `backend` and an Owner of `billing`, would read prod's
+sensitive values that way. Everything else the account
 reads as before, and its credential's maker is told, when it is made,
 which places hold a sensitive value it will not read (`withheld`). A
 personal token or a handle cannot take the path at all: the route that

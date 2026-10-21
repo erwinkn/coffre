@@ -166,8 +166,9 @@ The instance's roles have the same two columns (Developer as above).
   binding's scope keeps whether its issuer was an Owner of the project,
   of the whole instance or by a grant or role scoped to it, as a person
   on no credential's scope (`ownsProject`), and the vault hands a service
-  a sensitive value only through such a place (`readsSensitive`); anyone
-  else's reads every other value, and is refused that one
+  a sensitive value only on a credential that says so for the value's own
+  project (`readsSensitive`), a reference's source's included, whose value
+  it lends; anyone else's reads every other value, and is refused that one
   (`not_owner_issued`), whenever it was made sensitive:
 
   ```
@@ -175,6 +176,8 @@ The instance's roles have the same two columns (Developer as above).
   token Ada (Developer) issued     API_URL yes; STRIPE_SECRET_KEY refused
   token an Owner of backend issued  both
   Ada's token, a key of dev marked sensitive later   refused from then on
+  billing/dev/LEAK, a reference to it; a token an Owner of billing issued
+    for billing/dev                                    LEAK refused
   ```
 
   It is the credential that carries it, not the grant: a credential is

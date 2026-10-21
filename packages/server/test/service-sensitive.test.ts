@@ -13,7 +13,10 @@ import { generateToken, github, hashToken, signin, tokenHint, type BindingClaims
 import { and, asc, eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
+import { unsealedCredentials } from '@coffre/db/grants';
+
 import { authMac } from '../src/auth-rows.ts';
+import { sealScopes } from '../src/api/services.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
@@ -210,7 +213,31 @@ test("a reference takes its source's nature: a Developer's token reads no refere
   assert.deepEqual(theirs.withheld, ['backend/staging'], 'a reference to a sensitive value counts where it is held');
   assert.equal(await read(theirs.token, 'backend/staging/STRIPE_SECRET_KEY'), '403 not_owner_issued');
   const owners = await owen.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/staging': 'viewer' } });
-  assert.equal(await read(owners.token, 'backend/staging/STRIPE_SECRET_KEY'), STRIPE, "decided where it is held: backend/dev is not in the token's scope");
+  assert.equal(await read(owners.token, 'backend/staging/STRIPE_SECRET_KEY'), STRIPE, "backend's Owner issued it: backend/dev itself need not be in its scope");
+});
+
+test("a reference into another project lends its sensitive value only on a credential an Owner of that project issued: an Owner of the holder's project is not enough", async () => {
+  // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key, as a reader of it may (R24).
+  await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  await bo.members.add('token:bo-ci');
+  await bo.access.set('token:bo-ci', { 'billing/dev': 'viewer' });
+  const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
+  assert.deepEqual(his.withheld, ['billing/dev'], "billing/dev lends a value of backend's, which no Owner of backend issued it");
+  assert.equal(await read(his.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789', "billing's own, which its Owner issued it");
+  assert.equal(await read(his.token, 'billing/dev/LEAK'), '403 not_owner_issued');
+  await assert.rejects(bearer(his.token).secrets.reveal('billing/dev'), {
+    status: 403,
+    message: 'billing/dev holds LEAK, sensitive: a service account reads it only on a token or trust binding an Owner of the project each value is from issued',
+  });
+  // An Owner of the whole instance issues it one that reaches backend too: it reads it, decided where it is held.
+  await root.access.set('token:bo-ci', { 'backend/staging': 'viewer' });
+  const owners = await root.tokens.issue('token:bo-ci', { expiresInDays: 30 });
+  assert.deepEqual(owners.withheld, []);
+  assert.equal(await read(owners.token, 'billing/dev/LEAK'), STRIPE);
+  // Scoped to billing alone, even an Owner of the whole instance's says nothing for backend.
+  const narrow = await root.tokens.issue('token:bo-ci', { expiresInDays: 30, scope: { 'billing/dev': 'viewer' } });
+  assert.deepEqual(narrow.withheld, ['billing/dev']);
+  assert.equal(await read(narrow.token, 'billing/dev/LEAK'), '403 not_owner_issued');
 });
 
 test("a fork's inherited sensitive value is decided where it is held, its parent: an Owner's token there reads it, a Developer's does not", async () => {
@@ -236,6 +263,18 @@ test("a binding's runs read the sensitive values only where an Owner bound it; o
   const again = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [owners.binding.id] });
   assert.deepEqual(await stored(serviceBindings, again.binding.id), [{ role: 'viewer', sensitive: false }]);
   assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+});
+
+test("a binding an older release made, replaced before anything sealed it, is sealed first: its Owner's say is kept, never dropped", async () => {
+  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
+  const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
+  const binding = { id: randomUUID(), principal: CI, generation: member!.generation, profile: 'github', issuer: ISSUER, jwksUri: KEYS, claims: JSON.stringify(DEPLOY), revokedAt: null, scope };
+  await db.owner.insert(serviceBindings).values({ ...binding, label: null, createdBy: OWEN, authMac: authMac(deps.chainKey, 'service_bindings', binding) });
+  // Owen trusts the workload again in its place, inheriting its scope.
+  const again = await owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [binding.id] });
+  assert.deepEqual(await stored(serviceBindings, again.binding.id), [{ role: 'viewer', sensitive: true }]);
+  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
 });
 
 test('the vault decides it too, whatever the app asks: a service reads a sensitive value only on a scope that says an Owner issued it there', async () => {
@@ -265,11 +304,11 @@ test('tokens and bindings issued before 0.11 are sealed once by who issued them:
   const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
   // As 0.10 stored a scope: each place's role and what it held, nothing said of sensitive values.
   const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
-  const legacy = async (createdBy: string) => {
+  const legacy = async (createdBy: string, stored = scope) => {
     const token = generateToken('service');
     const row = {
       id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
-      principal: CI, identityId: null, label: '0.10', createdBy, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope,
+      principal: CI, identityId: null, label: '0.10', createdBy, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope: stored,
     };
     await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
     return { id: row.id, token };
@@ -286,6 +325,10 @@ test('tokens and bindings issued before 0.11 are sealed once by who issued them:
   assert.deepEqual(await stored(credentials, owners.id), [{ role: 'viewer', sensitive: true }]);
   assert.deepEqual(await stored(credentials, theirs.id), [{ role: 'viewer', sensitive: false }]);
   assert.deepEqual(await stored(serviceBindings, binding.id), [{ role: 'viewer', sensitive: true }]);
+  // One sealed while its account held nothing names no place: it is sealed, and never sealed again, nor listed.
+  await legacy(ROOT, '[]');
+  assert.deepEqual(await unsealedCredentials(db.owner, new Date()), []);
+  assert.equal(await sealScopes(deps.db, deps.chainKey, deps.vault), 0);
   // Logged by the app, one entry per scope it wrote, naming the rows it sealed with it.
   const seals = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'token.seal')).orderBy(asc(auditLog.seq));
   assert.deepEqual(seals.map((entry) => {

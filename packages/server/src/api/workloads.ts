@@ -263,6 +263,24 @@ export class WorkloadService {
     return live.map((row) => view(row, scopeByPath(readScope(row.scope), known)));
   }
 
+  /**
+   * A service's live bindings, those an older release made sealed first
+   * (`sealCredentials`), as a request's own credential check seals them:
+   * one that inherits their scope keeps what their issuer could give,
+   * sensitive values included, never less than the seal would say.
+   */
+  async #sealedBindings(member: string, generation: number): Promise<BindingRow[]> {
+    const { db, chainKey, vault } = this.#deps;
+    const live = await liveBindings(db, chainKey, member, generation);
+    const unsealed = live.filter((row) => unsealedScope(row.scope));
+    if (unsealed.length === 0) return live;
+    const policySeq = await newestPolicySeq(db);
+    const access = await vault.access(member);
+    if (access.status !== 'active') return live;
+    await sealCredentials(db, chainKey, vault, access, policySeq, unsealed.map((row) => ({ kind: 'binding' as const, id: row.id, principal: member, createdBy: row.createdBy, scope: row.scope })));
+    return liveBindings(db, chainKey, member, generation);
+  }
+
   /** Check a binding and ask its issuer where its keys are; with `dryRun`, write nothing and log nothing. */
   async bind(ctx: Asker, serviceId: string, input: BindingInput, options: { dryRun: boolean }): Promise<BindingPlan | { binding: BindingView; replaced: string[] }> {
     const member = `token:${serviceId}`;
@@ -312,7 +330,7 @@ export class WorkloadService {
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
         return replaces;
       };
-      const replaced = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation));
       // Left out, its scope is what those it replaces reached, so that trusting a workload again never widens it.
       const inherits = input.scope === undefined && replaced.length > 0;
       const { scope, byPath, withheld } = await issuedScope(
@@ -415,7 +433,7 @@ export class WorkloadService {
         }
         return on;
       };
-      const replaced = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation));
       // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
       const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
       for (const row of replaced) {

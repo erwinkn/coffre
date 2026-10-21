@@ -34,7 +34,7 @@ import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
-import { holdingSensitive, memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import { memberOf, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
 import { audited, denied, Refusal, type ApiContext } from './context.ts';
@@ -278,16 +278,18 @@ export async function issuedScope(
 }
 
 /**
- * The places of a service's scope, by path, that hold a sensitive value now,
- * their own or a reference's, and that it does not read: a project's, in
+ * The places of a service's scope, by path, that hold a sensitive value now
+ * that it will not read: one of a project no Owner of which issued it
+ * (`readsSensitive`), its own or a reference's source's. A project's, in
  * any of its environments.
  */
 async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly PlaceRow[]): Promise<string[]> {
-  const unread = scope.filter((grant) => grant.sensitive !== true);
+  const owned = new Set(scope.filter((grant) => grant.sensitive === true).map((grant) => grant.projectId));
   const environmentsOf = (grant: ScopeGrant) => known.find((project) => project.id === grant.projectId)?.environments
     .filter((environment) => grant.environmentId === null || environment.id === grant.environmentId).map((environment) => environment.id) ?? [];
-  const holding = await holdingSensitive(db, unread.flatMap(environmentsOf));
-  return Object.keys(scopeByPath(unread.filter((grant) => environmentsOf(grant).some((id) => holding.has(id))), known)!);
+  const from = await sensitiveFrom(db, scope.flatMap(environmentsOf));
+  const withholds = (grant: ScopeGrant) => environmentsOf(grant).some((id) => [...(from.get(id) ?? [])].some((project) => !owned.has(project)));
+  return Object.keys(scopeByPath(scope.filter(withholds), known)!);
 }
 
 /**

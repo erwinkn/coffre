@@ -1230,7 +1230,7 @@ export async function dryRunSecrets(
       }
       const level = askedSensitivity(value) ?? bareLevel(now, { personal: place.environment!.owner !== null, generated: typeof value === 'object' && 'generated' in value });
       if (current === null || level !== now || (typeof value === 'object' && ('generated' in value || 'ref' in value))
-        || (now === 'sensitive' && !readsSensitive(ctx.caller, placeOf(place.project, place.environment)))) {
+        || (now === 'sensitive' && !readsSensitive(ctx.caller, place.project.id))) {
         keys[key] = 'changed';
         continue;
       }
@@ -1731,17 +1731,19 @@ export async function reveal(
         denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
-    // A service's credential that an Owner of the project did not issue reads no sensitive value, where it is decided, a
-    // parent's or a reference's holder's (`readsSensitive`): refused whole, as the vault would, naming them, and who can.
+    // A service's credential reads no sensitive value but of a project an Owner of which issued it: the value's own, a
+    // reference's source's (`readsSensitive`). Refused whole, as the vault would, naming them, and who can.
     const purpose = use?.purpose ?? (path.key === undefined ? 'run' : 'reveal');
-    const here = placeOf(place.project, place.environment);
     const notIssued = ctx.caller.principal.type === 'service' && handsBack({ purpose })
-      ? rows.filter((item) => item.secret.sensitive === true && !readsSensitive(ctx.caller, item.parent === undefined ? here : parentOf(item))).map((item) => item.key)
+      ? rows.filter((item) => item.secret.sensitive === true && !readsSensitive(ctx.caller, item.secret.projectId))
       : [];
     if (notIssued.length > 0) {
+      const keys = notIssued.map((item) => item.key);
+      // A reference's value is its source's project's to hand out.
+      const whose = notIssued.every((item) => item.secret.projectId === place.project.id) ? place.project.slug : 'the project each value is from';
       throw new Refusal(
-        forbidden(`${named.path} holds ${notIssued.join(', ')}, sensitive: a service account reads ${notIssued.length === 1 ? 'it' : 'them'} only on a token or trust binding an Owner of ${place.project.slug} issued`),
-        denied(ctx, 'secret.read', 'not_owner_issued', { ...environment, operationId, metadata: { keys: notIssued } }),
+        forbidden(`${named.path} holds ${keys.join(', ')}, sensitive: a service account reads ${keys.length === 1 ? 'it' : 'them'} only on a token or trust binding an Owner of ${whose} issued`),
+        denied(ctx, 'secret.read', 'not_owner_issued', { ...environment, operationId, metadata: { keys } }),
       );
     }
     const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows);

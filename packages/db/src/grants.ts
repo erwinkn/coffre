@@ -221,8 +221,10 @@ export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: strin
  */
 export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
   const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
-  // Every scope this release writes for a service says, at each place, whether it reads the sensitive values there.
-  const unsealed = (scope: typeof credentials.scope | typeof serviceBindings.scope) => or(isNull(scope), sql`${scope} NOT LIKE '%"sensitive":%'`);
+  // Every scope this release writes for a service says, at each place it names, whether it reads the sensitive values
+  // there; one that names none, sealed while its account held nothing, is sealed (`unsealedScope` in @coffre/server).
+  const unsealed = (scope: typeof credentials.scope | typeof serviceBindings.scope) =>
+    or(isNull(scope), and(like(scope, '%"projectId"%'), sql`${scope} NOT LIKE '%"sensitive":%'`));
   const [tokens, bindings] = await Promise.all([
     db
       .select({ id: credentials.id, principal: credentials.principal, createdBy: credentials.createdBy, scope: credentials.scope })

@@ -1226,8 +1226,8 @@ class VaultService implements Vault {
         (await call.vet(d.tx, d.reads)).forEach((code, i) => (codes[i] = code));
       }
       // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks; and
-      // handed back to a service account only on a credential an Owner of its project issued, where it is decided
-      // (`readsSensitive`, R32). And a fork copies one, for anyone, a service account too, only where its app says it
+      // handed back to a service account only on a credential an Owner of its own project issued, a reference's
+      // source's too, whose value it is (`readsSensitive`, R32). And a fork copies one, for anyone, a service account too, only where its app says it
       // keeps it sensitive: an app of 0.9, mid-deploy, would write the copy as a secret its people read.
       const copying = action === 'secret.read' && call.input.purpose === 'copy';
       const handedBack = action === 'secret.read' && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true });
@@ -1235,7 +1235,7 @@ class VaultService implements Vault {
       secrets.forEach((secret, i) => {
         if (codes[i] !== null || secret.sensitive !== true) return;
         if ((copying && call.input.keepsSensitive !== true) || (handedBack && person)) codes[i] = 'sensitive';
-        else if (handedBack && !readsSensitive(reader.live, placeIn(at[i]!, environments))) codes[i] = 'not_owner_issued';
+        else if (handedBack && !readsSensitive(reader.live, secret.projectId)) codes[i] = 'not_owner_issued';
       });
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';

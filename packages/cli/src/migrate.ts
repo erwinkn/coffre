@@ -236,13 +236,13 @@ export function describeIssuers(unsealed: readonly Unsealed[]): string {
   const lines = [
     '',
     'A service token or trust binding now reads a sensitive value only where an Owner of its project issued it.',
-    'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then:',
+    'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then, project by project:',
   ];
   for (const principal of [...new Set(unsealed.map((row) => row.principal))]) {
     const theirs = unsealed.filter((row) => row.principal === principal);
     lines.push(`  ${shownMember(principal)}: ${credentialsInWords(theirs)}, issued by ${[...new Set(theirs.map((row) => row.createdBy))].join(', ')}`);
   }
-  lines.push("Anyone else's read every other value; an Owner of the project issues one that reads them too.", '');
+  lines.push("Anyone else's, one whose issuer has left included, read every other value; an Owner of the project issues one that reads them too.", '');
   return lines.join('\n');
 }
 
