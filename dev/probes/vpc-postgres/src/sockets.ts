@@ -47,9 +47,10 @@ export interface SocketsReport {
   afterHold?: Check;
   /**
    * A fresh connect() started RELEASE_AFTER_SECONDS before held session `closedSocket` closed,
-   * with `heldAtClose` sessions open just before; `closedSocket` is null when none was left to close.
+   * with `heldAtClose` sessions answering just before (`dead`: the ones that no longer did);
+   * `closedSocket` is null when none was left to close.
    */
-  release?: { closedSocket: number | null; heldAtClose: number; closedAtMs: number; connect: Attempt };
+  release?: { dead: (Attempt & { socket: number })[]; closedSocket: number | null; heldAtClose: number; closedAtMs: number; connect: Attempt };
   totalMs?: number;
 }
 
@@ -74,13 +75,15 @@ export async function holdSockets(dial: Dial, target: Target, count: number, hol
     const at = Date.now();
     const connecting = connect(dial, target);
     await sleep(RELEASE_AFTER_SECONDS);
+    // Asked again, so the session closed is one that was still holding a slot.
+    const dead = await answer(held);
     const heldAtClose = held.size;
     const [first] = held;
     if (first) {
       held.delete(first[0]);
       await first[1].close(true);
     }
-    report.release = { closedSocket: first?.[0] ?? null, heldAtClose, closedAtMs: Date.now() - at, connect: await connecting };
+    report.release = { dead, closedSocket: first?.[0] ?? null, heldAtClose, closedAtMs: Date.now() - at, connect: await connecting };
     report.ok = true;
   } catch (error) {
     report.error = describe(error);

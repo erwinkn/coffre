@@ -143,18 +143,22 @@ inside one call to a Durable Object, so it all counts against one request's limi
 2. **`beside`:** with them held, `select 1` on each held session (`dead` lists any that
    fail), then a fresh `fetch()` of a public page and a fresh `connect()` with a
    `select 1`, then each held session again. `evicted` lists those that answered
-   before the fresh attempts and not after; `alive` counts what is left.
+   before the fresh attempts and not after; `alive` counts what is left. With `n`
+   past six, `beside.dead` can also be sessions evicted while the later ones were
+   dialing.
 3. **`afterHold`:** waits `hold` seconds (150 by default, 600 at most), then
    checks again the same way.
-4. **`release`:** starts one more `connect()` and, 5 s later (`closedAtMs`), closes
-   held session `closedSocket` out of `heldAtClose` open. Then it reports how long
+4. **`release`:** starts one more `connect()`. 5 s later it asks the held sessions
+   again (`dead`) and closes `closedSocket`, one of the `heldAtClose` that still
+   answer, at `closedAtMs`. Then it reports how long
    that `connect()` took.
 
 | What you see | What it means |
 | --- | --- |
 | With 12, `openedOk` is 12, every `connect` is ok, and `release.connect.ms` is well under `closedAtMs` | Open VPC sockets do not count toward six. |
 | With 12, `openedOk` is 6 and the rest fail at `dial`. With 6, `beside.connect` fails at `dial`. `release.connect` is ok, with `ms` just past `closedAtMs` | They count, and a 7th waits in a queue for a slot. |
-| The same, but `release.connect` fails too | They count, and a 7th stalls: closing a socket does not let it through. |
+| The same, but `release.connect` fails at `dial` after about 15 s | They count, and a 7th stalls: closing a socket does not let it through. |
+| A 7th `connect` fails at `dial` within a few hundred ms, every time | They count, and a 7th is refused outright rather than queued. |
 | `beside.fetch` fails with a timeout once 6 are open | Open sockets also hold back plain `fetch()`. |
 | `evicted` is not empty | The runtime closed an idle socket to make room for the fresh `fetch()` or `connect()`. |
 | `afterHold.dead` is not empty | Idle sessions were dropped during the hold (cloudflared, the network, or Postgres), not by the limit. |

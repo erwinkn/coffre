@@ -308,7 +308,7 @@ try {
     assert.equal(report.beside.connect.ok, false);
     assert.equal(report.beside.connect.stage, 'dial');
     assert.equal(report.beside.alive, 3);
-    assert.deepEqual([report.release.closedSocket, report.release.heldAtClose], [0, 3]);
+    assert.deepEqual([report.release.dead, report.release.closedSocket, report.release.heldAtClose], [[], 0, 3]);
     assert.equal(report.release.connect.ok, true, JSON.stringify(report.release));
     assert.ok(report.release.connect.ms >= report.release.closedAtMs - 50, JSON.stringify(report.release));
   });
