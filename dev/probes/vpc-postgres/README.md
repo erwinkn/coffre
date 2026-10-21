@@ -1,18 +1,21 @@
 # VPC Postgres smoke probe (throwaway, do not merge)
 
-A Worker that answers two questions before coffre 0.11's tunnel ships:
+A Worker that answers three questions before coffre 0.11's tunnel ships:
 
 1. Does a Workers VPC **Network** binding's `connect("host:port")` work from inside a
    Durable Object? Cloudflare's docs only show it from a Worker.
 2. Does a plaintext Postgres session reach Equisafe's private prod read replica
    through `cloudflared`, log in as `debug_ro` with SCRAM-SHA-256, and run `select 1`?
+3. Do open VPC sockets count toward Workers' limit of six simultaneous open
+   connections per request? If they do, does a 7th wait in a queue or stall?
 
 `GET /worker` dials from the Worker, `GET /do` from inside a Durable Object. Both run
 the same code: SSLRequest, StartupMessage, SCRAM-SHA-256, two fixed queries, Terminate.
 The probe never takes SQL from the request. Every request without
 `Authorization: Bearer <PROBE_KEY>` gets an empty 404, whatever its path. Without a
 `PROBE_KEY` secret of 32 characters or more, the probe answers nothing at all. It
-never logs and never returns the password.
+never logs and never returns the password. `GET /sockets` holds several sessions in a
+Durable Object for question 3 ([below](#question-3-the-six-connection-limit)).
 
 ## What Infra provides
 
@@ -23,6 +26,7 @@ never logs and never returns the password.
 | Replica port | `vars.PG_PORT` | `5432` unless told otherwise |
 | Database name | `vars.PG_DATABASE` | |
 | `debug_ro` password | `wrangler secret put DEBUG_RO_PASSWORD` | Stored as SCRAM (`password_encryption = scram-sha-256`). ASCII only: the probe skips SASLprep. |
+| Session limit | the replica | `/sockets?n=12` holds up to 13 `debug_ro` sessions at once, for about 3 minutes. A lower `CONNECTION LIMIT` on the role fails the extra ones at `auth` with `53300`. |
 | Access rule | the replica | Allow plaintext SCRAM logins from the `cloudflared` pods' addresses, e.g. `host <db> debug_ro <cloudflared pods CIDR> scram-sha-256` (`host`, not `hostssl`). On a managed database, an ACL that allows those addresses and does not require TLS. |
 
 The replica sees the connection come from `cloudflared`, not from Cloudflare.
@@ -71,7 +75,7 @@ curl -sS -H "Authorization: Bearer $PROBE_KEY" "$URL/do?hold=300" | jq   # idle 
 curl -sS -o /dev/null -w '%{http_code}\n' "$URL/do"                       # 404: the gate
 ```
 
-`hold` takes whole seconds from 0 to 600, on either route. While it runs, the
+`hold` takes whole seconds from 0 to 600, on any route. While it runs, the
 response sends a space every 20 s so that nothing on the way drops a silent
 response. `jq` skips the spaces.
 
@@ -123,6 +127,38 @@ message. Postgres's own errors come as `<severity> <SQLSTATE>: <message>`.
 | `hold` | The idle session was closed during the hold. |
 | `durable-object` | The call to the Durable Object itself failed. |
 
+## Question 3: the six-connection limit
+
+```sh
+curl -sS -H "Authorization: Bearer $PROBE_KEY" "$URL/sockets?n=6" | jq    # about 3 minutes
+curl -sS -H "Authorization: Bearer $PROBE_KEY" "$URL/sockets?n=12" | jq   # about 3.5 minutes
+```
+
+Run them one at a time, with nothing else running against the probe. Everything happens
+inside one call to a Durable Object, so it all counts against one request's limit:
+
+1. **`opened`:** opens `n` sessions at once (dial and SCRAM login) and keeps them idle.
+   A socket that does not open within 15 s fails at `dial` with `no answer within 15 s`.
+2. **`beside`:** with them held, a fresh `fetch()` of a public page, then a fresh
+   `connect()` with a `select 1`. Then `select 1` on every held session: `alive`
+   counts the ones that answer, and `dead` lists the others.
+3. **`afterHold`:** waits `hold` seconds (150 by default, 600 at most), then
+   checks again.
+4. **`release`:** starts one more `connect()`, closes one held session 5 s later
+   (`closedAtMs`), and times the `connect()`.
+
+| What you see | What it means |
+| --- | --- |
+| `openedOk` equals `n` for 12, `beside.connect.ok`, `release.connect.ms` well under `closedAtMs` | Open VPC sockets do not count toward six. |
+| For 12, `openedOk` is 6 and the rest fail at `dial`. With 6, `beside.connect` fails at `dial`. `release.connect.ok` with `ms` just past `closedAtMs` | They count, and a 7th waits in a queue for a slot. |
+| The same, but `release.connect` fails too | They count, and a 7th stalls: closing a socket does not let it through. |
+| `beside.fetch` fails with a timeout once 6 are open | Open sockets also hold back plain `fetch()`. |
+| `beside.dead` is not empty | The runtime closed an idle socket to make room for a new one. |
+| Only `afterHold.dead` is not empty | Idle sessions were dropped during the hold (cloudflared, the network, or Postgres), not by the limit. |
+| `opened` fails at `auth` with `53300` | The role's own connection limit, not Workers'. |
+
+A socket's `dialMs` shows how long it waited to open.
+
 ## Remove it
 
 ```sh
@@ -135,9 +171,16 @@ Then ask Infra to remove the access rule, if they added one for this probe.
 
 `pnpm smoke` (Docker, Node 24) runs the probe under `wrangler dev` against a
 Postgres 17 of its own on `127.0.0.1:56145`. It runs with TLS on, then off, with
-`cloudflare:sockets` standing in for the VPC binding (`local/worker.ts`). It checks
-the gate, both routes, a 25 s hold, a session killed mid-hold, a wrong password, a
-server that asks for a cleartext password, and a closed port. It then runs the wire
-code from Node against two hostile fake servers: a malformed error, and an endless
-stream of messages. Then it removes its container. It does not reach Cloudflare: a
-VPC binding only runs there.
+`cloudflare:sockets` standing in for the VPC binding (`local/worker.ts`). It checks:
+
+- the gate, and all three routes
+- a 25 s hold, and a session killed mid-hold
+- `/sockets` with 8 sessions, and with held sessions killed mid-hold
+- a wrong password, a server that asks for a cleartext password, and a closed port
+
+`wrangler dev` has no six-connection limit, so the probe's handling of one is tested
+from Node, with a fake cap of 3 that queues the rest. The 4th socket and a fresh
+`connect()` stall, and the release lets the waiting `connect()` through. The wire
+code also runs from Node against two hostile fake servers: a malformed error, and an
+endless stream of messages. Then the smoke removes its container. It does not reach
+Cloudflare: a VPC binding only runs there.

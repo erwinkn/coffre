@@ -60,6 +60,43 @@ const decoder = new TextDecoder();
 export async function probe(dial: Dial, target: Target, holdSeconds: number): Promise<Report> {
   const report: Report = { ok: false };
   const started = Date.now();
+  let stage: Stage = 'query';
+  let connection: Connection | undefined;
+  try {
+    connection = await login(dial, target, report);
+    report.select1 = await selectOne(connection);
+    report.session = (await query(connection, SESSION))[0];
+
+    if (holdSeconds > 0) {
+      stage = 'hold';
+      await sleep(holdSeconds);
+      const at = Date.now();
+      const select1 = await selectOne(connection);
+      report.afterHold = { seconds: holdSeconds, select1, ms: Date.now() - at };
+    }
+    report.ok = true;
+  } catch (error) {
+    report.stage = error instanceof StageFailure ? error.stage : stage;
+    report.error = describe(error);
+  } finally {
+    await connection?.close(true);
+  }
+  // The verdict first, so a failure reads at the top.
+  const { ok, stage: failed, error, ...rest } = report;
+  return { ok, stage: failed, error, ...rest, totalMs: Date.now() - started };
+}
+
+/** A failure, and the stage of the login it happened in. */
+export class StageFailure extends Error {
+  readonly stage: Stage;
+  constructor(stage: Stage, cause: unknown) {
+    super(describe(cause));
+    this.stage = stage;
+  }
+}
+
+/** Dial and log in, filling the report's dial and login fields. A failure is thrown as a StageFailure, its socket closed. */
+export async function login(dial: Dial, target: Target, report: Report): Promise<Connection> {
   let stage: Stage = 'config';
   let connection: Connection | undefined;
   try {
@@ -119,28 +156,20 @@ export async function probe(dial: Dial, target: Target, holdSeconds: number): Pr
     report.serverVersion = await untilReady(connection);
     report.loginOk = true;
     report.loginMs = Date.now() - loginStarted;
-
-    stage = 'query';
-    report.select1 = (await query(connection, SELECT_1))[0]?.['?column?'] ?? null;
-    report.session = (await query(connection, SESSION))[0];
-
-    if (holdSeconds > 0) {
-      stage = 'hold';
-      await new Promise((resolve) => setTimeout(resolve, holdSeconds * 1000));
-      const at = Date.now();
-      const select1 = (await query(connection, SELECT_1))[0]?.['?column?'] ?? null;
-      report.afterHold = { seconds: holdSeconds, select1, ms: Date.now() - at };
-    }
-    report.ok = true;
+    return connection;
   } catch (error) {
-    report.stage = stage;
-    report.error = describe(error);
-  } finally {
     await connection?.close(true);
+    throw new StageFailure(stage, error);
   }
-  // The verdict first, so a failure reads at the top.
-  const { ok, stage: failed, error, ...rest } = report;
-  return { ok, stage: failed, error, ...rest, totalMs: Date.now() - started };
+}
+
+/** `select 1` on a logged-in connection. */
+export async function selectOne(connection: Connection): Promise<string | null> {
+  return (await query(connection, SELECT_1))[0]?.['?column?'] ?? null;
+}
+
+export function sleep(seconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 }
 
 /** An error's message alone, bounded: never a stack. */
@@ -148,7 +177,7 @@ export function describe(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
 
-class Connection {
+export class Connection {
   readonly #socket: ProbeSocket;
   readonly #reader: ReadableStreamDefaultReader<Uint8Array>;
   readonly #writer: WritableStreamDefaultWriter<Uint8Array>;

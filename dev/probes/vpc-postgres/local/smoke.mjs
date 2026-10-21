@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // `pnpm smoke`: runs the probe under `wrangler dev` against a Postgres 17 of
 // its own in Docker (127.0.0.1:56145, SCRAM, TLS on then off), and checks the
-// gate, both routes, a hold, and the failures it must report by stage; then
+// gate, the three routes, holds, and the failures it must report by stage; then
 // runs the wire code from Node against two hostile fake servers. It removes
 // its container however it ends.
 import { spawn, execFileSync } from 'node:child_process';
@@ -11,6 +11,7 @@ import { once } from 'node:events';
 import net from 'node:net';
 import { Duplex } from 'node:stream';
 import { probe } from '../src/pg.ts';
+import { holdSockets } from '../src/sockets.ts';
 
 const here = new URL('.', import.meta.url).pathname;
 const container = `vpc-probe-smoke-${process.pid}`;
@@ -46,6 +47,47 @@ const int32 = (value) => {
 };
 const frame = (type, body) => Buffer.concat([Buffer.from(type), int32(body.length + 4), body]);
 
+/** A Dial from Node's own sockets. */
+function nodeDial(address) {
+  const [host, port] = address.split(':');
+  const socket = net.connect(Number(port), host);
+  return { ...Duplex.toWeb(socket), opened: once(socket, 'connect'), close: async () => void socket.destroy() };
+}
+
+/** `dial`, with at most `limit` sockets open: the rest wait, unopened, for one to close, as Workers queues past six. */
+function capped(dial, limit) {
+  let active = 0;
+  const waiting = [];
+  return (address) => {
+    const socket = dial(address);
+    let holding = false;
+    let go;
+    const slot = new Promise((resolve) => {
+      go = () => {
+        active++;
+        holding = true;
+        resolve();
+      };
+    });
+    if (active < limit) go();
+    else waiting.push(go);
+    return {
+      ...socket,
+      opened: slot.then(() => socket.opened),
+      close: async () => {
+        const queued = waiting.indexOf(go);
+        if (queued >= 0) waiting.splice(queued, 1);
+        if (holding) {
+          holding = false;
+          active--;
+          waiting.shift()?.();
+        }
+        await socket.close();
+      },
+    };
+  };
+}
+
 /** The probe, from Node, against a fake server that answers SSLRequest with N and then does `misbehave` after StartupMessage. */
 async function hostile(misbehave) {
   const sockets = new Set();
@@ -59,16 +101,11 @@ async function hostile(misbehave) {
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const dial = (address) => {
-    const [host, port] = address.split(':');
-    const socket = net.connect(Number(port), host);
-    return { ...Duplex.toWeb(socket), opened: once(socket, 'connect'), close: async () => void socket.destroy() };
-  };
   // Bounded here too, so a regressed deadline fails the check instead of hanging the run.
   let timer;
   const hung = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error('the probe hung past 20 s')), 20_000)));
   try {
-    return await Promise.race([probe(dial, { host: '127.0.0.1', port: String(server.address().port), database: 'x', user: 'x', password }, 0), hung]);
+    return await Promise.race([probe(nodeDial, { host: '127.0.0.1', port: String(server.address().port), database: 'x', user: 'x', password }, 0), hung]);
   } finally {
     clearTimeout(timer);
     for (const socket of sockets) socket.destroy();
@@ -124,6 +161,7 @@ try {
       ['/do', { authorization: 'Bearer wrong' }],
       ['/do', { authorization: key }],
       ['/do', { authorization: `Bearer ${key}x` }],
+      ['/sockets', {}],
       ['/', {}],
       ['/other', {}],
       ['/worker', {}, 'POST'],
@@ -139,6 +177,11 @@ try {
 
   await check('hold past 600 s, or not whole seconds, is refused', async () => {
     for (const hold of ['601', '1.5', '-1', 'x']) assert.equal((await get(`/do?hold=${hold}`)).status, 400);
+    assert.equal((await get('/sockets?hold=601')).status, 400);
+  });
+
+  await check('/sockets refuses n outside 1 to 20', async () => {
+    for (const n of ['0', '21', '1.5', 'x', '']) assert.equal((await get(`/sockets?n=${n}`)).status, 400, n);
   });
 
   for (const route of ['worker', 'do']) {
@@ -174,6 +217,37 @@ try {
     assert.equal(json.stage, 'hold', JSON.stringify(json));
   });
 
+  await check('/sockets?n=8&hold=3: holds every session, and a fresh fetch and connect go through beside them', async () => {
+    const { json } = await get('/sockets?n=8&hold=3');
+    assert.equal(json.ok, true, JSON.stringify(json));
+    assert.equal(json.route, 'sockets');
+    assert.equal(json.count, 8);
+    assert.equal(json.openedOk, 8, JSON.stringify(json.opened));
+    for (const check of [json.beside, json.afterHold]) {
+      assert.equal(check.fetch.ok, true, JSON.stringify(check.fetch));
+      assert.equal(check.connect.ok, true, JSON.stringify(check.connect));
+      assert.equal(check.alive, 8);
+      assert.deepEqual(check.dead, []);
+    }
+    assert.ok(json.release.closedAtMs >= 5000, JSON.stringify(json.release));
+    assert.equal(json.release.connect.ok, true);
+    // Locally nothing caps connections, so the release check's connect did not wait for the close.
+    assert.ok(json.release.connect.ms < json.release.closedAtMs, JSON.stringify(json.release));
+  });
+
+  await check('/sockets: held sessions killed during the hold are reported dead', async () => {
+    const pending = get('/sockets?n=2&hold=6');
+    await wait(3500);
+    sql("select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'vpc-postgres-probe'");
+    const { json } = await pending;
+    assert.equal(json.ok, true, JSON.stringify(json));
+    assert.equal(json.beside.alive, 2);
+    assert.equal(json.afterHold.alive, 0, JSON.stringify(json.afterHold));
+    assert.deepEqual(json.afterHold.dead.map((dead) => [dead.socket, dead.stage]), [[0, 'query'], [1, 'query']]);
+    assert.equal(json.afterHold.connect.ok, true);
+    assert.equal(json.release.connect.ok, true);
+  });
+
   sql('alter system set ssl = off');
   sql('select pg_reload_conf()');
   await check('TLS off: the server answers N and the probe stays on its first socket', async () => {
@@ -181,6 +255,22 @@ try {
     assert.equal(json.ok, true, JSON.stringify(json));
     assert.equal(json.sslRequest, 'N');
     assert.equal(json.redialedPlaintext, undefined);
+  });
+
+  await check('/sockets under a cap of 3: the 4th socket and a fresh connect stall, and a release lets one through', async () => {
+    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'debug_ro', password };
+    const report = await holdSockets(capped(nodeDial, 3), target, 4, 0);
+    assert.equal(report.ok, true, JSON.stringify(report));
+    assert.equal(report.openedOk, 3, JSON.stringify(report.opened));
+    const stalled = report.opened.filter((attempt) => !attempt.ok);
+    assert.deepEqual(stalled.map((attempt) => attempt.stage), ['dial']);
+    assert.match(stalled[0].error, /no answer within 15 s/);
+    assert.equal(report.beside.fetch.ok, true, JSON.stringify(report.beside.fetch));
+    assert.equal(report.beside.connect.ok, false);
+    assert.equal(report.beside.connect.stage, 'dial');
+    assert.equal(report.beside.alive, 3);
+    assert.equal(report.release.connect.ok, true, JSON.stringify(report.release));
+    assert.ok(report.release.connect.ms >= report.release.closedAtMs - 50, JSON.stringify(report.release));
   });
 
   sql("alter role debug_ro password 'not-the-configured-one'");
