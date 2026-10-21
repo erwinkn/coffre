@@ -20,6 +20,9 @@ const REVOKED = `coffre_use_${'r'.repeat(43)}`;
 /** The handle the stand-in refuses at its first 33 admissions, then lets in. */
 const REFUSED = `coffre_use_${'f'.repeat(43)}`;
 
+/** The handle the stand-in refuses at once, as a timed-out admission is, while its decision goes on a second. */
+const SLOW = `coffre_use_${'s'.repeat(43)}`;
+
 /** The private address the replica's URL names, and the binding's stand-in. */
 const REPLICA = '10.9.8.7';
 
@@ -83,7 +86,13 @@ export const CoffreSockets = socketsObject<Env>((env) => {
       };
     },
   } as unknown as PluginContext;
-  return (request) => proxy.routes!.socket!(request, coffre);
+  return (request, _, hold) => {
+    if (request.headers.get('authorization') === `Bearer ${SLOW}`) {
+      hold(new Promise((resolve) => setTimeout(resolve, 1000)));
+      return Promise.resolve(new Response('coffre took too long to decide', { status: 503 }));
+    }
+    return proxy.routes!.socket!(request, coffre);
+  };
 });
 
 export default {

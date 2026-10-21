@@ -50,6 +50,12 @@ const MOST_HELD = 2 * WINDOW;
  * most three windows of the object's 128 MB (one out, two in).
  */
 const MOST_SESSIONS = 32;
+/**
+ * The longest a refused connection holds its slot while its admission
+ * goes on: past the 15 s that refuse it, a database or vault that never
+ * answers would otherwise keep it forever. An admission holds no window.
+ */
+const MOST_DECIDING_MS = 60_000;
 /** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
 const COUNT_EVERY = 128 * 1024;
 
@@ -144,10 +150,14 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
         this.#state.waitUntil(session);
         return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
       } finally {
-        // Refused, or failed before its session began: the slot is free again once nothing decides for it.
+        // Refused, or failed before its session began: the slot is free again once nothing decides for it, a minute at most.
         if (session === undefined) {
-          const free = () => void (this.#open -= 1);
-          void deciding.then(free, free);
+          let late: ReturnType<typeof setTimeout> | undefined;
+          const free = () => {
+            clearTimeout(late);
+            this.#open -= 1;
+          };
+          void Promise.race([deciding, new Promise<void>((resolve) => (late = setTimeout(resolve, MOST_DECIDING_MS)))]).then(free, free);
         }
       }
     }

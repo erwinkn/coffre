@@ -834,8 +834,9 @@ Worker, with 426 or 401, before any object is made. An object holds 32
 sessions at most, so a pool gone wrong cannot fill it: the 33rd is
 refused with 503. A connection takes its slot before admission, and one
 refused keeps it until its admission is done, past a refusal for taking
-too long, so neither a burst nor a slow database gets past the 32. The
-listener says a refusal once a run, on stderr, with coffre's reason. The object's name digests the bearer token alone and
+too long, a minute at most: neither a burst nor a slow database gets past
+the 32, and a database that never answers holds no slot for good. The
+listener says each refusal once a run, on stderr, with coffre's reason. The object's name digests the bearer token alone and
 the path's segments decoded, as admission reads them, so no spelling of
 either splits a run's connections. This is how any
 plugin's WebSocket carries its bytes on Workers, not the tunnel's own:

@@ -41,8 +41,8 @@ const KEEPALIVE_MS = 30_000;
 /** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. `keepaliveMs` is for tests. */
 export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEEPALIVE_MS } = {}): Promise<{ url: string; close: () => void }> {
   const sockets = new Set<Socket>();
-  /** The refusals said already, by status: once each for the run, however many connections a pool retries. */
-  const said = new Set<number>();
+  /** The refusals said already, by status and reason: once each for the run, however many connections a pool retries. */
+  const said = new Set<string>();
   const server = createServer((socket) => {
     sockets.add(socket);
     // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
@@ -72,18 +72,19 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
     }, keepaliveMs);
     keepalive.unref();
     ws.on('unexpected-response', (request, response) => {
-      // coffre's refusal, said once per status: the app sees its connection close, and a driver may retry it at once.
+      // coffre's refusal, said once for each reason: the app sees its connection close, and a driver may retry it at once.
       let body = '';
       response.setEncoding('utf8');
       response.on('data', (chunk: string) => (body = (body + chunk).slice(0, 1000)));
       response.on('end', () => {
-        if (!said.has(response.statusCode ?? 0)) {
-          said.add(response.statusCode ?? 0);
-          let message = body.trim();
-          try {
-            message = (JSON.parse(body) as { message?: string }).message ?? message;
-          } catch {}
-          process.stderr.write(`coffre: the tunnel for ${tunnel.key} was refused (${response.statusCode})${message === '' ? '' : `: ${message}`}\n`);
+        let message = body.trim();
+        try {
+          message = (JSON.parse(body) as { message?: string }).message ?? message;
+        } catch {}
+        const refusal = `(${response.statusCode})${message === '' ? '' : `: ${message}`}`;
+        if (!said.has(refusal)) {
+          said.add(refusal);
+          process.stderr.write(`coffre: the tunnel for ${tunnel.key} was refused ${refusal}\n`);
         }
         request.destroy();
         socket.destroy();

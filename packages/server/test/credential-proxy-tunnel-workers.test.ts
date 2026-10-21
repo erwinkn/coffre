@@ -168,6 +168,26 @@ test("a connection refused at admission frees its slot: 33 refused, then one let
   admitted.ws.close();
 });
 
+test("a connection refused while its admission goes on holds its slot until the admission is done", { skip, timeout: 60_000 }, async () => {
+  const slow = `coffre_use_${'s'.repeat(43)}`;
+  const open = async () => {
+    const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${slow}`, 'coffre-tunnel-flow': 'credit' } });
+    ws.on('error', () => undefined);
+    const [, response] = (await once(ws, 'unexpected-response')) as [unknown, { statusCode: number; on(event: 'data', listener: (chunk: Buffer) => void): void }];
+    let text = '';
+    response.on('data', (chunk) => (text += chunk.toString()));
+    await once(response as never, 'end');
+    return text;
+  };
+  // Each is refused at once, its decision going on a second: 32 of them fill the object, and the next finds no slot.
+  const refusals = await Promise.all(Array.from({ length: 32 }, open));
+  assert.ok(refusals.every((text) => text === 'coffre took too long to decide'));
+  assert.match(await open(), /this run holds 32 connections here already/);
+  // Their decisions done, the slots come back.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(await open(), 'coffre took too long to decide');
+});
+
 test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { skip, timeout: 30_000 }, async () => {
   // The app itself, say, speaking WebSocket with its handle, and no listener in between, to a database that takes nothing:
   // a startup and the password, as a driver sends them, and the session waits on the database, reading no more of the app.

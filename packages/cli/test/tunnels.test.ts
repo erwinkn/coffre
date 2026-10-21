@@ -165,10 +165,13 @@ test("a count that is none, or for bytes coffre was never sent, ends the connect
   }
 });
 
-test('a refused tunnel says why, once for the run, however many connections the app retries', async () => {
+test('a refused tunnel says why, once for each reason in the run, however many connections the app retries', async () => {
   const http = createServer();
+  let refusals = 0;
   http.on('upgrade', (_, socket) => {
-    const body = JSON.stringify({ error: 'credential_proxy', message: 'this run holds 32 connections here already' });
+    // The same status for two reasons: the cap, twice, then the migration door.
+    refusals += 1;
+    const body = JSON.stringify({ error: 'credential_proxy', message: refusals <= 2 ? 'this run holds 32 connections here already' : "coffre's database lacks this version's migrations" });
     socket.end(`HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`);
   });
   http.listen(0, '127.0.0.1');
@@ -186,5 +189,8 @@ test('a refused tunnel says why, once for the run, however many connections the 
     stderr.mock.restore();
     close();
   }
-  assert.deepEqual(written, ['coffre: the tunnel for DATABASE_URL was refused (503): this run holds 32 connections here already\n']);
+  assert.deepEqual(written, [
+    'coffre: the tunnel for DATABASE_URL was refused (503): this run holds 32 connections here already\n',
+    "coffre: the tunnel for DATABASE_URL was refused (503): coffre's database lacks this version's migrations\n",
+  ]);
 });
