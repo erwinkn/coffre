@@ -124,7 +124,7 @@ test('a WebSocket that does not ask for credit flow, or names no bearer, is refu
   }
 });
 
-test('an object holds 32 connections of a run at most: the next is refused, until one ends', { skip, timeout: 60_000 }, async () => {
+test('an object holds 32 connections of a run at most, a burst of them included: the next is refused, until one ends', { skip, timeout: 60_000 }, async () => {
   // Another handle, so another object, empty: each connection admitted, and waiting at its startup.
   const many = `coffre_use_${'m'.repeat(43)}`;
   const open = async () => {
@@ -133,9 +133,11 @@ test('an object holds 32 connections of a run at most: the next is refused, unti
     const [event, answer] = (await Promise.race([once(ws, 'open').then(() => ['open']), once(ws, 'unexpected-response').then(([, response]) => ['refused', response])])) as [string, { statusCode: number }?];
     return { ws, event, status: answer?.statusCode };
   };
-  const held = [];
-  for (let at = 0; at < 32; at += 1) held.push(await open());
-  assert.ok(held.every(({ event }) => event === 'open'));
+  // Forty at once, as a pool starts: 32 are admitted, however many were being admitted together, and the rest refused.
+  const burst = await Promise.all(Array.from({ length: 40 }, open));
+  assert.equal(burst.filter(({ event }) => event === 'open').length, 32);
+  assert.ok(burst.filter(({ event }) => event === 'refused').every(({ status }) => status === 503));
+  const held = burst.filter(({ event }) => event === 'open');
   const refused = await open();
   assert.deepEqual([refused.event, refused.status], ['refused', 503]);
   const closed = once(held[0]!.ws, 'close');
@@ -144,7 +146,7 @@ test('an object holds 32 connections of a run at most: the next is refused, unti
   await new Promise((resolve) => setTimeout(resolve, 200));
   const again = await open();
   assert.equal(again.event, 'open');
-  for (const { ws } of [...held, again]) ws.close();
+  for (const { ws } of [...burst, again]) ws.close();
 });
 
 test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { skip, timeout: 30_000 }, async () => {

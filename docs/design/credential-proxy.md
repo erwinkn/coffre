@@ -776,7 +776,8 @@ invocation is no place for a connection that lasts an hour, and a cancel
 request comes on a connection of its own, which could land in any
 isolate. So the Worker only routes: `coffre.upgrade(request, env)` sends a
 WebSocket a plugin takes to a Durable Object named by a digest of its path
-and its bearer, `sha256("/use/market/dev/db\nBearer coffre_use_…")`. That
+and its bearer token, `sha256('["","use","market","dev","db"]\ncoffre_use_…')`,
+the path's segments decoded. That
 is one `coffre run`'s connections to one database: the same group a Node
 process checks as one. There the plugin admits it exactly as on Node
 (`socket-admission.ts`: the migration door, then the proxy's own checks

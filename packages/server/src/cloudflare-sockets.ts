@@ -118,25 +118,31 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       if (this.#open >= MOST_SESSIONS) {
         return new Response(`this run holds ${MOST_SESSIONS} connections here already, each up to three windows of the object's memory: close some, or make the pool smaller`, { status: 503 });
       }
-      this.#admit ??= admission(this.#env, this.#state);
-      const answer = await this.#admit(request, cloudflareSourceIp(request));
-      if (answer instanceof Response) return answer;
-      const pair = new (globalThis as unknown as { WebSocketPair: new () => Record<0 | 1, WorkersWebSocket> }).WebSocketPair();
-      const server = pair[1];
-      server.accept();
-      // Binary messages as bytes: at the deployments' compatibility date a Workers WebSocket gives a Blob, as the standard says.
-      server.binaryType = 'arraybuffer';
-      const client = fromWebSocket(server);
+      // The slot is taken now, before admission waits: a burst of connections counts every one still being admitted.
       this.#open += 1;
-      this.#state.waitUntil(
-        answer(client, connect)
+      let session: Promise<void> | undefined;
+      try {
+        this.#admit ??= admission(this.#env, this.#state);
+        const answer = await this.#admit(request, cloudflareSourceIp(request));
+        if (answer instanceof Response) return answer;
+        const pair = new (globalThis as unknown as { WebSocketPair: new () => Record<0 | 1, WorkersWebSocket> }).WebSocketPair();
+        const server = pair[1];
+        server.accept();
+        // Binary messages as bytes: at the deployments' compatibility date a Workers WebSocket gives a Blob, as the standard says.
+        server.binaryType = 'arraybuffer';
+        const client = fromWebSocket(server);
+        session = answer(client, connect)
           .catch(() => undefined)
           .finally(() => {
             this.#open -= 1;
             client.close();
-          }),
-      );
-      return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
+          });
+        this.#state.waitUntil(session);
+        return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
+      } finally {
+        // Refused, or failed before its session began: the slot is free again.
+        if (session === undefined) this.#open -= 1;
+      }
     }
   };
 }
