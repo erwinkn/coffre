@@ -203,3 +203,26 @@ test("Node's pool refuses the same query, so that the suites catch it before a W
     await close();
   }
 });
+
+test("with closeIdleMs, what outlives a call closes its connection once idle, and the next query connects again", { skip }, async () => {
+  const proxy = await counted();
+  // As a Durable Object's coffre does: a check now and then, none of them a call that ends the pool.
+  const pool = new HyperdrivePool(proxy.url, { closeIdleMs: 50 });
+  const db = createDatabase(pool);
+  const closed = async () => {
+    for (let tries = 0; proxy.open > 0; tries += 1) {
+      assert.ok(tries < 100, 'the idle connection was left open');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  // One check's queries, each after the last, share one connection: the gap between them is shorter than the idle time.
+  assert.equal(n(await db.execute(sql`select 1 as n`)), 1);
+  assert.equal(n(await db.transaction(async (tx) => tx.execute(sql`select 2 as n`))), 2);
+  assert.equal(proxy.opened, 1);
+  await closed();
+  // The next check connects again, and lets go again.
+  assert.equal(n(await db.execute(sql`select 3 as n`)), 3);
+  assert.equal(proxy.opened, 2);
+  await closed();
+  await pool.end();
+});

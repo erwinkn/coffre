@@ -32,8 +32,12 @@ export type CoffrePlugin = {
     /**
      * A WebSocket asked for under `prefix`: a refusal, or what carries the
      * connection's bytes once it is open (`SocketSession`). On Node, the
-     * server's `upgrade` events reach it (`createCoffre(…).upgrade`); not on
-     * Workers yet.
+     * server's `upgrade` events reach it (`createCoffre(…).upgrade`); on
+     * Workers, a Durable Object per bearer and path hosts it, and its
+     * client paces the bytes by credit, as `coffre run`'s listener does
+     * (`cloudflare-sockets.ts`): a socket's client is coffre's own. A
+     * browser's WebSocket can neither ask for that nor count, and is
+     * refused there.
      */
     socket?: (request: Request, coffre: PluginContext) => Promise<Response | SocketSession>;
   };
@@ -149,7 +153,12 @@ export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp:
   return routes?.socket === undefined ? null : routes.socket(request, pluginContext(request, runtime, sourceIp));
 }
 
-function routesFor(request: Request, runtime: CoffreRuntime) {
+/** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
+export function takesSocket(request: Request, plugins: readonly CoffrePlugin[]): boolean {
+  return routesFor(request, { plugins })?.socket !== undefined;
+}
+
+function routesFor(request: Request, runtime: Pick<CoffreRuntime, 'plugins'>) {
   const { pathname } = new URL(request.url);
   return runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
 }

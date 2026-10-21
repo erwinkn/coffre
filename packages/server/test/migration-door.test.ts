@@ -7,6 +7,7 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { coffreRoute, respond, runScheduled } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
+import { admitSocket } from '../src/socket-admission.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 import { openTestDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
@@ -124,6 +125,18 @@ async function run(query: SQL): Promise<void> {
   if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
   else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
+
+test("below its migrations, a plugin's WebSocket is refused at the same door, on Node and in a Durable Object alike, and its plugin never asked", async () => {
+  let asked = false;
+  const runtime = { ...freshRuntime(), plugins: [{ name: 'sockets', routes: { prefix: '/sockets', fetch: async () => new Response(), socket: async () => ((asked = true), new Response('admitted')) } }] };
+  await unmigrated(async () => {
+    const answer = await admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null);
+    assert.ok(answer instanceof Response);
+    assert.equal(answer.status, 503);
+    assert.match(await answer.text(), /lacks this version's migrations/);
+  });
+  assert.equal(asked, false);
+});
 
 test('only a database that cannot be reached is an outage the door lets through; any other failure is not', () => {
   assert.equal(isUnreachable(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' })), true);

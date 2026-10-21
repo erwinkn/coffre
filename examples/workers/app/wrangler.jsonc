@@ -29,6 +29,10 @@
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "replace-with-your-hyperdrive-id" }],
   // The vault Worker, vault/wrangler.jsonc. Deploy it first.
   "services": [{ "binding": "VAULT", "service": "coffre-vault" }],
+  // Where plugins' WebSockets run: the credential proxy's database tunnel, one
+  // object per `coffre run` and database. Idle until you add the tunnel.
+  "durable_objects": { "bindings": [{ "name": "SOCKETS", "class_name": "CoffreSockets" }] },
+  "migrations": [{ "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] }],
   // The heartbeat and audit checkpoints.
   "triggers": { "crons": ["*/5 * * * *"] },
   // What a CI run's exchange of its ID token passes first: per address, and

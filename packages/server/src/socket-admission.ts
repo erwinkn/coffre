@@ -1,0 +1,31 @@
+// What a plugin's WebSocket passes before it opens, on Node and on Workers
+// alike: the migration door, as `respond` keeps it for every other request,
+// then the plugin under the path, which refuses or hands back its session.
+import { schemaReady } from './app.ts';
+import { pluginSocket, type SocketSession } from './plugins.ts';
+import type { CoffreRuntime } from './runtime.ts';
+
+/** How long a plugin has to admit a WebSocket or refuse it. */
+const ADMISSION_MS = 15_000;
+
+/**
+ * The plugin's refusal or its session; a path no plugin takes for a socket
+ * is a 404, and a plugin that has not decided in time has refused. `hold`
+ * is told of the decision itself, which goes on past that refusal: what
+ * holds a slot for it (a Durable Object's) holds it until then.
+ */
+export async function admitSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null, hold?: (deciding: Promise<unknown>) => void): Promise<Response | SocketSession> {
+  let late: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const decided = (async () =>
+      !(await schemaReady(runtime))
+        ? new Response("coffre's database lacks this version's migrations", { status: 503 })
+        : ((await pluginSocket(request, runtime, sourceIp)) ?? new Response('no WebSocket here', { status: 404 })))();
+    hold?.(decided);
+    return await Promise.race([decided, new Promise<Response>((resolve) => (late = setTimeout(() => resolve(new Response('coffre took too long to decide', { status: 503 })), ADMISSION_MS)))]);
+  } catch {
+    return new Response('the plugin failed', { status: 500 });
+  } finally {
+    clearTimeout(late);
+  }
+}

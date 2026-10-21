@@ -10,7 +10,9 @@ were taken on the recommended option while Erwin was away (R10), and each
 is his to revisit. 0.9 closes the gaps that kept keys on `expose`
 (section 2, "What replaces `expose`"). 0.10 (W128) replaces the
 deployment-wide `people` switch and `expose` with one setting per key, its
-sensitivity (section 2).
+sensitivity (section 2). 0.11 (W146) runs the tunnel on Workers, in a
+Durable Object, and through a VPC Network binding to a private database
+(section 5).
 
 ## 1. What it is for
 
@@ -756,18 +758,147 @@ process: its database and the database's real key. A cancel request is
 forwarded, over TLS as the session is, only when its key names a live
 session of the same handle. A guessed key, or another handle's, reaches
 nothing, and the database's own keys never leave coffre. psql's Ctrl-C
-works, and tests hold both. On Workers, where calls land on different
-isolates, the map would live in a Durable Object.
+works, and tests hold both. On Workers, the map is the object's (below): a cancel request comes with
+the same handle, for the same tunnel, so it reaches the object that holds
+the session. It must name a session of the same tunnel too, here and on
+Node, so it goes out the way that session's connection did, through the
+tunnel's network binding or not.
 
 **Not yet:**
-- *Workers.* The tunnel's code is platform-neutral, but only Node's
-  `upgrade` is wired. Workers take an inbound WebSocket (`WebSocketPair`)
-  and open TCP with `connect()` from `cloudflare:sockets` (`startTls()`
-  for Postgres's upgrade), so the adapter is about 40 lines. It needs a
-  check on a deployed Worker first: see section 7.
+- *A check on a deployed Worker* (section 7): whether an open socket
+  counts toward the six connections (a pool of six through two rechecks),
+  an idle object kept alive, a deploy's disconnect.
 - *The privileged-role warning* (section 6): reading `rolsuper` and
   `rolcreaterole` after login, before the app's first query.
 - *Minted short-lived logins* (W108), which replace the shared password.
+
+**Workers: one Durable Object per run and database (0.11).** A Worker's
+invocation is no place for a connection that lasts an hour, and a cancel
+request comes on a connection of its own, which could land in any
+isolate. So the Worker only routes: `coffre.upgrade(request, env)` sends a
+WebSocket a plugin takes to a Durable Object named by a digest of its path
+and its bearer token, `sha256('["","use","market","dev","db"]\ncoffre_use_…')`,
+the path's segments decoded. That
+is one `coffre run`'s connections to one database: the same group a Node
+process checks as one. There the plugin admits it exactly as on Node
+(`socket-admission.ts`: the migration door, then the proxy's own checks
+and its `credential.use` entry), and the session runs the same `tunnel()`,
+with TCP out through `cloudflare:sockets` (`cloudflare-sockets.ts`). The
+object holds nothing an instance decides: access, the vault and the log
+are reached through the plugin's context, by a coffre of the object's own
+whose database client opens with a query and closes ten seconds after its last
+(`closeIdleMs`). The object is given its admission as a function
+(`socketsObject(env => admit)`), so that a session held by the Worker
+itself, with only the cancel map in an object, would change the routing
+and leave the tunnel as it is.
+
+A walk-through. `coffre run market/dev -- psql "$DATABASE_URL"`: psql
+connects to the run's listener, which opens `wss://…/use/market/dev/db`
+with the handle; the Worker sends it to object `9f3c…`, which checks the
+handle, opens the URL (one `secret.read` and one `credential.use`), logs in
+with SCRAM, and swaps the database's `BackendKeyData` (pid 4242, its
+secret) for a random key of its own. Ctrl-C: psql opens a second
+connection with a `CancelRequest` for that key; the listener carries it
+with the same handle, to the same path, so to the same object `9f3c…`,
+whose map has the key, and which sends the database its real one. No key
+names an object and none needs to: the bearer already does. The handle is
+revoked: the group's check, a timer in the object, gets a refusal within
+`recheckSeconds` and ends both sockets of every session; the next
+connection is refused at admission.
+
+*Flow control.* A Workers WebSocket has no back-pressure either way: no
+`bufferedAmount`, and no way to stop reading. Unpaced, a `SELECT *` of a
+large table read by a slow psql would wait in the object's 128 MB, and a
+large `COPY … FROM STDIN` the same way the other direction. So the tunnel
+paces itself by credit, in-band. Each side counts back what it has taken:
+a text message holding the bytes of binary messages it took since its
+last count, sent once 128 KiB have piled up. Each side sends at most a
+window, 1 MiB, that the other has not counted. In the object, a write to
+the app waits while a window is uncounted, so the session stops reading
+the database socket, and TCP holds the database back. A message from the
+app is counted when the session takes it, so the database socket's own
+pace reaches the app. `coffre run`'s listener does the same on its side
+(`packages/cli/src/tunnels.ts`). The listener asks for it in a header,
+`coffre-tunnel-flow: credit`, and the object says it paces with a first
+count, `0`, before any byte: in-band, so no proxy that drops a header
+leaves the two waiting on each other. The listener counts back whatever
+coffre it reaches, and holds the app to the window until coffre's first
+message says: a count, and it paces; a byte, a database's answer from a
+coffre on Node, which reads its WebSocket only as fast as it writes and
+ignores the counts, and it does not. A count that is none, or for more
+than was sent, ends the connection, on either side. The object holds a
+client to its window: one that sends two windows uncounted is ended
+(close code 1008), so a client that ignores the window, the app itself
+speaking WebSocket with its handle, cannot fill the object. A WebSocket without
+the header, an older CLI's, or without a bearer, is refused by the
+Worker, with 426 or 401, before any object is made. An object holds 32
+sessions at most, so a pool gone wrong cannot fill it: the 33rd is
+refused with 503. A connection takes its slot before admission, and one
+refused keeps it until its admission is done, past a refusal for taking
+too long, a minute at most: neither a burst nor a slow database gets past
+the 32, and a database that never answers holds no slot for good. The
+listener says each refusal once a run, on stderr, with coffre's reason. The object's name digests the bearer token alone and
+the path's segments decoded, as admission reads them, so no spelling of
+either splits a run's connections. This is how any
+plugin's WebSocket carries its bytes on Workers, not the tunnel's own:
+a session is given a byte pipe (`Pipe`), and this is the pipe. So a
+plugin's WebSocket on Workers has coffre's CLI as its client: a browser
+can neither ask for credit nor count, and is refused. Measured with `vite
+dev` and the real CLI, 200 MB through the object at about 48 MB/s: with
+the app stalled 10 s mid-result, workerd's memory rose 2 MB (41 MB with the
+window off), and the test holds the object to a window: an app that
+counts nothing receives about 1 MiB, then nothing until it counts
+(`credential-proxy-tunnel-workers.test.ts`).
+
+*Keepalive.* Cloudflare closes a WebSocket idle for 100 seconds, and its
+edge answers a protocol ping itself, without reaching the object. So the
+listener sends a count every 30 seconds on each open connection, `0` when
+it owes none: a message that reaches the object, so an idle psql at its
+prompt keeps its WebSocket, and its object stays in memory with it. It
+sends a ping too, whose pong, the edge's, must come before the next: a
+connection whose network went away without a word ends within a minute,
+and the app's driver sees it drop, rather than a query that hangs.
+
+*A private database, through a VPC Network binding.* `connect()` reaches
+public addresses only. A database inside a private network, a read
+replica on Scaleway's say, is reached through a Cloudflare Tunnel whose
+connector runs in that network, and a VPC Network binding to it, whose
+`connect('10.0.1.5:5432')` opens TCP to the address given. The tunnel
+names it:
+
+```ts
+// app/src/coffre.ts
+tunnels: { replica: postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect: env.REPLICA_NET }) },
+// app/wrangler.jsonc
+"vpc_networks": [{ "binding": "REPLICA_NET", "tunnel_id": "<the tunnel's id>" }]
+```
+
+With `connect`, and only then, `hosts` may name a private address, and
+must name the hosts the URL may: a binding reaches a whole network. The
+URL says `sslmode=disable`: such a binding carries plaintext TCP only, so
+the leg from the connector to the database runs unencrypted inside that
+network, and Cloudflare's own carries it encrypted up to the connector. A
+URL that asks for TLS is refused with 409, rather than tried. A binding
+the Worker lacks is `undefined`: the configuration fails, and never dials
+without it, as a credential's `egress` does. Without `connect`, nothing
+changes: public addresses only, TLS unless `insecureUpstreams`. A cancel
+request goes through the binding too.
+
+The deployment opts in, in code. `coffre init` writes the object's wiring
+(examples/workers does), idle until a plugin takes WebSockets:
+
+```ts
+// app/src/coffre.ts: sockets: env.SOCKETS, and, to open the tunnel,
+//   plugins: [credentialProxy({ … tunnels: { db: postgres('DATABASE_URL') } })], with its route, routes/use.$.ts
+// app/src/server.ts
+export default { fetch: (request, env, ctx) => coffre.upgrade(request, env) ?? handler.fetch(request, { context: coffre.request(env, ctx) }) };
+export const CoffreSockets = coffre.Sockets;
+// app/wrangler.jsonc
+"durable_objects": { "bindings": [{ "name": "SOCKETS", "class_name": "CoffreSockets" }] },
+"migrations": [{ "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] }]
+```
+
+Without `sockets`, a WebSocket under `/use` gets 501; Node is unchanged.
 
 **Shaped placeholders.** Some clients check their key before they send it.
 DFNS's SDK decodes its token's middle part on every request, to read the
@@ -1073,7 +1204,9 @@ private, loopback or link-local address (`10.0.0.8`, `169.254.169.254`,
 never belongs in production. A hostname that *resolves* to a private
 address is the operator's own DNS. On Workers, `fetch` cannot reach a
 private network anyway; a credential's `egress` can (section 5), and a
-VPC Service binding reaches only the host it was made for. On Node, pinning the resolved address is left for
+VPC Service binding reaches only the host it was made for. A tunnel's
+`connect`, a VPC Network binding, reaches a whole network, so the tunnel
+names the hosts in it its URL may (section 5). On Node, pinning the resolved address is left for
 later (decision 9).
 
 **Injection** goes into headers, the query and Basic only. Nothing is
@@ -1128,12 +1261,58 @@ Workers take (`WebSocketPair`), and an outbound TCP connection, which
 'starttls'` and `startTls()` for Postgres's TLS upgrade. Both are
 documented and general, and Hyperdrive is not involved: the tunnel
 connects to the database's public address, as any TCP client would. The
-limits: `connect()` reaches public addresses only (no private network
-without Cloudflare Tunnel), port 25 is blocked, and a Worker invocation
-has a CPU budget and up to six simultaneous open connections, so a session
-with many parallel connections should stay on Node or a Durable Object
-holding the sockets. To be checked on a deployed Worker in PR 3. Locally,
-workerd's `connect()` behaves the same, but Cloudflare's network does not.
+limits: `connect()` reaches public addresses only (a private network
+through a VPC Network binding, section 5) and port 25 is blocked. The
+tunnel runs in a Durable Object (section 5); what the prototype found,
+locally under workerd and in Cloudflare's documentation:
+
+- *Six connections: assumed, to confirm.* Cloudflare's limits page counts
+  six connections per invocation "simultaneously waiting for response
+  headers", a `connect()` among them, and queues the seventh rather than
+  refusing it; a connection stops counting "once response headers
+  arrive". A TCP socket has no headers, so whether an *open* socket still
+  counts is not said, and local workerd enforces no limit. Read as
+  "until it opens", a pool of ten opens six at once, then four. Read as
+  "while open", it is worse than a queued dial: a pool of six at its
+  prompt holds the budget, and the object's recheck, a Hyperdrive query
+  and a vault call, waits behind it until its 10 s deadline says no,
+  which ends all six, every minute. Locally, twelve connections of one
+  run, one object, opened within 0.2 s and ran together, which settles
+  nothing here. To confirm on Cloudflare, before a release carries a
+  production database: a real `coffre run` with six idle connections
+  held through two rechecks, the log showing both `recheck` entries and
+  the sessions still open, and twelve opened at once. *Fallback, if open
+  sockets count:* `MOST_SESSIONS` drops to four, leaving two for the
+  recheck's database and vault, and deploy.md tells pools to stay under
+  it.
+- *Hibernation* saves nothing here. It frees an object whose WebSockets
+  are idle, but an open TCP socket to Postgres cannot survive it, and the
+  group's check is a timer. An object holding a run's connections is in
+  memory, billed as 128 MB of duration, for as long as they are open:
+  450 GB-s an hour, about $0.0056 an hour past the paid plan's 400,000
+  GB-s a month; the free plan's 13,000 GB-s a day is 29 hours of runs.
+  One object per run, not per connection: a pool of ten costs one.
+- *STARTTLS* works: `startTls()` with no options, which checks the
+  certificate against the host `connect()` dialled. workerd refuses
+  `expectedServerHostname` ("unsupported"). Locally, TLS 1.3 to a
+  Postgres whose certificate a test CA signed (given to workerd with
+  `SSL_CERT_FILE`), and a refusal when dialled by an address its
+  certificate does not name.
+- *Eviction and deploys* end every session: a deploy restarts every
+  object and disconnects its WebSockets, and an evicted object's TCP
+  sockets are gone. The app's driver sees its connections drop, as when a
+  database restarts, and its pool connects again, through a new object.
+  `vite dev`'s reload swaps the module in place and keeps them.
+- *Cost.* Measured with `vite dev`, one psql session of 20,000 one-row
+  queries: 175 µs of workerd's main thread per query (one message each
+  way, the JavaScript and the I/O together), 0.45 ms a query against
+  0.08 ms direct; 110 MB read in 2 s of its CPU. An object is one thread:
+  a run's connections share about 5,000 queries a second. With flow
+  control (0.11), through the real CLI: 200 MB in 4.2 s, 48 MB/s, for
+  3.9 s of workerd's CPU, the whole process's, `coffre run`'s own requests
+  included; 1 GB in 21.9 s for 18.1 s. About 19 ms of CPU a MB, as before
+  the counts: they cost nothing measurable. Each message is far under the
+  30 s of CPU an event may take.
 
 **Cloudflare Access.** The proxy's callers are apps and the CLI, not
 browsers, and a handle is not an Access identity. So `/use/*` needs an
@@ -1313,8 +1492,9 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     `egress(name, binding)` helper: the deployment already holds it, and a
     `{ fetch }` of its own covers every other road (Access, a test fake).
     Named and missing, it refuses the configuration rather than leave by
-    the global `fetch`. HTTP credentials only: a tunnel's `connect()` and a
-    signer reach no upstream through it.
+    the global `fetch`. HTTP credentials only: a signer reaches no
+    upstream, and a tunnel dials through a `connect` of its own (decision
+    31).
 
 29. **An Owner loosens a sensitive value in place (R30, Erwin
     2026-10-21).** An Owner of the project, or of the whole instance,
@@ -1331,6 +1511,36 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     retyping, always (R16); loosening the key's history too, which would
     rewrite versions in place, unlike everything else.
 
+30. **The tunnel on Workers paces itself by credit, and refuses a CLI that
+    does not (W146, 0.11).** In-band counts, text messages beside the
+    binary ones, rather than a second channel or relying on TCP: a Workers
+    WebSocket gives no back-pressure to rely on, and a count needs no
+    state but two numbers each side. A 1 MiB window keeps a pool of ten
+    under 20 MB of the object's 128 MB in the worst case. An older CLI is
+    refused with 426, since it would send no counts: the Workers tunnel is
+    new in 0.11, so no deployment loses a working CLI. The keepalive is a
+    count, not a protocol ping, which Cloudflare's edge answers itself.
+    *Alternatives:* a smaller window, at the cost of throughput far from
+    the object (window over round trip: 1 MiB over 30 ms is 33 MB/s).
+
+31. **A tunnel's `connect` is a VPC Network binding, named by value, which
+    lets it name private hosts and plaintext, and fails closed (Erwin
+    2026-10-21, TLS option a).** As a credential's `egress`: the binding
+    itself, refused at configuration when missing, never a direct dial in
+    its place. A binding reaches a whole network, so `hosts` is required
+    with it. Plaintext, since the binding carries no TLS yet: the last leg,
+    connector to database, stays in the private network. A URL asking for
+    TLS is refused rather than downgraded. *Alternatives:* TLS through the
+    binding once Cloudflare offers it, which would then be the default.
+
+32. **`coffre init` writes the sockets object's wiring, idle (W146).** The
+    binding, its migration, `coffre.upgrade` in the server entry and
+    `sockets: env.SOCKETS`, though the example adds no credential proxy:
+    opening the tunnel is then the plugin and its route alone, and the
+    example and `pnpm dev` share their server entry. An object nobody
+    reaches costs nothing. *Alternative:* leave it to the docs, at the
+    cost of a wrangler migration each deployment writes by hand.
+
 ## 9. Plan
 
 | PR | What |
@@ -1339,7 +1549,7 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
 | 2 | `sigv4()`: S3 through the proxy, tested with the AWS SDK against a signature-checking fake, and by hand against MinIO. Built |
 | 3 | The Postgres tunnel: a socket capability for plugins (`routes.socket`, Node's `upgrade`), the listener in `coffre run`, SCRAM, cancel, revocation mid-session. Built |
 | 0.9 E | The stable URL, `/use/<credential>`, from the environments a handle keeps (`0010_handle_places`); `baseUrl` removed. Built |
-| 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), checked on a deployed Worker; the privileged-role warning |
+| 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), one Durable Object per run and database, paced by credit; through a VPC Network binding (`connect`). Built (0.11); to check on a deployed Worker. The privileged-role warning, not yet |
 | 4 | Redis through the tunnel |
 | 5 | `presign` (built in 0.8.1) and `sign` (0.9 D); `verify`, HMAC, SDK credential files |
 | 0.9 C | Shaped placeholders, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |

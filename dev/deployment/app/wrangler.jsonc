@@ -19,6 +19,9 @@
   },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "local" }],
   "services": [{ "binding": "VAULT", "service": "coffre-dev-vault" }],
+  // The credential proxy's tunnel: one object per `coffre run` and database, which holds its connections.
+  "durable_objects": { "bindings": [{ "name": "SOCKETS", "class_name": "CoffreSockets" }] },
+  "migrations": [{ "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] }],
   // Workload exchanges, per caller's address and in total (docs/design/oidc.md),
   // then MCP's OAuth requests the same way, and each connection's tool calls.
   "ratelimits": [

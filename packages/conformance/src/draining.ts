@@ -25,6 +25,8 @@ export function drainingConfig(server: string): string {
     join(server, 'conformance.js'),
     [
       "import app from './index.js';",
+      // The app's other exports, its Durable Object classes (`CoffreSockets`), which its config binds by name.
+      "export * from './index.js';",
       'export default {',
       '  ...app,',
       '  async fetch(request, env, ctx) {',

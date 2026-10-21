@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createServer as createHttp, type Server } from 'node:http';
 import { connect as tcp, createServer as createTcp, type AddressInfo, type Server as TcpServer, type Socket } from 'node:net';
 import { once } from 'node:events';
+import { Duplex } from 'node:stream';
 
 import pg from 'pg';
 import { WebSocket } from 'ws';
@@ -20,9 +21,10 @@ import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './db/connect
 import { TEST_ENGINE } from './db/engine.ts';
 import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { upgrade } from '../src/node-sockets.ts';
-import { checkPlugins } from '../src/plugins.ts';
-import { credentialProxy, postgres } from '../src/plugins/credential-proxy.ts';
+import { checkPlugins, pluginSocket } from '../src/plugins.ts';
+import { credentialProxy, postgres, type Network } from '../src/plugins/credential-proxy.ts';
 import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
+import type { WorkersSocket } from '../src/workers-socket.ts';
 
 const postgresOnly = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false };
 // The suite's database, as the app's would name it: no TLS to a database on loopback.
@@ -557,6 +559,103 @@ test('a tunnel reaches only the hosts it names, and a private database only with
   }
   assert.throws(() => credentialProxy({ credentials: { db: { upstream: 'https://x.example', inject: { kind: 'header', name: 'x', template: '{K}' } } }, tunnels: { db: postgres('DATABASE_URL') } }), /a credential and a tunnel/);
 });
+
+test('a tunnel through a network binding reaches the private host it names, plaintext, without insecureUpstreams', postgresOnly, async () => {
+  // A VPC Network binding as Workers give one: `connect('10.9.8.7:5432')`, a socket of web streams. This one reaches the suite's database.
+  const asked: string[] = [];
+  const port = Number(new URL(TEST_RUNTIME_DATABASE_URL).port);
+  const network: Network = {
+    connect: (address) => {
+      asked.push(address);
+      const socket = tcp({ host: '127.0.0.1', port });
+      const { readable, writable } = Duplex.toWeb(socket);
+      return {
+        readable: readable as ReadableStream<Uint8Array>,
+        writable: writable as WritableStream<Uint8Array>,
+        opened: once(socket, 'connect'),
+        closed: once(socket, 'close').then(() => undefined),
+        close: async () => void socket.destroy(),
+        startTls: () => {
+          throw new Error('plaintext only');
+        },
+      };
+    },
+  };
+  const replica = (query: string) => `postgres://coffre_runtime:local-runtime-only@10.9.8.7:5432${new URL(TEST_RUNTIME_DATABASE_URL).pathname}${query}`;
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable') });
+  // Each connection opens the URL afresh, as the vault holds it now.
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) }, cacheSeconds: 0 })]);
+  const client = appClient();
+  await client.connect();
+  try {
+    assert.deepEqual((await client.query('SELECT current_user AS who')).rows, [{ who: 'coffre_runtime' }]);
+  } finally {
+    await client.end();
+  }
+  assert.deepEqual(asked, ['10.9.8.7:5432']);
+  // TLS asked for, which the binding does not carry: refused before any dial, and said.
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('') });
+  const refused = await upgradeRefusal();
+  assert.equal(refused.status, 409);
+  assert.match(refused.message, /asks for TLS, which the tunnel db's network binding does not carry: sslmode=disable/);
+  // A host the tunnel does not name, private or not, and the same private host without the binding: refused.
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable').replace('10.9.8.7', '10.9.8.8') });
+  assert.equal((await upgradeRefusal()).status, 403);
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable') });
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, cacheSeconds: 0 })]);
+  assert.equal((await upgradeRefusal()).status, 403);
+  assert.deepEqual(asked, ['10.9.8.7:5432'], 'no other dial through the binding');
+});
+
+test("a tunnel's network binding is checked with the configuration: missing, it fails, and never falls back to a direct dial", () => {
+  const tunnel = (options: Parameters<typeof postgres>[1]) => () => credentialProxy({ credentials: {}, tunnels: { replica: postgres('REPLICA_URL', options) } });
+  // A binding the Worker lacks is undefined: the key is there, its value is not.
+  assert.throws(tunnel({ hosts: ['10.0.1.5'], connect: undefined }), /tunnel replica's connect is undefined, as a Worker's binding is when wrangler\.jsonc lacks it/);
+  assert.throws(tunnel({ hosts: ['10.0.1.5'], connect: {} as Network }), /has no connect method/);
+  // A binding reaches a whole network: the hosts in it are named.
+  assert.throws(tunnel({ connect: { connect: () => Promise.reject(new Error('unused')) } }), /names the hosts it reaches there/);
+  assert.throws(tunnel({ hosts: [], connect: { connect: () => Promise.reject(new Error('unused')) } }), /names the hosts it reaches there/);
+  // Private hosts, with a binding and without insecureUpstreams; never without it.
+  assert.doesNotThrow(tunnel({ hosts: ['10.0.1.5'], connect: { connect: () => Promise.reject(new Error('unused')) } }));
+  assert.throws(tunnel({ hosts: ['10.0.1.5'] }), /names a private host/);
+});
+
+test("a dial through a network binding still under way when the app leaves is given up: the socket that comes after is closed", postgresOnly, async () => {
+  // A binding that answers only when told, with a socket that says when it is closed.
+  let answer!: (socket: WorkersSocket) => void;
+  const asked = new Promise<void>((resolve) => {
+    const network: Network = {
+      connect: () => {
+        resolve();
+        return new Promise<WorkersSocket>((done) => (answer = done));
+      },
+    };
+    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) }, cacheSeconds: 0 })]);
+  });
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@10.9.8.7:5432/d?sslmode=disable' });
+  const raw = tcp({ host: '127.0.0.1', port: listenerPort });
+  await once(raw, 'connect');
+  const startup = Buffer.concat([Buffer.from([0, 3, 0, 0]), cstring('user'), cstring('app'), Buffer.from([0])]);
+  const length = Buffer.alloc(4);
+  length.writeInt32BE(startup.length + 4);
+  raw.write(Buffer.concat([length, startup]));
+  await once(raw, 'data');
+  raw.write(message('p', cstring(handle)));
+  await asked;
+  raw.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  let closed = false;
+  answer({ readable: new ReadableStream(), writable: new WritableStream(), opened: Promise.resolve(), closed: new Promise(() => undefined), close: async () => void (closed = true), startTls: () => { throw new Error('unused'); } });
+  for (let waited = 0; !closed && waited < 2000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(closed, 'the late socket was closed');
+});
+
+/** The tunnel's refusal of a WebSocket, as the plugin answers it: its status and message. */
+async function upgradeRefusal(): Promise<{ status: number; message: string }> {
+  const answer = await pluginSocket(new Request(`${ORIGIN}/use/market/dev/db`, { headers: { authorization: `Bearer ${handle}` } }), runtime, null)!;
+  assert.ok(answer instanceof Response, 'refused');
+  return { status: answer.status, message: ((await answer.json()) as { message: string }).message };
+}
 
 // --- a raw session, as psql's wire is: the simple query protocol, COPY included ---
 

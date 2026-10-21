@@ -43,10 +43,11 @@ import { CoffreError } from '@coffre/client';
 
 import { recipeProblem } from '@coffre/core/recipe';
 
-import type { CoffrePlugin, PickKeys, PluginContext, SocketSession } from '../plugins.ts';
+import type { CoffrePlugin, Connect, PickKeys, PluginContext, SocketSession } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
+import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 
 /** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
 export type Inject =
@@ -156,8 +157,15 @@ export type Credential = {
   egress?: Egress;
 };
 
-/** A database the proxy tunnels to: the key that holds its URL, and the hosts that URL may name. */
-export type Tunnel = { kind: 'postgres'; key: string; hosts?: readonly string[] };
+/**
+ * What a tunnel dials through, in place of the platform's TCP: a Workers
+ * VPC Network binding (`env.REPLICA_NET`), whose `connect('10.0.1.5:5432')`
+ * reaches a private network through a Cloudflare Tunnel, plaintext.
+ */
+export type Network = { connect(address: string): WorkersSocket | Promise<WorkersSocket> };
+
+/** A database the proxy tunnels to: the key that holds its URL, the hosts that URL may name, and what it dials through. */
+export type Tunnel = { kind: 'postgres'; key: string; hosts?: readonly string[]; connect?: Network };
 
 /**
  * A Postgres database, reached through `coffre run`'s local listener and
@@ -165,8 +173,16 @@ export type Tunnel = { kind: 'postgres'; key: string; hosts?: readonly string[] 
  * The environment's `DATABASE_URL` is the real one, `postgres://…`, which
  * coffre logs in with; the app's is the listener's, with the handle as its
  * password. `hosts`, when set, are the only ones the URL may name.
+ *
+ * A database inside a private network, through a VPC Network binding:
+ * `postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect: env.REPLICA_NET })`.
+ * Then `hosts` is required, may name private addresses, and the URL says
+ * `sslmode=disable`: the binding carries plaintext TCP only, and the last
+ * leg, from the tunnel's connector to the database, stays inside that
+ * network. Named but missing (a binding the Worker lacks is `undefined`),
+ * the configuration fails, and never dials without it.
  */
-export function postgres(key: string, options: { hosts?: readonly string[] } = {}): Tunnel {
+export function postgres(key: string, options: { hosts?: readonly string[]; connect?: Network } = {}): Tunnel {
   return { kind: 'postgres', key, ...options };
 }
 
@@ -553,15 +569,20 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     return failure(409, `${path}'s ${tunnel.key} is no postgres:// URL`);
   }
   if (tunnel.hosts !== undefined && !tunnel.hosts.includes(db.host)) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
-  if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
-    return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, allows`);
+  if (tunnel.connect !== undefined) {
+    // Inside the binding's private network, plaintext: TLS through it is no option yet.
+    if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${place[2]}'s network binding does not carry: sslmode=disable, for a database inside that network`);
+  } else if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
+    return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, or the tunnel's network binding (connect), allows`);
   }
   const key = `${handle}\u0000${path}\u0000${place[2]!}`;
+  const network = tunnel.connect;
   return (client, connect) =>
     tunnelPostgres(client, {
       handle,
+      group: key,
       database: db,
-      connect,
+      connect: network === undefined ? connect : through(network),
       // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.
       stands: async () => (await coffre.handle(handle).then(() => true, () => false)) && (proxy.groups.get(key)?.stands ?? true),
       watch: (end) => watch(coffre, proxy, key, { path, handle, name: place[2]!, key: tunnel.key, expiresAt, fresh }, end),
@@ -1222,10 +1243,27 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
   if (credentials.has(name)) throw new Error(`credentialProxy: ${name} names a credential and a tunnel`);
   if (tunnel.kind !== 'postgres') throw new Error(`credentialProxy: tunnel ${name} is postgres(…), the only kind there is`);
   if (!KEY.test(tunnel.key)) throw new Error(`credentialProxy: tunnel ${name} names the key that holds its URL, DATABASE_URL`);
+  // A binding the Worker lacks is `undefined`, the key still there: refused, never the platform's TCP in its place.
+  if ('connect' in tunnel && typeof tunnel.connect?.connect !== 'function') {
+    throw new Error(tunnel.connect === undefined
+      ? `credentialProxy: tunnel ${name}'s connect is undefined, as a Worker's binding is when wrangler.jsonc lacks it: add the binding, or remove connect. ${name} never dials without it`
+      : `credentialProxy: tunnel ${name}'s connect has no connect method: give it a VPC Network binding`);
+  }
+  // A network binding reaches a whole private network: the tunnel names the hosts in it the URL may name.
+  if (tunnel.connect !== undefined && (tunnel.hosts ?? []).length === 0) throw new Error(`credentialProxy: tunnel ${name} dials through a network binding, and names the hosts it reaches there: hosts: ['10.0.1.5']`);
   // Each as it is dialled, 127.1 as 127.0.0.1: what the URL's host is held to.
   const hosts = tunnel.hosts?.map((host) => new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname.replace(/^\[|\]$/g, ''));
-  if (!insecure && hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams reaches`);
+  if (!insecure && tunnel.connect === undefined && hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams, or a network binding (connect), reaches`);
   return { ...tunnel, ...(hosts === undefined ? {} : { hosts }) };
+}
+
+/** TCP out through a tunnel's network binding, to the host and port its URL names. */
+function through(network: Network): Connect {
+  return async (host, port, signal) => {
+    if (signal?.aborted) throw new Error('the session ended');
+    // Not awaited here: a dial the binding has not answered when the session ends is given up, and closed if it comes.
+    return workersSocket(network.connect(`${host.includes(':') ? `[${host}]` : host}:${port}`), signal);
+  };
 }
 
 function checkSigner(name: string, signer: Signer, credentials: Map<string, Resolved>, tunnels: Map<string, Tunnel>): Signer {

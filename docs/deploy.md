@@ -827,6 +827,69 @@ mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) 
 claude.ai and Claude Desktop connect from Anthropic's servers, which must
 reach the instance; Claude Code connects from the person's machine.
 
+## The credential proxy's database tunnel
+
+`coffre run` gives a person's app a database URL of its own, a listener on
+127.0.0.1, and coffre logs in to the real database for it, with the real
+password, which the app never holds
+([design](design/credential-proxy.md#5-the-other-shapes)). The deployment
+adds the proxy, `credentialProxy({ … tunnels: { db: postgres('DATABASE_URL',
+{ hosts: ['db.acme.example'] }) } })` in its `plugins`, and its route,
+`app/src/routes/use.$.ts`:
+
+```ts
+import { createFileRoute } from '@tanstack/react-router';
+import { plugin } from '@coffre/server/routes';
+
+export const Route = createFileRoute('/use/$')({ ...plugin });
+```
+
+On Workers, each `coffre run`'s connections to a database run in a
+Durable Object of their own. A deployment `coffre init` writes from 0.11
+has it already: the `SOCKETS` binding and its migration in
+`app/wrangler.jsonc`, `sockets: env.SOCKETS` in `app/src/coffre.ts`, and in
+`app/src/server.ts`:
+
+```ts
+export default {
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => coffre.upgrade(request, env) ?? handler.fetch(request, { context: coffre.request(env, ctx) }),
+  scheduled: coffre.scheduled,
+};
+
+/** The Durable Object `SOCKETS` binds (wrangler.jsonc). */
+export const CoffreSockets = coffre.Sockets;
+```
+
+An older deployment adds these itself, with, in `app/wrangler.jsonc`:
+
+```jsonc
+"durable_objects": { "bindings": [{ "name": "SOCKETS", "class_name": "CoffreSockets" }] },
+"migrations": [{ "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] }],
+```
+
+The tunnel needs the 0.11 CLI or later: an older one is refused with 426.
+
+A database in a private network, a read replica with no public address,
+is reached through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+whose connector runs in that network, and a
+[VPC Network binding](https://developers.cloudflare.com/workers-vpc/configuration/vpc-networks/)
+to it:
+
+```jsonc
+// app/wrangler.jsonc
+"vpc_networks": [{ "binding": "REPLICA_NET", "tunnel_id": "<the tunnel's id>" }],
+```
+
+```ts
+// app/src/coffre.ts
+tunnels: { replica: postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect: env.REPLICA_NET }) },
+```
+
+The binding reaches the network, `hosts` the addresses in it the URL may
+name, and the URL says `sslmode=disable`: the binding carries plaintext
+TCP, so the last leg, from the connector to the database, stays inside
+that network. A binding the Worker lacks fails the configuration.
+
 ## Backups, restores and monitoring
 
 Back up the one database, and keep the escrowed keys apart from it: the
