@@ -29,16 +29,19 @@ export type Env = {
 // Behind a tunnel, the dev IdP is known by its public URL, as its issuer and in
 // every address it publishes, and that URL answers only a person's browser. So
 // this Worker's own calls to it go to loopback instead.
-let tunnelled = false;
+let tunnelled = '';
 function reachIdpOnLoopback(env: Env) {
-  if (tunnelled || env.COFFRE_DEV_IDP_PUBLIC_URL === env.COFFRE_DEV_IDP_URL) return;
-  tunnelled = true;
+  const pair = `${env.COFFRE_DEV_IDP_PUBLIC_URL} ${env.COFFRE_DEV_IDP_URL}`;
+  if (tunnelled === pair || env.COFFRE_DEV_IDP_PUBLIC_URL === env.COFFRE_DEV_IDP_URL) return;
+  tunnelled = pair;
+  const publicOrigin = new URL(env.COFFRE_DEV_IDP_PUBLIC_URL).origin;
+  const local = new URL(env.COFFRE_DEV_IDP_URL).origin;
   const upstream = globalThis.fetch;
   globalThis.fetch = (input, init) => {
-    const url = input instanceof Request ? input.url : String(input);
-    if (!url.startsWith(env.COFFRE_DEV_IDP_PUBLIC_URL)) return upstream(input, init);
-    const local = env.COFFRE_DEV_IDP_URL + url.slice(env.COFFRE_DEV_IDP_PUBLIC_URL.length);
-    return upstream(input instanceof Request ? new Request(local, input) : local, init);
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.origin !== publicOrigin) return upstream(input, init);
+    const target = local + url.pathname + url.search;
+    return upstream(input instanceof Request ? new Request(target, input) : target, init);
   };
 }
 
@@ -46,7 +49,7 @@ export const coffre = createCoffre((env: Env) => {
   reachIdpOnLoopback(env);
   const idp = env.COFFRE_DEV_IDP_PUBLIC_URL;
   // Loopback issuers and MCP clients are for an instance on loopback; behind a tunnel, there are none.
-  const loopback = new URL(env.COFFRE_PUBLIC_URL).hostname === '127.0.0.1';
+  const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(env.COFFRE_PUBLIC_URL).hostname);
   const local = { clientId: 'coffre-local', clientSecret: 'coffre-local-secret' };
   // The dev IdP's GitHub App, installed on acme and octo-dev: one value, which signs people in through its own
   // client and lists those accounts' repositories (docs/github-app.md). Its client is a local fixture; its key

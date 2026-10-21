@@ -20,8 +20,11 @@ function cookieOf(response) {
 export function browser(api, idp, tunnel = {}) {
     const site = tunnel.api ?? api;
     const home = tunnel.idp ?? idp;
-    const toLoopback = (url) =>
-        url.startsWith(site) ? api + url.slice(site.length) : url.startsWith(home) ? idp + url.slice(home.length) : url;
+    const toLoopback = (address) => {
+        const url = new URL(address);
+        const local = url.origin === new URL(site).origin ? api : url.origin === new URL(home).origin ? idp : null;
+        return local === null ? address : local + url.pathname + url.search;
+    };
 
     /**
      * Sign in as a browser would: leave for the stand-in GitHub, answer its

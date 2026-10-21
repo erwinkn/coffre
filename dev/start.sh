@@ -49,6 +49,17 @@ export COFFRE_DEV_PUBLIC_URL="${COFFRE_DEV_PUBLIC_URL:-$local_url}"
 export COFFRE_DEV_IDP_PUBLIC_URL="${COFFRE_DEV_IDP_PUBLIC_URL:-$COFFRE_DEV_IDP_URL}"
 COFFRE_DEV_PUBLIC_URL="${COFFRE_DEV_PUBLIC_URL%/}"
 COFFRE_DEV_IDP_PUBLIC_URL="${COFFRE_DEV_IDP_PUBLIC_URL%/}"
+for public in "$COFFRE_DEV_PUBLIC_URL" "$COFFRE_DEV_IDP_PUBLIC_URL"; do
+    if ! [[ "$public" =~ ^https?://[^/?#@]+$ ]]; then
+        echo "ERROR: $public is not an origin: expected scheme://host[:port], with no path, query or credentials" >&2
+        exit 1
+    fi
+done
+# A tunnel to one service is no use signed in to through the other's loopback address.
+if [ "$COFFRE_DEV_PUBLIC_URL" = "$local_url" ] && [ "$COFFRE_DEV_IDP_PUBLIC_URL" != "$COFFRE_DEV_IDP_URL" ] ||
+    [ "$COFFRE_DEV_PUBLIC_URL" != "$local_url" ] && [ "$COFFRE_DEV_IDP_PUBLIC_URL" = "$COFFRE_DEV_IDP_URL" ]; then
+    echo "warning: only one of COFFRE_DEV_PUBLIC_URL and COFFRE_DEV_IDP_PUBLIC_URL is set; sign-in from another machine needs both" >&2
+fi
 export COFFRE_PUBLIC_URL="$COFFRE_DEV_PUBLIC_URL"
 export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"
@@ -128,8 +139,8 @@ cat <<BANNER
     vault       beside it, reached only through the app's VAULT binding
     dev IdP     $COFFRE_DEV_IDP_PUBLIC_URL
 
-  CLI (a device login: approve it in the browser):
-    $cli login $COFFRE_DEV_PUBLIC_URL
+  CLI, on this machine (a device login: approve it in the browser):
+    $cli login $COFFRE_DEV_URL
     $cli run market/dev -- printenv
 
   Logs:

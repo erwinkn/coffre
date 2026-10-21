@@ -25,7 +25,6 @@ const pool = new pg.Pool({
 
 // Behind a tunnel (dev/start.sh), the stack's own URLs are its public ones.
 const tunnel = { api: process.env.COFFRE_DEV_PUBLIC_URL, idp: process.env.COFFRE_DEV_IDP_PUBLIC_URL };
-const SITE = tunnel.api ?? API;
 
 const { signIn, send, call } = browser(API, IDP, tunnel);
 
@@ -132,4 +131,4 @@ console.log('==> issued ci-deploy a token, for 30 days');
 await send(admin, 'POST', '/auth/signout');
 await pool.end();
 
-console.log(`\nSeeded. ci-deploy, which reads market/prod, holds this token, for \`coffre login ${SITE} --token\`\n(from a home of its own: it replaces the session saved there):\n  ${ci.token}`);
+console.log(`\nSeeded. ci-deploy, which reads market/prod, holds this token, for \`coffre login ${API} --token\`\n(from a home of its own: it replaces the session saved there):\n  ${ci.token}`);
