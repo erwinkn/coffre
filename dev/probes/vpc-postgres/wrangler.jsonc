@@ -1,0 +1,25 @@
+// Fill in the four REPLACE_ME values from Infra before deploying (README.md).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vpc-postgres-probe",
+  "account_id": "4d1bbbc86d9eb5a3976d7a3c61b1a478",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vpc_networks": [
+    // Bound to one Cloudflare Tunnel, not cf1:network. remote: true is what local dev would need; deploy ignores it.
+    { "binding": "VPC", "tunnel_id": "REPLACE_ME-tunnel-uuid", "remote": true }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "Probe" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Probe"] }],
+  "vars": {
+    "PG_HOST": "REPLACE_ME-replica-private-ip",
+    "PG_PORT": "5432",
+    "PG_DATABASE": "REPLACE_ME-database",
+    "PG_USER": "debug_ro"
+  }
+  // Secrets, set with `wrangler secret put`: DEBUG_RO_PASSWORD, PROBE_KEY.
+}
