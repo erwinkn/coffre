@@ -27,6 +27,8 @@ source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
 restored_db="${source_db}_restored"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
 export COFFRE_DEV_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
+# The drill's stack is never behind a tunnel, whatever the shell exports.
+export COFFRE_DEV_PUBLIC_URL="$COFFRE_DEV_URL" COFFRE_DEV_IDP_PUBLIC_URL="$COFFRE_DEV_IDP_URL"
 owner_url() { echo "postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"; }
 psql_as_owner() { docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -qU coffre_owner "$@"; }
 log() { printf '\n==> %s\n' "$1"; }

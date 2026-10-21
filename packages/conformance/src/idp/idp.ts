@@ -28,6 +28,8 @@ export interface DevIdpClient {
 export interface RegisteredClient extends DevIdpClient {
   /** Accept any http://127.0.0.1 or http://localhost redirect URI, on any port. */
   anyLoopbackRedirect: boolean;
+  /** Also accept redirect URIs under these origins (a tunnel to the app). Only for the built-in clients. */
+  redirectOrigins: readonly string[];
 }
 
 export interface DevIdpOptions {
@@ -37,6 +39,14 @@ export interface DevIdpOptions {
   autoApprove?: boolean;
   /** The fake GitHub App's private key, PKCS #1 PEM: made at start unless given. */
   githubAppKey?: string;
+  /**
+   * The origin a browser reaches this server at, when that is not its loopback
+   * address (a tunnel to it): the issuer, and every URL it publishes, name it.
+   * It still listens on loopback only.
+   */
+  publicOrigin?: string;
+  /** Origins besides loopback that the built-in clients may redirect to: the app's, behind the same tunnel. */
+  redirectOrigins?: readonly string[];
 }
 
 /** Built in, so local dev needs no registration step. */
@@ -59,6 +69,7 @@ export const DEFAULT_CLIENT = Object.freeze({
 export class DevIdp {
   #server: Server | null = null;
   #port = 0;
+  #publicOrigin: string | undefined;
   #clients = new Map<string, RegisteredClient>();
   #subjects = new Map<string, string>();
   #gitHubAccounts = new Map<string, GitHubAccount>();
@@ -85,11 +96,14 @@ export class DevIdp {
 
   constructor(options: DevIdpOptions = {}) {
     this.autoApprove = options.autoApprove ?? false;
+    this.#publicOrigin = options.publicOrigin === undefined ? undefined : new URL(options.publicOrigin).origin;
+    const redirectOrigins = (options.redirectOrigins ?? []).map((each) => new URL(each).origin);
     this.githubApp = new FakeGitHubApp(() => this.origin, options.githubAppKey);
     this.#clients.set(DEFAULT_CLIENT.clientId, {
       ...DEFAULT_CLIENT,
       redirectUris: [],
       anyLoopbackRedirect: true,
+      redirectOrigins,
     });
     for (const client of options.clients ?? []) this.registerClient(client);
     // The GitHub App's own OAuth client, which signs people in as the fake GitHub's do.
@@ -98,6 +112,7 @@ export class DevIdp {
       clientSecret: this.githubApp.clientSecret,
       redirectUris: [],
       anyLoopbackRedirect: true,
+      redirectOrigins,
     });
 
     const authz = new AuthorizationServer(this);
@@ -106,7 +121,7 @@ export class DevIdp {
 
   get origin(): string {
     if (this.#port === 0) throw new Error('DevIdp is not started');
-    return `http://127.0.0.1:${this.#port}`;
+    return this.#publicOrigin ?? `http://127.0.0.1:${this.#port}`;
   }
 
   /** Matches the Cloudflare Access team-domain issuer shape. */
@@ -185,6 +200,7 @@ export class DevIdp {
       clientSecret: client.clientSecret,
       redirectUris: [...client.redirectUris],
       anyLoopbackRedirect: false,
+      redirectOrigins: [],
     });
   }
 

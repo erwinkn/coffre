@@ -2,6 +2,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from 'jose';
 
+import { allowsRedirect } from '../../src/idp/authorize.ts';
 import { DevIdp } from '../../src/idp/idp.ts';
 import { defaultSubject, PERSONAS } from '../../src/idp/people.ts';
 import { basic, form, get, location, pkce, REDIRECT_URI } from './helpers.ts';
@@ -325,4 +326,31 @@ test('the Access endpoints still work', async () => {
   assert.equal(decodeJwt(minted.token).email, 'dev@acme.example');
   const jwks = await (await get(idp.jwksUrl)).json();
   assert.equal(jwks.keys[0].kid, idp.kid);
+});
+
+test('behind a tunnel, it names itself by its public origin and accepts redirects to the app there', async () => {
+  const tunnelled = new DevIdp({
+    autoApprove: true,
+    publicOrigin: 'https://idp.example/',
+    redirectOrigins: ['https://app.example'],
+  });
+  await tunnelled.start();
+  try {
+    // It still listens on loopback; what it publishes names the tunnel.
+    assert.equal(tunnelled.origin, 'https://idp.example');
+    assert.equal(tunnelled.issuer, 'https://idp.example');
+    assert.equal(tunnelled.jwksUrl, 'https://idp.example/cdn-cgi/access/certs');
+
+    const client = tunnelled.client(CLIENT_ID)!;
+    assert.equal(allowsRedirect(client, 'https://app.example/auth/callback/local'), true);
+    assert.equal(allowsRedirect(client, 'http://127.0.0.1:3000/auth/callback'), true);
+    for (const uri of ['https://evil.example/cb', 'http://app.example/cb', 'https://user@app.example/cb', 'https://app.example/cb#x']) {
+      assert.equal(allowsRedirect(client, uri), false, uri);
+    }
+    // Registered clients are not widened by it.
+    tunnelled.registerClient({ clientId: 'strict', clientSecret: 's', redirectUris: [] });
+    assert.equal(allowsRedirect(tunnelled.client('strict')!, 'https://app.example/cb'), false);
+  } finally {
+    await tunnelled.stop();
+  }
 });

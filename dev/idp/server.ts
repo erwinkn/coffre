@@ -1,12 +1,19 @@
 /**
  * Standalone dev IdP, for `pnpm dev`: an OpenID Connect provider and a fake
  * GitHub for coffre's own sign-in, each with a persona page instead of a
- * password. It signs anyone in as anyone, so it listens on loopback only.
+ * password. It signs anyone in as anyone, so it listens on loopback only; a
+ * tunnel to it (COFFRE_DEV_IDP_PUBLIC_URL) is the tunnel's to gate.
  */
 import { DEFAULT_CLIENT, DevIdp } from '@coffre/conformance/idp';
 
 // The GitHub App's key, which dev/start.sh made and the app's configuration names too.
-const idp = new DevIdp({ githubAppKey: process.env.COFFRE_DEV_GITHUB_APP_KEY });
+// Behind a tunnel, the browser reaches it, and the app, at their public origins (dev/start.sh).
+const publicUrl = process.env.COFFRE_DEV_PUBLIC_URL || undefined;
+const idp = new DevIdp({
+  githubAppKey: process.env.COFFRE_DEV_GITHUB_APP_KEY,
+  publicOrigin: process.env.COFFRE_DEV_IDP_PUBLIC_URL || undefined,
+  redirectOrigins: publicUrl === undefined ? [] : [publicUrl],
+});
 idp.listenPort = Number(process.env.COFFRE_DEV_IDP_PORT ?? 8081);
 
 await idp.start();
@@ -17,7 +24,7 @@ console.log(`  discovery            ${idp.origin}/.well-known/openid-configurati
 console.log(`  authorize            ${idp.origin}/oauth/authorize`);
 console.log(`  token                ${idp.origin}/oauth/token`);
 console.log(`  userinfo             ${idp.origin}/oauth/userinfo`);
-console.log(`  client               ${DEFAULT_CLIENT.clientId} / ${DEFAULT_CLIENT.clientSecret} (any loopback redirect URI)`);
+console.log(`  client               ${DEFAULT_CLIENT.clientId} / ${DEFAULT_CLIENT.clientSecret} (any loopback redirect URI${publicUrl === undefined ? '' : `, and any under ${publicUrl}`})`);
 console.log(`Fake GitHub`);
 console.log(`  web base URL         ${idp.origin}/github`);
 console.log(`  api base URL         ${idp.origin}/github/api`);
