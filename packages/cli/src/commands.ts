@@ -125,9 +125,10 @@ export const SECTIONS = [
         about: [
           'a key, or every value of the environment\'s own, made stricter, its',
           'value kept: plain to secret, secret to sensitive; looser takes the',
-          'value written again, coffre set … --secret. A reference or an',
-          'inherited key looser than asked is left, and named, to mark where',
-          'it is held',
+          'value written again, coffre set … --secret, but an Owner of the',
+          'project makes a sensitive value secret in place, never shown to',
+          'them by it. A reference or an inherited key at another level is',
+          'left, and named, to mark where it is held',
         ],
       },
       {
@@ -275,7 +276,7 @@ export const SECTIONS = [
         usage: [`environments protect ${P}`],
         about: ["each role holds its protected column there, for people:", "managing the project's environments does it"],
       },
-      { command: 'environments unprotect', usage: [`environments unprotect ${P}`], about: ['an Owner of the whole instance only'] },
+      { command: 'environments unprotect', usage: [`environments unprotect ${P}`], about: ['an Owner of the project, or of the whole instance, only'] },
     ],
   },
   {

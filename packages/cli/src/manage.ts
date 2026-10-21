@@ -821,8 +821,8 @@ export async function rolesRemove(connect: () => CoffreClient, args: string[], i
 /**
  * `coffre environments protect market/prod`: a person holds their role's
  * protected column there (docs/design/roles.md); whoever manages the
- * project's environments protects one, and only an Owner of the whole
- * instance unprotects it.
+ * project's environments protects one, and only an Owner of the project,
+ * or of the whole instance, unprotects it.
  */
 export async function environmentsProtect(connect: () => CoffreClient, args: string[], on: boolean, io: Io = STDIO): Promise<void> {
   const { positionals } = parse(args, {}, ['<project>/<environment>']);

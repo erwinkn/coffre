@@ -35,7 +35,7 @@ import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 import { formatMember } from './paths.ts';
 import { resolveKeys, type Held } from './inheritance.ts';
-import { protectedFor } from './roles.ts';
+import { protectedFor, unprotects } from './roles.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
 export type Me = {
@@ -98,6 +98,12 @@ export type ProjectEnvironmentSummary = {
    * role's protected column there. A personal config is as its parent is.
    */
   protected: boolean;
+  /**
+   * Whether you may take its protection off, protected or not: an Owner of
+   * its project, or of the whole instance, on no credential's scope (R30).
+   * False for a personal config, protected as its parent is.
+   */
+  unprotectable: boolean;
   /**
    * Your personal config of `parent`, listed as `dev@me`: nobody else's is
    * listed here, as only its owner reads it (maintainers find them under
@@ -202,7 +208,10 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
         const personal = environment.owner !== null;
         const slug = listedSlug(environment);
         if (!manages && !secretAccess) {
-          return { slug, name: personal ? slug : environment.name, accessible: false, parent: parent(environment), personal, protected: protectedFor(caller, environment), details: null };
+          return {
+            slug, name: personal ? slug : environment.name, accessible: false, parent: parent(environment), personal,
+            protected: protectedFor(caller, environment), unprotectable: unprotects(caller, project.id, environment), details: null,
+          };
         }
         return {
           slug,
@@ -211,6 +220,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
           parent: parent(environment),
           personal,
           protected: protectedFor(caller, environment),
+          unprotectable: unprotects(caller, project.id, environment),
           details: {
             archivedAt: iso(environment.archivedAt),
             secretCount: secretAccess ? (resolved.get(environment.id)?.size ?? environment.secretCount) : null,

@@ -11,6 +11,7 @@ import {
   isInstanceRole,
   normalDefinition,
   ownsInstance,
+  ownsProject,
   PERMISSIONS,
   PROJECT_ONLY_PERMISSIONS,
   protects,
@@ -88,9 +89,19 @@ export type RoleInput = { name: string; description: string; permissions: Permis
 
 type Kind = 'role' | 'instance-role';
 
-/** Whether the caller edits roles and unprotects environments: an Owner of the whole instance, on no credential's scope. */
+/** Whether the caller edits roles: an Owner of the whole instance, on no credential's scope. */
 export function editsRoles(caller: Caller): boolean {
   return caller.principal.type === 'user' && caller.credentialScope === null && ownsInstance(caller);
+}
+
+/**
+ * Whether the caller takes an environment's protection off: an Owner of its
+ * project, or of the whole instance, on no credential's scope (R30), as the
+ * vault decides (`ownsProject`). A personal config is protected as the
+ * environment it is a config of, and is unprotected there.
+ */
+export function unprotects(caller: Caller, projectId: string, environment: { owner?: string | null }): boolean {
+  return environment.owner == null && ownsProject(caller, projectId);
 }
 
 /** Whether an environment is protected for the caller: a personal config as the environment it is a config of. */
@@ -316,8 +327,8 @@ function impactSentence(weighed: readonly { impact: ImpactLine; only: string | n
 
 /**
  * Protect an environment, or take its protection off: whoever manages its
- * project's environments protects it, and only an Owner of the whole
- * instance unprotects it (R15). The vault decides, and logs it as
+ * project's environments protects it, and only an Owner of its project, or
+ * of the whole instance, unprotects it (R30). The vault decides, and logs it as
  * `policy.change`. Before any app transaction: none stays open across a
  * vault call. The request as of the change (`protectIds`).
  */

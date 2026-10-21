@@ -393,6 +393,8 @@ export function createEnvironment(client: CoffreClient, project: string): Change
         parent: vars.inherit === true ? (vars.from ?? null) : null,
         // A fork of a protected environment, however made, is protected from its first moment.
         protected: vars.from !== undefined && environments.some((environment) => environment.slug === vars.from && environment.protected),
+        // Who unprotects it is who unprotects any of the project's, as its siblings say, until the server answers.
+        unprotectable: environments.some((environment) => environment.unprotectable),
         personal: false,
         details: { archivedAt: null, secretCount: 0 },
       },
@@ -431,8 +433,9 @@ export function renameEnvironment(client: CoffreClient, project: string): Change
 /**
  * Protect an environment, or take its protection off (docs/design/roles.md):
  * shown at once, on its card and its page, which say if the server
- * refuses. Only an Owner of the whole instance unprotects one, which the
- * page offers to them alone. What everyone holds there changes, so the
+ * refuses. Only an Owner of its project, or of the whole instance,
+ * unprotects one, which the page offers to them alone (`unprotectable`).
+ * What everyone holds there changes, so the
  * roles' readers are refetched too.
  */
 export function protectEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; protected: boolean }, unknown> {

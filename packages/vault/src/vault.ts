@@ -23,6 +23,7 @@ import {
   normalScope,
   NOTHING,
   ownsInstance,
+  ownsProject,
   PROJECT_ONLY_PERMISSIONS,
   ROLE_ID,
   ROLES,
@@ -318,7 +319,7 @@ class Outage {
 }
 
 /** A rewrap that would make a value less sensitive than it is. */
-const LOOSER = 'a value is made less sensitive only by writing it again: an old version comes back, and a key is made stricter, as sensitive as its newest version or more';
+const LOOSER = 'a value is made less sensitive only by writing it again: an old version comes back, and a key is made stricter, as sensitive as its newest version or more; only its current sensitive value is made a secret in place, by an Owner of its project';
 
 function refusal(code: RefusalCode, message: string): Refusal {
   return { code, message };
@@ -1022,14 +1023,18 @@ class VaultService implements Vault {
     }
     // A value is made looser only by writing it again: a sensitive version's key, or one of a secret whose newest is,
     // is never wrapped again as anything but sensitive, so that a person who may not read it never makes it readable.
-    if (items.some((item, i) => item.secret.sensitive !== true && (loaded.versions[i].secret.sensitive || loaded.versions[i].newestSensitive))) {
+    // But for one: a key's current sensitive value made a secret, in place, by an Owner of its project, who reads it
+    // anyway through a service account they give read (R30). Older versions stay as they were held.
+    const loosens = items.map((item, i) => item.secret.sensitive !== true && loaded.versions[i].secret.sensitive === true && loaded.versions[i].current);
+    if (items.some((item, i) => !loosens[i] && item.secret.sensitive !== true && (loaded.versions[i].secret.sensitive || loaded.versions[i].newestSensitive))) {
       return this.#refuseVersions(principal, 'invalid', loaded.versions.map((source) => ({
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'invalid', input), secretVersionId: source.id,
       })), LOOSER);
     }
     const sources = new Map(items.map((item, i) => [item.secret, loaded.versions[i]]));
+    const loosened = new Set(items.flatMap((item, i) => (loosens[i] ? [item.secret] : [])));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => ({
-      ...keyEntry('key.rewrap', principal, secret, decision, code, input, { from: sources.get(secret)!.secret.version }),
+      ...keyEntry('key.rewrap', principal, secret, decision, code, input, { from: sources.get(secret)!.secret.version, ...(loosened.has(secret) ? { was: 'sensitive' } : {}) }),
       secretVersionId: sources.get(secret)!.id,
     });
     const remote =
@@ -1037,11 +1042,18 @@ class VaultService implements Vault {
     return this.#keys(
       {
         action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input,
-        // Again in the decision and under the log's head: a sensitive version written since it was loaded is as newest as any.
+        // Again in the decision and under the log's head: a sensitive version written since it was loaded is as newest as any,
+        // and a value loosened is still its key's current one.
         vet: async (db) => {
           const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
-          return items.map(({ secret }) => (secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null));
+          // Read only for a loosening: what a restore brings back as it was held, null where it is the current value.
+          const current = loosens.includes(true) ? await store.restoredNatures(db, items.map(({ secret }) => ({ secretId: secret.secretId, from: sources.get(secret)!.id }))) : [];
+          return items.map(({ secret }, i) => {
+            if (loosens[i]) return current[i] === null ? null : 'invalid';
+            return secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null;
+          });
         },
+        owns: loosens,
         // An old value brought back, not the current one, is made live by whoever could have read it: a secret by its
         // readers, a sensitive one, which nobody reads, by those who use it, a plain one by any writer, as it was shown
         // to them. Whatever reads the key next, a reference to it included, then reads what its restorer could. Typing a
@@ -1153,6 +1165,8 @@ class VaultService implements Vault {
        * is, read in the decision and again under the head; none for null.
        */
       needs?: (db: Queryable) => Promise<(readonly Permission[] | null)[]>;
+      /** Each secret that takes besides its reader being an Owner of its project (`ownsProject`): a sensitive value made a secret. */
+      owns?: readonly boolean[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
@@ -1187,7 +1201,7 @@ class VaultService implements Vault {
       owners.clear();
       for (const [id, environment] of environments) if (environment.owner !== null) owners.set(id, ownerKey(environment.owner));
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
-      const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
+      const refusalOf = (secret: SecretRef, i: number): RefusalCode | null => {
         const personal = personalRefusal(reader, principal, call.permission, secret, at[i]!, environments);
         if (personal !== undefined) return personal;
         const also = needs[i];
@@ -1200,6 +1214,11 @@ class VaultService implements Vault {
         // (a sensitive one stays use-only) from its source, and its permissions from where it lives. Its maker held what
         // the source's nature asks when it was made (`reference`).
         return refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
+      };
+      // A loosening takes its reader owning the project besides, a personal config's owner too, there.
+      const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
+        const code = refusalOf(secret, i);
+        return code === null && call.owns?.[i] === true && !ownsProject(reader.live, secret.projectId) ? 'not_allowed' : code;
       });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) {
         (await call.vet(d.tx, d.reads)).forEach((code, i) => (codes[i] = code));
@@ -2243,9 +2262,10 @@ class VaultService implements Vault {
           next.protected = [...next.protected, ...change.environmentIds.filter((id) => !known.has(id)).map((environmentId) => ({ projectId: change.projectId, environmentId, at: d.at }))]
             .sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1));
         } else {
-          // Unprotecting widens what people hold there: an Owner of the whole instance's to do (R15).
-          if (!owner) throw refused('not_allowed', 'only an Owner of the whole instance unprotects an environment');
-          next.protected = next.protected.filter((place) => !change.environmentIds.includes(place.environmentId));
+          // Unprotecting widens what people hold there: an Owner of the project's to do, or of the whole instance's (R30).
+          // It takes off only what the project protects: a fork's id, with no row yet, is another project's to unprotect.
+          if (!ownsProject(acting.live, change.projectId)) throw refused('not_allowed', 'only an Owner of its project, or of the whole instance, unprotects an environment');
+          next.protected = next.protected.filter((place) => place.projectId !== change.projectId || !change.environmentIds.includes(place.environmentId));
         }
       } else {
         throw refused('invalid', 'a change is to a role, an instance role, or protection');

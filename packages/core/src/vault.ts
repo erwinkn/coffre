@@ -39,7 +39,10 @@ export interface Vault {
    * It needs a write grant, not a read one, since the key never leaves the
    * vault. A new version is never less sensitive than the one it is made
    * from, or than its secret's newest: a value is made looser only by
-   * being written again (`invalid`).
+   * being written again (`invalid`). Except one: a key's current sensitive
+   * value made a secret, in place, by an Owner of its project, or of the
+   * whole instance, on no credential's scope (`ownsProject`; `not_allowed`
+   * for anyone else), its entry saying `was: 'sensitive'`.
    */
   rewrap(input: RewrapInput): Promise<Outcome<Wrapped>>;
 
@@ -114,7 +117,8 @@ export interface Vault {
    *   Member;
    * - environments of one project protected, by whoever manages its
    *   environments, before their rows exist too (a fork's); or
-   *   unprotected, by an Owner of the whole instance.
+   *   unprotected, by an Owner of the project or of the whole instance
+   *   (`ownsProject`), as far as that project protected them.
    * The policy after it, and the newest `policy.change`, which it is as of:
    * the change's own, when it changed anything.
    */

@@ -76,6 +76,7 @@ export type Api = {
           accessible: boolean;
           parent: string | null;
           protected: boolean;
+          unprotectable: boolean;
           personal: boolean;
           details: null | {
             archivedAt: string | null;
@@ -277,6 +278,8 @@ export type Api = {
         fallback: boolean;
       };
       protected: boolean;
+      unprotectable: boolean;
+      loosenable: boolean;
       rotateAfterDays: number | null;
     };
   };
@@ -2137,6 +2140,7 @@ export type ProjectSummary = {
     accessible: boolean;
     parent: string | null;
     protected: boolean;
+    unprotectable: boolean;
     personal: boolean;
     details: null | {
       archivedAt: string | null;

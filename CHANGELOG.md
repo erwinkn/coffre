@@ -8,10 +8,37 @@
   may change it, the tag is the button that does, on both, behind the
   same confirmation as before: "Protect…" on an environment that is not,
   for those who manage the project's environments, and "Protected" on one
-  that is, for an Owner of the whole instance, who alone takes it off. Everyone else sees the tag
+  that is, for an Owner of the project, who alone takes it off (below). Everyone else sees the tag
   alone, whose note says what it means and who changes it. The card's ⋯
   menu no longer offers Protect or Unprotect, which the tag does. Who may
-  protect or unprotect is unchanged, and still decided by the server.
+  protect or unprotect is still decided by the server.
+- **An Owner of a project makes a sensitive value a secret in place, and
+  unprotects its environments** (R30). An Owner can already read any
+  value of their project, through a service account they give read
+  (break-glass), so typing a sensitive value again to loosen it, or
+  asking an Owner of the whole instance to unprotect prod, protected
+  nothing from them. Now an Owner of the project, by a grant on it or an
+  instance role scoped to it, or of the whole instance, as a person on
+  no credential's scope:
+  - makes a sensitive value a secret with its value kept: `coffre mark
+    market/prod/DATABASE_URL secret` (`coffre mark market/prod secret`
+    for every one of its own), or the row's Who sees it › Secret, behind
+    a confirmation. The vault opens the key and wraps it again without
+    the sensitive binding, and refuses it to anyone else (`not_allowed`),
+    so the value never reaches the app or its caller by it. It is a new
+    version: the older ones stay sensitive, and a rollback to one brings
+    it back sensitive. A reference to it reads it as a secret, live.
+    Logged as its own entry, `secret.loosen`, saying both levels;
+  - takes an environment's protection off (`coffre environments
+    unprotect`, or the Protected tag), as far as their project protects
+    it. Recovering a policy the vault cannot read is still the whole
+    instance's Owner's.
+  Everyone else types the value again, and leaves prod protected, as
+  before. Secret to plain is unchanged: a reveal, then a write. The
+  secrets listing says `loosenable` and `unprotectable`, the projects
+  listing `unprotectable` per environment, as the server decides them:
+  the UI reads those, not role names. An Owner of every `prod`, scoped to
+  environments by slug, owns no project, and does neither. No migration.
 
 ## 0.10.2 (2026-10-20)
 

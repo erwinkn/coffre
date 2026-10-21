@@ -154,6 +154,7 @@ export function EnvironmentPage() {
       keys={result.keys}
       parents={result.parents ?? []}
       personal={result.personal != null}
+      loosenable={result.loosenable === true}
       rotateAfterDays={result.rotateAfterDays}
     />
   );
@@ -168,6 +169,7 @@ function EnvironmentLedger({
   keys,
   parents,
   personal,
+  loosenable,
   rotateAfterDays,
 }: {
   project: string;
@@ -178,6 +180,8 @@ function EnvironmentLedger({
   parents: string[];
   /** Your personal config, `dev@me`: its values yours alone. */
   personal: boolean;
+  /** Whether you make a sensitive value of its own a secret in place, as an Owner of its project does, as the server says. */
+  loosenable: boolean;
   /** Days a value may go unchanged before it is flagged for rotation; null for no flag. */
   rotateAfterDays: number | null;
 }) {
@@ -691,6 +695,7 @@ function EnvironmentLedger({
                       canArchive={canArchive}
                       canReveal={canReveal}
                       canList={canList}
+                      canLoosen={loosenable}
                       folders={folders}
                       onMove={(folder) => move({ key: entry.key, folder })}
                       lent={lentBy.get(entry.key) ?? []}
@@ -1230,6 +1235,7 @@ function SecretRow({
   canArchive,
   canReveal,
   canList,
+  canLoosen,
   folders,
   onMove,
   lent,
@@ -1266,6 +1272,8 @@ function SecretRow({
   canReveal: boolean;
   /** Whether the caller lists the environment: reads it, or uses it as a Contributor does. */
   canList: boolean;
+  /** Whether the caller makes a sensitive value a secret in place, its value kept: an Owner of the project. */
+  canLoosen: boolean;
   /** The folders in use in this environment, offered when moving it. */
   folders: readonly string[];
   onMove: (folder: string | null) => void;
@@ -1310,6 +1318,8 @@ function SecretRow({
   const { run: act, error: actError } = useAction();
   // Made sensitive from the menu, once confirmed: nobody sees its value after.
   const [hiding, setHiding] = useState(false);
+  // Made a secret from the menu, by an Owner, once confirmed: its readers see its value after.
+  const [showing, setShowing] = useState(false);
   const { reference, parent } = entry;
   // In a fork (docs/design/forking.md): a key it inherits has no row of its
   // own, one it overrides has, and one it removed is not served.
@@ -1442,10 +1452,12 @@ function SecretRow({
   }
 
   // Who sees it, chosen from its menu: stricter at once, its value kept; more
-  // visible in the editor, which asks for the value typed again.
+  // visible in the editor, which asks for the value typed again. But a
+  // sensitive value an Owner makes a secret keeps its value too, once confirmed.
   function chooseLevel(next: Sensitivity) {
     if (entry.sensitivity === null || next === entry.sensitivity) return;
-    if (stricter(entry.sensitivity, next)) {
+    if (canLoosen && entry.sensitivity === 'sensitive' && next === 'secret') setShowing(true);
+    else if (stricter(entry.sensitivity, next)) {
       setFocusName(false);
       setReveal(null);
       onEdit();
@@ -1902,6 +1914,22 @@ function SecretRow({
         confirmLabel="Make sensitive"
         destructive={false}
         onConfirm={() => mark('sensitive')}
+      />
+
+      <ConfirmDialog
+        open={showing}
+        onOpenChange={setShowing}
+        title={
+          <>
+            Make <span className="mono">{entry.key}</span> a secret?
+          </>
+        }
+        body={personal
+          ? 'Its value is kept, and you will see it. Its earlier versions stay sensitive.'
+          : `Its value is kept, and shown from now on to people whose role reads secrets in ${project}/${environment}, you included, and wherever a reference or a fork reads it. Its earlier versions stay sensitive.`}
+        confirmLabel="Make secret"
+        destructive={false}
+        onConfirm={() => mark('secret')}
       />
 
       <ConfirmDialog

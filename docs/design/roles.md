@@ -28,11 +28,17 @@ service account, a Viewer of `market/prod`, reads them as it always did.
 
 - **A flag on the environment**, set by anyone who manages environments
   in its project (`environment.manage`), and taken off only by an Owner
-  of the whole instance (R15): protecting tightens, unprotecting widens.
-  No name patterns: `prod` is protected because someone said so.
+  of its project, or of the whole instance (R30, which widened R15's
+  instance Owner alone): protecting tightens, unprotecting widens. No
+  name patterns: `prod` is protected because someone said so. An Owner of
+  the project is one by a grant on it, or whose instance role is scoped
+  to it, as a person on no credential's scope (`ownsProject`,
+  packages/core/src/access.ts); an Owner of every `prod`, scoped to
+  environments by slug, owns no project, and leaves its protection on.
 - **Forks stay protected.** A fork of a protected environment, a copy or
   one that inherits, is protected from its first moment: the vault
-  protects its id before its row exists, and only an Owner unprotects it.
+  protects its id before its row exists, and only an Owner of the
+  project unprotects it.
   Each protected id keeps when it was protected: one with no row ten
   minutes later is a fork refused or abandoned, and protects nothing.
   Until then, a scoped instance role's holder, whose filters take in no
@@ -88,6 +94,11 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   - Typing a value, and tightening a key's nature (plain to secret, secret
     to sensitive), take writing alone: what is written is what its writer
     has seen, or reaches fewer.
+  - Loosening a sensitive value to a secret in place, its value kept,
+    takes an Owner of its project (R30): the one person who could have
+    read it, through a service account they give read. The vault decides
+    it (`rewrap`, `ownsProject`), for the key's current version only.
+    Anyone else, and anything looser, types the value again.
 
   ```
   Ada uses and writes a protected prod, and reads dev
@@ -111,8 +122,8 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   rows is never undone by them. Its edits are unknown, not none, so no
   change is made from them, which would write a policy without the
   protections and role edits the forged rows hide: every change is
-  refused but an Owner's of the whole instance, on no credential's scope,
-  which starts a fresh policy, the roles as they ship and only what it
+  refused but an Owner's of the whole instance, on no credential's scope
+  (an Owner of the project unprotects nothing then), which starts a fresh policy, the roles as they ship and only what it
   protects. That is the recovery: the Owner then protects again what was
   protected, and edits again what was edited, from the log's own entries
   (`coffre audit`), which still name each change.
@@ -210,7 +221,15 @@ two: replacing a Viewer's binding keeps what the Viewer held.
    by being made. *Alternative:* vault-owned tables with sealed rows, as
    members have, which a migration and a seal per row would cost.
 3. **Protecting takes `environment.manage`; unprotecting, an Owner of the
-   whole instance.** R15.
+   project or of the whole instance** (R30, Erwin 2026-10-21; R15 had the
+   whole instance's alone). An Owner reads any value of their project
+   anyway, through a service account they give read (break-glass,
+   docs/design/credential-proxy.md), so keeping protection from them
+   protects nothing; a project's Owner holds this inside their project.
+   The unprotect takes off only what the project protects: a fork's id
+   with no row yet, protected for another project, stays. Recovering a
+   policy the vault cannot read stays the whole instance's Owner's.
+   *Alternative:* an Owner of the whole instance alone, as 0.10 shipped.
 4. **Default protected columns drop read from Viewer, Developer and
    Maintainer** (section 3), as Erwin's example has it. *Alternative:* the
    same as their normal columns, so protecting changes nothing until an
@@ -246,7 +265,7 @@ GET    /api/roles                     every role and instance role: both columns
 PUT    /api/roles/<role>              { name, description, permissions, protected }: an edit, or a new role
 DELETE /api/roles/<role>              a built-in role as it ships again; one an Owner made, deleted (409 while granted)
 PUT    /api/instance-roles/<role>     the same, for an instance role; DELETE resets it
-PATCH  /api/projects/<p>/<e>          { "protected": true }, on its own: managing its environments; false: an Owner of the whole instance
+PATCH  /api/projects/<p>/<e>          { "protected": true }, on its own: managing its environments; false: an Owner of the project
 ```
 
 `?dryRun=1` on a `PUT` or `DELETE` answers what the change would do, and
@@ -271,7 +290,8 @@ as weighed, or answers 409 `policy_changed` if the policy changed since
 (section 8, rule 2). A project-wide permission counts `projects` and no environments. Projects
 and environments say `protected` where they are listed (`GET
 /api/projects`, `GET /api/secrets/<p>/<e>`), a personal config as the
-environment it is a config of.
+environment it is a config of, and `unprotectable`, whether the caller
+takes its protection off, as the server decides it: the UI names no role.
 
 ## 8. Rules that hold the policy
 

@@ -10,20 +10,21 @@ import { Lock } from './icons';
 import { ConfirmButton, Toggletip } from './ui';
 
 const MEANING = 'Protected: each person here holds their role’s protected column, which an Owner sets in Settings › Roles. Service accounts hold their role as anywhere else.';
-const WHO_UNPROTECTS = 'Only an Owner of the whole instance takes protection off.';
+const WHO_UNPROTECTS = 'Only an Owner of its project takes protection off.';
 
 /**
  * An environment's protection (docs/design/roles.md), on its card and its
  * page. Whoever manages the project's environments protects one, and only
- * an Owner of the whole instance takes it off: for them the tag is the
- * button that does, behind a confirmation. Everyone else sees the tag, whose
+ * an Owner of its project, or of the whole instance, takes it off, as the
+ * server says (`unprotectable`): for them the tag is the button that does,
+ * behind a confirmation. Everyone else sees the tag, whose
  * note says what it means and who changes it, and nothing while it is off.
  * A personal config has none of its own: it is as its parent is.
  */
 export function Protection({ project, environment }: { project: string; environment: ProjectEnvironment }) {
-  const { capabilities, projects } = useShell();
+  const { projects } = useShell();
   const manages = projects.find((entry) => entry.slug === project)?.permissions.includes('environment.manage') === true;
-  const unprotects = capabilities.ownsInstance;
+  const unprotects = environment.unprotectable === true;
   const guarded = environment.protected;
   if (manages && environment.details !== null && environment.personal !== true && (!guarded || unprotects)) {
     return <ChangeProtection project={project} slug={environment.slug} guarded={guarded} unprotects={unprotects} />;

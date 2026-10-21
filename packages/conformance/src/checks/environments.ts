@@ -238,6 +238,40 @@ export async function references(deployment: Deployment, { admin, reader, leaver
 /** A key prod has and dev does not, for the missing-keys check; archived once checked. */
 const PROD_ONLY = 'CONFORMANCE_PROD_ONLY';
 
+const LOOSE = 'CONFORMANCE_LOOSENED';
+
+/**
+ * A sensitive value is made a secret in place by an Owner alone (R30): the
+ * leaver, a developer on dev, is refused, and told the listing does not
+ * offer it; the admin's mark answers no value, and the reader, a viewer on
+ * dev, reads it after, as a secret, its old version still sensitive. Its
+ * own `secret.loosen`, which "keys behind writes" holds to the vault's
+ * `key.rewrap`. The key is archived after.
+ */
+export async function loosening({ admin, reader, leaver }: People): Promise<string> {
+  const value = canary();
+  const path = `${DEV}/${LOOSE}`;
+  await admin.api.secrets.set(DEV, { [LOOSE]: { value, sensitivity: 'sensitive' } });
+  try {
+    await refused('a viewer read a sensitive value', reader.api.secrets.reveal(path));
+    expect((await leaver.api.secrets.list(DEV)).loosenable === false, 'a developer on dev is told they make a sensitive value a secret in place');
+    await refused('a developer on dev made a sensitive value a secret in place', leaver.api.secrets.set(DEV, { [LOOSE]: { sensitivity: 'secret' } }));
+    expect((await admin.api.secrets.list(DEV)).loosenable === true, 'the admin, an Owner of the whole instance, is told they do not loosen');
+    const marked = await admin.api.secrets.set(DEV, { [LOOSE]: { sensitivity: 'secret' } });
+    expect(!JSON.stringify(marked).includes(value), "the admin's loosening answered the value", marked);
+    expect(JSON.stringify(marked.keys[LOOSE]) === JSON.stringify({ version: 2, sensitivity: 'secret' }), 'the loosening made no new secret version', marked.keys);
+    const read = await reader.api.secrets.reveal(path);
+    expect(read.values[LOOSE] === value, "the reader did not read the loosened value as dev's secret");
+    const versions = (await admin.api.secrets.history(path)).versions.map((version) => version.sensitivity);
+    expect(versions.join() === 'secret,sensitive', 'the loosening changed the old version too, or made none', versions);
+    const logged = (await admin.api.audit.list({ path, limit: 50 })).entries.filter((entry) => entry.action === 'secret.loosen');
+    expect(logged.length === 1 && logged[0]!.metadata.from === 'sensitive' && logged[0]!.metadata.to === 'secret', 'the loosening is not its own entry, saying both levels', logged);
+  } finally {
+    await admin.api.secrets.set(DEV, { [LOOSE]: null });
+  }
+  return 'the admin makes a sensitive value a secret in place, answered no value, as a new version, logged as secret.loosen; a developer on dev may not';
+}
+
 /**
  * Within a project, key names are not secret; values are. What dev is
  * missing is compared with every sibling: the reader, a viewer on dev who

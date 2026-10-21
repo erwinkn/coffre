@@ -278,6 +278,16 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => [...place(entry), ...(number(entry.metadata.from) === null ? [] : [` to version ${number(entry.metadata.from)}`])],
     then: ({ entry }) => (entry.version === null ? [] : [`, now ${entry.version}`]),
   },
+  // A sensitive value made a secret in place, by an Owner of its project: its value kept, shown to its readers from then on.
+  'secret.loosen': {
+    did: 'made',
+    tried: 'make',
+    what: ({ entry }) => place(entry),
+    then: ({ entry }) => [
+      ` ${text(entry.metadata.to) ?? 'secret'}, from ${text(entry.metadata.from) ?? 'sensitive'}, its value kept`,
+      ...(entry.version === null ? [] : [`, now version ${entry.version}`]),
+    ],
+  },
   'secret.rename': {
     did: 'renamed',
     tried: 'rename',

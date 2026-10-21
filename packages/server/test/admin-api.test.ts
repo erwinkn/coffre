@@ -317,6 +317,7 @@ test('environment grants expose only the listed names of inaccessible siblings',
     parent: null,
     personal: false,
     protected: false,
+    unprotectable: false,
     details: { archivedAt: null, secretCount: 1 },
   });
   assert.deepEqual(prod, {
@@ -326,6 +327,7 @@ test('environment grants expose only the listed names of inaccessible siblings',
     parent: null,
     personal: false,
     protected: false,
+    unprotectable: false,
     details: null,
   });
 });

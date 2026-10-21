@@ -100,7 +100,7 @@ const placePatch = z
   .object({ name: displayName, slug, archived: z.boolean() })
   .partial()
   .strict();
-// `protected`: whoever manages the project's environments protects one; only an Owner of the whole instance unprotects it.
+// `protected`: whoever manages the project's environments protects one; only an Owner of its project, or of the whole instance, unprotects it.
 const environmentPatch = placePatch.extend({ slug: environmentSlug.optional(), protected: z.boolean().optional() }).strict();
 
 /** `?dryRun=1`: what the call would do, without doing it. Any other query is refused, not ignored. */
