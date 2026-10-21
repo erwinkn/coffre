@@ -45,6 +45,11 @@ export const FLOW = 'coffre-tunnel-flow';
 const WINDOW = 1024 * 1024;
 /** What the object takes from a client before it ends it: a window, and the message that crossed it. */
 const MOST_HELD = 2 * WINDOW;
+/**
+ * The sessions one object holds at once: a pool of a few dozen, each at
+ * most three windows of the object's 128 MB (one out, two in).
+ */
+const MOST_SESSIONS = 32;
 /** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
 const COUNT_EVERY = 128 * 1024;
 
@@ -56,8 +61,16 @@ const COUNT_EVERY = 128 * 1024;
 export async function forwardSocket(request: Request, sockets: SocketsNamespace): Promise<Response> {
   const refused = refusal(request);
   if (refused !== null) return refused;
-  const { pathname } = new URL(request.url);
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${pathname}\n${request.headers.get('authorization') ?? ''}`));
+  // As admission reads them: the token alone, and the path's segments decoded, so one run's spellings of them name one object.
+  const token = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')!)![1]!;
+  const segments = new URL(request.url).pathname.split('/').map((segment) => {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  });
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${JSON.stringify(segments)}\n${token}`));
   const name = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   return sockets.get(sockets.idFromName(name)).fetch(request);
 }
@@ -92,6 +105,8 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
     readonly #state: ObjectState;
     readonly #env: Env;
     #admit: Admit | undefined;
+    /** The sessions open in the object, which it holds to `MOST_SESSIONS`. */
+    #open = 0;
     constructor(state: ObjectState, env: Env) {
       this.#state = state;
       this.#env = env;
@@ -100,6 +115,9 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       // The Worker refuses these first (`refusal`); an object asked otherwise refuses them too.
       const refused = refusal(request);
       if (refused !== null) return refused;
+      if (this.#open >= MOST_SESSIONS) {
+        return new Response(`this run holds ${MOST_SESSIONS} connections here already, each up to three windows of the object's memory: close some, or make the pool smaller`, { status: 503 });
+      }
       this.#admit ??= admission(this.#env, this.#state);
       const answer = await this.#admit(request, cloudflareSourceIp(request));
       if (answer instanceof Response) return answer;
@@ -109,7 +127,15 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       // Binary messages as bytes: at the deployments' compatibility date a Workers WebSocket gives a Blob, as the standard says.
       server.binaryType = 'arraybuffer';
       const client = fromWebSocket(server);
-      this.#state.waitUntil(answer(client, connect).catch(() => undefined).finally(client.close));
+      this.#open += 1;
+      this.#state.waitUntil(
+        answer(client, connect)
+          .catch(() => undefined)
+          .finally(() => {
+            this.#open -= 1;
+            client.close();
+          }),
+      );
       return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
     }
   };
@@ -151,12 +177,15 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
     counted?.();
     arrived = counted = null;
   };
-  const end = () => {
+  /** Ends the pipe; closes the WebSocket unless the client already did (`gone`): workerd answers its close itself, and a close after it fails out of reach. */
+  const end = (gone = false) => {
     if (done) return;
     done = true;
-    try {
-      ws.close(1000);
-    } catch {}
+    if (!gone) {
+      try {
+        ws.close(1000);
+      } catch {}
+    }
     wake();
     ended();
   };
@@ -178,8 +207,8 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
     queued += data.byteLength;
     wake();
   });
-  ws.addEventListener('close', end);
-  ws.addEventListener('error', end);
+  ws.addEventListener('close', () => end(true));
+  ws.addEventListener('error', () => end(true));
   // That the object paces: the client holds itself to the window from here.
   ws.send('0');
   const readable = new ReadableStream<Uint8Array>(
@@ -199,7 +228,7 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
           end();
         }
       },
-      cancel: end,
+      cancel: () => end(),
     },
     // Nothing read ahead: a message is taken when the session asks for it, and counted then.
     { highWaterMark: 0 },
@@ -211,10 +240,10 @@ function fromWebSocket(ws: WorkersWebSocket): Pipe {
       ws.send(chunk);
       uncounted += chunk.length;
     },
-    close: end,
-    abort: end,
+    close: () => end(),
+    abort: () => end(),
   });
-  return { readable, writable, close: end, closed };
+  return { readable, writable, close: () => end(), closed };
 }
 
 /**

@@ -759,9 +759,10 @@ forwarded, over TLS as the session is, only when its key names a live
 session of the same handle. A guessed key, or another handle's, reaches
 nothing, and the database's own keys never leave coffre. psql's Ctrl-C
 works, and tests hold both. On Workers, the map is the object's (below): a cancel request comes with
-the same handle, for the same database, so it reaches the object that
-holds the session. It must name a session of the same database too, which
-it is sent to through that tunnel's own way out.
+the same handle, for the same tunnel, so it reaches the object that holds
+the session. It must name a session of the same tunnel too, here and on
+Node, so it goes out the way that session's connection did, through the
+tunnel's network binding or not.
 
 **Not yet:**
 - *A check on a deployed Worker* (section 7): six dials at once, an idle
@@ -826,9 +827,15 @@ one that sends two windows uncounted, or counts more than it was sent, is
 ended, so a client that ignores the window, the app itself speaking
 WebSocket with its handle, cannot fill the object. A WebSocket without
 the header, an older CLI's, or without a bearer, is refused by the
-Worker, with 426 or 401, before any object is made. This is how any
+Worker, with 426 or 401, before any object is made. An object holds 32
+sessions at most, so a pool gone wrong cannot fill it: the 33rd is
+refused with 503. The object's name digests the bearer token alone and
+the path's segments decoded, as admission reads them, so no spelling of
+either splits a run's connections. This is how any
 plugin's WebSocket carries its bytes on Workers, not the tunnel's own:
-a session is given a byte pipe (`Pipe`), and this is the pipe. Measured with `vite
+a session is given a byte pipe (`Pipe`), and this is the pipe. So a
+plugin's WebSocket on Workers has coffre's CLI as its client: a browser
+can neither ask for credit nor count, and is refused. Measured with `vite
 dev` and the real CLI, 200 MB through the object at about 48 MB/s: with
 the app stalled 10 s mid-result, workerd's memory rose 2 MB (41 MB with the
 window off), and the test holds the object to a window: an app that

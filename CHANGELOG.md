@@ -20,7 +20,8 @@
   back what they took, and neither sends more than 1 MiB the other has
   not counted: a large `SELECT *` read by a slow client, or a large `COPY
   FROM STDIN`, waits in the database's socket, not in the object's
-  memory, and a client that ignores the window is ended. The CLI's
+  memory, and a client that ignores the window is ended. One run holds 32
+  connections to a database at most there. The CLI's
   listener sends a count every 30 seconds, so a psql left at its prompt
   outlives Cloudflare's 100-second idle timeout. A Workers coffre refuses
   an older CLI with 426: update it. Node is unchanged, and the 0.11 CLI
@@ -33,10 +34,9 @@
   `sslmode=disable`, since the binding carries plaintext TCP only; a URL
   that asks for TLS is refused. A binding the Worker lacks fails the
   configuration, never a direct dial. Without `connect`, nothing changes.
-- **A cancel request reaches only a session of the same database.** It
+- **A cancel request reaches only a session of the same tunnel.** It
   already needed the same handle; now its key must also name a session of
-  the database (host, port and name) it came for, so it is sent the way
-  that tunnel dials.
+  the tunnel it came on, so it is sent the way that tunnel dials.
 
 - **Protection shows where you are, and changes there.** A protected
   environment's tag is amber now, on its card and in its page's header,

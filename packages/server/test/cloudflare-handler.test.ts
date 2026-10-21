@@ -88,6 +88,10 @@ test("a plugin's WebSocket goes to the Durable Object its path and bearer name; 
   const names = sent.map(([name]) => name);
   assert.equal(names[0], names[1]);
   assert.equal(new Set(names).size, 3);
+  // Another spelling of the same bearer and path, as admission reads them: the same object.
+  const spelled = new Request('https://coffre.test/use/market/dev/%64b', { headers: { upgrade: 'websocket', authorization: 'bearer   a', 'coffre-tunnel-flow': 'credit' } });
+  await hosted.upgrade(spelled, {});
+  assert.equal(sent.at(-1)![0], names[0]);
   // A digest: the handle names no object anyone can read.
   assert.ok(names.every((name) => /^[0-9a-f]{64}$/.test(name)));
   // The object is sent the request as it came, its bearer included, and decides on it: the Worker checks nothing.

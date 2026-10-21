@@ -4,5 +4,6 @@
     // For the tests of the repo's own scripts, which are plain JavaScript.
     "allowJs": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  // The vault's declaration of `cloudflare:workers`, for test/workers/coffre-worker.ts, which runs the vault's Worker beside coffre's.
+  "include": ["src/**/*.ts", "test/**/*.ts", "../vault/src/cloudflare-workers.d.ts"]
 }

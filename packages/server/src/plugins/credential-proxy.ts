@@ -580,6 +580,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   return (client, connect) =>
     tunnelPostgres(client, {
       handle,
+      group: key,
       database: db,
       connect: network === undefined ? connect : through(network),
       // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.

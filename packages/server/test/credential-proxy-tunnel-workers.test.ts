@@ -9,7 +9,6 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,18 +20,17 @@ import { WebSocket } from 'ws';
 
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
+import { tunnelListener, WINDOW } from './tunnel-listener.ts';
 
 const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false;
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const REVOKED = `coffre_use_${'r'.repeat(43)}`;
 const NAME = 'coffre-tunnel-workers-test';
-/** The object's window, cloudflare-sockets.ts's `WINDOW`: what it sends that the app has not counted. */
-const WINDOW = 1024 * 1024;
 
 let dir: string;
 let worker: Unstable_DevWorker;
 let at: string;
-const listeners: Server[] = [];
+const listeners: { close(): void }[] = [];
 
 before(async () => {
   if (skip) return;
@@ -64,45 +62,11 @@ after(async () => {
   if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
 });
 
-/**
- * `coffre run`'s listener as it speaks to a Workers coffre (packages/cli/src/tunnels.ts):
- * the flow header, and each side's count of what it took.
- */
+/** A listener for `tunnel`, closed after the suite; its port. */
 async function listen(tunnel: string, handle = HANDLE): Promise<number> {
-  const listener = createServer((socket: Socket) => {
-    socket.pause();
-    const ws = new WebSocket(`${at}/use/market/dev/${tunnel}`, { headers: { authorization: `Bearer ${handle}`, 'coffre-tunnel-flow': 'credit' } });
-    let uncounted = 0;
-    let taken = 0;
-    ws.on('open', () => socket.resume());
-    socket.on('data', (chunk: Buffer) => {
-      uncounted += chunk.length;
-      ws.send(chunk);
-      if (uncounted >= WINDOW) socket.pause();
-    });
-    ws.on('message', (data: Buffer, binary: boolean) => {
-      if (!binary) {
-        uncounted -= Number(data.toString());
-        if (uncounted < WINDOW) socket.resume();
-        return;
-      }
-      socket.write(data, () => {
-        taken += data.length;
-        if (taken >= 64 * 1024) {
-          ws.send(String(taken));
-          taken = 0;
-        }
-      });
-    });
-    ws.on('close', () => socket.destroy());
-    ws.on('error', () => socket.destroy());
-    socket.on('close', () => ws.close());
-    socket.on('error', () => ws.terminate());
-  });
-  listener.listen(0, '127.0.0.1');
-  await once(listener, 'listening');
-  listeners.push(listener);
-  return (listener.address() as AddressInfo).port;
+  const { port, close } = await tunnelListener(`${at}/use/market/dev/${tunnel}`, handle);
+  listeners.push({ close });
+  return port;
 }
 
 const appClient = (port: number, handle = HANDLE) => new pg.Client({ connectionString: `postgres://app:${handle}@127.0.0.1:${port}/app` });
@@ -158,6 +122,29 @@ test('a WebSocket that does not ask for credit flow, or names no bearer, is refu
     assert.equal(response.statusCode, status);
     ws.terminate();
   }
+});
+
+test('an object holds 32 connections of a run at most: the next is refused, until one ends', { skip, timeout: 60_000 }, async () => {
+  // Another handle, so another object, empty: each connection admitted, and waiting at its startup.
+  const many = `coffre_use_${'m'.repeat(43)}`;
+  const open = async () => {
+    const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${many}`, 'coffre-tunnel-flow': 'credit' } });
+    ws.on('error', () => undefined);
+    const [event, answer] = (await Promise.race([once(ws, 'open').then(() => ['open']), once(ws, 'unexpected-response').then(([, response]) => ['refused', response])])) as [string, { statusCode: number }?];
+    return { ws, event, status: answer?.statusCode };
+  };
+  const held = [];
+  for (let at = 0; at < 32; at += 1) held.push(await open());
+  assert.ok(held.every(({ event }) => event === 'open'));
+  const refused = await open();
+  assert.deepEqual([refused.event, refused.status], ['refused', 503]);
+  const closed = once(held[0]!.ws, 'close');
+  held[0]!.ws.close();
+  await closed;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const again = await open();
+  assert.equal(again.event, 'open');
+  for (const { ws } of [...held, again]) ws.close();
 });
 
 test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { skip, timeout: 30_000 }, async () => {

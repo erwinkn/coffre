@@ -163,6 +163,8 @@ function parameters(body: Uint8Array): Map<string, string> {
 export type TunnelSession = {
   /** The handle this tunnel was opened with, which the app must give as its password. */
   handle: string;
+  /** Which tunnel of the handle's this is, and so how it dials, `<handle>\0<project>/<env>\0<tunnel>`: a cancel reaches its own tunnel's sessions only. */
+  group: string;
   /** The real database. */
   database: Database;
   /** Whether the session may log in, asked just before it does; afterwards, `watch`'s checks decide. */
@@ -186,7 +188,7 @@ const MAX_LOGIN = 65_536;
  * In this process only (on Workers, this isolate, which several objects may
  * share): a key outlives no session.
  */
-const cancels = new Map<string, { processId: number; secret: number; handle: string; database: Database }>();
+const cancels = new Map<string, { processId: number; secret: number; group: string; database: Database }>();
 
 /**
  * One connection of the app's, from its first byte to its last. A cancel
@@ -285,7 +287,7 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
         const mine = { processId: view(said).getInt32(0), secret: view(said).getInt32(4) };
         const given = crypto.getRandomValues(new Int32Array(2));
         key = `${given[0]}:${given[1]}`;
-        cancels.set(key, { ...mine, handle: session.handle, database: db });
+        cancels.set(key, { ...mine, group: session.group, database: db });
         await to.message('K', concat(int32(given[0]!), int32(given[1]!)));
         continue;
       }
@@ -342,12 +344,11 @@ async function open(session: TunnelSession, db: Database, own: (pipe: Pipe) => v
   return secure;
 }
 
-/** A cancel request of the app's: the key it was given, for one of this handle's sessions of this database; to it, with its own key. */
+/** A cancel request of the app's: the key it was given, for a session of the same handle and tunnel; to its database, with its own key. */
 async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) => void, signal: AbortSignal): Promise<void> {
   const target = cancels.get(given);
-  // The same handle and database: a cancel goes out the way its session's connection did, through its tunnel's network.
-  const same = target !== undefined && (['host', 'port', 'database'] as const).every((part) => target.database[part] === session.database[part]);
-  if (target === undefined || target.handle !== session.handle || !same) return;
+  // The same handle and tunnel: a cancel goes out the way its session's connection did, through its tunnel's network.
+  if (target === undefined || target.group !== session.group) return;
   const socket = await open(session, target.database, own, signal);
   const writer = new Writer(socket.writable);
   await writer.write(concat(int32(16), int32(CANCEL_REQUEST), int32(target.processId), int32(target.secret)));
