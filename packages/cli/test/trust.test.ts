@@ -129,6 +129,7 @@ test('a plan and a list show every claim in full', () => {
     claims: { event_name: 'push', ref: 'refs/heads/main' },
     keys: null,
     scope: { 'market/dev': 'developer' as const, 'market/prod': 'viewer' as const, 'api/dev': 'developer' as const },
+    withheld: [] as string[],
     replaces: [{ id: 'old', why: 'keys_moved' as const }],
   };
   assert.equal(
@@ -144,6 +145,11 @@ test('a plan and a list show every claim in full', () => {
       '  replaces old: the issuer moved its keys',
       '',
     ].join('\n'),
+  );
+  // A Developer's binding, where market/prod holds sensitive values: told before it is saved (R32).
+  assert.match(
+    describePlan('token:api-deploy', { ...plan, withheld: ['market/prod'] }, null),
+    /\n  reads no sensitive value of market\/prod: only one an Owner of its project issues does\n$/,
   );
   assert.equal(describeBindings('token:api-deploy', []), 'service:api-deploy trusts no CI runs: none signs in as it by OIDC\n');
   const listed = describeBindings('token:api-deploy', [

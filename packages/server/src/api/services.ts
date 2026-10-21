@@ -12,6 +12,7 @@ import {
   issuesCredential,
   managesService,
   NOTHING,
+  ownsProject,
   PERMISSIONS,
   protectedWithin,
   runsInstance,
@@ -33,9 +34,9 @@ import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
-import { memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import { holdingSensitive, memberOf, places, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
-import { newestPolicySeq, placeOf } from './caller.ts';
+import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
 import { audited, denied, Refusal, type ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
@@ -118,7 +119,9 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
 // Credentials' scopes (docs/design/instance-roles.md, "Credentials' scopes"):
 // each token and trust binding carries its own, at most what its account
 // held and its issuer could give when it was made (`issuesCredential`), and
-// a request made with it holds what both it and the account hold now.
+// a request made with it holds what both it and the account hold now. Each
+// place says too whether it reads the sensitive values there: only where an
+// Owner of its project issued it (`readsSensitive`, R32).
 
 /** A credential's scope as the API names it: each place by its path, `market` or `market/dev`, and the role there. */
 export type ScopeByPath = Record<string, Role>;
@@ -126,7 +129,8 @@ export type ScopeByPath = Record<string, Role>;
 /**
  * A scope as a token's or binding's row stores it, under its MAC: its
  * grants as JSON, by place, each with what its role held when it was
- * issued (`issuedGrant`), so that a role widened later widens no credential.
+ * issued (`issuedGrant`), so that a role widened later widens no credential,
+ * and, a service's, whether it reads the sensitive values there.
  */
 export function storedScope(scope: CredentialScope): string {
   const key = (grant: CredentialScope[number]) => `${grant.projectId}/${grant.environmentId ?? ''}`;
@@ -135,20 +139,31 @@ export function storedScope(scope: CredentialScope): string {
       .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
       .map((grant) => {
         const { permissions, protected: guarded } = scopeDefinition(grant);
-        return { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role, permissions: { normal: [...permissions], protected: [...guarded] } };
+        return {
+          projectId: grant.projectId,
+          environmentId: grant.environmentId,
+          role: grant.role,
+          permissions: { normal: [...permissions], protected: [...guarded] },
+          ...(grant.sensitive === undefined ? {} : { sensitive: grant.sensitive }),
+        };
       }),
   );
 }
 
 /**
  * A grant of a scope as it holds now and as it was issued, whichever is
- * narrower, column by column: what a credential that inherits another's
- * scope carries, so trusting a workload again never widens it.
+ * narrower, column by column, and reading sensitive values only if both
+ * do: what a credential that inherits another's scope carries, so trusting
+ * a workload again never widens it.
  */
 function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
   const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
   const [a, b] = [scopeDefinition(now), scopeDefinition(before)];
-  return { ...now, permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) } };
+  return {
+    ...now,
+    permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) },
+    ...(now.sensitive === undefined ? {} : { sensitive: now.sensitive && before.sensitive === true }),
+  };
 }
 
 /**
@@ -203,6 +218,11 @@ export function parseScope(wanted: ScopeByPath, policy: Policy): { path: ReturnT
  * holds and the caller could give it (`issuesCredential`). A scope that
  * reaches nothing is refused: the account needs a grant first, since
  * nothing it is given later reaches a credential made before.
+ *
+ * Each place reads the sensitive values there only if the caller is an
+ * Owner of its project (`ownsProject`, R32); `withheld` names those of its
+ * places that hold one now and that it will not read, for the caller to be
+ * told before they rely on it.
  */
 export async function issuedScope(
   db: Queryable,
@@ -212,7 +232,7 @@ export async function issuedScope(
   wanted: ScopeByPath | undefined,
   refused: { action: 'token.create' | 'token.bind'; metadata: Record<string, unknown> },
   inherited?: CredentialScope,
-): Promise<{ scope: CredentialScope; byPath: ScopeByPath }> {
+): Promise<{ scope: CredentialScope; byPath: ScopeByPath; withheld: string[] }> {
   const known = await places(db);
   const { policy } = ctx.caller;
   const account = accountOf(standing.grants, standing.by, known);
@@ -221,7 +241,7 @@ export async function issuedScope(
   // the caller could give all of it there, its protected environments included (`issuesCredential`).
   const before = new Map((inherited ?? []).map((grant) => [`${grant.projectId}/${grant.environmentId ?? ''}`, grant]));
   const kept = (grant: ServiceAccount['grants'][number]): ScopeGrant => {
-    const now = issuedGrant(asGrant(grant), policy);
+    const now = { ...issuedGrant(asGrant(grant), policy), sensitive: ownsProject(ctx.caller, grant.place.projectId) };
     const was = before.get(`${now.projectId}/${now.environmentId ?? ''}`);
     return was === undefined ? now : narrowest(now, was);
   };
@@ -254,7 +274,20 @@ export async function issuedScope(
     );
   }
   const issued = scope.map(kept);
-  return { scope: issued, byPath: scopeByPath(issued, known)! };
+  return { scope: issued, byPath: scopeByPath(issued, known)!, withheld: await withheldIn(db, issued, known) };
+}
+
+/**
+ * The places of a service's scope, by path, that hold a sensitive value now,
+ * their own or a reference's, and that it does not read: a project's, in
+ * any of its environments.
+ */
+async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly PlaceRow[]): Promise<string[]> {
+  const unread = scope.filter((grant) => grant.sensitive !== true);
+  const environmentsOf = (grant: ScopeGrant) => known.find((project) => project.id === grant.projectId)?.environments
+    .filter((environment) => grant.environmentId === null || environment.id === grant.environmentId).map((environment) => environment.id) ?? [];
+  const holding = await holdingSensitive(db, unread.flatMap(environmentsOf));
+  return Object.keys(scopeByPath(unread.filter((grant) => environmentsOf(grant).some((id) => holding.has(id))), known)!);
 }
 
 /**
@@ -357,11 +390,20 @@ function asGrant({ role, place }: ServiceAccount['grants'][number]): GrantPlace 
 }
 
 /**
- * Seal the tokens and trust bindings 0.4 made, which carry no scope, with
- * what their account holds now: once a configuration, the isolate's or the
- * process's, before it checks its first credential (`SigninService.verify`),
- * so each keeps what it reached and nothing granted after reaches it. A row
- * 0.4 still makes while both run is sealed on its first use instead
+ * Whether a service token's or trust binding's stored scope is sealed by
+ * this release: one of 0.4 has none, and one of a release before 0.11
+ * names places without saying whether it reads the sensitive values there
+ * (`unsealedCredentials`, whose query says the same).
+ */
+export function unsealedScope(stored: string | null): boolean {
+  return stored === null || (stored.includes('"projectId"') && !stored.includes('"sensitive":'));
+}
+
+/**
+ * Seal the tokens and trust bindings an older release made (`Unsealed`):
+ * once a configuration, the isolate's or the process's, before it checks
+ * its first credential (`SigninService.verify`). A row an older release
+ * still makes while both run is sealed on its first use instead
  * (`sealCredentials`, from `verify` or an exchange). Returns how many rows
  * it sealed.
  */
@@ -372,43 +414,54 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
     const policySeq = await newestPolicySeq(db);
     const access = await vault.access(principal);
     if (access.status !== 'active') continue;
-    sealed += await sealCredentials(db, chainKey, access, policySeq, unsealed.filter((candidate) => candidate.principal === principal));
+    sealed += await sealCredentials(db, chainKey, vault, access, policySeq, unsealed.filter((candidate) => candidate.principal === principal));
   }
   return sealed;
 }
 
 /**
- * Seal these unsealed rows of one account with what it holds now, as
- * `access` answered, asked of the vault after the newest `policy.change`
- * was `policySeq`: in one transaction, committed only while it still is
- * (`policyStill`), so what each keeps is its roles as the policy is when it
- * commits; with a `token.seal` entry naming those it sealed, so a row put
- * back unsealed later, and sealed again, shows in the log. Each update
- * matches the row's MAC as read, so two at once seal a row once. Returns
- * how many it sealed.
+ * Seal these unsealed rows of one account, as `access` answered it, asked
+ * of the vault after the newest `policy.change` was `policySeq`. One of
+ * 0.4 keeps what the account holds now, each grant with what its role
+ * holds now, so nothing granted after reaches it; one of a release before
+ * 0.11 keeps its scope. Each then reads the sensitive values of a place
+ * where whoever issued it is an Owner of its project now (`ownsProject`,
+ * R32), as one they issued now would: those an Owner issued keep reading
+ * them, and those anyone else did never do. In one transaction, committed
+ * only while the policy is still `policySeq`'s (`policyStill`), with a
+ * `token.seal` entry for each scope it wrote, naming those it sealed with
+ * it, so a row put back unsealed later, and sealed again, shows in the log.
+ * Each update matches the row's scope as read, so two at once seal a row
+ * once. Returns how many it sealed.
  */
-export async function sealCredentials(db: Database, chainKey: Buffer, access: Access, policySeq: bigint | null, rows: readonly Unsealed[]): Promise<number> {
-  // Each with what its role holds now, kept, as one issued now.
+export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vault, access: Access, policySeq: bigint | null, rows: readonly Unsealed[]): Promise<number> {
   const policy = access.policy ?? DEFAULT_POLICY;
-  const scope = storedScope(access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy)));
+  const held = access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy));
+  // Each issuer as the vault answers them now, asked before the transaction: no vault call is made inside one.
+  const issuers = new Map<string, Caller>();
+  for (const by of new Set(rows.map((row) => row.createdBy))) issuers.set(by, callerFrom({ type: 'user', id: by }, await vault.access(`user:${by}`), policySeq));
+  const scopes = rows.map((row) => storedScope((readScope(row.scope) ?? held).map((grant) => ({ ...grant, sensitive: ownsProject(issuers.get(row.createdBy)!, grant.projectId!) }))));
   return audited({ db, chainKey, caller: { policySeq, policy } }, async (tx, log) => {
-    const done = { tokens: [] as string[], bindings: [] as string[] };
-    for (const row of rows) {
+    const done = new Map<string, { tokens: string[]; bindings: string[] }>();
+    for (const [i, row] of rows.entries()) {
+      const scope = scopes[i]!;
       const changed = row.kind === 'token'
-        ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: null }, { scope })
-        : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: null }, { scope });
-      if (changed > 0) done[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
+        ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: row.scope }, { scope })
+        : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: row.scope }, { scope });
+      if (changed === 0) continue;
+      const sealed = done.get(scope) ?? { tokens: [], bindings: [] };
+      sealed[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
+      done.set(scope, sealed);
     }
-    const count = done.tokens.length + done.bindings.length;
-    if (count > 0) {
+    for (const [scope, sealed] of done) {
       log.push({
         actorType: 'system',
         actorId: 'app',
         action: 'token.seal',
         decision: 'allow',
-        metadata: { principalType: 'service', principalId: memberOf(access.principal).id, ...done, scope: JSON.parse(scope) as unknown },
+        metadata: { principalType: 'service', principalId: memberOf(access.principal).id, ...sealed, scope: JSON.parse(scope) as unknown },
       });
     }
-    return count;
+    return [...done.values()].reduce((sum, sealed) => sum + sealed.tokens.length + sealed.bindings.length, 0);
   });
 }

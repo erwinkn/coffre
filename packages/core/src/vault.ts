@@ -216,6 +216,13 @@ export type RefusalCode =
    */
   | 'sensitive'
   /**
+   * A service account asked for a sensitive value to be handed back on a
+   * credential no Owner of its project issued (`readsSensitive`, R32): it
+   * reads every other value there, and that one once an Owner issues it a
+   * token or binding.
+   */
+  | 'not_owner_issued'
+  /**
    * The project or environment was deleted for good: nothing under it is
    * opened or wrapped again, whatever grant would cover it.
    */

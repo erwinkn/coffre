@@ -159,6 +159,28 @@ The instance's roles have the same two columns (Developer as above).
   project's protected environments too, where the service would hold its
   normal column: a Developer of a protected prod gives no Viewer of all of
   `market`, which would read prod.
+- **A service reads a sensitive value only where an Owner said so** (R32,
+  Erwin 2026-10-21). Nobody reads one, so nobody may hand one to an
+  account they set up but an Owner of its project, who could read it that
+  way anyway (break-glass). Each place of a service token's or trust
+  binding's scope keeps whether its issuer was an Owner of the project,
+  of the whole instance or by a grant or role scoped to it, as a person
+  on no credential's scope (`ownsProject`), and the vault hands a service
+  a sensitive value only through such a place (`readsSensitive`); anyone
+  else's reads every other value, and is refused that one
+  (`not_owner_issued`), whenever it was made sensitive:
+
+  ```
+  ci, a Viewer of backend/dev, which holds STRIPE_SECRET_KEY, sensitive
+  token Ada (Developer) issued     API_URL yes; STRIPE_SECRET_KEY refused
+  token an Owner of backend issued  both
+  Ada's token, a key of dev marked sensitive later   refused from then on
+  ```
+
+  It is the credential that carries it, not the grant: a credential is
+  what a run signs in with, it never grows (section 5), and a grant
+  widened by an Owner later reaches no token made before. A binding that
+  replaces another reads them only where both did (`narrowest`).
 - **Reading the whole log** takes `audit.read` in both columns of the
   instance role, with nothing narrowing its scope: an Auditor edited to
   read no protected environment's log reads every other place's, as
@@ -256,6 +278,19 @@ two: replacing a Viewer's binding keeps what the Viewer held.
    credentials CI already holds keep working. *Alternative:* none at all,
    each issued again, which R17 would allow but which narrows nothing a
    constant does not already hold.
+10. **Who may hand a service sensitive values is recorded on its
+    credentials, not its grants** (R32). Every read a service makes comes
+    through a token or a binding, each of which already keeps, place by
+    place, what its issuer could give; one more fact there closes both
+    ways round it, an account set up by a Developer and a key marked
+    sensitive after, with no migration and no change to the vault's
+    sealed rows. A credential made before 0.11 is sealed once, as 0.4's
+    were (`sealScopes`), reading them where whoever issued it is an Owner
+    of the project then: CI an Owner set up keeps working, and a
+    Developer's stops reading them. *Alternative:* a flag on each grant,
+    sealed by the vault, which would still need the credential's (a
+    token a Developer issued before an Owner flagged the grant would
+    read them), and a migration.
 
 ## 7. The API
 

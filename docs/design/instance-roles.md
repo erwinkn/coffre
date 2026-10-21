@@ -253,6 +253,12 @@ it, make another and revoke the first. Its issuer losing access later
 shrinks nothing, so CI keeps working when they leave: offboarding them
 lists the tokens they issued, each with its scope, to revoke.
 
+Each grant of a scope also keeps whether its issuer was an Owner of its
+project (`sensitive`): only then does the credential read the sensitive
+values there (R32, `readsSensitive`; docs/design/roles.md, section 3).
+Ada's token for ci-web reads `market/dev`'s secrets and none of its
+sensitive values, and is told so when it is made (`withheld`).
+
 | Ada, a Developer of every `dev`, for ci-web, which holds `developer` on `market/dev` | Answer |
 |---|---|
 | a token, scope left out | `developer` on `market/dev` |

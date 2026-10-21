@@ -40,6 +40,38 @@
   already needed the same handle; now its key must also name a session of
   the tunnel it came on, so it is sent the way that tunnel dials.
 
+- **Only an Owner hands a service account sensitive values** (R32).
+  Anyone may set up a service account where the instance lets them, and
+  give it what they hold; a service reads sensitive values. So a Developer
+  of `backend/dev`, who does not read its sensitive `STRIPE_SECRET_KEY`,
+  could give an account read there, issue it a token, and read the key
+  with it; or issue one while nothing was sensitive, and read a key marked
+  sensitive later. Now each place of a service token's or trust binding's
+  scope says whether it reads the sensitive values there: only where whoever
+  issued it is an Owner of the project, of the whole instance or by a
+  grant or role scoped to it, on no credential's scope. The vault refuses
+  anything else (`not_owner_issued`), deciding where the read is decided:
+  a reference where it is held, a fork's inherited value at its parent.
+  A read of a whole environment that holds one is refused whole, naming
+  the keys, rather than run without them; a dry run of a write does not
+  compare them. Everything else reads as before.
+  - Issuing a token or binding says which places of its scope hold a
+    sensitive value it will not read: `withheld` in the API, a line in
+    `coffre tokens issue` and `coffre trust`, a warning in the token and
+    binding dialogs.
+  - A binding that replaces another, inheriting its scope, reads them only
+    where both did.
+  - **Tokens and bindings issued before this release** are sealed once,
+    on the first credential this version checks, as 0.4's scopes were:
+    each reads them where whoever issued it is an Owner of the project
+    then, logged as `token.seal`. CI an Owner set up keeps working; one a
+    Developer set up reads every other value, and an Owner issues it a new
+    token or binding to read the sensitive ones. `coffre migrate` lists
+    them first, by account and issuer.
+  No database migration. Roll back across this release and the tokens and
+  bindings it issued or sealed reach nothing until it is back: deploy it
+  once you mean to keep it.
+
 - **Protection shows where you are, and changes there.** A protected
   environment's tag is amber now, on its card and in its page's header,
   where it was grey, and changed only from the card's menu. For whoever

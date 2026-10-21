@@ -188,8 +188,10 @@ export function describeFirstRun({ everyProject, unsealed, holding }: FirstRun):
   // What a member holds once the vault has converted: their grants on a place, and what it makes of those on every project, unless it leaves them.
   const converted = everyProject.filter((preview) => !preview.reported && preview.conversion.grants.length > 0).map((preview) => preview.principal);
   const holds = new Set([...holding, ...converted]);
+  const scopeless = unsealed.filter((row) => row.scope === null);
   return describeEveryProject(everyProject) +
-    describeUnsealed(unsealed, new Set(unsealed.map((row) => row.principal).filter((principal) => !holds.has(principal))));
+    describeUnsealed(scopeless, new Set(scopeless.map((row) => row.principal).filter((principal) => !holds.has(principal)))) +
+    describeIssuers(unsealed);
 }
 
 /**
@@ -211,16 +213,44 @@ export function describeUnsealed(unsealed: readonly Unsealed[], empty: ReadonlyS
   ];
   for (const principal of [...new Set(unsealed.map((row) => row.principal))]) {
     const theirs = unsealed.filter((row) => row.principal === principal);
-    const tokens = theirs.filter((row) => row.kind === 'token').length;
-    const bindings = theirs.length - tokens;
-    const what = [tokens === 0 ? null : count(tokens, 'token'), bindings === 0 ? null : count(bindings, 'trust binding')].filter((part) => part !== null);
     const nothing = empty.has(principal)
       ? `, which will reach nothing: grant the account before you deploy, or reissue ${theirs.length === 1 ? 'it' : 'them'} after`
       : '';
-    lines.push(`  ${shownMember(principal)}: ${what.join(' and ')}${nothing}`);
+    lines.push(`  ${shownMember(principal)}: ${credentialsInWords(theirs)}${nothing}`);
   }
   lines.push('Grant or revoke before you deploy to choose what they keep; to change one after, issue another and revoke it.', '');
   return lines.join('\n');
+}
+
+/**
+ * The tokens and trust bindings of a release before 0.11, by account, and
+ * who issued them: when this version first checks a credential, each reads
+ * the sensitive values of a place only where whoever issued it is an Owner
+ * of its project then (`sealScopes` in @coffre/server, R32). Nothing when
+ * there are none.
+ *
+ *   service:ci-web   2 tokens and 1 trust binding, issued by erwin@acme.example
+ */
+export function describeIssuers(unsealed: readonly Unsealed[]): string {
+  if (unsealed.length === 0) return '';
+  const lines = [
+    '',
+    'A service token or trust binding now reads a sensitive value only where an Owner of its project issued it.',
+    'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then:',
+  ];
+  for (const principal of [...new Set(unsealed.map((row) => row.principal))]) {
+    const theirs = unsealed.filter((row) => row.principal === principal);
+    lines.push(`  ${shownMember(principal)}: ${credentialsInWords(theirs)}, issued by ${[...new Set(theirs.map((row) => row.createdBy))].join(', ')}`);
+  }
+  lines.push("Anyone else's read every other value; an Owner of the project issues one that reads them too.", '');
+  return lines.join('\n');
+}
+
+/** Tokens and bindings, counted: `2 tokens and 1 trust binding`. */
+function credentialsInWords(rows: readonly Unsealed[]): string {
+  const tokens = rows.filter((row) => row.kind === 'token').length;
+  const bindings = rows.length - tokens;
+  return [tokens === 0 ? null : count(tokens, 'token'), bindings === 0 ? null : count(bindings, 'trust binding')].filter((part) => part !== null).join(' and ');
 }
 
 /**

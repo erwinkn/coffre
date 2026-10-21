@@ -23,6 +23,7 @@ import {
 import { removeBinding } from '../lib/changes';
 import { memberRef, statusOf, useCoffre } from '../lib/coffre';
 import { affects, queries } from '../lib/queries';
+import { withheldInWords } from '../lib/service-setup';
 import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { useGitHubLookup } from '../lib/use-github-lookup';
@@ -390,6 +391,8 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   const whole = (): ScopeChoice => ({ scope: wholeScope(grants), chosen: false });
   const [choice, setChoice] = useState(whole);
   const [plan, setPlan] = useState<BindingPlan | null>(null);
+  // The sensitive values its credentials would not read, as the server planned it (R32).
+  const unread = withheldInWords(plan?.withheld, 'binding');
   // What the plan was made from: Save sends it, whatever the form says by then.
   const [reviewed, setReviewed] = useState<ReturnType<typeof input> | null>(null);
   const coffre = useCoffre();
@@ -700,6 +703,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
             </p>
             <Claims binding={plan} />
             <Exposure events={claimValues(plan.claims.event_name)} />
+            {unread !== null && <Notice tone="warn">{unread}</Notice>}
             {plan.replaces.length > 0 && (
               <Notice tone="info">
                 This replaces {plan.replaces.length === 1 ? 'a binding' : `${plan.replaces.length} bindings`}

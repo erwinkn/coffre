@@ -169,11 +169,13 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
 });
 
-test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork that keeps it so, read by a service", async () => {
+test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork that keeps it so, read by a service on what an Owner issued", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'developer']]);
   const SERVICE = 'token:deploy';
   await member(w, SERVICE, [[w.dev, 'viewer']]);
+  // Its token, issued by an Owner of the project, which reads its sensitive values (`readsSensitive`, R32), or by anyone else.
+  const issued = (sensitive: boolean) => [{ projectId: w.project, environmentId: w.dev, role: 'viewer', sensitive }];
   const secret = { ...(await w.secret(w.dev)), sensitive: true };
   const key = randomBytes(32).toString('base64');
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key }] });
@@ -194,7 +196,12 @@ test("a sensitive value is never handed back to a person, an Owner included: use
   // A purpose a later app may name is one that hands values back.
   const unknown = await w.vault.unwrap({ principal: ADA, purpose: 'peek' as 'reveal', items });
   assert.equal(!unknown.ok && unknown.refusal.code, 'sensitive');
-  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items }), { ok: true, keys: [key] });
+  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items, credentialScope: issued(true) }), { ok: true, keys: [key] });
+  for (const credentialScope of [issued(false), null]) {
+    const refused = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items, credentialScope });
+    assert.equal(!refused.ok && refused.refusal.code, 'not_owner_issued', 'on what no Owner issued, or on no credential at all');
+  }
+  assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'use', items, credentialScope: issued(false) }), { ok: true, keys: [key] }, 'used, never handed back');
   // A service account's fork, through an app of 0.9 that would write the copy as a secret, copies nothing sensitive either.
   const serviceCopy = await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', items });
   assert.equal(!serviceCopy.ok && serviceCopy.refusal.code, 'sensitive');
@@ -215,12 +222,14 @@ test("a sensitive version's key opens as nothing else: its column flipped back i
   const flipped = await versionItems([{ secret: { ...secret, sensitive: false }, wrapped: sealed }]);
   const SERVICE = 'token:deploy';
   await member(w, SERVICE, [[w.dev, 'viewer']]);
-  const read = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: flipped });
+  // On a token an Owner issued, which reads sensitive values (R32): only the key's claim refuses it.
+  const credentialScope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer', sensitive: true }];
+  const read = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: flipped, credentialScope });
   assert.equal(!read.ok && read.refusal.code, 'bad_claim');
   // And a secret's key read as sensitive does not open either.
   const other = await w.secret(w.dev);
   const marked = await versionItems([{ secret: { ...other, sensitive: true }, wrapped: await wrapped(w, other) }]);
-  const as = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: marked });
+  const as = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: marked, credentialScope });
   assert.equal(!as.ok && as.refusal.code, 'bad_claim');
 });
 

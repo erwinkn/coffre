@@ -292,11 +292,13 @@ export function ownsInstance(standing: { role: InstanceRole; scope: Scope }): bo
 /**
  * Whether the holder is an Owner of a project, as a person on no
  * credential's scope: an Owner of the whole instance, one scoped to the
- * project, or one by a grant on it. They make a sensitive value of its own
- * a secret in place, and take its environments' protection off (R30): an
- * Owner reads any value there anyway, through a service account they give
- * read (break-glass). An Owner scoped to environments by slug, Owner of
- * every `prod`, owns no project, and an Owner's token, scoped, none.
+ * project, or one by a grant on it. They alone issue a service's token or
+ * trust binding that reads its sensitive values (R32, `readsSensitive`),
+ * and so make a sensitive value of its own a secret in place, and take its
+ * environments' protection off (R30): an Owner reads any value there
+ * anyway, through a service account they give read (break-glass). An
+ * Owner scoped to environments by slug, Owner of every `prod`, owns no
+ * project, and an Owner's token, scoped, none.
  */
 export function ownsProject(holder: Holdings, projectId: string): boolean {
   if (holder.credentialScope != null || holder.service === true) return false;
@@ -442,7 +444,9 @@ export function grantKind(grant: GrantPlace): 'project' | 'environment' | null {
  * Each grant keeps what its role held when the credential was issued, both
  * columns (`permissions`), and no more than its issuer held, so neither a
  * role an Owner widens later nor its issuer widens the credential
- * (docs/design/roles.md, section 8, rule 3).
+ * (docs/design/roles.md, section 8, rule 3). A service's grant keeps too
+ * whether its issuer was an Owner of the place, who alone hands a service
+ * its sensitive values (`readsSensitive`).
  */
 export type CredentialScope = readonly ScopeGrant[];
 
@@ -454,9 +458,11 @@ export type Columns = { normal: readonly Permission[]; protected: readonly Permi
  * the credential was issued (`issuedGrant`). One kept by a release before
  * 0.10, its role's name alone, holds that role as it ships, a constant no
  * edit changes, so it never widens either: a built-in role's, or nothing
- * for any other name.
+ * for any other name. A service's, whether it reads the sensitive values
+ * there: true only when an Owner of its project issued it
+ * (`readsSensitive`); left out on a person's, who reads none.
  */
-export type ScopeGrant = GrantPlace & { role: Role; permissions?: Columns };
+export type ScopeGrant = GrantPlace & { role: Role; permissions?: Columns; sensitive?: boolean };
 
 /**
  * A grant of a scope with what its role holds now in `policy`, kept: what a
@@ -562,8 +568,9 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
   const column = (list: unknown) => Array.isArray(list) && list.every((permission) => PERMISSIONS.includes(permission as Permission)) && new Set(list).size === list.length;
   return value.every((grant: unknown) => {
     if (typeof grant !== 'object' || grant === null || Array.isArray(grant)) return false;
-    const { projectId, environmentId, role, permissions, ...rest } = grant as Record<string, unknown>;
+    const { projectId, environmentId, role, permissions, sensitive, ...rest } = grant as Record<string, unknown>;
     if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string') return false;
+    if (sensitive !== undefined && typeof sensitive !== 'boolean') return false;
     // As issued, both columns; or, kept before 0.10, a built-in role's name alone, which holds it as it ships.
     if (!ROLE_ID.test(role)) return false;
     if (permissions === undefined) {
@@ -658,6 +665,23 @@ export function withinCredential(holder: Holdings, permission: Permission, place
 /** Whether the credential's scope covers `place` with a grant that held `permission` there when it was issued. */
 function scopeHolds(holder: Holdings, permission: Permission, place: Place): boolean {
   return (holder.credentialScope ?? []).some((grant) => covers(grant, place) && holds(scopeDefinition(grant), permission, place, holder));
+}
+
+/**
+ * Whether a sensitive value at `place` is handed to `holder` (R32): never
+ * to a person, Owners included (R16); to a service account, only on a
+ * credential whose grant there reads, and an Owner of its project issued
+ * (`ScopeGrant`'s `sensitive`). A person who could not read the value
+ * gets it through no account they set up, nor through a value made
+ * sensitive after they issued its token:
+ *
+ *   ci, a Viewer of backend/dev, which holds STRIPE_SECRET_KEY, sensitive
+ *   its token, issued by Ada, a Developer     reads every other value there
+ *   its token, issued by an Owner of backend  reads STRIPE_SECRET_KEY too
+ */
+export function readsSensitive(holder: Holdings, place: Place): boolean {
+  return holder.service === true
+    && (holder.credentialScope ?? []).some((grant) => grant.sensitive === true && covers(grant, place) && holds(scopeDefinition(grant), 'secret.read', place, holder));
 }
 
 /**

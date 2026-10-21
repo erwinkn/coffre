@@ -76,6 +76,8 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
   }
   // A sensitive value, which no person is handed: not a refusal of their access, which the message says how to use.
   if (refusal.code === 'sensitive') return new ApiError('forbidden', refusal.message, refusal.code);
+  // A sensitive value its credential's issuer could not hand a service account (R32): the message says who can.
+  if (refusal.code === 'not_owner_issued') return new ApiError('forbidden', refusal.message, refusal.code);
   // Not the caller's doing: the instance is misconfigured, and stays unable to open any value until restarted.
   if (refusal.code === 'wrong_kek') return new ApiError('unavailable', refusal.message, refusal.code);
   // Valid, and refused only by who else owns the instance now: the message says what to do first.

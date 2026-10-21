@@ -205,35 +205,42 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
   });
 }
 
-/** A service token or trust binding of 0.4, which carries no scope of its own yet. */
-export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: string };
+/**
+ * A service token or trust binding whose scope this release has not sealed
+ * yet: none of its own, as 0.4 made it (`scope` null), or one that does not
+ * say where it reads sensitive values, as a release before 0.11 made it. By
+ * whom it was issued, `createdBy`, a person's email.
+ */
+export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: string; createdBy: string; scope: string | null };
 
 /**
  * The live service tokens and trust bindings of active service accounts
- * that carry no scope yet, as 0.4 made them: what the app seals with each
- * account's grants once a process (`sealScopes`), and what `coffre migrate`
- * says it will. A credential a binding issued carries its binding's.
+ * whose scope is not sealed yet (`Unsealed`): what the app seals once a
+ * process (`sealScopes`), and what `coffre migrate` says it will. A
+ * credential a binding issued carries its binding's.
  */
 export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
   const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
+  // Every scope this release writes for a service says, at each place, whether it reads the sensitive values there.
+  const unsealed = (scope: typeof credentials.scope | typeof serviceBindings.scope) => or(isNull(scope), sql`${scope} NOT LIKE '%"sensitive":%'`);
   const [tokens, bindings] = await Promise.all([
     db
-      .select({ id: credentials.id, principal: credentials.principal })
+      .select({ id: credentials.id, principal: credentials.principal, createdBy: credentials.createdBy, scope: credentials.scope })
       .from(credentials)
       .innerJoin(vaultMembers, and(eq(vaultMembers.principal, credentials.principal), eq(vaultMembers.generation, credentials.generation)))
       .where(and(
         eq(credentials.kind, 'service'),
-        isNull(credentials.scope),
+        unsealed(credentials.scope),
         sql`${credentials.createdBy} NOT LIKE 'binding:%'`,
         isNull(credentials.revokedAt),
         gt(credentials.expiresAt, at),
         eq(vaultMembers.status, 'active'),
       )),
     db
-      .select({ id: serviceBindings.id, principal: serviceBindings.principal })
+      .select({ id: serviceBindings.id, principal: serviceBindings.principal, createdBy: serviceBindings.createdBy, scope: serviceBindings.scope })
       .from(serviceBindings)
       .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
-      .where(and(isNull(serviceBindings.scope), isNull(serviceBindings.revokedAt), eq(vaultMembers.status, 'active'))),
+      .where(and(unsealed(serviceBindings.scope), isNull(serviceBindings.revokedAt), eq(vaultMembers.status, 'active'))),
   ]);
   return [
     ...tokens.map((row) => ({ kind: 'token' as const, ...row })),

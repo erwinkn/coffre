@@ -10,7 +10,7 @@ import { parseArgs } from 'node:util';
 import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, PROJECT_ONLY_PERMISSIONS, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
 
-import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
+import { describeRemoval, reaches, scopeFrom, serviceMember, withheldLine } from './trust.ts';
 
 /** Where a command writes: what it answers on `out`, what it tells a person on `err`. */
 export type Io = {
@@ -960,14 +960,17 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   const about = personal
     ? `your personal token ${issued.id} "${values.label!.trim()}", acting as you on ${reaches(issued.scope)}, until ${ends(issued.expiresAt, true)}`
     : `${shownMember(member)}'s bearer token ${issued.id}, reaching ${reaches(issued.scope)}, until ${day(issued.expiresAt)}`;
+  // What it will not read, said now rather than at its first run's refusal (R32).
+  const unread = withheldLine(issued.withheld);
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
     closeSync(fd);
     io.out.write(`wrote ${about}, to ${path}, readable by you alone\n`);
-    return;
+  } else {
+    io.out.write(`${issued.token}\n`);
+    if (io.err.isTTY) io.err.write(`coffre: ${about}. It is shown this once\n`);
   }
-  io.out.write(`${issued.token}\n`);
-  if (io.err.isTTY) io.err.write(`coffre: ${about}. It is shown this once\n`);
+  if (unread !== null) io.err.write(`coffre: it ${unread}\n`);
 }
 
 export async function tokensRevoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {

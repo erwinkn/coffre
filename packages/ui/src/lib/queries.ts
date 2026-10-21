@@ -59,6 +59,7 @@ export const keys = {
   credentials: (member: string) => ['credentials', member],
   bindings: (member: string) => ['bindings', member],
   githubRepositories: ['github-repositories'],
+  tokenPlan: (member: string, scope: Record<string, string>) => ['token-plan', member, scope],
   identities: ['identities'],
   sessions: ['sessions'],
   apps: ['apps'],
@@ -157,6 +158,19 @@ export const queries = {
     queryOptions({
       queryKey: keys.githubRepositories,
       queryFn: () => client.bindings.repositories(),
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
+    }),
+
+  /**
+   * What a service's token would reach, as the server would issue it now,
+   * and the sensitive values it would not read (`withheld`); issues
+   * nothing. A scope the server refuses plans nothing: issuing says why.
+   */
+  tokenPlan: (client: CoffreClient, member: string, scope: Record<string, string>) =>
+    queryOptions({
+      queryKey: keys.tokenPlan(member, scope),
+      queryFn: () => client.tokens.preview(member, { label: null, expiresInDays: 1, scope }).catch(() => null),
       staleTime: 60_000,
       refetchOnWindowFocus: false,
     }),

@@ -340,12 +340,18 @@ const role = roleId;
  * What a token or a binding will reach, as the server would make it now,
  * as the page says it, and its basis: Approve reads it again and is refused
  * if it differs from what the person read, as when the account was given
- * another grant since, and makes the change with it (`pinned`).
+ * another grant since, and makes the change with it (`pinned`). And the
+ * places of it that hold a sensitive value it will not read (`withheld`,
+ * R32), said before it is approved.
  */
-function reaching(scope: CredentialScope, state: Record<string, unknown> = {}): Replaced {
+function reaching(plan: { scope: CredentialScope; withheld?: readonly string[] }, state: Record<string, unknown> = {}): Replaced {
+  const withheld = plan.withheld ?? [];
   return {
-    state: { ...state, scope },
-    details: [{ label: 'Reaches', value: credentialScopeInWords(scope), note: 'Never more than the account holds, and nothing it is given later.' }],
+    state: { ...state, scope: plan.scope },
+    details: [
+      { label: 'Reaches', value: credentialScopeInWords(plan.scope), note: 'Never more than the account holds, and nothing it is given later.' },
+      ...(withheld.length === 0 ? [] : [{ label: 'Sensitive values', value: `not read in ${withheld.join(', ')}`, note: 'Only one an Owner of their project issues reads them.' }]),
+    ],
   };
 }
 
@@ -756,7 +762,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       },
       // What it will reach, as the server would issue it: what it names, or all the account holds. Approve refuses it changed.
       replaces: async (api, { service, label, expiresInDays, scope }) =>
-        reaching((await api.tokens.preview(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) })).scope),
+        reaching(await api.tokens.preview(serviceMember(service), { label: label ?? null, expiresInDays, ...(scope === undefined ? {} : { scope }) })),
       preview: async (_api, { service, label, expiresInDays }, _viewing, replaced) => [
         { label: 'Service account', value: shownService(service), kind: 'mono' },
         ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
@@ -830,7 +836,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       // What its runs will reach, and the bindings it takes the place of, as the server plans them: Approve refuses either changed.
       replaces: async (api, { service, profile, issuer, claims, scope, label }) => {
         const plan = await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null });
-        const replaced = reaching(plan.scope, { replaces: plan.replaces.map(({ id }) => id) });
+        const replaced = reaching(plan, { replaces: plan.replaces.map(({ id }) => id) });
         if (plan.replaces.length === 0) return replaced;
         const moved = plan.replaces.some(({ why }) => why === 'keys_moved') ? ', since the issuer moved its keys' : '';
         return { ...replaced, details: [...replaced.details, { label: 'Replaces', value: `${plan.replaces.length === 1 ? 'a binding' : `${plan.replaces.length} bindings`} of the account${moved}`, note: plan.replaces.map(({ id }) => id).join(', ') }] };
