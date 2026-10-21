@@ -430,10 +430,10 @@ export function renameEnvironment(client: CoffreClient, project: string): Change
 
 /**
  * Protect an environment, or take its protection off (docs/design/roles.md):
- * shown on its card at once, and the card says if the server refuses. Only
- * an Owner of the whole instance unprotects one, which the page offers to
- * them alone. What everyone holds there changes, so the roles' readers are
- * refetched too.
+ * shown at once, on its card and its page, which say if the server
+ * refuses. Only an Owner of the whole instance unprotects one, which the
+ * page offers to them alone. What everyone holds there changes, so the
+ * roles' readers are refetched too.
  */
 export function protectEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; protected: boolean }, unknown> {
   return {

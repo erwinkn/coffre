@@ -10,6 +10,7 @@ import { Lock } from './icons';
 import { ConfirmButton, Toggletip } from './ui';
 
 const MEANING = 'Protected: each person here holds their role’s protected column, which an Owner sets in Settings › Roles. Service accounts hold their role as anywhere else.';
+const WHO_UNPROTECTS = 'Only an Owner of the whole instance takes protection off.';
 
 /**
  * An environment's protection (docs/design/roles.md), on its card and its
@@ -22,13 +23,14 @@ const MEANING = 'Protected: each person here holds their role’s protected colu
 export function Protection({ project, environment }: { project: string; environment: ProjectEnvironment }) {
   const { capabilities, projects } = useShell();
   const manages = projects.find((entry) => entry.slug === project)?.permissions.includes('environment.manage') === true;
+  const unprotects = capabilities.ownsInstance;
   const guarded = environment.protected;
-  if (manages && environment.details !== null && environment.personal !== true && (!guarded || capabilities.ownsInstance)) {
-    return <ChangeProtection project={project} slug={environment.slug} guarded={guarded} ownsInstance={capabilities.ownsInstance} />;
+  if (manages && environment.details !== null && environment.personal !== true && (!guarded || unprotects)) {
+    return <ChangeProtection project={project} slug={environment.slug} guarded={guarded} unprotects={unprotects} />;
   }
   if (!guarded) return null;
   return (
-    <Toggletip label={`${MEANING} Only an Owner of the whole instance takes protection off.`}>
+    <Toggletip label={`${MEANING} ${WHO_UNPROTECTS}`}>
       <button type="button" className="tag tag-amber tag-button">
         <Lock size={11} />
         Protected
@@ -38,7 +40,7 @@ export function Protection({ project, environment }: { project: string; environm
 }
 
 /** The tag as the button that protects the environment, or takes it off, once confirmed. */
-function ChangeProtection({ project, slug, guarded, ownsInstance }: { project: string; slug: string; guarded: boolean; ownsInstance: boolean }) {
+function ChangeProtection({ project, slug, guarded, unprotects }: { project: string; slug: string; guarded: boolean; unprotects: boolean }) {
   const { roles } = useRoles();
   const protect = useChange(protectEnvironment(useCoffre(), project));
   const { status } = useChangeStatus(keys.projects);
@@ -67,7 +69,7 @@ function ChangeProtection({ project, slug, guarded, ownsInstance }: { project: s
         guarded
           ? 'People holding a role here get its full column again, as in any other environment. Service accounts are unaffected.'
           : `People holding a role here get its protected column${protection === null ? ', which for now holds what the other does' : `: ${protection}`}. Service accounts are unaffected.${
-              ownsInstance ? '' : ' Only an Owner of the whole instance takes protection off.'
+              unprotects ? '' : ` ${WHO_UNPROTECTS}`
             }`
       }
       confirmLabel={guarded ? 'Unprotect' : 'Protect'}
