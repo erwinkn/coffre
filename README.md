@@ -71,6 +71,9 @@ values into Cloudflare, Vercel and other deploy pipelines.
 [Read coffre from tools that speak Vault](docs/vault.md) covers External
 Secrets Operator, the `vault` CLI, vals and Terraform, through an optional,
 read-only Vault KV v2 API.
+[Workload access](docs/design/workload-access.md) is the design for apps
+in production that hold no secret at all: platform identity, key-bound
+sessions, and use through coffre.
 
 ## Running it locally
 

@@ -130,6 +130,17 @@ for Entra and Okta, or by polling Google Workspace's directory); until then,
 someone removed there cannot sign in again but keeps an open session until it
 ends. Passkeys would make a good recent sign-in for revealing.
 
+## Next: workload access
+
+Apps in production hold no secret and read no value: a workload proves who
+it is with its platform's own identity (Kubernetes, AWS, Google Cloud,
+Azure, Fly, Vercel, CI; a service binding on Cloudflare; an enrollment
+code where a platform signs nothing), holds a session bound to a key that
+never leaves its memory, and uses its credentials through coffre, under
+live limits and freezes. A copy of its environment, disk or logs is worth
+nothing. The design, its guarantees per platform and attacker, and its
+build plan are in [design/workload-access.md](design/workload-access.md).
+
 ## Later
 
 - **Rewrap**, a maintenance command that wraps every stored data key again
