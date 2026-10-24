@@ -10,7 +10,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 
 import { coffreRoute } from '../src/app.ts';
-import { readJson, readLimitedText } from '../src/http.ts';
+import { readJson, readLimitedJson, readLimitedText } from '../src/http.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -51,28 +51,44 @@ test('readJson abandons an oversize body instead of buffering and parsing it', a
   await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: '{"__proto__":1}' }), 4 * 1024), /__proto__/);
 });
 
-test('the unauthenticated device-login endpoint refuses an oversize body', async () => {
-  const body = JSON.stringify({ device_code: 'a'.repeat(32 * 1024) });
-  const response = await coffreRoute(
-    new Request(`${ORIGIN}/api/auth/device/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
-    runtime,
-    '203.0.113.7',
-  );
-  assert.equal(response!.status, 400);
-  assert.match(JSON.stringify(await response!.json()), /larger than 4096 bytes/);
+test('a body is abandoned soon after the cap, not drained to the end', async () => {
+  let pulled = 0;
+  const endless = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled += 1;
+      controller.enqueue(new Uint8Array(1024).fill(0x61));
+    },
+  });
+  await assert.rejects(readLimitedText(new Request('https://x/', { method: 'POST', body: endless, duplex: 'half' } as RequestInit), 4 * 1024), /larger than 4096 bytes/);
+  assert.ok(pulled <= 8, `the stream was abandoned soon after the cap, not drained (pulled ${pulled} chunks)`);
 });
 
-test('a bulk secret write names at most MAX_BULK_KEYS keys', async () => {
+test('both unauthenticated device-login endpoints refuse an oversize body', async () => {
+  for (const path of ['/api/auth/device', '/api/auth/device/token']) {
+    const body = JSON.stringify({ client_label: 'x', device_code: 'a'.repeat(32 * 1024) });
+    const response = await coffreRoute(
+      new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
+      runtime,
+      '203.0.113.7',
+    );
+    assert.equal(response!.status, 400, path);
+    assert.match(JSON.stringify(await response!.json()), /larger than 4096 bytes/);
+  }
+});
+
+test('readLimitedJson refuses a top-level __proto__ key, as readJson does', async () => {
+  await assert.rejects(readLimitedJson(new Request('https://x/', { method: 'POST', body: '{"__proto__":1}' }), 1024), /__proto__/);
+});
+
+test('an object body names at most MAX_BODY_KEYS entries, refused before validation', async () => {
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  const tooMany = Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, 'v']));
-  await assert.rejects(root.secrets.set('market/dev', tooMany), (error: unknown) => {
-    const { status } = error as { status: number };
-    assert.equal(status, 400);
-    return true;
-  });
+  const is400 = (error: unknown) => { assert.equal((error as { status: number }).status, 400); return true; };
+  // A bulk write over the cap.
+  await assert.rejects(root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, 'v']))), is400);
+  // A dismissal map over the cap, the same guard.
+  await assert.rejects(root.environments.dismiss('market/dev', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, true as const]))), is400);
   // A write at the cap is accepted.
-  const ok = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`K${i}`, 'v']));
-  await root.secrets.set('market/dev', ok);
+  await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`K${i}`, 'v'])));
   assert.equal((await root.secrets.list('market/dev')).keys.length, 1000);
 });

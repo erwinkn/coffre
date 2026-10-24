@@ -15,11 +15,12 @@ import { routes, type Check, type Route } from './routes.ts';
 
 /**
  * The most an API request body may be, read as it streams and abandoned
- * past this: a control-plane request, a bulk secret write its largest (each
- * value is at most 64 KiB), well above anything the CLI or UI sends. Bounded
- * so no request buffers an unbounded body; at this size a plain parse stays
- * within R27's budget, and `MAX_BODY_KEYS` caps the entries a body drives
- * before they are validated.
+ * past this: a control-plane request, a bulk secret write its largest. Well
+ * above anything the CLI or UI sends for a typical change, though a very
+ * large `.env` import (over this, or over `MAX_BODY_KEYS` keys) is refused
+ * with a 400 and must be split. Bounded so no request buffers an unbounded
+ * body; at this size a plain parse stays within R27's budget, and
+ * `MAX_BODY_KEYS` caps the entries a body drives before they are validated.
  */
 const API_BODY_BYTES = 1024 * 1024;
 

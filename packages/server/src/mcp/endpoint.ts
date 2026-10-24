@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { allowed, audited, denied, type McpVia } from '../api/context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import type { AuthenticatedIdentity } from '../auth.ts';
+import { ApiError } from '../api/errors.ts';
 import { fetchApi } from '../fetch-api.ts';
 import { readLimitedJson } from '../http.ts';
 import { logged } from '../logged.ts';
@@ -100,8 +101,12 @@ export async function mcpEndpoint(request: Request, runtime: CoffreRuntime, sour
   let body: unknown;
   try {
     body = await readLimitedJson(request, BODY_BYTES);
-  } catch {
-    return failure(null, 400, { code: CODE.parse, message: 'Parse error: the body is not JSON' });
+  } catch (error) {
+    // A malformed body is a parse error; a well-formed one the guard refuses (too large, or a `__proto__` key) is an
+    // invalid request, told as such rather than as broken JSON.
+    return error instanceof ApiError && error.message !== 'the body is not JSON'
+      ? failure(null, 400, { code: CODE.invalidRequest, message: `Invalid Request: ${error.message}` })
+      : failure(null, 400, { code: CODE.parse, message: 'Parse error: the body is not JSON' });
   }
   const message = parseMessage(body);
   if (errorOf(message)) return failure(null, 400, message);
