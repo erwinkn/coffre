@@ -116,10 +116,19 @@ const show = (value) => {
       const reader = value.kind === 'secret.read' ? ` as ${value.who}` : '';
       return `${value.kind} ${value.at} (${value.id[0]})${via}${reader}`;
     }
+    // Another model's entry: its kind, what it names, and the operation that wrote it.
+    if ('kind' in value && 'id' in value) return `${value.kind}${named(value, ['kind', 'id'])} (${value.id[0]})`;
     return `[${Object.entries(value).map(([k, v]) => `${k} ${show(v)}`).join(', ')}]`;
   }
   return String(value);
 };
+
+/** A record's fields that say something, but `skip`: none of `none`, `false` or an empty reference. */
+const named = (value, skip) =>
+  Object.entries(value)
+    .filter(([k, v]) => !skip.includes(k) && v !== 'none' && v !== false && !(Array.isArray(v) && v[0] === 'none'))
+    .map(([k, v]) => ` ${k} ${show(v)}`)
+    .join('');
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -142,9 +151,12 @@ function change(name, before, after) {
   return [`${name} ${show(before)} -> ${show(after)}`];
 }
 
-const SHOWN = ['slug', 'archived', 'held', 'version', 'grants', 'owners', 'refRow', 'status', 'gen', 'memberLock', 'head', 'log', 'creds'];
+// Every variable is shown but the processes' own and the history the invariants read.
+const HIDDEN = ['pc', 'op', 'l', 'left', 'keyName', 'forkOwn', 'revealed', 'deletions', 'everDeleted', 'excused', 'declared', 'regens', 'issued', 'given', 'released'];
 
 function describe(op) {
+  // Another model's operation: its kind and what it names.
+  if (!('actor' in op && 'who' in op && 'at' in op)) return `${op.kind}${named(op, ['kind'])}`;
   switch (op.kind) {
     case 'none': return '';
     case 'read': case 'write': return `${op.kind} ${op.at} as ${op.who}`;
@@ -170,7 +182,7 @@ for (const step of trace.slice(1)) {
   const lines = [];
   const before = { pc: state.pc, l: state.l, op: state.op };
   for (const [name, value] of Object.entries(step.vars)) {
-    if (SHOWN.includes(name) && !same(state[name], value)) lines.push(...change(name, state[name], value));
+    if (!HIDDEN.includes(name) && !same(state[name], value)) lines.push(...change(name, state[name], value));
     state[name] = value;
   }
   // The process that moved: its label, its locals or its operation changed.

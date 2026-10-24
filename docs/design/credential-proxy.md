@@ -777,7 +777,10 @@ before any password, with the key the app was given in `BackendKeyData`.
 That key is coffre's, random, and maps to one live session of this
 process: its database and the database's real key. A cancel request is
 forwarded, over TLS as the session is, only when its key names a live
-session of the same handle. A guessed key, or another handle's, reaches
+session of the same handle, and coffre waits, as libpq does, for the
+database to close that connection, 5 seconds at most: a VPC Network
+binding's socket is open before its connector has dialed, and closed at
+once it would send nothing. A guessed key, or another handle's, reaches
 nothing, and the database's own keys never leave coffre. psql's Ctrl-C
 works, and tests hold both. On Workers, the map is the object's (below): a cancel request comes with
 the same handle, for the same tunnel, so it reaches the object that holds
@@ -878,7 +881,11 @@ it owes none: a message that reaches the object, so an idle psql at its
 prompt keeps its WebSocket, and its object stays in memory with it. It
 sends a ping too, whose pong, the edge's, must come before the next: a
 connection whose network went away without a word ends within a minute,
-and the app's driver sees it drop, rather than a query that hangs.
+and the app's driver sees it drop, rather than a query that hangs. An app
+that stops reading (a psql in its pager) keeps its connection: paced, the
+listener goes on reading pongs and counts, and coffre sends no more than a
+window; with a coffre on Node, which does not pace, the listener stops
+reading for the app, and a pong it could not read ends nothing.
 
 *A private database, through a VPC Network binding.* `connect()` reaches
 public addresses only. A database inside a private network, a read

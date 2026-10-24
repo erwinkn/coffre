@@ -53,37 +53,67 @@ export async function readLimitedText(request: Request, max: number): Promise<st
   }
 }
 
-/** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */
-export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
-  const text = await readLimitedText(request, max);
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw badRequest('the body is not JSON');
-  }
-}
+/**
+ * The most values a request body may hold, counted over the whole tree
+ * (every object entry, array element and leaf). Validation builds work, and
+ * sometimes an error, per value, so a body is held to this before it is
+ * validated: well above the largest real one (a 1000-key bulk write of
+ * generated values is about 11k), and far below what a megabyte of tiny
+ * entries or array elements would reach, which cost seconds of CPU (R27).
+ */
+const MAX_BODY_NODES = 20000;
 
-/** A JSON body, or `fallback` when the body is empty. */
-export async function readJson(request: Request, fallback?: unknown): Promise<unknown> {
-  let text: string;
-  try {
-    text = await request.text();
-  } catch {
-    throw badRequest('the body could not be read');
-  }
-  if (text.length === 0 && fallback !== undefined) return fallback;
-  // Validation would quietly drop a `__proto__` key (a secret named that,
-  // say), so the write would succeed and store nothing: refuse it outright.
-  let proto = false;
+/**
+ * Parse a JSON body, then walk it once under a node cap, refusing a
+ * `__proto__` key anywhere. `JSON.parse` makes `__proto__` an own property,
+ * not prototype pollution, but validation treats it inconsistently (a secret
+ * named that would seem to write and store nothing), so it is refused. The
+ * walk counts every value and stops the body — before validation — once it
+ * is too large: a plain parse (not a per-node reviver) is bounded by the
+ * byte cap, but validating a huge array or record is not, so the count is
+ * what keeps a request within R27's CPU budget. The walk pushes a node's
+ * children only while under the cap, so a 262k-element array is refused
+ * after counting it, never after copying it.
+ */
+function parseJsonBody(text: string): unknown {
   let body: unknown;
   try {
-    body = JSON.parse(text, (key, value: unknown) => {
-      if (key === '__proto__') proto = true;
-      return value;
-    });
+    body = JSON.parse(text);
   } catch {
     throw badRequest('the body is not JSON');
   }
-  if (proto) throw badRequest('__proto__ cannot be used as a key');
+  let nodes = 1;
+  const stack: unknown[] = [body];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (value === null || typeof value !== 'object') continue;
+    if (Array.isArray(value)) {
+      nodes += value.length;
+      if (nodes > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
+      for (const element of value) stack.push(element);
+    } else {
+      if (Object.prototype.hasOwnProperty.call(value, '__proto__')) throw badRequest('__proto__ cannot be used as a key');
+      const keys = Object.keys(value);
+      nodes += keys.length;
+      if (nodes > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
+      for (const key of keys) stack.push((value as Record<string, unknown>)[key]);
+    }
+  }
   return body;
+}
+
+/** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */
+export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
+  return parseJsonBody(await readLimitedText(request, max));
+}
+
+/**
+ * A JSON body of at most `max` bytes, or `fallback` when the body is empty.
+ * Every body is bounded: the stream is abandoned past the limit, so an
+ * oversize or endless body never buffers (the heart of R27's CPU budget).
+ */
+export async function readJson(request: Request, max: number, fallback?: unknown): Promise<unknown> {
+  const text = await readLimitedText(request, max);
+  if (text.length === 0 && fallback !== undefined) return fallback;
+  return parseJsonBody(text);
 }

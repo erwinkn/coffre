@@ -317,6 +317,8 @@ async function run(t: TestContext, operations: Operation[], { paces, honest }: {
   let pacing: boolean | null = null;
   let accepted = 0;
   let countsSent = 0;
+  /** Bytes coffre's frames carried to the listener. */
+  let fromCoffre = 0;
   let cheated = false;
   /** Frames delivered, either way. */
   let moved = 0;
@@ -340,6 +342,11 @@ async function run(t: TestContext, operations: Operation[], { paces, honest }: {
       if (frame.kind === 'text') {
         refused = pacing === false || !COUNT.test(frame.data) || Number(frame.data) > app.emitted - accepted;
         if (!refused) accepted += Number(frame.data);
+      } else {
+        // A coffre that said it paces, sending past two windows the listener has not counted back, is ended.
+        fromCoffre += frame.data.length;
+        const counted = countsSent + ws.wire.reduce((sum, { frame: sent }) => sum + (sent.kind === 'text' ? Number(sent.data) : 0), 0);
+        refused = pacing === true && fromCoffre - counted > 2 * WINDOW;
       }
       pacing ??= frame.kind === 'text';
       ws.receive(frame);
@@ -355,8 +362,11 @@ async function run(t: TestContext, operations: Operation[], { paces, honest }: {
     if (pacing !== false) assert.ok(app.emitted - accepted < WINDOW + BIGGEST, `${where}: the listener sent ${app.emitted - accepted} bytes uncounted`);
     const buffered = ws.wire.reduce((sum, { frame }) => sum + (frame.kind === 'binary' ? frame.data.length : 0), 0);
     assert.ok(buffered < HIGH_WATER + BIGGEST, `${where}: ${buffered} bytes wait in the listener's WebSocket`);
-    // And coffre's bytes wait on the wire, not the listener: a socket buffer of them for a slow app, and one message.
-    assert.ok(app.writableLength < SOCKET_HIGH_WATER + BIGGEST, `${where}: ${app.writableLength} bytes wait in the app's socket`);
+    // And coffre's bytes wait on the wire, not the listener: for a slow app, a socket buffer of them from a coffre that does
+    // not pace, which the WebSocket waits on; a window from one that paces (two, a cheat's, before it is ended), which it
+    // does not wait on, so that it goes on reading pongs and counts; and one message.
+    const bound = pacing !== true ? SOCKET_HIGH_WATER : honest ? WINDOW : 2 * WINDOW;
+    assert.ok(app.writableLength < bound + BIGGEST, `${where}: ${app.writableLength} bytes wait in the app's socket`);
     // Credit is conserved: the listener counts back what the app took, never more, and owes less than 128 KiB of it.
     if (!app.destroyed && ws.readyState === OPEN) {
       const owed = down.taken - countsSent - ws.wire.reduce((sum, { frame }) => sum + (frame.kind === 'text' ? Number(frame.data) : 0), 0);

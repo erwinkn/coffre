@@ -41,11 +41,13 @@ import {
   updateAuth,
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
   issuedScope,
+  issuerNow,
+  issuerStill,
   managedAccount,
   notManager,
   personalScope,
@@ -73,7 +75,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId'>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -883,9 +885,13 @@ export class SigninService {
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
-      const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
-      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
-      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+      // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.create' });
+      const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
+      // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
+      return audited({ ...this.#deps, caller }, async (tx, log) => {
+        await issuerStill(tx, caller, accessSeq);
+        await credentialStill(ctx, tx, 'token.create');
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,

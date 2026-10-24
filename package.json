@@ -19,6 +19,7 @@
     "test:properties:long": "pnpm test:properties --long && pnpm test:properties:server --long",
     "test:schema": "./scripts/test-schema.sh",
     "formal": "./scripts/formal.sh",
+    "formal:lean": "./scripts/formal-lean.sh",
     "conformance:workers": "./scripts/ensure-postgres.sh && node scripts/ensure-database.mjs coffre && pnpm --filter coffre-workers conformance --postgres postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432} --runtime postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432} --vault-runtime postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}",
     "conformance:node": "pnpm --filter coffre-node conformance",
     "bench:workers": "./scripts/ensure-postgres.sh && node scripts/ensure-database.mjs coffre && node --conditions=coffre:source packages/conformance/scripts/bench.ts workers examples/workers --postgres postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432} --runtime postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432} --vault-runtime postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}",

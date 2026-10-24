@@ -47,6 +47,8 @@ async function browserIdentity(
   return identity instanceof Response ? null : identity;
 }
 
+/** A device-login body carries a short label or a device code, nothing more: it is read in at most this many bytes, as anyone may call it. */
+const DEVICE_BODY_BYTES = 4 * 1024;
 const deviceStart = z.object({ client_label: z.string().trim().max(120).optional() });
 
 /**
@@ -57,7 +59,7 @@ const deviceStart = z.object({ client_label: z.string().trim().max(120).optional
 export async function startDevice(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
   try {
-    const input = deviceStart.parse(await readJson(request, {}));
+    const input = deviceStart.parse(await readJson(request, DEVICE_BODY_BYTES, {}));
     const started = await runtime.signin.startDevice({ clientLabel: input.client_label ?? null, sourceIp });
     return jsonResponse({
       device_code: started.deviceCode,
@@ -85,7 +87,7 @@ const devicePoll = z.object({ device_code: z.string().min(1).max(128) });
 export async function pollDevice(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
   try {
-    const { device_code } = devicePoll.parse(await readJson(request));
+    const { device_code } = devicePoll.parse(await readJson(request, DEVICE_BODY_BYTES));
     const polled = await runtime.signin.pollDevice(device_code, { requestId: crypto.randomUUID(), sourceIp });
     switch (polled.status) {
       case 'pending':

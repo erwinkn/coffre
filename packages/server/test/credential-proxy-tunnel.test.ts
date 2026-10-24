@@ -612,6 +612,74 @@ test('a tunnel through a network binding reaches the private host it names, plai
   assert.deepEqual(asked, ['10.9.8.7:5432'], 'no other dial through the binding');
 });
 
+test('a cancel request through a network binding reaches the database, though its connector dials after the socket opens', postgresOnly, async () => {
+  // A VPC Network binding as Cloudflare's is: open at once, its connector dialing the database only later; closed before
+  // that, it sends nothing (W150, measured live).
+  const port = Number(new URL(TEST_RUNTIME_DATABASE_URL).port);
+  const network: Network = {
+    connect: () => {
+      let socket: Socket | null = null;
+      let given = false;
+      const waiting: Uint8Array[] = [];
+      let readable!: ReadableStreamDefaultController<Uint8Array>;
+      let ended!: () => void;
+      const closed = new Promise<void>((resolve) => (ended = resolve));
+      const end = () => {
+        try {
+          readable.close();
+        } catch {}
+        ended();
+      };
+      setTimeout(() => {
+        if (given) return;
+        socket = tcp({ host: '127.0.0.1', port });
+        socket.on('data', (chunk: Buffer) => readable.enqueue(new Uint8Array(chunk)));
+        socket.on('close', end);
+        for (const chunk of waiting.splice(0)) socket.write(chunk);
+      }, 300);
+      return {
+        readable: new ReadableStream<Uint8Array>({ start: (controller) => void (readable = controller) }),
+        writable: new WritableStream<Uint8Array>({ write: (chunk) => void (socket === null ? waiting.push(chunk) : socket.write(chunk)) }),
+        opened: Promise.resolve(),
+        closed,
+        close: async () => {
+          given = true;
+          if (socket === null) end();
+          else socket.destroy();
+        },
+        startTls: () => {
+          throw new Error('plaintext only');
+        },
+      };
+    },
+  };
+  await clientFor(deps, ROOT).secrets.set('market/dev', {
+    DATABASE_URL: `postgres://coffre_runtime:local-runtime-only@10.9.8.7:5432${new URL(TEST_RUNTIME_DATABASE_URL).pathname}?sslmode=disable`,
+  });
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) } })]);
+  const client = appClient();
+  await client.connect();
+  try {
+    const sleeping = client.query('SELECT pg_sleep(30)');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const { processID, secretKey } = client as unknown as { processID: number; secretKey: number };
+    const cancel = tcp({ host: '127.0.0.1', port: listenerPort });
+    await once(cancel, 'connect');
+    const packet = Buffer.alloc(16);
+    packet.writeInt32BE(16, 0);
+    packet.writeInt32BE(80877102, 4);
+    packet.writeInt32BE(processID, 8);
+    packet.writeInt32BE(secretKey, 12);
+    cancel.write(packet);
+    const started = Date.now();
+    await assert.rejects(sleeping, (error: { code?: string }) => error.code === '57014');
+    assert.ok(Date.now() - started < 5000);
+    cancel.destroy();
+  } finally {
+    await client.end();
+  }
+});
+
 test("a tunnel's network binding is checked with the configuration: missing, it fails, and never falls back to a direct dial", () => {
   const tunnel = (options: Parameters<typeof postgres>[1]) => () => credentialProxy({ credentials: {}, tunnels: { replica: postgres('REPLICA_URL', options) } });
   // A binding the Worker lacks is undefined: the key is there, its value is not.

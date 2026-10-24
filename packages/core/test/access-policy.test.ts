@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { allows, DEFAULT_POLICY, isCredentialScope, ROLES, scopeDefinition, type Holdings, type Policy } from '../src/access.ts';
+import { allows, DEFAULT_POLICY, EVERYWHERE, givesService, isCredentialScope, protectedWithin, readsWholeLog, ROLES, scopeDefinition, type Holdings, type Policy } from '../src/access.ts';
 
 const market = '11111111-1111-4111-8111-111111111111';
 const dev = '22222222-2222-4222-8222-222222222222';
@@ -19,4 +19,16 @@ test("a scope kept before 0.10, its role's name alone, holds the role as it ship
   assert.equal(allows(holder, 'secret.write', place), true);
   assert.equal(allows({ ...holder, credentialScope: kept }, 'secret.write', place), false);
   assert.equal(allows({ ...holder, credentialScope: kept }, 'secret.read', place), true);
+});
+
+test('a name a plain object holds already names no role and no project of the policy', () => {
+  // `formal-lean.ts` found these: `instanceRoles['constructor']` is Object, which made `allows` throw.
+  for (const name of ['constructor', '__proto__', 'toString']) {
+    const odd: Holdings = { role: name as Holdings['role'], scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
+    assert.equal(allows(odd, 'secret.read', { projectId: 'market' }), false);
+    assert.equal(readsWholeLog(odd), false);
+    assert.deepEqual(protectedWithin(DEFAULT_POLICY, { projectId: name }), []);
+    const developer: Holdings = { role: 'developer', scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
+    assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), true);
+  }
 });
