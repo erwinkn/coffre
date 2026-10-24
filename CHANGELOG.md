@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Upgrading to 0.12, in short.** Run `coffre migrate` before you deploy,
+  as always: it applies `0017_capped_alerts` (`0016_capped_alerts` on
+  SQLite), which only adds a table, so the release before keeps serving on
+  it until the deploy. Then:
+  - **The GitHub Action needs `keys:`** (breaking, below). Add the keys the
+    job's later steps use, by name or prefix, to every `erwinkn/coffre/action`
+    step: `keys: DATABASE_URL STRIPE_*`. Without it, or with a bare `*`, the
+    step fails before reading anything. To hand every key to one process,
+    run it with `coffre run <environment> -- <cmd>` instead. Bump the
+    Action's tag to `v0.12.0` together: it runs `@coffre/cli` at its own
+    version, and `--format github` needs `--keys`.
+  - **Old and new pair either way.** A workflow still on `action@v0.11.0`
+    runs the 0.11 CLI, which sends no `keys` and exports the whole
+    environment as before, against a 0.12 instance. The 0.12 Action against
+    a 0.11 instance exports only the keys named, but the older instance
+    opens, and its audit log records, every key of the environment.
+  - Nothing else is breaking. The audit heartbeat and the unknown-key alert
+    change no setting, API or config, and no data needs reissuing.
+
 - **Breaking: the GitHub Action exports only the keys the workflow names.**
   Workflows must add `keys:`. What the Action writes to `GITHUB_ENV`, every
   later step of the job sees, so anyone who could only write `market/prod`
