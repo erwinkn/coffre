@@ -517,6 +517,28 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => [['the', text(entry.metadata.kekProvider) === 'local' ? null : text(entry.metadata.kekProvider), 'vault key', text(entry.metadata.kekId)].filter((word) => word !== null).join(' ')],
   },
   'audit.heartbeat': { did: 'checked in', tried: 'check in', what: () => [] },
+  // The audit watch's (server plugins/audit-watch.ts): what it found, what cleared it, and an Owner's acceptance.
+  'audit.finding': {
+    did: 'found the log changed',
+    tried: 'find the log changed',
+    what: ({ entry }) => [number(entry.metadata.seq) === null ? text(entry.metadata.reason) ?? 'where it walked' : `at entry ${number(entry.metadata.seq)}`],
+  },
+  'audit.finding_cleared': { did: 'found the log whole again', tried: 'find the log whole again', what: () => [] },
+  'audit.reanchor': {
+    did: 're-anchored the log',
+    tried: 're-anchor the log',
+    what: ({ entry }) => (number(entry.metadata.at) === null ? [] : [`at entry ${number(entry.metadata.at)}`]),
+  },
+  'audit.loss_accepted': {
+    did: 'accepted as lost',
+    tried: 'accept as lost',
+    what: ({ entry }) => [`entries ${number(entry.metadata.from) ?? '?'} to ${number(entry.metadata.to) ?? '?'}`],
+  },
+  'audit.loss_unapplied': {
+    did: 'could not apply the acceptance of',
+    tried: 'apply the acceptance of',
+    what: ({ entry }) => [`entries ${number(entry.metadata.from) ?? '?'} to ${number(entry.metadata.to) ?? '?'} as lost`],
+  },
   'audit.checkpoint': {
     did: 'signed the log',
     tried: 'sign the log',

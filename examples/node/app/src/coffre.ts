@@ -2,7 +2,8 @@
 // `pnpm start` reads): read by src/server.ts, and so only on the
 // server. It holds no vault key: it asks the vault, a process of its own
 // (src/vault.ts), over a Unix socket.
-import { createCoffre, github, githubApp, processLimits, signin, type CoffreContext } from '@coffre/server/node';
+import { createCoffre, fileAnchor, github, githubApp, processLimits, signin, type CoffreContext } from '@coffre/server/node';
+import { auditWatch } from '@coffre/server/plugins/audit-watch';
 import { connectVault } from '@coffre/vault/node';
 
 function env(name: string): string {
@@ -52,6 +53,15 @@ export const coffre = createCoffre({
     mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) },
   }),
   auditChainKey: env('APP_KEY'),
+  // The audit watch: every five minutes, the log walked from what it last
+  // verified, which it keeps outside the database, in a file. Put the file
+  // on a volume that outlives the process: on a disk that goes with the
+  // container, every restart walks the log whole again and alerts (through
+  // workloads' `alert`, or else in the process's log), and a cut made
+  // while it was down goes unseen. More than one process wants a store
+  // they share (docs/deploy.md, "The audit watch"). Remove it, and the log
+  // is checked only when someone runs `coffre verify log`.
+  plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) })],
 });
 
 // What src/server.ts hands Start with each request, for Start's types.

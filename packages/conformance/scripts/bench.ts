@@ -165,6 +165,8 @@ function paths(deployment: Deployment, people: { admin: Who; reader: Who; servic
   const reveal = (path: string) => ({ method: 'POST', body: JSON.stringify({ path }) });
   return [
     { name: 'GET /livez (the floor)', request: async () => ok(await fetch(`${origin}/livez`)) },
+    // Red or green, it costs what it costs: red only while the beats catch up with a log grown since the last.
+    { name: 'GET /readyz', request: async () => void (await (await fetch(`${origin}/readyz`)).text()) },
     { name: 'GET /api/me, browser session', request: async () => ok(await people.admin.browser.send('GET', '/api/me')) },
     { name: 'GET /api/me, CLI session', request: async () => ok(await fetch(`${origin}/api/me`, { headers: as(people.cli) })) },
     { name: 'POST /api/reveals, one key', request: async () => ok(await people.admin.browser.send('POST', '/api/reveals', { path: `${APP}/KEY_0` })) },

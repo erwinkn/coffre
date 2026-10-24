@@ -94,6 +94,11 @@ outside a reveal by someone allowed to.
 
 ## The checks
 
+The checks of readiness and the log's checkpoints hold a deployment to
+the audit watch, which `coffre init` writes in
+([deploy.md](deploy.md#the-audit-watch)): one that removed it fails them,
+`/readyz` answering `watched: false`.
+
 In order, since each builds on the ones before:
 
 | Check | What must hold |

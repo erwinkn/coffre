@@ -26,8 +26,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
     account sensitive values (R32);
   - [`formal/Bulk.tla`](../formal/Bulk.tla), the vault's bulk limit (R28);
   - [`formal/Audit.tla`](../formal/Audit.tla), the audit chain's
-    heartbeats, checkpoints and readiness against someone who writes the
-    database ([below](#the-audit-chain-and-the-tunnel));
+    heartbeats, checkpoints, anchor and readiness against someone who
+    writes the database ([below](#the-audit-chain-and-the-tunnel));
   - [`formal/Tunnel.tla`](../formal/Tunnel.tla), how long a revoked
     handle's tunnel session lives.
 
@@ -283,8 +283,8 @@ reference to that secret in `References`, and none yet elsewhere.
   `projects.ts`, `secrets.ts`, `references.ts` or `signin.ts` should change
   `Coffre.tla` in the same pull request; one in `workloads.ts`, `signin.ts`,
   `services.ts` or `context.ts`, `Credentials.tla` or `Issuing.tla`; one in
-  the vault's count, `Bulk.tla`; one in `heartbeat.ts`, `audit.ts` or the
-  vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`.
+  the vault's count, `Bulk.tla`; one in `plugins/audit-watch.ts`, `anchor.ts`, `audit.ts` or
+  the vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`.
 - **Beyond the bounds.** The bounds are three places, a few members, and three
   or four requests of one to three operations each. Races that need more are
   not explored. The races found so far needed two requests, or three for
@@ -830,7 +830,8 @@ session lives.
 ### Audit.tla
 
 The chain's verification against someone who can write the database and
-holds no key. They edit an entry in place, or rewrite one and chain
+holds no key. They edit an entry in place, heartbeat rows among them, and
+put it back, as often as their budget allows, or rewrite one and chain
 everything after it again, the head row too. An entry's hash is
 abstracted to the chain's version where it is: a rewrite moves every
 entry from there on to a new one. An entry's MAC binds its content and
@@ -839,38 +840,35 @@ was appended after the rewrite. An edit leaves the stored hash, and only
 recomputing it finds the edit. Each walk runs in a snapshot of its own,
 so it is one step.
 
-A heartbeat row is the heartbeat's memory: where the next walk resumes,
-and what the last one found. So they write those rows too, at any step,
-as often as their budget allows: they hide one (change its `action`,
-`author`, `decision` or `seq`, or delete it, so that no read of beats
-finds it), forge one (make it say it verified to the head, clean), and
-put it back as it was. Either change is an edit in place: a walk over the
-row finds it.
+The anchor (`anchor.ts`) is out of their reach: one variable, which a
+beat, or a walk between beats, writes by compare-and-set, a step. It holds the newest checkpoint a
+beat saw, where its prefix ends and its hash; how far the app verified;
+the entry a walk found, or that the vault refused; and the beat that
+wrote it.
 
-- **A heartbeat** (`heartbeat.ts`, `writeAuditHeartbeat`):
-  1. in one snapshot, where to resume (`resumePoint`) and the walk from
-     there, at most `CHAIN_WALK` entries, each link and hash, and the
-     app's MACs (`walkChain`);
-  2. the beat: how far it verified, or, if it found the chain broken,
-     where its walk began and the entry it found;
-  3. then the vault's checkpoint.
-- **Where to resume** (`audit.ts`, `resumePoint`): what the newest beat
-  whose MAC verifies says it verified, at a point before its own row, and
-  no further than where the walk of any broken beat past that point began,
-  until a clean beat has cleared it (`clears`). Each beat records where its
-  walk began (`from`) and the newest entry its snapshot held that the
-  app's key vouches for (`head`): its walk's end, or the newest beat whose
-  MAC verifies. A beat B clears what F found if B's walk was clean, B's
-  snapshot held F's row (`B.head >= F.seq`), and B's walk began before the
-  entry F found and went over it (`B.from < F.broken <= B.verified`); or,
-  F having found the entry its walk began from with another hash, B began
-  there and found the hash F expected. Rows are appended under the log's
-  head and so committed in seq order: a snapshot holding F's row began
-  after F committed, so B found the entry whole after F found it changed.
-  A beat from before 0.12, which records neither, clears nothing.
-- **A checkpoint** (`vault.ts`, `checkpoint`):
-  1. the walk from the newest one, in a snapshot, at most `walks.checkpoint`
-     entries, each link and hash, and the vault's MACs;
+- **A heartbeat** (`plugins/audit-watch.ts`, `beat`):
+  1. the anchor, read;
+  2. the beat's row, under the head;
+  3. the vault's checkpoint, below, which returns the prefix it signed, or
+     the newest one, or a refusal;
+  4. in one snapshot, the anchor's prefix still there, by its hash, and
+     no longer than the one the vault returned (`AnchorHeld`), then the
+     walk from where the app verified to, toward that prefix, at most
+     `CHAIN_WALK` entries, each link and hash and the app's MACs, ending
+     at the hash the vault signed; a finding of the app's that stands is
+     checked alone instead, its entry, until it verifies again;
+  5. the anchor written, over the record read in step 1 (`AnchorCas`). If
+     a walk between beats wrote it first, toward the same checkpoint, the
+     beat reads that record and goes again from step 4, as it would had
+     it read that record in step 1 (`BeatRetries`); any other record
+     written first, and it writes nothing.
+- **A walk between beats** (`plugins/audit-watch.ts`, `walkOn`; the
+  Durable Object's alarm, Node's job): an anchor with a backlog read, the
+  walk of step 4 toward its own checkpoint, and the anchor written over
+  that record, its beat and age unchanged.
+- **A checkpoint** (`vault.ts`, `checkpoint`), as before the anchor:
+  1. the walk from the newest one, in a snapshot, at most
+     `walks.checkpoint` entries, each link and hash, and the vault's MACs;
   2. a stretch of the scrub in another, each hash of the signed prefix
      recomputed;
   3. under the head, whether another call checkpointed or refused
@@ -878,160 +876,85 @@ row finds it.
      reached the head, the rest walked and the head signed, or else where
      the walk got to, behind it, unless another call signed as far;
   4. a refusal's entry, in a transaction of its own.
-- **Readiness** (`auditReadiness`, `readiness`): in one snapshot, the
-  newest beat, the newest checkpoint and that the prefix it signed is
-  still there, and the next beat's walk, from where it would resume to
-  the head. That walk costs what a beat's own does: the entries since the
-  newest beat's walk began, at most `CHAIN_WALK` (`request-cost.test.ts`
-  holds it to the same however long the log, and to one walk past it).
-  Past `CHAIN_WALK`, readiness is red, as the beat itself would be.
+- **Readiness** (`plugins/audit-watch.ts`, `readiness`): the anchor, then, in another read,
+  the log's entry at its checkpoint, by its hash (`ReadinessChecksHeld`).
 
-Why that is enough, by induction over beats. Say beat F found entry e
-edited, its walk having begun at point s, before e. Take any later beat X
-that resumes from point r, the cursor of a beat B its MAC vouches for.
-- If F's row lies past r, X's walk reads it. Hidden or forged there, it
-  is an entry changed, and X finds it. As written, F is a broken beat
-  past r, so X resumes no further than s, and walks over e; unless a clean
-  beat cleared F, whose walk went over e after F found it, and found e
-  whole: put back since F found it.
-- If F's row lies before r, B's cursor is past F's row. A beat's cursor
-  is never past the head as its walk began, so F had committed before B
-  walked, and the same holds of B: B walked over e after F found it, or
-  resumed no further than s.
-
-So no walk passes e while F's edit stays, except one that walked over e
-after F found it, which found e as it was put back. Readiness runs X's
-walk, so it is red as long as X would find e or F's row changed. Edited
-again after that, e is a new edit behind every cursor, which the scrub
-finds. "A walk reads F's row and finds it changed" holds while F stays
-one of the app's rows: one made the vault's is the vault's to check, the
-gap below.
+Why that is enough. Readiness vouches for the prefix the anchor's
+checkpoint signed, and only once the app verified through it: every
+entry of it was walked by one beat or walk or another, each from where
+the one before ended, which the anchor keeps and nobody else can move. A
+rewrite inside it, the chain after it hashed again, changes the hash at
+its end, which readiness reads. A finding
+leaves the anchor where it was, and stands in it until the entry it names
+verifies again; then the walk goes on from where the anchor was, over that
+entry and on. Two beats at once: the one that writes second named a record
+no longer stored, and writes nothing; one that a walk between beats
+overtook walks again from that walk's record, which holds its checkpoint. What is past the anchor is the next
+beat's: readiness says nothing of it.
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
-| A heartbeat's walk checks that the entry it goes on from still has its hash (`walkChain`, `from`) | readiness green after a rewrite behind the app's cursor (`RewriteNeverGreen`) | |
-| And each app entry's MAC | the same, after a rewrite of app entries the vault cannot check (`RewriteNeverGreen`) | |
+| A beat's walk checks each app entry's MAC (`walkChain`, `verifyEntries`) | readiness green over a rewrite of app entries the vault cannot check (`GreenIsReal`) | |
 | A checkpoint's walk checks the vault's MACs, and under the head the prefix signed last (`rehash`, `carries`) | a prefix signed over a vault entry chained after a rewrite (`SignsNoForgedVault`) | |
 | Under the head, a call that another overtook signs nothing, and a refusal since the last checkpoint stands (`seen`, `#standingRefusal`) | a checkpoint signed after a refusal for a tamper the vault can find (`StaysUnsignedOnceFound`) | |
 | The scrub recomputes the signed prefix's hashes (`#scrub`, `relink`) | an entry edited in place, signed over again and again (`EditFoundByNextScrub`) | |
-| A beat reads where to resume in the snapshot it walks in (`writeAuditHeartbeat`, `OneSnapshot`) | a beat reads where to resume before the finder commits, and walks over the finder's row after, as any row (`FoundStaysRed`, in `Overtaking`); or the finder's row hidden only while it reads where to resume, and put back before it walks (`FoundEditStaysRed`, in `Masking` and `Rows`) | #296's review |
-| A beat counts as where to resume only by its MAC, and only for a point before its own row (`resumePoint`, `CursorByMac`) | the finder's row forged to say it verified to the head: the next walk resumes there, past the edit (`FoundEditStaysRed`, in `Rows`) | this model |
-| No further than where the walk of any broken beat past that point began (`resumePoint`, `NoResumePastFinding`) | two heartbeats at once: the one that walked before an edit commits after the one that found it, and the next walks on from its cursor, past the edit (`FoundStaysRed`, in `Overtaking`; `FoundEditStaysRed`, in `Hiding`, `Reverting`, `Rows`) | this model, fixed with it |
-| Readiness runs the next beat's walk, to the head (`auditReadiness`, `ReadinessWalks`) | the same two beats, readiness green on the second until the next beat (`FoundStaysRed`, in `Tampering`); or the finder hidden, and readiness green on the beat before it (`FoundEditStaysRed`, in `Hiding` and `Rows`) | this model, fixed with it |
-| Until a clean beat cleared it (`clears`, `Clears`) | a finder whose row lies more than a walk past where its walk began, its entry put back: every beat after brings the walk back there, none reaches past the finder's row, and readiness stays red on a whole chain (`RepairGoesGreen`, in `Repair`) | #296's Fable review |
-| Cleared only by a walk that went over the entry found, from before it, in a snapshot that held the finder (`clears`, `ClearsOverFault`) | cleared by any clean beat whose snapshot held the finder, as that review proposed: the finder hidden while a beat walks from an overtaker's cursor, ending short of the finder's row, and put back; the next beat goes on past the edit (`FoundEditStaysRed`, in `Overtaken`) | this model |
-| Readiness reads the newest beat and the newest checkpoint in one snapshot (`readiness`) | green on a beat and a checkpoint that were never the newest together (`GreenIsReal`) | this model, fixed with it |
+| Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
+| A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`); a walk between beats writes how far it got over a beat's later checkpoint (`AnchorNeverBack`, in `Walking`) | this model |
 
-`FoundEditStaysRed` is stated over what the beats found, kept by the
-model as they commit, not over their rows as they are now: so a finder
-hidden or forged since still counts. `Rows` gives the attacker two
-changes of any beat rows at any step, with three beats running and one
-edit behind every cursor, 3.7 million states; with three changes it
-holds too, over 41 million states, which `pnpm formal` does not run.
-`RepairGoesGreen` is progress, checked as an invariant of `Repair`'s
-runs: once the edit is put back and four beats have walked with no edit
-in place, readiness is green.
-
-This replaces #296's first fix, rounds 1 to 4 of its first review: a beat read,
-under the head before it appended, the beats committed since its walk
-began, and said what a broken one found. Each round found another
-interleaving that sent readiness green: the finder's row edited while
-the newer beat read, then while the next read where to resume, then made
-no beat at all, which no read of beats can see. Each was a row the
-attacker changed between two reads. Here the reads that matter are one
-snapshot, and every row past where it resumes is one the walk reads.
+Two protections the code keeps are not needed in the model: the beat's
+walk checking that the anchor's prefix is still there, and that the entry
+it goes on from still has its hash (`AnchorHeld`, `WalkChecksFrom`).
+Turned off, alone or together, every scenario still holds: the vault's
+own check refuses to sign over a rewrite of the prefix it signed last,
+and readiness reads the anchor's hash. They matter where the model does
+not go: a vault started again after the log was cut back below its
+newest checkpoint, which then resumes from an older one still in the log
+and signs the shorter log afresh (`audit-watch.test.ts`, "a log cut back
+below the anchor").
 
 What it does not claim, as the code does not:
 
 - **The vault signs over app entries it cannot check.** A rewrite of the
-  app's entries alone, past the last vault entry, is signed. The
-  heartbeat's walk keeps readiness red (`FoundStaysRed`, `RewriteNeverGreen`).
-- **A refusal of the vault's stands only until it signs again.** One that
-  found an app entry rewritten mid-walk is overtaken by the next
-  checkpoint, which cannot see it. The next beat finds it.
+  app's entries alone, past the last vault entry, is signed. The beat's
+  walk finds it and the anchor keeps the finding (`FoundEditStaysRed`).
+- **A refusal of the vault's stands only until it signs again.** Three
+  checkpoints at once break `StaysUnsignedOnceFound`, so `Overtaking`
+  leaves it to `Tampering`. Call b refuses for an entry edited while call
+  a walked; a, whose snapshot began before the edit, has signed over it;
+  call c's snapshot begins after b's refusal and resumes from a's
+  checkpoint, past the edit, and signs. This is the vault's, unchanged by
+  the anchor, and the scrub finds the edit again within two laps. The
+  anchor clears a refusal once the vault signs, so readiness is green over
+  that edit until then, if the edit is to an entry behind the app's walk.
+- **A rewrite that stops short of the anchor's checkpoint.** The model's
+  rewrite hashes the chain again to the head. One of entries 400 to 499,
+  each hashed again, under a checkpoint at 500, leaves 500's hash, which
+  readiness reads, and breaks 500's link to 499, which no beat walks
+  again: the scrub, which links each entry to the one before, finds it
+  within two laps, as it does an edit in place.
 - **An edit made between a checkpoint's walk and its signature is signed
   over.** The scrub finds it: here, with a scrub of the whole prefix a
   call, at the next checkpoint; in the code, with `walks.scrub` entries a
-  call, within two laps. That bound is not checked here: `Overtaking`
-  scrubs an entry a call, and its runs end before a lap does twice.
+  call, within two laps.
 - **A walk cut short.** A walk reads at most `CHAIN_WALK` entries; one cut
-  short says how far it got, which readiness reads as red, and the next
-  goes on from there. A row hidden past where it stopped is read by the
-  next. The model's walks are four entries.
-- **Rewinding the database.** Deleting the newest rows, the head row put
-  back, is the limit [architecture.md](architecture.md#limits) states: a
-  finder cut so loses its finding, and every row left is genuine.
-- **A finder made one of the vault's rows, for one beat.** The app's walk
-  checks the vault's rows only for their place in the chain, by their
-  hashes; only the vault holds their MACs. So someone who makes a finder
-  F one of the vault's rows (its `author` changed, its hash computed
-  again), while only the vault's rows come after it, and chains those
-  again, the head row too, leaves the app a whole chain and no beat. An
-  app row after F would fail its MAC, so it must be done before the next
-  one is written. Readiness is then green on the beat before F, for one
-  beat interval at most, the app writing on meanwhile. The vault's next
-  checkpoint finds F by its MAC and refuses, and it refuses every one
-  after, since nothing can put F back without breaking the rows chained
-  to it since: so the next beat stays uncovered, and readiness red for
-  good, on the refusal rather than on F's finding, which the beats after
-  it no longer see. Made so after its checkpoint signed it, F moves the
-  hash that checkpoint signed, and readiness is red at once
-  (`auditHashAt`). The model's attacker keeps each entry's author, so it
-  does not explore this. Closing it means asking the vault about its rows
-  past its newest checkpoint on each readiness probe, bound to the app's
-  walk: `verifyLog` would need a bounded mode that recomputes the hashes
-  up to `upTo` itself, counts no prefix from the first entry, and says it
-  reached `upTo`. Today's verification, with `upTo`, leaves the links to
-  the app, which a row app-claimed in one snapshot and the vault's in the
-  other escapes; and it counts the whole signed prefix, which a readiness
-  probe cannot afford (R25). #296's review, rounds 1 to 3.
-
-The race it found in heartbeats, with readiness's walk off. Two run at
-once, as on two Node instances, each beating on its own timer. Beat 1
-reads where to resume and walks the chain (step 8). Someone rewrites the
-app's newest entry (9). Beat 2 walks and finds it, and commits `broken`
-(12). Beat 1 commits after, with what its own walk found, and is now the
-newest beat (14). Its checkpoint signs over the app's entries, which the
-vault cannot check (18), and readiness is green with the rewrite found
-and still there, until the next beat. With readiness's walk on, it reads
-beat 2 past where beat 1 verified, resumes from where beat 2's walk
-began, and finds the rewrite.
-
-```
-  8. beat1     BeatAttest        beat at 0                  -> beat.head
-  9. attacker  Tamper            rewrite at 0               -> idle            log[5] app -> app forged true rechained; tampered[kind] none -> rewrite; tampered[at] 0 -> 5; tampered[n] 0 -> 1
- 12. beat2     BeatCommit        beat at 0                  -> ckpt.snapshot   log +beat verified 2 broken true walked true fault 5; head beat2 -> none
- 14. beat1     BeatCommit        beat at 0                  -> ckpt.snapshot   log +beat verified 5; head beat1 -> none
- 18. beat1     CkptCommit        beat at 0                  -> idle            log +ckpt at 7; head beat1 -> none
-```
-
-And a finder hidden, with readiness's walk off. Beat a verifies through
-entry 4 (6). Its row is hidden (8). Beat b walks from there, finds the
-row changed, and commits `broken` (11). Its row is hidden too (13): the
-newest beat a read of beats finds is the one the log started with, which
-the newest checkpoint covers, and readiness is green on it. With its walk
-on, readiness resumes from that beat's cursor, reads both rows, and finds
-them changed.
-
-```
-  6. a         BeatCommit        beatonly at 0              -> idle            log +beat verified 4; head a -> none
-  8. y         Tamper            hide at 0                  -> idle            log[5] beat verified 4 -> beat verified 4 edited 1 hidden true; tampered[kind] none -> edit; tampered[at] 0 -> 5; tampered[n] 0 -> 1
- 11. b         BeatCommit        beatonly at 0              -> idle            log +beat verified 2 fEdit 1 broken true fault 5; history[found] {} -> {<<5, 1>>}; head b -> none
- 13. y         Tamper            hide at 0                  -> idle            log[6] beat verified 2 fEdit 1 broken true fault 5 -> beat verified 2 edited 2 fEdit 1 broken true fault 5 hidden true; tampered[at] 5 -> 6; tampered[n] 1 -> 2
-```
-
-And in readiness, with its reads apart. The monitor reads beat 1 (7).
-Beat 2 commits (11). Beat 1's checkpoint commits after it (15), covering
-beat 1 and not beat 2. The monitor reads it, and answers green on beat 1
-(16): when that checkpoint was signed, beat 2 was the newest beat, and no
-checkpoint covered it, so at no instant were the rows green.
-
-```
-  7. monitor   ProbeBeat         probe at 0                 -> probe.ckpt
- 11. beat2     BeatCommit        beat at 0                  -> ckpt.snapshot   log +beat verified 5; head beat2 -> none
- 15. beat1     CkptCommit        beat at 0                  -> idle            log +ckpt at 5; head beat1 -> none
- 16. monitor   ProbeCkpt         probe at 0                 -> idle            history[greens] {} -> {[real false]}
-```
+  short keeps how far it got in the anchor, which readiness reads as red,
+  and the next goes on from there. The model's walks are four entries, six
+  in `Repair`, where the beats must outrun the two entries each adds.
+- **Cutting the log.** The model's attacker edits and rewrites, and does
+  not delete: a cut is the tests' (`audit-watch.test.ts`, "a cut tail is red
+  at once", "a log cut back below the anchor"). The entries written since
+  the last beat are a window a cut takes unseen.
+- **An empty store, and an Owner's acceptance.** The scenarios start
+  from an anchor. A store found empty is re-anchored by a walk of the
+  whole log, readiness green meanwhile (Erwin, 2026-10-24): over that
+  window `GreenIsReal` does not hold by design, since nothing yet vouches
+  for the prefix, and a cut made before the store emptied is never seen.
+  An Owner's acceptance of lost entries moves the anchor back in a new
+  epoch. Neither is modelled; both are the tests' (`audit-watch.test.ts`).
+- **The anchor's own store.** Its compare-and-set is one step here; a
+  store with weak access control is tamper-evident by the app's MAC and
+  the vault's signature, and only its own compare-and-set and monotonic
+  rule (`admits`) keep an older record from being put back.
 
 ### Tunnel.tla
 
@@ -1074,11 +997,11 @@ availability edge, not a bound, which `StandingStaysOpen` does not see.
 |---|---|
 | `SignsNoForgedVault` | The vault never signs a prefix holding an entry of its own rewritten, or chained after a rewrite |
 | `StaysUnsignedOnceFound` | Once a checkpoint was refused for a broken log, none is signed while the vault could find the tamper |
-| `RewriteNeverGreen` | A heartbeat whose walk came after a rewrite is never green |
-| `FoundStaysRed` | Once a heartbeat found the chain broken, readiness is red from then on, against someone who writes once |
-| `FoundEditStaysRed` | Against someone who writes again, edits, hides, forges and puts back: while an edit any beat found is still in place, readiness is red, whatever has become of that beat's row. Edited again after a revert, it is a new edit behind every cursor, which the scrub finds (`EditFoundByNextScrub`) |
+| `FoundEditStaysRed` | Against someone who edits, reverts and edits again, any entry, heartbeat rows among them: while an edit a beat wrote to the anchor is still in place, readiness is red. Edited again after a revert, it is a new edit behind the anchor, which the scrub finds (`EditFoundByNextScrub`) |
 | `EditFoundByNextScrub` | An entry edited in place is signed over by one checkpoint in flight at most, with a scrub of the whole prefix a call, as in `Tampering` |
-| `GreenIsReal` | Readiness answers green only on rows that said so at one instant during its reads |
+| `GreenIsReal` | Readiness, read as a monitor asks it, the anchor then the log, never vouches for a prefix holding an entry rewritten or chained after a rewrite |
+| `AnchorNeverBack` | The anchor's checkpoint and the app's progress never move back |
+| `RepairGoesGreen` | In `Repair`, once the edit is put back and five beats have walked with no edit in place, readiness is green |
 | `EndsWithinBound` | A revoked handle's tunnel session ends within R + D of its revocation |
 | `StandingStaysOpen` | A session whose handle stands stays open while every check answers before its deadline |
 
@@ -1086,16 +1009,12 @@ availability edge, not a bound, which `StandingStaysOpen` does not see.
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Tampering` | From an entry of each author, a beat and a checkpoint: a request appends, two heartbeats run at once with their checkpoints, and someone edits an entry in place or rewrites the chain from one | 800 thousand |
-| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run with their checkpoints, which sign behind the head, and a monitor asks for readiness | 120 thousand |
-| `Overtaking` | Four heartbeats at once, one with its checkpoint, while someone edits the entry the newest checkpoint signed, behind every cursor, with a scrub of one entry a call | 180 thousand |
-| `Hiding` | Someone edits the entry the newest checkpoint signed, a beat finds it, and they hide its row while one that walked before commits, then put it back | 11 thousand |
-| `Reverting` | From a beat past the newest checkpoint, someone edits an entry behind its cursor and one ahead; beats find each, and they revert the one ahead while a third walks | 440 thousand |
-| `Reedit` | Someone edits an entry, reverts it once a beat found it, and edits it again, while beats walk one after another | 31 thousand |
-| `Masking` | A beat walks past an entry before it is edited; another, begun before it, finds the edit and commits after; the finder's row is hidden while a third reads where to resume, and put back before it walks | 150 thousand |
-| `Rows` | Someone edits the entry the newest checkpoint signed, and hides, forges or puts back any beat row, twice, at any step, while three beats run, one with its checkpoint | 3.7 million |
-| `Repair` | From a finder whose row lies more than a walk past where its walk began, its entry edited: someone puts it back when they like, while six beats run one after another | 489 |
-| `Overtaken` | From a finder, and an overtaker that walked past its entry before the edit and committed after it: someone hides and puts back beat rows while two beats run | 19 thousand |
+| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 5.2 million |
+| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 178 thousand |
+| `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 1.7 million |
+| `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 1.1 million |
+| `Walking` | From a checkpoint past a backlog of four entries: walks between beats go on with it, two entries a walk, while two beats run at once, someone edits an entry in the backlog, and a monitor asks | 1.3 million |
+| `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 731 |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
 

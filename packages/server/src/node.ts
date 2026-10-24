@@ -12,6 +12,7 @@
  *     vault: connectVault('/run/coffre/vault.sock'),
  *     auth: signin({ providers: [github({ clientId: …, clientSecret: … })] }),
  *     auditChainKey: process.env.APP_KEY,
+ *     plugins: [auditWatch({ anchor: fileAnchor('/var/lib/coffre/anchor.json') })],
  *   });
  *
  * and Start's server entry, which hands each request coffre and runs the
@@ -32,7 +33,7 @@ import type { Duplex } from 'node:stream';
 import { openDatabase } from '@coffre/db/connect';
 import { migrateDatabase } from '@coffre/db/migrate';
 
-import { runScheduled } from './app.ts';
+import { runScheduled, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { processGates } from './gate.ts';
 import { logged } from './logged.ts';
@@ -42,6 +43,8 @@ import { requestScope, type CoffreContext } from './scope.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
 
 export * from './index.ts';
+/** The audit watch's anchor in a file, for one process with a persistent volume: `auditWatch({ anchor: fileAnchor('/var/lib/coffre/anchor.json') })`. */
+export { fileAnchor } from './anchor-file.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 /** Limits for workload exchanges that count in this process: `signin({ workloads: { limits: processLimits() } })`. */
 export { processLimits } from './workloads/limits.ts';
@@ -66,6 +69,12 @@ export type CoffreNode = {
 };
 
 const SCHEDULE_MINUTES = 5;
+
+/** Walks of the audit watch's backlog after a scheduled run, at most: 10,000 entries each, a million a run. */
+const BACKLOG_WALKS = 100;
+
+/** How long before the next run the backlog's walks stop: a walk's time, with room to spare. */
+const BACKLOG_MARGIN_MS = 30_000;
 
 /**
  * coffre on Node, its configuration checked now. The database opens with
@@ -102,10 +111,19 @@ export function createCoffre(config: NodeConfig): CoffreNode {
     },
     schedule() {
       if (timer !== undefined) return;
-      const tick = () =>
-        ready()
-          .then(runScheduled)
+      // Then the audit watch's backlog, a walk after another, until none is left, `BACKLOG_WALKS`, or a little
+      // before the next run is due.
+      const tick = () => {
+        const until = Date.now() + SCHEDULE_MINUTES * 60_000 - BACKLOG_MARGIN_MS;
+        return ready()
+          .then(async (rt) => {
+            const ran = await runScheduled(rt).then(() => null, (error: unknown) => error);
+            // Each failure its own line: the walk's never hides the run's.
+            await walkAuditBacklog(rt, BACKLOG_WALKS, until).catch((error: unknown) => console.error('the audit backlog could not be walked', logged(error)));
+            if (ran !== null) throw ran;
+          })
           .catch((error: unknown) => console.error('scheduled job failed', logged(error)));
+      };
       void tick();
       timer = setInterval(tick, SCHEDULE_MINUTES * 60_000);
       timer.unref();

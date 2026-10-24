@@ -17,15 +17,14 @@ import { preferencesIn, type Preferences } from '@coffre/core/pages';
 import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
-import { pruneSpentTokens } from './db/queries.ts';
+import { auditHead, pruneSpentTokens } from './db/queries.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
-import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
 import { mcpEndpoint } from './mcp/endpoint.ts';
 import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
 import { pluginRoute } from './plugins.ts';
-import type { CoffreRuntime } from './runtime.ts';
+import { watchOf, type CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
 
@@ -37,7 +36,7 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/readyz': {
     method: 'GET',
     handler: async (_request, runtime) => {
-      const readiness = await auditReadiness(runtime.db, runtime.vault, runtime.chainKey);
+      const readiness = await ready(runtime);
       return jsonResponse(readiness, readiness.ok ? 200 : 503);
     },
   },
@@ -177,14 +176,79 @@ function migrating(request: Request): Response {
  */
 export const SPENT_TOKENS_PER_BEAT = 5000;
 
-/** The scheduled audit heartbeat and checkpoint, then spent tokens' upkeep. Throws so the scheduler reports failures. */
+/**
+ * Readiness: the database migrated, and, with an audit watch, what it says
+ * (plugins/audit-watch.ts). Without one, nothing more, and `watched: false`
+ * says so: the log is verified only when someone asks (`coffre verify log`).
+ */
+async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<string, unknown>> {
+  const watch = watchOf(runtime);
+  try {
+    if (!(await migrated(runtime.db))) return watch === null ? { ok: false, watched: false } : { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false, anchored: false };
+  } catch {
+    return watch === null ? { ok: false, watched: false } : { ok: false };
+  }
+  if (watch === null) return { ok: true, watched: false };
+  const said = await watch.hooks.readiness(watch.context());
+  return { ...said, ok: said.ok };
+}
+
+/**
+ * The scheduled run: the audit watch's beat, if the deployment added one;
+ * the vault's checkpoint of the log, once, which the beat asked for if it
+ * ran, and which keeps every verification a walk from the newest
+ * checkpoint (R25); then spent tokens' upkeep. Throws so the scheduler
+ * reports failures.
+ */
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   if (!(await schemaReady(runtime))) throw new Error(MIGRATING);
-  const ok = await writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, {
-    warn: (value, message) => console.warn(message, value),
-  });
-  // After the heartbeat, which a failed prune never holds back, and reported as the beat's failure too.
+  const watch = watchOf(runtime);
+  if (watch === null) unwatched(runtime);
+  const context = watch?.context();
+  const watched = watch === null ? true : await watch.hooks.scheduled(context!);
+  // Asked once a run: the watch's own call, when it made one, is this one.
+  const signed = await (context?.vault.checkpoint() ?? runtime.vault.checkpoint()).then(
+    (outcome) => (outcome.ok ? null : outcome.refusal.message),
+    (error: Error) => error.message,
+  );
+  // After the beat, which a failed prune never holds back, and reported as the run's failure too.
   const pruned = await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).then(() => null, (error: Error) => error);
-  if (!ok) throw new Error('scheduled audit heartbeat failed');
+  if (!watched) throw new Error('scheduled audit heartbeat failed');
+  // An empty log has nothing to sign: no failure without a watch, whose beat is an entry.
+  if (signed !== null && watch === null && !(await logIsEmpty(runtime))) throw new Error(`the vault did not checkpoint the audit log: ${signed}`);
   if (pruned !== null) throw new Error(`spent tokens could not be pruned: ${pruned.message}`);
+}
+
+const told = new WeakSet<object>();
+
+/**
+ * Said once a configuration, the isolate's or the process's: a deployment
+ * that left the audit watch out, or upgraded without adding it, sees that
+ * nothing watches the log.
+ */
+function unwatched(runtime: CoffreRuntime): void {
+  if (told.has(runtime.plugins)) return;
+  told.add(runtime.plugins);
+  console.warn('no audit watch: the audit log is verified only when someone asks (coffre verify log), and /readyz says only that the database is migrated. Add auditWatch to plugins (docs/deploy.md, "The audit watch").');
+}
+
+/** Whether the log holds no entry yet; a database that cannot say, no. */
+async function logIsEmpty(runtime: CoffreRuntime): Promise<boolean> {
+  return auditHead(runtime.db).then((head) => (head?.nextSeq ?? 0n) === 0n, () => false);
+}
+
+/**
+ * More of the audit watch's backlog walked, a walk after another, up to
+ * `walks`, and none begun after `until` (ms since the epoch): what Node's
+ * scheduled job runs after each run (on Workers, the anchor's Durable
+ * Object's alarm). Whether more is left.
+ */
+export async function walkAuditBacklog(runtime: CoffreRuntime, walks: number, until = Infinity): Promise<boolean> {
+  const watch = watchOf(runtime);
+  if (watch === null) return false;
+  for (let i = 0; i < walks; i++) {
+    if (Date.now() >= until) return true;
+    if (!(await watch.hooks.walkOn(watch.context()))) return false;
+  }
+  return true;
 }

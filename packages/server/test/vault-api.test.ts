@@ -13,7 +13,7 @@ import { auditRange } from '../src/db/queries.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
+import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import {
   clientFor,
@@ -208,8 +208,8 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
   const verdict = await misled.vault.verifyLog({});
   assert.ok(!verdict.ok);
   assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
-  const ready = await auditReadiness(db.runtime, misled.vault, deps.chainKey);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, deps.anchor, { warn: () => {} }), false);
+  const ready = await auditReadiness(db.runtime, misled.vault, deps.chainKey, deps.anchor);
   assert.deepEqual([ready.ok, ready.checkpointed], [false, false]);
   // The right one still reads.
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'sk_test');
@@ -276,7 +276,7 @@ test('a grant forged in the database lists as stored until the vault meets it, w
   // A list is a display: it shows the rows as stored, the forged grant among them.
   assert.deepEqual(await listed(), { tampered: false, roles: ['developer', 'owner'] });
   // The scheduled checkpoint checks every row, and finds it: the list says so, and the vault refuses them.
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet), true);
   assert.deepEqual(await listed(), { tampered: true, roles: [] });
   await assert.rejects(developer.secrets.reveal('market/dev/API_KEY'), { status: 403 });
   // An owner removes them, which starts them over, and the mark goes with it.
@@ -311,7 +311,7 @@ test('the vault\'s entries are chained, and one rewritten fails', async () => {
 
 test('a read put on someone else and chained again fails: the vault wrote it, and only the vault can seal it', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet), true);
   const verified = await root.audit.verify();
   assert.ok(verified.ok && verified.checkpoint !== null);
 
@@ -357,14 +357,14 @@ test('a read put on someone else and chained again fails: the vault wrote it, an
     reason: 'not written by the vault: its MAC does not match',
   });
   // And the vault will not sign past it.
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, { warn: () => {} }), false);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, { warn: () => {} }), false);
   const [refused] = await vaultEntries();
   assert.deepEqual([refused.action, refused.decision, refused.reason], ['audit.checkpoint', 'deny', 'log_broken']);
 });
 
 test('the audit verification checks the vault\'s rows too, and finds a grant written around it', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet), true);
   const verified = await root.audit.verify();
   assert.ok(verified.ok);
 
@@ -382,7 +382,7 @@ test('the audit verification checks the vault\'s rows too, and finds a grant wri
 
 test('a vault entry cut out of the log fails the audit verification', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet), true);
 
   // The vault's entries have no log of their own to be cut back in:
   // taking the read out leaves a gap in the one chain.
@@ -403,7 +403,7 @@ test('a vault entry cut out of the log fails the audit verification', async () =
 
 test('the database holds no key', async () => {
   await developer.secrets.reveal('market/dev');
-  await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet);
+  await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet);
 
   // Every row of every table, the app's and the vault's.
   const values: Buffer[] = [];

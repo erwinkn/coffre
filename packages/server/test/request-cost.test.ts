@@ -19,22 +19,24 @@ import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '
 import { createDatabase } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { localVault } from '@coffre/vault/node';
+import { desc, eq } from 'drizzle-orm';
 import type pg from 'pg';
 
 import { SigninService } from '../src/api/signin.ts';
 import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
+import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import { appLogKey, CHAIN_WALK } from '../src/db/audit.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testAnchor, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { postgresOnly } from './db/engine.ts';
+import { postgresOnly, withLogUnlocked } from './db/engine.ts';
+import { auditLog } from './db/tables.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -93,6 +95,10 @@ let workload: () => Promise<void>;
 let bound: () => Promise<void>;
 /** The scheduled beat, and `/readyz`'s check, on the counted connections. */
 let beat: () => Promise<boolean>;
+/** The beat, warnings and all: one that finds the log broken. */
+let beatAnyway: () => Promise<boolean>;
+/** The vault's checkpoint, asked outside a beat. */
+let signLog: () => Promise<{ ok: boolean }>;
 let ready: () => Promise<{ ok: boolean }>;
 /** `count` entries of the app's appended at once, as many requests would write them. */
 let append: (count: number) => Promise<void>;
@@ -125,9 +131,11 @@ before(async () => {
     },
   });
   if (auth.mode !== 'signin') throw new Error('unreachable');
-  const base: FixtureDeps = { db: createDatabase(app), vault, chainKey: randomBytes(32) };
-  beat = () => writeAuditHeartbeat(base.db, base.chainKey, vault, { warn: () => assert.fail('the beat warned') });
-  ready = () => auditReadiness(base.db, vault, base.chainKey);
+  const base: FixtureDeps = { db: createDatabase(app), vault, chainKey: randomBytes(32), anchor: testAnchor() };
+  beat = () => writeAuditHeartbeat(base.db, base.chainKey, vault, base.anchor, { warn: () => assert.fail('the beat warned') });
+  signLog = () => vault.checkpoint();
+  beatAnyway = () => writeAuditHeartbeat(base.db, base.chainKey, vault, base.anchor, { warn: () => undefined });
+  ready = () => auditReadiness(base.db, vault, base.chainKey, base.anchor);
   append = async (count) => {
     for (let left = count; left > 0; left -= 1000) {
       const entries = Array.from({ length: Math.min(1000, left) }, () => ({ actor: 'system:load', action: 'secret.read', decision: 'allow' as const, metadata: '{}' }));
@@ -381,23 +389,45 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
   }, growthSettings);
 });
 
-test("readiness reads the entries since the newest beat's walk began, however long the log", POSTGRES, async () => {
-  // An hour of beats, the most a resume reads back.
-  for (let i = 0; i < 12; i++) await beat();
+test('readiness costs the same however long the log, and however far it ran past the anchor', POSTGRES, async () => {
+  await beat();
   assert.equal((await ready()).ok, true);
   const small = await cost(ready);
-  // The log grown by writes, then a beat that walks them: readiness walks from where the next beat would.
+  // The log grown by writes, then a beat that walks them.
   for (let i = 0; i < 150; i++) await root.secrets.set('market/busy', { [`READY_${i % 20}`]: `fake-${i}` });
   await beat();
   assert.equal((await ready()).ok, true);
   assert.deepEqual(await cost(ready), small, 'readiness ran more statements or read more rows once the log grew');
+  // Twice a walk's worth since the newest beat: the next beat's to walk, not readiness's.
+  await append(2 * CHAIN_WALK);
+  assert.equal((await ready()).ok, true);
+  assert.deepEqual(await cost(ready), small, 'readiness read the entries past the anchor');
+  // A beat walks one walk of them, and readiness is red until the beats catch up, at the same cost.
+  assert.equal(await beat(), true, 'a backlog is no failure');
+  assert.equal((await ready()).ok, false);
+  assert.deepEqual(await cost(ready), small);
+  await beat();
+  await beat();
+  assert.equal((await ready()).ok, true);
 });
 
-test('readiness reads no more than one walk of entries since the newest beat, and is red past it', POSTGRES, async () => {
-  await beat();
-  // Twice a walk's worth of writes since the newest beat, as a beat far behind a busy log would find.
+test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows', POSTGRES, async () => {
+  assert.equal(await beat(), true);
+  await append(1);
+  const [x] = await db.owner.select().from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+  // Signed, then edited in place: the app's walk finds it.
+  assert.ok((await signLog()).ok);
+  const edit = (metadata: string) => withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ metadata }).where(eq(auditLog.seq, x!.seq)));
+  await edit('{"edited":true}');
+  assert.equal(await beatAnyway(), false);
+  const first = await cost(beatAnyway);
+  // Two walks' worth of requests since: the beat still reads the flagged entry, and the anchor, alone.
   await append(2 * CHAIN_WALK);
-  const spent = await cost(async () => assert.equal((await ready()).ok, false));
-  // Each entry walked is two rows: its size, then itself (`withinBytes`, `auditRange`).
-  assert.ok(spent.app.rows <= 2 * CHAIN_WALK + 100, `readiness read ${spent.app.rows} rows`);
+  const later = await cost(beatAnyway);
+  assert.equal((await ready()).ok, false);
+  assert.ok(later.app.rows <= first.app.rows && later.app.statements <= first.app.statements, `${JSON.stringify(first.app)} then ${JSON.stringify(later.app)}`);
+  // Put back, it clears, and the beats walk the backlog, a walk each.
+  await edit(x!.metadata);
+  for (let i = 0; i < 4; i++) await beatAnyway();
+  assert.equal((await ready()).ok, true);
 });

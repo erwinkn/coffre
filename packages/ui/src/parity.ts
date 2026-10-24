@@ -231,4 +231,5 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /settings': { ui: [{ does: 'Settings › Service accounts: where people set them up', in: 'pages/settings.tsx', call: 'settings.get' }] },
   'PUT /settings': { ui: [{ does: 'Settings › Service accounts › Edit', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
+  'POST /audit/loss': { not: "an Owner's acceptance of lost audit entries is rare and irreversible: `coffre audit accept-loss`, never a button" },
 };

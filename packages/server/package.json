@@ -51,6 +51,11 @@
       "types": "./dist/plugins/vault-kv.d.ts",
       "default": "./dist/plugins/vault-kv.js"
     },
+    "./plugins/audit-watch": {
+      "coffre:source": "./src/plugins/audit-watch.ts",
+      "types": "./dist/plugins/audit-watch.d.ts",
+      "default": "./dist/plugins/audit-watch.js"
+    },
     "./plugins/credential-proxy": {
       "coffre:source": "./src/plugins/credential-proxy.ts",
       "types": "./dist/plugins/credential-proxy.d.ts",

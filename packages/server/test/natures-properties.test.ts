@@ -70,7 +70,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, openTestDatabase, resetDatabase, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { environments as storedEnvironments, projects as storedProjects } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -184,7 +184,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
   await resetDatabase(db.owner);
   forgetKeys();
   const vault = testVault([ROOT.slice('user:'.length)], { bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, { kek: Buffer.alloc(32, 17) });
-  const deps: FixtureDeps = { db: db.runtime, vault, chainKey: Buffer.alloc(32, 23) };
+  const deps: FixtureDeps = { db: db.runtime, vault, chainKey: Buffer.alloc(32, 23), anchor: testAnchor() };
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault,

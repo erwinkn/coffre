@@ -1713,6 +1713,15 @@ export type Api = {
       revoked: true;
     };
   };
+  "POST /audit/loss": {
+    input: {
+      from: number;
+      to: number;
+    };
+    output: {
+      resumes: number | null;
+    };
+  };
 };
 
 export type AccessValue = string | null | {

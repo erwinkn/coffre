@@ -315,6 +315,51 @@ plugins: [
    should be one core-owned table (`plugin_state`: plugin, key, value) that
    coffre migrates, never a plugin's own migration.
 
+### Watching the log
+
+The audit watch (`@coffre/server/plugins/audit-watch`) is the first
+plugin that is no route: it watches the audit log on the scheduled run
+and contributes to `/readyz`. A route's plugin reaches coffre only as its
+request's caller, through the API; a watcher has no caller, and the work
+it does, walking the chain and holding what it verified, needs more than
+any caller gets. It still gets no database or vault client. Its hooks
+(`Watcher`, `packages/server/src/watch.ts`) are handed a context of
+capabilities, each narrow:
+
+| Capability | What core does with it |
+|---|---|
+| `log.walk({ held, from, to })` | in one read-only snapshot, each held point still at its hash, then the chain walked from `from` toward `to`, at most 10,000 entries, every link, hash and app MAC (`walkChain`) |
+| `log.hashAt(seq)` | one entry's hash, for readiness and a finding's recheck |
+| `log.check(seq, link)` | one entry checked alone, its hash, number and MAC |
+| `log.append(action, metadata)` | one entry of the watcher's kinds only (`audit.heartbeat`, `audit.finding`, `audit.finding_cleared`, `audit.reanchor`, `audit.loss_accepted`, `audit.loss_unapplied`), in the scheduler's name, or the Owner's whose request it answers |
+| `vault.checkpoint()`, `vault.checkpointKeys()` | the vault's checkpoint, asked once a run however many ask, and the public keys checkpoints verify under |
+| `alert(text)` | the deployment's alert channel, a workload's alerts' |
+| `seal(fields)`, `own(record)` | a record MACed under a key core derives from `auditChainKey`, which the watcher never sees |
+
+Its own storage, the anchor, is its plugin's option: the deployment hands
+it a store (`durableAnchor(env.ANCHOR)`, `fileAnchor(path)`). The hooks:
+`scheduled` (its part of the run, before core's checkpoint), `readiness`
+(what `/readyz` says of it), `verified` (where the audit page's check
+starts), `walkOn` (a backlog between beats, from the Durable Object's
+alarm or Node's job) and `acceptLoss` (an Owner's request, through `POST
+/api/audit/loss`, checked by core as an unscoped Owner who is a person).
+
+Every step fits in those: none needed a client. The chain key and the
+vault's keys stay core's, so a watcher can neither forge an app entry nor
+a checkpoint; what it can do wrong is append its own kinds, and say red
+or green.
+
+Third-party plugins do not get it. The context reads every entry's place
+in the chain and decides readiness, which is the instance's integrity
+signal, and R9 gives plugins capabilities as a caller. Core takes a
+watcher only if coffre's own code made it (`watcher`, a module-private
+set), whatever a plugin object carries. Should a second watcher ever be
+wanted, the context above is the line to hold it to.
+
+The accept-loss action has an API route and a CLI command, `coffre audit
+accept-loss <from> <to>`, and no page: it is rare, irreversible and an
+Owner's, and a button would invite it (`packages/ui/src/parity.ts`).
+
 ## 5. The Vault KV adapter
 
 **What it serves** (`packages/server/src/plugins/vault-kv.ts`):

@@ -413,7 +413,14 @@ export const SECTIONS = [
   },
   {
     title: 'Audit',
-    entries: [{ command: 'audit', usage: ['audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail] [--json]'], about: ['a project, environment or KEY: market/prod/DATABASE_URL lists', 'who read or changed it, reads of several that listed it included'] }],
+    entries: [
+      { command: 'audit', usage: ['audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail] [--json]'], about: ['a project, environment or KEY: market/prod/DATABASE_URL lists', 'who read or changed it, reads of several that listed it included'] },
+      {
+        command: 'audit accept-loss',
+        usage: ['audit accept-loss <from> <to>'],
+        about: ['as an owner of the whole instance: entries <from> to <to> are lost for', "good, a cut with no backup; the audit watch's finding stays logged"],
+      },
+    ],
   },
   {
     title: 'Verify',
@@ -578,4 +585,5 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'GET /audit': { commands: ['audit'] },
   'GET /audit/verification': { commands: ['verify log'] },
   'GET /audit/keys': { commands: ['verify keys'] },
+  'POST /audit/loss': { commands: ['audit accept-loss'] },
 };

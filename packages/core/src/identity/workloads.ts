@@ -1017,7 +1017,8 @@ export type WorkloadCaller = {
 
 /** What a workload's alert says (section 8.3), to the log and to the deployment's `alert`. */
 export type WorkloadAlert = {
-  readonly kind: 'enrolled' | 'contention' | 'limit' | 'expiring' | 'frozen' | 'unknown_key';
+  /** `audit`: the audit watch's, of the log itself (`service` is the scheduler). */
+  readonly kind: 'enrolled' | 'contention' | 'limit' | 'expiring' | 'frozen' | 'unknown_key' | 'audit';
   readonly service: string;
   readonly binding: string | null;
   readonly session: string | null;

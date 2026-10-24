@@ -2,7 +2,8 @@
 // src/server.ts, and so only on the server. The app reaches the database
 // through Hyperdrive and the keys only through the vault Worker's service
 // binding.
-import { createCoffre, github, githubApp, postgres, signin, type CoffreContext, type GatesNamespace, type SocketsNamespace, type Vault } from '@coffre/server/cloudflare';
+import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type AnchorNamespace, type CoffreContext, type GatesNamespace, type SocketsNamespace, type Vault } from '@coffre/server/cloudflare';
+import { auditWatch } from '@coffre/server/plugins/audit-watch';
 
 export type Env = {
   HYPERDRIVE: Hyperdrive;
@@ -30,6 +31,8 @@ export type Env = {
   SOCKETS: SocketsNamespace;
   /** The Durable Object that holds each workload's gate, `CoffreGates` (src/server.ts). */
   GATES: GatesNamespace;
+  /** The Durable Object that keeps the audit watch's anchor, `CoffreAnchor` (src/server.ts). */
+  ANCHOR: AnchorNamespace;
 };
 
 export const coffre = createCoffre((env: Env) => {
@@ -61,6 +64,11 @@ export const coffre = createCoffre((env: Env) => {
       },
     }),
     auditChainKey: env.APP_KEY,
+    // The audit watch: every five minutes, the log walked from what it last
+    // verified, which it keeps outside the database, in ANCHOR; /readyz red
+    // on anything it finds. Remove it, and the log is checked only when
+    // someone runs `coffre verify log` (docs/deploy.md, "The audit watch").
+    plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) })],
     // Where plugins' WebSockets run, one object per `coffre run` and database: the
     // credential proxy's tunnel, once you add it (docs/design/credential-proxy.md).
     sockets: env.SOCKETS,

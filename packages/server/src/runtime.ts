@@ -8,7 +8,10 @@ import { WorkloadService } from './api/workloads.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
 import type { Gates } from './gate.ts';
+import { auditAlerter } from './alerts.ts';
+import { actorOf } from './db/audit.ts';
 import { logged } from './logged.ts';
+import { watchContext, watcherOf, type WatchActor, type WatchContext, type Watcher } from './watch.ts';
 import { McpService } from './mcp/service.ts';
 import type { WorkloadTransport } from './workloads/transport.ts';
 
@@ -119,9 +122,28 @@ function knownOf(config: ResolvedConfig): Known {
   return kept;
 }
 
+/**
+ * The deployment's audit watch (plugins/audit-watch.ts), if it added one:
+ * its hooks, and a context for them over this runtime, in `actor`'s name
+ * when given, the scheduler's otherwise.
+ */
+export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (actor?: WatchActor) => WatchContext } | null {
+  const hooks = runtime.plugins.map(watcherOf).find((found) => found !== undefined);
+  if (hooks === undefined) return null;
+  const alert = auditAlerter(runtime);
+  return {
+    hooks,
+    context: (actor) =>
+      watchContext({ db: runtime.db, chainKey: runtime.chainKey, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
+  };
+}
+
 /** What a handler gets: the runtime's stores and the request's caller. */
 export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdentity): ApiContext {
+  const watch = watchOf(runtime);
+  const actor: WatchActor = { actorType: identity.caller.principal.type, actorId: identity.caller.principal.id, requestId: identity.requestId, sourceIp: identity.sourceIp };
   return {
+    watch: watch === null ? null : { hooks: watch.hooks, context: (asCaller) => watch.context(asCaller ? actor : undefined) },
     db: runtime.db,
     chainKey: runtime.chainKey,
     vault: runtime.vault,
