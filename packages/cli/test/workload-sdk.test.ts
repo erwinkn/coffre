@@ -491,3 +491,26 @@ test("a tunnel refused before it opened makes the next one ask for the gate's ne
   // The refused one, perhaps twice (undici's WebSocket tries its handshake again), then a renewal for the newest nonce, then the upgrade.
   assert.deepEqual(coffre.log.slice(-3), ['POST /api/auth/workload/renew use_dpop_nonce', 'POST /api/auth/workload/renew 200', 'GET /use/db upgrade']);
 });
+
+test("a credential's fetch reaches its own upstream only: a path that climbs out to another credential is refused", async (t) => {
+  const { coffre, session } = await signedIn(t);
+  const s3 = session.credential('s3');
+  for (const path of ['/../stripe/v1/charges', '/a/../../stripe/v1/charges', '/%2e%2e/stripe/v1/charges', '..']) {
+    assert.throws(() => s3.fetch(path, { method: 'POST' }), /leaves s3's URL/, path);
+  }
+  assert.equal(coffre.forwarded.length, 0);
+  // Within it, dot segments are the path's own business.
+  assert.equal((await s3.fetch('/bucket/a/../b')).status, 200);
+  assert.equal(coffre.forwarded[0]!.path, '/use/s3/bucket/b');
+});
+
+test('a proof given once, found spent when proving again, is final: no retry storm, and it says so once', async (t) => {
+  const said: string[] = [];
+  const coffre = await fakeCoffre({ notAfterMs: 1000, exchange: (_proof, _jkt, attempt) => (attempt === 1 ? null : { status: 401, body: { error: 'unauthorized', reason: 'replayed' } }) });
+  t.after(() => coffre.close());
+  const session = await workload({ url: coffre.url, service: 'api-prod', proof: oidc('id-token'), log: (line) => said.push(line) });
+  t.after(() => session.close().catch(() => undefined));
+  await sleep(3000);
+  assert.equal(coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length, 2, coffre.log.join('\n'));
+  assert.equal(said.filter((line) => /was spent, and it gives no fresh one/.test(line)).length, 1);
+});

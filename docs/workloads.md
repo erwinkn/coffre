@@ -83,7 +83,10 @@ const { url } = await coffre.credential('s3').presign('/uploads/report.pdf', { e
 const { token } = await coffre.credential('github').mint<{ token: string }>();        // where the binding lists the minter
 ```
 
-`presign` gives the upstream's own URL, usable by anyone until `expiresAt`.
+A credential's `fetch` reaches its own upstream only: a path that climbs out of
+it (`/../stripe/…`, from an object key or a file name) is refused before
+anything is sent. `presign` gives the upstream's own URL, usable by anyone
+until `expiresAt`.
 `mint` answers only where the binding's `reads` lists the minter.
 
 ### `read`: the escape hatch

@@ -224,6 +224,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   /** The exchange in flight, which requests without a session wait for; and why the last one failed, while none holds. */
   let attempt: Promise<Session> | null = null;
   let failure: unknown = null;
+  /** A refusal no new proof can change (a superseded code, a proof given once and spent), once seen. */
+  let final: unknown = null;
   let tries = 0;
   /** The renewal in flight for each session: one each, so that an old session's renewal answered late takes no new session's turn. */
   const renewals = new WeakMap<Session, Promise<void>>();
@@ -245,6 +247,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
 
   /** A new session, with a fresh proof and the same key: requests in flight finish on the old one. Retried with backoff while it fails, unless it cannot change. */
   const prove = (): Promise<Session> => {
+    // A refusal no new proof changes stands: no later renewal or request asks again.
+    if (final !== null) return Promise.reject(final);
     attempt ??= exchange()
       .then((next) => {
         // Closed while it was asked for: it ends now, as the one it replaced did.
@@ -262,7 +266,11 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
       })
       .catch((error: unknown) => {
         failure = error;
-        if (!closed && !(error instanceof CoffreError && FINAL.has(error.reason ?? ''))) at('retry', Date.now() + backoff(tries++), () => prove().catch(() => undefined));
+        // A proof spent, from a platform that gives no fresh one (a token given once), is as final as a superseded code.
+        const spent = error instanceof CoffreError && error.reason === 'replayed' && options.proof.spent === undefined;
+        if (spent) log(`coffre: ${options.service}'s ${options.proof.name} proof was spent, and it gives no fresh one: the session ends at its expiry`);
+        if (spent || (error instanceof CoffreError && FINAL.has(error.reason ?? ''))) final = error;
+        else if (!closed) at('retry', Date.now() + backoff(tries++), () => prove().catch(() => undefined));
         throw error;
       })
       .finally(() => (attempt = null));
@@ -283,7 +291,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
           if (session === held) at('renew', enrolled ? Date.now() + ENROLLMENT_RENEW_MS : Date.now() + Math.max(1000, (held.expiresAt - Date.now()) / 2), renew);
           return;
         }
-        if (response.status !== 401 && response.status !== 403) throw new Error(`renewal answered ${response.status}`);
+        // Asked for a nonce once more, it says nothing of the session: tried again soon, as when coffre is out of reach.
+        if ((response.status !== 401 && response.status !== 403) || askedNonce(response)) throw new Error(`renewal answered ${response.status}`);
         if (session === held) lose();
       } catch {
         // coffre unreachable for now: try again soon, and once the session is gone, prove again.
@@ -483,7 +492,14 @@ function surface(core: Core): Workload {
     fetch: signed,
     url,
     credential: (name) => ({
-      fetch: (path, init) => signed(`${url(name)}${path.startsWith('/') ? '' : '/'}${path}`, init),
+      fetch: (path, init) => {
+        // A path stays under its credential: `/../stripe/…`, from an object key or a file name, would otherwise spend another.
+        const base = url(name);
+        const target = new URL(`${base}${path.startsWith('/') ? '' : '/'}${path}`);
+        const under = new URL(base).pathname;
+        if (target.pathname !== under && !target.pathname.startsWith(`${under}/`)) throw new TypeError(`${JSON.stringify(path)} leaves ${name}'s URL: a credential's fetch reaches its own upstream only`);
+        return signed(target.href, init);
+      },
       sign: async (message) => {
         const body = await compute({ sign: { credential: name, message: bytesOf(message) } }, 'signed');
         if (typeof body.signature !== 'string') throw new Error('coffre signed nothing');

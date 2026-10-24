@@ -200,7 +200,12 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    if ('path' in address) server.listen(address.path, () => resolve());
+    if ('path' in address) {
+      // The socket is made its owner's alone from the start, never open to others before its chmod.
+      const umask = process.umask(0o177);
+      server.listen(address.path, () => resolve());
+      process.umask(umask);
+    }
     else server.listen(address.port, address.host, () => resolve());
   });
   if ('path' in address) chmodSync(address.path, 0o600);

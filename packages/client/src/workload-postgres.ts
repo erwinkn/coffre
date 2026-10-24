@@ -88,7 +88,8 @@ export class TunnelStream extends Duplex {
     super();
     void upgradeHeaders(coffre, url).then(
       (headers) => {
-        if (this.destroyed) return;
+        // Ended or destroyed while it was signed: no connection is opened for it.
+        if (this.destroyed || this.writableEnded) return void (this.destroyed || this.destroy());
         const ws = new WebSocketImpl(url, { headers: { ...headers, [FLOW]: 'credit' } });
         ws.binaryType = 'arraybuffer';
         this.#ws = ws;

@@ -163,6 +163,11 @@ async function awsCredentials(fetchImpl: Fetch): Promise<AwsCredentials> {
   }
   const container = vars.AWS_CONTAINER_CREDENTIALS_FULL_URI ?? (vars.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI ? `http://169.254.170.2${vars.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}` : undefined);
   if (container !== undefined) {
+    // As the AWS SDKs allow: https, or this machine, or the ECS and EKS agents' own addresses.
+    const at = new URL(container);
+    if (at.protocol !== 'https:' && !/^(127(\.\d{1,3}){3}|localhost|\[::1\]|169\.254\.170\.(2|23)|\[fd00:ec2::23\])$/.test(at.hostname)) {
+      throw new Error(`aws(): AWS_CONTAINER_CREDENTIALS_FULL_URI names ${at.host}, which is neither https nor this machine nor the container agent's`);
+    }
     const file = vars.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
     const authorization = file ? (await (await import('node:fs/promises')).readFile(file, 'utf8')).trim() : vars.AWS_CONTAINER_AUTHORIZATION_TOKEN;
     const body = await json(await fetchImpl(container, { headers: authorization ? { authorization } : {} }), 'the ECS credentials endpoint');
