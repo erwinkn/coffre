@@ -24,6 +24,7 @@
  * no GitHub binding matches `sub`: `ref` and `workflow_ref` stay as they were.
  */
 
+import { shownMember } from '../schemas.ts';
 import type { Constraints } from './constraints.ts';
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
@@ -224,6 +225,11 @@ export class BindingInvalid extends Error {
 function forcedProfiles(issuer: string): readonly WorkloadProfile[] | null {
   if (issuer === GITHUB_ISSUER) return ['github', 'github-reusable', 'github-reusable-organization'];
   if (issuer === GITLAB_ISSUER) return ['gitlab'];
+  // The platforms of workload access (section 4.2): a custom binding of theirs would drop the key-naming audience, or spend a token they repeat.
+  if (issuer === GOOGLE_ISSUER) return ['gcp'];
+  if (issuer.startsWith('https://oidc.fly.io/')) return ['fly'];
+  if (issuer === 'https://oidc.vercel.com' || issuer.startsWith('https://oidc.vercel.com/')) return ['vercel'];
+  if (issuer.startsWith('https://sts.windows.net/') || issuer.startsWith('https://login.microsoftonline.com/')) return ['azure'];
   return null;
 }
 
@@ -269,6 +275,8 @@ export function checkBinding(
     if (options.uploaded === true) throw new BindingInvalid(`a ${profile} binding carries no keys: its proof is no ID token`);
   } else if (options.uploaded === true) checkIssuerName(issuer);
   else checkFetchUrl(issuer, 'the issuer', { allowLoopback: options.allowLoopback, path: true, query: false });
+  // Google signs every service account's tokens, as one issuer.
+  if (profile === 'gcp' && issuer !== GOOGLE_ISSUER) throw new BindingInvalid(`a gcp binding's issuer is ${GOOGLE_ISSUER}`);
   const forced = forcedProfiles(issuer);
   if (forced !== null && !forced.includes(profile)) {
     throw new BindingInvalid(`${issuer} signs only for the ${forced[0]} profile${forced.length > 1 ? 's' : ''}`);
@@ -824,7 +832,7 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
   if (given.mintedBy !== undefined) {
     const named = typeof given.mintedBy === 'string' ? (given.mintedBy.startsWith('token:') ? given.mintedBy : `token:${given.mintedBy}`) : '';
     if (!SERVICE_NAME.test(named.slice('token:'.length))) throw new BindingInvalid('mintedBy names a service account');
-    if (named === options.service) throw new BindingInvalid(`mintedBy names another service than ${shownService(options.service)}: a session of its own would mint codes for itself`);
+    if (named === options.service) throw new BindingInvalid(`mintedBy names another service than ${shownMember(options.service)}: a session of its own would mint codes for itself`);
     policy.mintedBy = named;
   }
   for (const flag of ['approve', 'unsignedUploads'] as const) {
@@ -837,10 +845,6 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
     if (given.onContention === 'alert') policy.onContention = 'alert';
   }
   return policy;
-}
-
-function shownService(service: string): string {
-  return service.startsWith('token:') ? `service:${service.slice('token:'.length)}` : service;
 }
 
 /** A value as canonical JSON: every object's keys sorted, at every depth. */
@@ -888,6 +892,9 @@ function ipv6(text: string): Uint8Array | null {
 
 /** An address, IPv4 dotted or IPv6 in hex groups; null for anything else. */
 export function parseAddress(text: string): { version: 4 | 6; bytes: Uint8Array } | null {
+  // An IPv4 client of a server listening on `::`, as Node reports it: the IPv4 address it is.
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(text);
+  if (mapped !== null) return parseAddress(mapped[1]!);
   const v4 = ipv4(text);
   if (v4 !== null) return { version: 4, bytes: v4 };
   const v6 = text.includes(':') ? ipv6(text) : null;
@@ -963,8 +970,10 @@ export function freezeTarget(text: string): string | null {
   const kind = text.slice(0, colon);
   const rest = text.slice(colon + 1);
   switch (kind) {
+    // `service:<name>` is how the CLI and the pages name one: `token:<name>` is its one spelling.
     case 'token':
-      return SERVICE_NAME.test(rest) ? text : null;
+    case 'service':
+      return SERVICE_NAME.test(rest) ? `token:${rest}` : null;
     case 'binding':
     case 'session':
       return UUID.test(rest.toLowerCase()) ? `${kind}:${rest.toLowerCase()}` : null;

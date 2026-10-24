@@ -130,8 +130,8 @@ export function canonicalHtu(input: string | URL): string {
   const url = new URL(String(input));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new TypeError(`a proof signs an http or https URL, not ${url.protocol}`);
   // The path as given, before the WHATWG parser removes its dot segments, which it would do before merging slashes.
-  // A `\` ends the authority as `/` does, as the WHATWG parser reads an http(s) URL, so the path is the one fetch sends.
-  const raw = typeof input === 'string' ? /^[^:/\\?#]+:[/\\]{2}[^/\\?#]*([^?#]*)/.exec(input)?.[1] ?? url.pathname : url.pathname;
+  // A `\` ends the authority as `/` does, and any run of either starts it, as the WHATWG parser reads an http(s) URL: the path fetch sends.
+  const raw = typeof input === 'string' ? /^[^:/\\?#]+:[/\\]{2,}[^/\\?#]*([^?#]*)/.exec(input)?.[1] ?? url.pathname : url.pathname;
   if (/%(?![0-9A-Fa-f]{2})/.test(raw)) throw new TypeError('a URL a proof signs escapes a character with % and two hex digits, never a lone %');
   const decoded = raw.replace(/%([0-9A-Fa-f]{2})/g, (_, code: string) => {
     const char = String.fromCharCode(parseInt(code, 16));

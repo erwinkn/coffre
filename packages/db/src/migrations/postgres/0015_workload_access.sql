@@ -37,7 +37,7 @@ CREATE INDEX "audit_log_supersede_idx" ON "audit_log" USING btree ((("metadata")
 CREATE INDEX "credentials_enrollment_roots_idx" ON "credentials" USING btree ("enrollment_id","created_at") WHERE "credentials"."kind" = 'workload' AND "credentials"."ancestors" IS NULL;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_workload_jkt_check" CHECK ("credentials"."kind" <> 'workload' OR "credentials"."jkt" IS NOT NULL);--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_kind_check" CHECK ("credentials"."kind" IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload'));--> statement-breakpoint
-ALTER TABLE "credentials" ADD CONSTRAINT "credentials_kind_matches_principal" CHECK (("credentials"."kind" IN ('service', 'workload')) = ("credentials"."principal" LIKE 'token:%'));;--> statement-breakpoint
+ALTER TABLE "credentials" ADD CONSTRAINT "credentials_kind_matches_principal" CHECK (("credentials"."kind" IN ('service', 'workload')) = ("credentials"."principal" LIKE 'token:%'));--> statement-breakpoint
 -- The app makes codes and never changes one; a session's key, hard end, ancestors, limits and code are set when it is made, and never after: renewal moves its expiry, and an approval is the one other change.
 GRANT SELECT, INSERT ON enrollments TO coffre_app;--> statement-breakpoint
 GRANT UPDATE (expires_at, approved_at, approved_by) ON credentials TO coffre_app;

@@ -198,8 +198,8 @@ test('a known issuer forces its profile; any other issuer is custom, by its subj
   refused({ profile: 'custom', issuer: GITHUB_ISSUER, claims: { sub: 'repo:acme/api:ref:refs/heads/main' } }, /signs only for the github profiles/);
   refused({ profile: 'github', issuer: GITLAB_ISSUER, claims: { ...GITHUB } }, /signs only for the gitlab profile/);
   refused({ profile: 'custom', issuer: null, claims: { sub: 'x' } }, /names its issuer/);
-  refused({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { email: 'deploy@acme.iam.gserviceaccount.com' } }, /requires sub/);
-  checkBinding({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104000000000000000000' } });
+  refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { email: 'deploy@acme.iam.gserviceaccount.com' } }, /requires sub/);
+  checkBinding({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104000000000000000000' } });
   // A GitHub Enterprise Server is checked as GitHub.
   refused({ profile: 'github', issuer: 'https://github.acme.example/_services/token', claims: { ...GITHUB, event_name: 'pull_request_target' } }, /event_name/);
   refused({ profile: 'nope', issuer: null, claims: {} }, /unknown profile "nope"/);

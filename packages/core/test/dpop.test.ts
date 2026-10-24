@@ -224,6 +224,8 @@ test('a proof signs the path as it goes upstream: one object and another to S3 a
 test("htu's path is the one fetch sends, a backslash ending the authority as WHATWG reads it", async () => {
   for (const url of [
     'https://secrets.acme.example\\unused/api/members',
+    'https:////secrets.acme.example/p',
+    'https:/\\/secrets.acme.example/p',
     'https:\\\\secrets.acme.example\\use\\x',
     'https://secrets.acme.example/use/a\\..\\b',
     'https://secrets.acme.example?/x',

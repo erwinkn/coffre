@@ -32,6 +32,11 @@
   a `policy` on trust bindings, and an `enrollments` table, so the release
   before serves on it unchanged. `/api/auth/oidc` now takes only bindings
   of today's five profiles with no policy, as every binding of before is.
+  Google's, Fly's, Vercel's and Entra's issuers now force their own
+  profiles, as github.com's and gitlab.com's do: a new `custom` binding
+  can no longer name them, and the binding they force signs in at
+  `/api/auth/workload` once that is served. Bindings already made are
+  unchanged.
   The design's routes and the `coffre enroll`, `approve`, `freeze`,
   `unfreeze` and `serve` commands are declared, and answer that they are
   not built yet until the changes that serve them land.

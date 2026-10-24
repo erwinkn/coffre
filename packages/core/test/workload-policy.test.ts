@@ -43,6 +43,14 @@ test("today's five profiles are the bearer ones, and a profile that is no ID tok
   assert.deepEqual(cluster.claims, { 'kubernetes.io.serviceaccount.uid': '4f1c', sub: 'system:serviceaccount:api:api' });
   assert.throws(() => checkBinding({ profile: 'azure', issuer: 'https://sts.windows.net/t/', claims: { tid: 't' } }), /requires oid/);
   for (const profile of WORKLOAD_PROFILES) assert.ok(Array.isArray(REQUIRED_CLAIMS[profile]));
+  // Google's, Fly's, Vercel's and Entra's issuers force their profiles: a custom binding of theirs would drop the
+  // key-naming audience, or spend a token they hand out again. And every gcp binding is Google's.
+  for (const issuer of ['https://accounts.google.com', 'https://oidc.fly.io/acme', 'https://oidc.vercel.com', 'https://oidc.vercel.com/acme', 'https://sts.windows.net/t/', 'https://login.microsoftonline.com/t/v2.0']) {
+    assert.throws(() => checkBinding({ profile: 'custom', issuer, claims: { sub: 'x' } }), /signs only for the/, issuer);
+  }
+  assert.throws(() => checkBinding({ profile: 'gcp', issuer: 'https://evil.example', claims: { sub: '1047' } }), /gcp binding's issuer is https:\/\/accounts\.google\.com/);
+  assert.equal(checkBinding({ profile: 'gcp', issuer: null, claims: { sub: '1047' } }).issuer, 'https://accounts.google.com');
+  assert.equal(checkBinding({ profile: 'fly', issuer: 'https://oidc.fly.io/acme', claims: { org_id: 'o', app_id: 'a' } }).profile, 'fly');
 });
 
 test('a policy holds only what its profile allows, and is canonical: one policy, one spelling', () => {
@@ -116,7 +124,10 @@ test('a CIDR has one spelling, and an address is within it or not, IPv4 and IPv6
   assert.ok(addressWithin('162.220.232.17', ['162.220.232.0/24']));
   assert.ok(!addressWithin('162.220.233.17', ['162.220.232.0/24']));
   assert.ok(addressWithin('2001:db8::5', ['10.0.0.0/8', '2001:db8::/32']));
-  assert.ok(!addressWithin('::ffff:a00:1', ['10.0.0.0/8']), 'an IPv4-mapped address is IPv6, and fails closed');
+  // An IPv4 client of a server on `::`, as Node reports it, is the IPv4 address it is; in hex groups, it fails closed.
+  assert.ok(addressWithin('::ffff:203.0.113.9', ['203.0.113.0/24']));
+  assert.ok(addressWithin('::FFFF:10.1.2.3', ['10.0.0.0/8']));
+  assert.ok(!addressWithin('::ffff:a00:1', ['10.0.0.0/8']));
   assert.ok(!addressWithin('not an address', ['0.0.0.0/0']));
   assert.ok(addressWithin('203.0.113.9', ['0.0.0.0/0']));
 });
@@ -124,10 +135,11 @@ test('a CIDR has one spelling, and an address is within it or not, IPv4 and IPv6
 test('a freeze target has one spelling, or none', () => {
   assert.equal(freezeTarget('instance'), 'instance');
   assert.equal(freezeTarget('token:api-prod'), 'token:api-prod');
+  assert.equal(freezeTarget('service:api-prod'), 'token:api-prod', 'as the CLI and the pages name a service');
   assert.equal(freezeTarget(`binding:${KEY.toUpperCase()}`), `binding:${KEY}`);
   assert.equal(freezeTarget(`session:${KEY}`), `session:${KEY}`);
   assert.equal(freezeTarget(`credential:${ENV.toUpperCase()}/stripe`), `credential:${ENV}/stripe`);
-  for (const bad of ['tokenx', 'tokens', 'instancex', 'Instance', 'token:', 'token:a b', 'binding:x', `credential:${ENV}`, `credential:${ENV}/Stripe`, `credential:${ENV}/a/b`, 'credential:market/prod/stripe', `secret:${KEY}`, '']) {
+  for (const bad of ['tokenx', 'tokens', 'instancex', 'Instance', 'token:', 'service:', 'user:ada@acme.example', 'token:a b', 'binding:x', `credential:${ENV}`, `credential:${ENV}/Stripe`, `credential:${ENV}/a/b`, 'credential:market/prod/stripe', `secret:${KEY}`, '']) {
     assert.equal(freezeTarget(bad), null, bad);
   }
 });

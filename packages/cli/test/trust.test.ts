@@ -101,9 +101,9 @@ test('a GitLab project, by its namespace and project IDs, a branch or a tag, and
 });
 
 test('any other issuer, by its claims', async () => {
-  assert.deepEqual(await built({ issuer: 'https://accounts.google.com', claim: ['sub=104000000000000000000'] }), {
+  assert.deepEqual(await built({ issuer: 'https://idp.acme.example', claim: ['sub=104000000000000000000'] }), {
     profile: 'custom',
-    issuer: 'https://accounts.google.com',
+    issuer: 'https://idp.acme.example',
     claims: { sub: '104000000000000000000' },
   });
   await assert.rejects(bindingFrom({ issuer: 'https://idp.acme.example', claim: ['sub'] }, lookup), /--claim takes <name>=<value>/);
@@ -225,8 +225,8 @@ test('a binding says, in a sentence, which CI runs it lets sign in: platform, re
     'GitLab pipelines of project 5 (namespace 6) on https://gitlab.acme.example, on branch main, by push',
   );
   assert.equal(
-    runsOf({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '1040' } }),
-    'runs whose ID token, from https://accounts.google.com, says sub=1040',
+    runsOf({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '1040' } }),
+    'runs whose ID token, from https://idp.acme.example, says sub=1040',
   );
 });
 
@@ -277,7 +277,7 @@ test('the preview says which events the binding accepts, the flag that adds thos
     describeEvents(await built({ gitlab: 'acme/api', branch: 'main' })),
     'Accepts pipelines started by push. Not by web or schedule: add them with --source, as --source push,web,schedule.',
   );
-  assert.equal(describeEvents(await built({ issuer: 'https://accounts.google.com', claim: ['sub=1'] })), null);
+  assert.equal(describeEvents(await built({ issuer: 'https://idp.acme.example', claim: ['sub=1'] })), null);
 });
 
 test('the CLI hands a refused lookup back to trust, which says how to give the IDs, rather than ending on "not found"', async (t) => {
