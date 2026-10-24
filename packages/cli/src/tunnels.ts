@@ -55,11 +55,14 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
     /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
     let uncounted = 0;
     let taken = 0;
+    /** Bytes coffre sent that the listener has not counted back: a coffre that paces keeps them under a window. */
+    let owed = 0;
     let answered = true;
     const held = () => ws.bufferedAmount >= HIGH_WATER || (pacing !== false && uncounted >= WINDOW);
     const count = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(String(taken), () => undefined);
+      owed -= taken;
       taken = 0;
     };
     ws.on('open', () => socket.resume());
@@ -115,6 +118,9 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
         pacing = false;
         if (!held()) socket.resume();
       }
+      // A coffre that said it paces and sends past two windows uncounted is held to it, as the object holds the listener.
+      owed += data.length;
+      if (pacing === true && owed > 2 * WINDOW) return ws.terminate();
       const flushed = socket.write(data, () => {
         taken += data.length;
         if (taken >= COUNT_EVERY) count();

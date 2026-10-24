@@ -164,7 +164,7 @@ test('an app that stops reading for a while keeps its connection: the listener s
   // A psql in its pager, or a slow consumer: the app reads nothing for five intervals.
   socket.pause();
   await new Promise((resolve) => setTimeout(resolve, 1000));
-  assert.equal(socket.destroyed, false, 'the listener ended a connection whose app stopped reading');
+  assert.equal(ws.readyState, ws.OPEN, 'the listener ended a connection whose app stopped reading');
   let read = 0;
   socket.on('data', (chunk: Buffer) => (read += chunk.length));
   socket.resume();
