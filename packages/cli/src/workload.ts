@@ -8,13 +8,14 @@
  * session it saves, which lasts as long. A token is spent once used, so on
  * GitHub each exchange asks the runner for a fresh one.
  */
+import { createHash } from 'node:crypto';
 import { chmodSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-import { UNSIGNED_HEADERS } from '@coffre/client/dpop';
-import { aws, azure, CoffreError, enrollment, fly, gcp, github, kubernetes, oidc, vercel, workload, type Proof, type Workload } from '@coffre/client/workload';
+import { contentDigest, MAX_DIGESTED_BODY, UNSIGNED_HEADERS } from '@coffre/client/dpop';
+import { askedNonce, aws, azure, CoffreError, enrollment, fly, gcp, github, kubernetes, oidc, vercel, workload, type Proof, type Workload } from '@coffre/client/workload';
 
 import { clash, environmentPaths, listOf } from './environments.ts';
 import { UsageError } from './manage.ts';
@@ -133,8 +134,6 @@ export function addressOf(text: string, flag: string): Address {
 const DROPPED = new Set([...UNSIGNED_HEADERS, 'expect', 'x-coffre-handle']);
 /** Headers no answer carries back: the transport's, and what fetch undid (a body it decompressed is no longer its encoding). */
 const UNANSWERED = new Set(['connection', 'content-encoding', 'content-length', 'keep-alive', 'transfer-encoding', 'dpop-nonce']);
-/** The most a request's body may hold, coffre's proxy's own limit. */
-const MOST_BODY = 16 * 1024 * 1024;
 
 /**
  * A local listener that forwards each request under `/use/` to coffre,
@@ -162,24 +161,45 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
         if (!DROPPED.has(req.rawHeaders[i]!.toLowerCase())) headers.append(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
       }
       const method = req.method ?? 'GET';
-      let body: BodyInit | undefined;
+      // What the request carries, as a stream: the app's own, sent once, or the chunks read, as often as it is sent.
+      let body: (() => ReadableStream<Uint8Array>) | undefined;
+      let again = false;
       if (method !== 'GET' && method !== 'HEAD') {
+        const length = req.headers['content-length'];
         if (headers.has('x-amz-content-sha256')) {
-          // An upload to an AWS-signed credential is bound by the digest it declares: it streams, of any size.
-          body = Readable.toWeb(req) as ReadableStream<Uint8Array>;
+          // An upload to an AWS-signed credential is bound by the digest it declares: it streams, of any size, with the
+          // length it says, which coffre streams it by.
+          if (length !== undefined) headers.set('content-length', length);
+          const stream = Readable.toWeb(req) as ReadableStream<Uint8Array>;
+          body = () => stream;
         } else {
-          // Any other body is signed whole, so it is read whole, within the proxy's own limit.
+          // Any other body is signed whole, so it is read whole, hashed as it comes: the chunks as they came, one copy and in
+          // memory, never on disk, then its digest and length declared, which coffre streams it on by, checking the bytes.
           const chunks: Buffer[] = [];
+          const hash = createHash('sha256');
           let size = 0;
           for await (const chunk of req as AsyncIterable<Buffer>) {
             size += chunk.length;
-            if (size > MOST_BODY) return answer(413, 'too_large', `a request's body is at most ${MOST_BODY} bytes`);
+            if (size > MAX_DIGESTED_BODY) return answer(413, 'too_large', `a request's body through coffre is at most ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes`);
+            hash.update(chunk);
             chunks.push(chunk);
           }
-          body = Buffer.concat(chunks);
+          if (!headers.has('content-digest')) headers.set('content-digest', contentDigest(hash.digest('hex')));
+          headers.set('content-length', String(size));
+          again = true;
+          body = () => {
+            let next = 0;
+            return new ReadableStream<Uint8Array>({ pull: (out) => (next < chunks.length ? out.enqueue(chunks[next++]!) : out.close()) });
+          };
         }
       }
-      const response = await coffre.fetch(target.href, { method, headers, body, redirect: 'manual', signal: gone.signal, ...(body instanceof ReadableStream ? { duplex: 'half' } : {}) } as RequestInit);
+      const send = () => coffre.fetch(target.href, { method, headers, body: body?.(), redirect: 'manual', signal: gone.signal, ...(body === undefined ? {} : { duplex: 'half' }) } as RequestInit);
+      let response = await send();
+      // A stream goes once, with a fresh nonce: one coffre would take only with its newest goes again, from the chunks.
+      if (again && askedNonce(response)) {
+        await response.body?.cancel();
+        response = await send();
+      }
       const back: [string, string][] = [...response.headers].filter(([name]) => !UNANSWERED.has(name) && name !== 'set-cookie');
       // A redirect to coffre's own /use/ comes back through this listener, which signs it: a path, which the app resolves against the listener.
       const location = back.find(([name]) => name === 'location');

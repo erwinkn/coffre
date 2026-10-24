@@ -8,7 +8,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { request } from 'node:http';
 import { connect as connectTcp } from 'node:net';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -229,6 +230,8 @@ test('through the sidecar: a redirect within coffre comes back to it, a SigV4 up
   const size = 17 * 1024 * 1024;
   const upload = await fetch(`${listener}/use/s3/bucket/big`, { method: 'PUT', headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }, body: new Uint8Array(size) });
   assert.deepEqual(await upload.json(), { path: '/use/s3/bucket/big', size });
+  // With the length it says, which coffre streams it by: without one, coffre would read it whole, and refuse it past 16 MiB.
+  assert.equal(coffre.forwarded.at(-1)!.length, String(size));
 
   // The gate restarts: the next upgrade is refused for its nonce, and the one after it signs with the nonce that refusal gave.
   coffre.gate.restart();
@@ -238,6 +241,56 @@ test('through the sidecar: a redirect within coffre comes back to it, a SigV4 up
   assert.deepEqual((await client.query('select six')).rows, [{ value: 'select six' }]);
   await client.end();
   assert.deepEqual(coffre.log.filter((line) => line.startsWith('GET /use/market/prod/db')), ['GET /use/market/prod/db use_dpop_nonce', 'GET /use/market/prod/db upgrade']);
+});
+
+/** The most the process has held in memory so far, in bytes (Linux's VmHWM); null where /proc does not say. */
+function peak(pid: number): number | null {
+  try {
+    return Number(/VmHWM:\s+(\d+) kB/.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))![1]) * 1024;
+  } catch {
+    return null;
+  }
+}
+
+test('through the sidecar, a 55 MB document is held once, in memory, hashed as it comes, and streamed to coffre with its Content-Digest; sent again from the chunks for a fresh nonce', { timeout: 120_000 }, async (t) => {
+  const coffre = await fakeCoffre({ upstream: (sent) => ({ status: 200, body: { size: Number(sent.length), sha256: sent.sha256 } }) });
+  t.after(() => coffre.close());
+  const run = cli(t, ['serve', '--url', coffre.url, '--service', 'api-prod', '--proof', 'enrollment', '--listen', '127.0.0.1:0']);
+  const [, listener] = await said(run, /(http:\/\/127\.0\.0\.1:\d+)\/use\/<credential>/);
+  const boundary = '----coffre5f1c';
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="contract.pdf"\r\ncontent-type: application/pdf\r\n\r\n`),
+    randomBytes(55_000_000),
+    Buffer.from(`\r\n--${boundary}\r\ncontent-disposition: form-data; name="nature"\r\n\r\nsignable_document\r\n--${boundary}--\r\n`),
+  ]);
+  const sha256 = createHash('sha256').update(body).digest();
+  const before = peak(run.child.pid!);
+  const sent = await fetch(`${listener}/use/yousign/v3/signature_requests/sr-1/documents`, { method: 'POST', headers: { 'content-type': `multipart/form-data; boundary=${boundary}` }, body });
+  assert.deepEqual(await sent.json(), { size: body.length, sha256: sha256.toString('hex') });
+  const forwarded = coffre.forwarded.at(-1)!;
+  assert.equal(forwarded.headers['content-digest'], `sha-256=:${sha256.toString('base64')}:`);
+  assert.equal(forwarded.headers['content-type'], `multipart/form-data; boundary=${boundary}`);
+  assert.equal(forwarded.length, String(body.length));
+  // One copy of the body, and some room (70 MB here): one buffer of it handed to the SDK, which reads it whole, grew by 430 MB.
+  const after = peak(run.child.pid!);
+  if (before !== null && after !== null) assert.ok(after - before < 1.5 * body.length, `the sidecar grew by ${after - before} bytes for a body of ${body.length}`);
+
+  // An empty POST declares the empty body's digest, and streams as any other.
+  const empty = await fetch(`${listener}/use/yousign/v3/ping`, { method: 'POST' });
+  assert.deepEqual(await empty.json(), { size: 0, sha256: createHash('sha256').digest('hex') });
+
+  // The gate restarts: the stream, refused for its nonce, goes again from the chunks the sidecar holds, signed with the new one.
+  coffre.gate.restart();
+  const again = await fetch(`${listener}/use/yousign/v3/documents`, { method: 'POST', body: 'a small document' });
+  assert.equal(again.status, 200, await again.text());
+  assert.deepEqual(coffre.log.filter((line) => line.startsWith('POST /use/yousign/v3/documents')), ['POST /use/yousign/v3/documents use_dpop_nonce', 'POST /use/yousign/v3/documents 200']);
+
+  // Past 95 MiB, refused by the sidecar itself, before a byte goes to coffre.
+  const forwards = coffre.forwarded.length;
+  const huge = await fetch(`${listener}/use/yousign/v3/documents`, { method: 'POST', body: new Uint8Array(95 * 1024 * 1024 + 1) });
+  assert.equal(huge.status, 413);
+  assert.match(((await huge.json()) as { message: string }).message, /at most 95 MiB/);
+  assert.equal(coffre.forwarded.length, forwards);
 });
 
 test("a service's run refuses a credential two of its environments name, and a run stopped before its command starts logs out first", async (t) => {

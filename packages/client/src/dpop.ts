@@ -174,6 +174,42 @@ export async function bodyDigest(body: Uint8Array | string): Promise<string> {
   return hex(await sha256(body));
 }
 
+/**
+ * The most a body that declares its digest carries (`Content-Digest`),
+ * which coffre streams and `coffre serve` holds while it hashes it: 95 MiB,
+ * 99,614,720 bytes, under the 100 MB (decimal) Cloudflare takes in a
+ * request on Free and Pro zones, so a body near it gets coffre's answer and
+ * not the zone's.
+ */
+export const MAX_DIGESTED_BODY = 95 * 1024 * 1024;
+
+/** A body's `Content-Digest` (RFC 9530) from its SHA-256 in hex, as the SDK and `coffre serve` send it: `sha-256=:<base64>:`. */
+export function contentDigest(sha256: string): string {
+  if (!SHA256_HEX.test(sha256)) throw new TypeError('a Content-Digest is made from a SHA-256 in hex');
+  return `sha-256=:${btoa(String.fromCharCode(...sha256.match(/../g)!.map((pair) => parseInt(pair, 16))))}:`;
+}
+
+/**
+ * The SHA-256 a `Content-Digest` declares, in hex, as a body's line takes
+ * it: its `sha-256` member's, among any others (RFC 9530 lets one header
+ * name several algorithms). Null for one with no `sha-256` member, an app's
+ * own `sha-512` say, which declares nothing to coffre. Throws on a
+ * `sha-256` member that is no SHA-256 (32 bytes, as base64 between colons),
+ * or one named twice: such a header binds no body, and stands for none.
+ *
+ *   declaredDigest('sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:')   'e3b0c442…7852b855'
+ *   declaredDigest('sha-512=:z4PhNX7v…:')                                     null
+ */
+export function declaredDigest(header: string): string | null {
+  const members = header.split(',').map((member) => member.trim()).filter((member) => /^sha-256(?:[=;]|$)/.test(member));
+  if (members.length === 0) return null;
+  const base64 = members.length === 1 ? /^sha-256=:([A-Za-z0-9+/]{43}=):$/.exec(members[0]!)?.[1] : undefined;
+  const bytes = base64 === undefined ? null : Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  // One spelling for one digest: stray bits in the last character would let two headers declare it.
+  if (bytes === null || btoa(String.fromCharCode(...bytes)) !== base64) throw new TypeError('Content-Digest declares a body\'s SHA-256 once, as sha-256=:<44 characters of base64>:');
+  return hex(bytes);
+}
+
 /** `ath`: base64url SHA-256 of the session token the proof is sent with. */
 export async function tokenDigest(token: string): Promise<string> {
   return base64url(await sha256(token));
@@ -194,14 +230,17 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
  * each from what it knows of the body:
  *
  * - `declared`: its `x-amz-content-sha256`, given only through a credential
- *   `sigv4` signs; null otherwise, or when it sets none.
+ *   `sigv4` signs; else the SHA-256 its `Content-Digest` declares
+ *   (`declaredDigest`); null when it sets neither.
  * - `length`: its bytes as known: those read, a stream's `content-length`,
  *   or null for a stream of no stated length.
  *
  * A body of no bytes signs the empty body's digest, whatever it declares.
- * One that declares a hash signs it, which S3 checks against the bytes, so
- * it may stream: 64 lower-case hex digits, or `UNSIGNED_BODY` for any other
- * value. Every other body signs its bytes' digest (`bytes`, none for none).
+ * One that declares a hash signs it, which S3, or coffre for a
+ * `Content-Digest`, checks against the bytes, so it may stream: 64
+ * lower-case hex digits, or `UNSIGNED_BODY` for any other value, which only
+ * an `x-amz-content-sha256` can be. Every other body signs its bytes'
+ * digest (`bytes`, none for none).
  *
  *   bodyLine({ declared: null, length: 6, bytes })                       bodyDigest(bytes)
  *   bodyLine({ declared: 'UNSIGNED-PAYLOAD', length: 0 })                bodyDigest('')
@@ -225,9 +264,11 @@ export async function bodyLine(body: { declared: string | null; length: number |
  * behind one; this line signs it as it goes upstream, so `/use/s3/a/b` and
  * `/use/s3/a//b`, one object and another to S3, are two requests. A path a
  * zone changed fails closed. The body's line is its buffered bytes' digest
- * (`bodyDigest`), or, for a streamed upload through a credential `sigv4`
- * signs, the 64 hex digits its `x-amz-content-sha256` declares, which S3
- * checks against the bytes; any other declared value is `UNSIGNED_BODY`. A
+ * (`bodyDigest`), or, for a body that declares one (`bodyLine`), the 64 hex
+ * digits its `Content-Digest` declares, which coffre checks against the
+ * bytes as they stream, or, through a credential `sigv4` signs, those its
+ * `x-amz-content-sha256` declares, which S3 checks; any other value of the
+ * latter is `UNSIGNED_BODY`. A
  * header sent several times is one value, joined by `, `, as `Headers`
  * gives it. No line holds a line break, so no two requests read as one;
  * throws on one that does, or on a body line that is neither.
@@ -261,7 +302,7 @@ export function signedHeaders(headers: HeadersInit): [string, string][] {
  * - `token` adds `ath`, for a request made with a session; the exchange has none.
  * - `nonce` is the gate's newest, from the last answer's `DPoP-Nonce`.
  * - `content` adds `hdr` and `req`: the headers the app set, and the body's
- *   line (`bodyDigest`, a streamed SigV4 upload's declared digest, or
+ *   line (`bodyLine`: its bytes' digest, the one it declares, or
  *   `UNSIGNED_BODY`).
  *   Whatever it names is all coffre forwards.
  */

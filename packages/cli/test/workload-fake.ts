@@ -12,13 +12,13 @@ import { once } from 'node:events';
 
 import { WebSocketServer, type WebSocket } from 'ws';
 
-import { bodyDigest, bodyLine, type PublicJwk } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, declaredDigest, type PublicJwk } from '@coffre/client/dpop';
 import { thumbprint, verifyProof } from '@coffre/core/identity';
 
 export type Answer = { status: number; body?: unknown; headers?: Record<string, string> };
 
-/** What `/use/` forwarded upstream: the request as the proof signs it, with only the headers `hdr` names. */
-export type Forwarded = { method: string; path: string; query: string; headers: Record<string, string>; body: string; session: string };
+/** What `/use/` forwarded upstream: the request as the proof signs it, with only the headers `hdr` names, and the length it said and its body's SHA-256. */
+export type Forwarded = { method: string; path: string; query: string; headers: Record<string, string>; body: string; session: string; length: string | undefined; sha256: string };
 
 export type Session = { id: string; token: string; jkt: string; expiresAt: number; notAfter: number; places: string[]; revoked: boolean; parent?: string };
 
@@ -171,8 +171,12 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       const credential = places.includes(segments.slice(0, 2).join('/')) ? segments[2] : segments[0];
       const headers = new Headers();
       for (let i = 0; i < req.rawHeaders.length; i += 2) headers.append(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
-      // As the server reads it (`bodyLine`): a SigV4 credential's request with a body is bound by the digest it declares; any other, by its bytes.
-      const declared = options.sigv4?.includes(credential ?? '') ? headers.get('x-amz-content-sha256') : null;
+      // As the server reads it (`bodyLine`): a SigV4 credential's request with a body is bound by the digest it declares; any
+      // other, by the SHA-256 its Content-Digest declares, which its bytes must be, or else by its bytes.
+      const own = headers.get('content-digest');
+      const digest = own === null ? null : declaredDigest(own);
+      const declared = options.sigv4?.includes(credential ?? '') ? headers.get('x-amz-content-sha256') : digest;
+      if (digest !== null && declared === digest && digest !== (await bodyDigest(body))) return record('content-digest'), refuse(res, 'content-digest', 400);
       const line = await bodyLine({ declared, length: body.length, bytes: body });
       const session = await authenticate(req, res, { headers, body: line });
       if (session === 'use_dpop_nonce') return record('use_dpop_nonce');
@@ -185,6 +189,8 @@ export async function fakeCoffre(options: FakeOptions = {}) {
         headers: Object.fromEntries(hdr === '' ? [] : hdr.split(' ').map((name) => [name, headers.get(name)!])),
         body: body.toString(),
         session: session.id,
+        length: req.headers['content-length'],
+        sha256: await bodyDigest(body),
       };
       record('200');
       // The environment's own URL: the plan, or what coffre makes with its values.

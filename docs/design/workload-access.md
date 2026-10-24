@@ -710,7 +710,7 @@ the rest:
   <the path as sent, as the WHATWG parser writes it: every slash and escape kept>\n
   <the raw query string as sent, without "?", or empty>\n
   <name>:<value>\n   for each header in hdr, in order, its value as received
-  <the body's SHA-256, hex | the declared payload hash, for a streamed SigV4 upload only, | UNSIGNED-PAYLOAD>
+  <the body's SHA-256, hex | the SHA-256 its Content-Digest declares, hex | a SigV4 upload's declared payload hash | UNSIGNED-PAYLOAD>
   ```
 
   `htu` signs the path as a zone normalizes it; the first line signs it as
@@ -718,11 +718,13 @@ the rest:
   are two requests under one `htu` (PR 0's review r2). A path a zone
   changed on the way fails closed.
 
-  The declared form applies only to a credential injected by `sigv4`, and
-  only when its `x-amz-content-sha256` is 64 hex characters, which S3
-  checks against the bytes. Any other value (`UNSIGNED-PAYLOAD`,
+  A body declares its hash in a `Content-Digest` (RFC 9530), whose
+  `sha-256` member is the line, in hex, which coffre checks against the
+  bytes as they stream, for any credential; or, through a credential
+  injected by `sigv4`, in an `x-amz-content-sha256` of 64 hex characters,
+  which S3 checks. Any other value of the latter (`UNSIGNED-PAYLOAD`,
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER`, every `STREAMING-*`) is unsigned.
-  Every other credential's body is hashed whole.
+  A body that declares neither is hashed whole.
 
 Coffre recomputes `req` from what it received, and forwards upstream only
 the headers `hdr` names, plus the credential's injection. A header added on
@@ -730,14 +732,22 @@ the way, by an HTTP library or a proxy, is dropped rather than refused, so
 `user-agent` and `via` do no harm.
 
 - **Bodies.** A buffered body (up to the proxy's 16 MiB) is hashed whole. A
+  body that declares its `Content-Digest` and length is bound by that
+  digest and streams, up to 95 MiB: coffre hashes it as it passes and holds
+  back its last bytes until the digest matches, so the upstream never gets
+  whole a body other than the one signed (the
+  [proxy's design](credential-proxy.md#4-the-proxy-request-by-request) says what an
+  upstream that acts on part of a request can still see). The SDK and
+  `coffre serve` declare every body. A
   streamed SigV4 upload is bound by the payload hash it declares, which S3
   itself checks against the bytes. An unsigned streamed upload cannot be
   bound, and a workload may send one only
   through a credential that says `unsignedUploads: true`, whose page notes
   that column B is **use** for it.
 - **Cost.** Hashing a body costs CPU in proportion to its size, about 2 ms
-  per MiB on Workers. API calls are kilobytes. Large objects go through
-  streamed SigV4 or delivered minting (7.2).
+  per MiB on Workers. API calls are kilobytes. Documents up to 95 MiB
+  stream with their `Content-Digest`; larger objects go through streamed
+  SigV4 or delivered minting (7.2).
 
 **The verifier** (`verifyProof` in core) checks, cheapest first:
 
@@ -764,7 +774,7 @@ the way, by an HTTP library or a proxy, is dropped rather than refused, so
    - `ath` equals base64url(SHA-256(token)).
    - `req` equals the recomputed digest. A buffered body is checked before
      anything is sent; a streamed one is bound by its declared hash, as
-     above.
+     above, and the header that declares it must be one `hdr` names.
    - `iat` is within ±300 s. The nonce, not the clock, is what makes a proof
      fresh.
 7. **The gate** checks the nonce and the `jti` (5.2).

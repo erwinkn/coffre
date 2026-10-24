@@ -27,7 +27,7 @@
  *     once if the gate asks for a fresh one;
  *   - logout on `close()`, and on SIGTERM.
  */
-import { base64url, bodyDigest, bodyLine, createProof, generateProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
+import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
 
@@ -410,9 +410,11 @@ function surface(core: Core): Workload {
     if (!under(url)) return core.base(input, init);
     // As fetch would send it: the headers fetch adds for its body (a form's content-type) are the app's, and signed.
     const request = new Request(input, init);
-    // A request to an AWS-signed credential declares its body's digest, which coffre takes as the body's line, and which S3 checks
-    // against the bytes; any other declared value leaves the body unsigned. Only such a request streams; any other body is read whole.
-    const declared = request.headers.get('x-amz-content-sha256');
+    // A body that declares its digest has it for its line: an AWS-signed credential's `x-amz-content-sha256`, which S3 checks
+    // against the bytes (any other value of it leaves the body unsigned), or a `Content-Digest`'s SHA-256, which coffre checks
+    // as they pass. Only such a body streams; any other is read whole, and declares its own digest, so that coffre streams it on.
+    const own = request.headers.get('content-digest');
+    const declared = request.headers.get('x-amz-content-sha256') ?? (own === null ? null : declaredDigest(own));
     const streamed = init?.body instanceof ReadableStream || (input instanceof Request && init?.body === undefined);
     const stream = declared !== null && request.body !== null && streamed ? request.body : null;
     const bytes = stream === null && request.body !== null ? new Uint8Array(await request.arrayBuffer()) : null;
@@ -420,11 +422,16 @@ function surface(core: Core): Workload {
     const stated = request.headers.get('content-length');
     const length = stream === null ? (bytes?.length ?? 0) : stated !== null && /^\d+$/.test(stated) ? Number(stated) : null;
     const line = await bodyLine({ declared, length, bytes });
+    // What the proof signs and coffre forwards: the app's headers, and the digest of a body read whole, unless the app set one.
+    const content = new Headers(request.headers);
+    if (declared === null && own === null && length !== 0) content.set('content-digest', contentDigest(line));
     const send = async () => {
       const { token } = await core.current();
-      const headers = new Headers(request.headers);
+      const headers = new Headers(content);
+      // The length of a body read whole, which coffre streams a declared one by.
+      if (bytes !== null) headers.set('content-length', String(bytes.length));
       headers.set('authorization', `DPoP ${token}`);
-      headers.set('dpop', await createProof(key, { method: request.method, url: request.url, token, nonce: nonces.value, content: { headers: request.headers, body: line } }));
+      headers.set('dpop', await createProof(key, { method: request.method, url: request.url, token, nonce: nonces.value, content: { headers: content, body: line } }));
       const sent = dispatch(nonces);
       const response = await core.base(request.url, {
         method: request.method,
@@ -460,7 +467,7 @@ function surface(core: Core): Workload {
     if (!asGet && stream !== null) throw new TypeError(`fetch failed: ${request.url} redirects a streamed body, which cannot be sent again`);
     const next = new URL(location, request.url);
     const headers = new Headers(request.headers);
-    if (asGet) for (const name of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) headers.delete(name);
+    if (asGet) for (const name of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location', 'content-digest']) headers.delete(name);
     // As fetch does: credentials the app set go to no other origin.
     if (next.origin !== new URL(request.url).origin) for (const name of ['authorization', 'cookie', 'proxy-authorization']) headers.delete(name);
     // The next hop, signed afresh if it is coffre's, and sent with the app's own headers alone if it is not.
@@ -666,8 +673,11 @@ async function logout(api: Api, token: string): Promise<void> {
   if (!response.ok && (response.status !== 401 || askedNonce(response))) throw refusal(response.status, body, 'coffre did not end the session');
 }
 
-/** Whether coffre refused a proof for its nonce alone (RFC 9449, section 8): sent again once, with the nonce it gave. */
-function askedNonce(response: Response): boolean {
+/**
+ * Whether coffre refused a proof for its nonce alone (RFC 9449, section 8): sent again once, with the nonce it gave. A
+ * workload's `fetch` does so itself, but for a stream, which it cannot read twice: whoever holds its bytes may.
+ */
+export function askedNonce(response: Response): boolean {
   return response.status === 401 && /error="?use_dpop_nonce/.test(response.headers.get('www-authenticate') ?? '') && response.headers.has('dpop-nonce');
 }
 

@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -48,14 +49,15 @@ test('a request is signed whole and forwarded as the app made it: only the heade
   assert.equal(sent!.method, 'POST');
   assert.equal(sent!.path, '/use/stripe/v1/charges');
   assert.equal(sent!.query, 'expand[]=balance_transaction&a=%2F');
-  // The content-type fetch adds for a form is the app's, and signed; fetch's own transport headers, and the app's stand-in key, are not.
-  assert.deepEqual(sent!.headers, { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8', 'idempotency-key': '5f1c', 'stripe-account': 'acct_1' });
+  // The content-type fetch adds for a form is the app's, and signed, as is the body's digest; fetch's own transport headers, and the app's stand-in key, are not.
+  const digest = `sha-256=:${createHash('sha256').update('amount=2000&currency=eur').digest('base64')}:`;
+  assert.deepEqual(sent!.headers, { 'content-digest': digest, 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8', 'idempotency-key': '5f1c', 'stripe-account': 'acct_1' });
   assert.equal(sent!.body, 'amount=2000&currency=eur');
   // The credential's own fetch, the same; and a Request object, its body read once.
   await session.credential('stripe').fetch('v1/balance', { headers: { accept: 'application/json' } });
   await session.fetch(new Request(`${session.url('openai')}/files`, { method: 'PUT', body: new Uint8Array([0, 1, 2, 255]) }));
   assert.equal(coffre.forwarded[1]!.path, '/use/stripe/v1/balance');
-  assert.deepEqual(coffre.forwarded[1]!.headers, { accept: 'application/json' });
+  assert.deepEqual(coffre.forwarded[1]!.headers, { accept: 'application/json' }, 'no body, no digest');
   assert.equal(coffre.forwarded[2]!.body, Buffer.from([0, 1, 2, 255]).toString());
 });
 
@@ -88,6 +90,30 @@ test('a streamed upload to an AWS-signed credential is bound by its declared dig
   const request = new Request(`${session.url('s3')}/bucket/other`, { method: 'PUT', headers: { 'x-amz-content-sha256': digest }, body: stream(), duplex: 'half' } as RequestInit);
   assert.equal((await session.fetch(request)).status, 200);
   assert.deepEqual(coffre.forwarded.map((sent) => sent.body), ['object bytes', 'object bytes', '', 'object bytes']);
+});
+
+test("a body read whole declares its own SHA-256; a stream that declares it streams, held to it; an app's own digest of another algorithm stays as it is", async (t) => {
+  const { coffre, session } = await signedIn(t);
+  const bytes = new TextEncoder().encode('%PDF-1.7 a signature document');
+  const declared = `sha-256=:${createHash('sha256').update(bytes).digest('base64')}:`;
+  const stream = (body = bytes) => new ReadableStream({ start: (controller) => (controller.enqueue(body), controller.close()) });
+  const upload = (headers: Record<string, string>, body: BodyInit) => session.fetch(`${session.url('yousign')}/v3/documents`, { method: 'POST', headers, body, duplex: 'half' } as RequestInit);
+  assert.equal((await upload({}, bytes)).status, 200);
+  assert.equal(coffre.forwarded.at(-1)!.headers['content-digest'], declared);
+  // Declared by whoever holds the bytes (`coffre serve`): its stream is never read here, and coffre holds the bytes to it.
+  const response = await upload({ 'content-digest': declared, 'content-length': String(bytes.length) }, stream());
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(coffre.forwarded.at(-1)!.body, '%PDF-1.7 a signature document');
+  const tampered = await upload({ 'content-digest': declared, 'content-length': String(bytes.length) }, stream(new TextEncoder().encode('%PDF-1.7 another document!!!!')));
+  assert.equal(tampered.status, 400);
+  assert.equal(coffre.forwarded.length, 2);
+  // An app's own sha-512 declares nothing to coffre: it goes on as the app set it, signed, and the body is read whole.
+  const sha512 = `sha-512=:${createHash('sha512').update(bytes).digest('base64')}:`;
+  assert.equal((await upload({ 'content-digest': sha512 }, stream())).status, 200);
+  assert.equal(coffre.forwarded.at(-1)!.headers['content-digest'], sha512);
+  // A sha-256 member that is no SHA-256 binds nothing, and is sent nowhere.
+  await assert.rejects(upload({ 'content-digest': 'sha-256=:bm90IGEgZGlnZXN0:' }, bytes), /Content-Digest declares a body's SHA-256 once/);
+  assert.equal(coffre.forwarded.length, 3);
 });
 
 test('a nonce the gate no longer knows is refused once, and the request sent again with the new one; the newest is always used', async (t) => {

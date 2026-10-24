@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- **Workload uploads past 16 MiB stream: a 50 MB Yousign document goes
+  through the proxy.** A request body that declares its SHA-256 in a
+  `Content-Digest` (RFC 9530, `sha-256=:<base64>:`) and says its length now
+  streams through coffre to the upstream, up to 95 MiB, instead of being
+  read whole and refused past 16 MiB. coffre hashes it as it passes and
+  holds back its last bytes until the digest matches: a body with other
+  bytes, short of its length or past it, is cut off before the end, so the
+  upstream never gets a complete request, and the app gets a 400 saying
+  why. The proof signs the digest as the body's line and names the header
+  in `hdr`. 95 MiB (99,614,720 bytes) sits under the 100 MB (decimal)
+  Cloudflare takes in one request on Free and Pro zones, so a body near it
+  gets coffre's 413, which names the way through, and not the zone's.
+  - **`coffre serve` holds each body in memory while it hashes it**: the
+    chunks it came in, one copy, never written to disk, up to 95 MiB per
+    upload in flight. Size the sidecar's memory limit for the uploads you
+    run at once: the process's own (about 120 MB at peak, idle) plus up to
+    95 MiB for each. A 55 MB document raised its peak by 70 MB. Past 95
+    MiB, the sidecar answers 413 before sending anything.
+  - **The SDK** (`@coffre/client/workload`) declares the digest of every
+    body it reads whole, and streams a body that declares its own. A
+    `Content-Digest` the app set stays as it is; one with no `sha-256`
+    member declares nothing, and its body is read whole, up to 16 MiB.
+  - **Old and new pair either way.** A 0.12.1 SDK or sidecar against a
+    0.12.0 instance signs the same line (the digest of the bytes), so its
+    requests still go, read whole up to 16 MiB, and the upstream gets the
+    `Content-Digest` header too. A 0.12.0 sidecar against 0.12.1 sends no
+    digest, and keeps the 16 MiB.
+  - **What it leaves:** an upstream that acts on part of a request before
+    it ends, a multipart part stored as soon as it is read, may act on a
+    body whose digest then fails. That takes a request carrying other bytes
+    than its proof signed.
+  - **Fixed:** `coffre serve` dropped an S3 upload's `content-length`, so
+    coffre read the upload whole, and refused one past 16 MiB. It sends it
+    now, and the upload streams.
+  - On Workers, a refused stream shows in the logs as an uncaught
+    exception (workerd reports the subrequest body's error), beside the
+    400 the app gets.
+
 ## 0.12.0 (2026-10-24)
 
 - **Upgrading to 0.12, in short.** Run `coffre migrate` before you deploy,
