@@ -90,18 +90,26 @@ def place (j : Json) : Parse Place := do
 def grant (j : Json) : Parse Grant := do
   pure ⟨⟨← optStr (← present j "projectId"), ← optStr (← present j "environmentId")⟩, ← str (← req j "role")⟩
 
+/-- A grant's `reads`: `"*"`, or a list of key IDs. -/
+def reads (j : Json) : Parse (Option Reads) :=
+  if j.isNull then pure none
+  else if j == Json.str "*" then pure (some .all)
+  else do pure (some (.keys (← (← list j).mapM str)))
+
 def scopeGrant (j : Json) : Parse ScopeGrant := do
   let perms := field j "permissions"
   let sens := field j "sensitive"
   pure { project := ← optStr (← present j "projectId"), env := ← optStr (← present j "environmentId"), role := ← str (← req j "role"),
          cols := ← if perms.isNull then pure none else some <$> columns perms,
-         sensitive := ← if sens.isNull then pure none else some <$> sens.getBool? }
+         sensitive := ← if sens.isNull then pure none else some <$> sens.getBool?,
+         reads := ← reads (field j "reads") }
 
 def holdings (j : Json) : Parse Holdings := do
   let cred := field j "credentialScope"
+  let kind ← optStr (field j "kind")
   pure { role := ← str (← req j "role"), scope := ← scope (← req j "scope"), grants := ← (← list (← req j "grants")).mapM grant,
          cred := ← if cred.isNull then pure none else some <$> (← list cred).mapM scopeGrant,
-         policy := ← policy (field j "policy"), service := ← flag (field j "service") }
+         policy := ← policy (field j "policy"), service := ← flag (field j "service"), workload := kind == some "workload" }
 
 def optScope (j : Json) : Parse (Option Scope) := if j.isNull then pure none else some <$> scope j
 
@@ -124,6 +132,13 @@ def reader (j : Json) : Parse Reader := do
 
 def secretPlace (j : Json) : Parse SecretPlace := do pure ⟨← str (← req j "projectId"), ← str (← req j "environmentId")⟩
 
+def nature (j : Json) : Parse Nature := do
+  match ← str j with
+  | "plain" => pure .plain
+  | "secret" => pure .secret
+  | "sensitive" => pure .sensitive
+  | s => throw s!"no nature {s}"
+
 def envRows (j : Json) : Parse (Table EnvRow) := do
   (← list j).mapM fun pair => do
     let id ← str (← req pair "id")
@@ -141,7 +156,11 @@ def jsonGrant (g : ScopeGrant) : Json :=
     (match g.cols with
       | some c => [("permissions", Json.mkObj [("normal", jsonPerms c.normal), ("protected", jsonPerms c.prot)])]
       | none => []) ++
-    (match g.sensitive with | some b => [("sensitive", Json.bool b)] | none => []))
+    (match g.sensitive with | some b => [("sensitive", Json.bool b)] | none => []) ++
+    (match g.reads with
+      | some .all => [("reads", Json.str "*")]
+      | some (.keys ids) => [("reads", Json.arr (ids.map Json.str).toArray)]
+      | none => []))
 
 def action (j : Json) : Parse Action := do
   match ← str j with
@@ -226,9 +245,23 @@ def answer (j : Json) : Parse Json := do
       let (project, sensitive) := secrets.getD i ("", false)
       sensitiveRefusal (codes.getD i none) r a principal purpose keeps project sensitive (via.getD i false)
     pure (Json.arr (out.map code).toArray)
+  | "useOnlyRefusals" =>
+    let r ← reader (field j "reader")
+    let a ← action (field j "action")
+    let purpose ← optStr (field j "purpose")
+    let codes ← (← list (← req j "codes")).mapM optStr
+    let secrets ← (← list (← req j "secrets")).mapM fun s => do pure (← secretPlace s, ← str (← req s "secretId"))
+    let out := (List.range secrets.length).map fun i =>
+      let (place, id) := secrets.getD i (default, "")
+      useOnlyRefusal (codes.getD i none) r a purpose place id
+    pure (Json.arr (out.map code).toArray)
+  | "useOnly" =>
+    let key ← req j "key"
+    pure (Json.bool (useOnly (← holdings (field j "holder")) (← str (← req key "projectId")) (← str (← req key "environmentId")) (← str (← req key "secretId"))))
   | "referenceRefusal" =>
-    pure (code (referenceRefusal (← reader (← req j "reader")) (← secretPlace (← req j "holder")) (← secretPlace (← req j "source"))
-      (← envRows (← req j "environments")) (← (← req j "sensitive").getBool?)))
+    let source ← req j "source"
+    pure (code (referenceRefusal (← reader (← req j "reader")) (← secretPlace (← req j "holder")) (← secretPlace source) (← str (← req source "secretId"))
+      (← envRows (← req j "environments")) (← nature (← req j "nature"))))
   | "encodeAad" => pure (Json.str (String.ofList (Envelope.encodeAad (← aadCtx (field j "ctx")))))
   | "verifyEntries" => verifyCase j
   | _ => throw s!"no op {op}"

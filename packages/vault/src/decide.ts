@@ -1,4 +1,4 @@
-import { allows, ownsProject, readsSensitive, withinCredential, type Holdings, type Permission, type Place } from '@coffre/core/access';
+import { allows, ownsProject, readsSensitive, useOnly, withinCredential, type HeldKey, type Holdings, type Permission, type Place } from '@coffre/core/access';
 import { handsBack, type Access, type RefusalCode } from '@coffre/core/vault';
 import type { EnvironmentRow } from './store.ts';
 
@@ -152,25 +152,47 @@ export function sensitiveRefusals(
 }
 
 /**
+ * Each key's refusal once a workload's listing is weighed too, after `vet`
+ * and before its sensitivity (docs/design/workload-access.md, section 6.1).
+ * A workload is handed back, for any purpose but the proxy's use, only a
+ * value its credential lists where the value is held (`useOnly`): each
+ * secret is that place, a reference's source, a fork's parent, whatever
+ * place the call checked its permission at. A copy too, kept sensitive or
+ * not: it would land where the workload may read it. The vault opens no
+ * plain value, so every key here is a secret or a sensitive one.
+ */
+export function useOnlyRefusals(
+  codes: readonly (RefusalCode | null)[],
+  reader: Reader,
+  call: { action: 'secret.read' | 'key.wrap' | 'key.rewrap'; purpose?: string; secrets: readonly HeldKey[] },
+): (RefusalCode | null)[] {
+  const handedBack = call.action === 'secret.read' && call.purpose !== 'use';
+  return call.secrets.map((secret, i) => codes[i] ?? (handedBack && useOnly(reader.live, secret) ? 'use_only' : null));
+}
+
+/**
  * Why `reader` may not make a reference at `holder` to `source`, or null, past
  * what only the database settles (a source of another claim, a reference to
  * itself). A personal config's values are bound to its owner: no reference
  * holds one, nor reads one. Making one hands its source's value to whoever
  * reads the holder, whatever its nature becomes: its maker writes the holder,
  * reads the source there, as any direct access, and, for a sensitive one,
- * which nobody reads, uses it there too (R24).
+ * which nobody reads, uses it there too (R24). A workload refers only to a
+ * value it is handed back, a plain one or one it lists (`useOnly`): it
+ * would otherwise move a value it uses to a place whose keys it reads.
  */
 export function referenceRefusal(
   reader: Reader,
   holder: SecretPlace,
-  source: SecretPlace,
+  source: HeldKey,
   environments: ReadonlyMap<string, EnvironmentRow>,
-  sensitive: boolean,
+  nature: 'plain' | 'secret' | 'sensitive',
 ): RefusalCode | null {
   if (environments.get(holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
   const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
   const at = placeIn(source, environments);
   return refuses(reader, 'secret.write', placeIn(holder, environments), gone(holder))
     ?? refuses(reader, 'secret.read', at, gone(source))
-    ?? (sensitive ? refuses(reader, 'secret.use', at, gone(source)) : null);
+    ?? (nature === 'sensitive' ? refuses(reader, 'secret.use', at, gone(source)) : null)
+    ?? (nature !== 'plain' && useOnly(reader.live, source) ? 'use_only' : null);
 }

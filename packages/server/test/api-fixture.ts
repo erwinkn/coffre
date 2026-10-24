@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
-import type { Vault } from '@coffre/core/vault';
+import type { Through, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, type LocalVault, type VaultConfig } from '@coffre/vault/node';
@@ -31,7 +31,7 @@ export type FixtureDeps = {
  * and entries with everything else, and starts every one of them afresh, so
  * a suite's tests do not share them, checkpoints or bulk-limit counts.
  */
-export type TestVault = Vault & {
+export type TestVault = SpeakingVault<Vault> & {
   /** The raw KEK, and the signing key the vault derives from it, which no database may hold. */
   kek: Buffer;
   signingKey: Buffer;
@@ -39,6 +39,35 @@ export type TestVault = Vault & {
   advance(ms: number): void;
   reset(): Promise<void>;
 };
+
+/** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
+type Spoken<I> = I extends Through ? Omit<I, 'caller'> & Partial<Through> : I;
+
+/** A vault whose calls may leave `caller` out (`speaking`). */
+export type SpeakingVault<V> = { [K in keyof V]: V[K] extends (input: infer I) => infer R ? (I extends Through ? (input: Spoken<I>) => R : V[K]) : V[K] };
+
+/**
+ * `vault`, spoken to as the app does by a test about something other than
+ * who asks: a call that leaves its `caller` out says the kind its acting
+ * principal is, a person for `user:`, a bearer for `token:`. One about a
+ * workload says so itself.
+ */
+export function speaking<V extends object>(vault: V): SpeakingVault<V> {
+  return new Proxy(vault, {
+    get(target, name) {
+      const value: unknown = Reflect.get(target, name);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => value.apply(target, [said(args[0]), ...args.slice(1)]);
+    },
+  }) as unknown as SpeakingVault<V>;
+}
+
+function said(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || 'caller' in input) return input;
+  const { actor, principal } = input as { actor?: unknown; principal?: unknown };
+  const asking = typeof actor === 'string' ? actor : principal;
+  return typeof asking === 'string' ? { ...input, caller: asking.startsWith('user:') ? 'person' : 'bearer' } : input;
+}
 
 const vaults = new Set<TestVault>();
 
@@ -83,13 +112,13 @@ export function testVault(
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
     const signedIn = first === undefined ? null : await opened.access(first).catch(() => null);
     if (signedIn?.role === 'owner') {
-      for (const principal of others) await opened.admit({ actor: first, principal, role: 'owner' });
+      for (const principal of others) await opened.admit({ actor: first, caller: 'person', principal, role: 'owner' });
     }
     return opened;
   };
   const call = (name: keyof Vault) => async (...args: unknown[]) => {
     assertOutsideTransaction(name);
-    return ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
+    return (speaking(await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
   };
   const vault = {
     unwrap: call('unwrap'),
@@ -254,7 +283,7 @@ export async function holdSomething(owner: Database, vault: Vault, service: stri
   const slug = `${service.replace(/^token:/, '')}-reads`;
   const id = randomUUID();
   await owner.insert(projects).values({ id, slug, name: slug });
-  const granted = await vault.setAccess({ actor, principal: service, changes: [{ projectId: id, environmentId: null, role: 'viewer', expiresAt: null }] });
+  const granted = await speaking(vault).setAccess({ actor, principal: service, changes: [{ projectId: id, environmentId: null, role: 'viewer', expiresAt: null }] });
   if (!granted.ok) throw new Error(`could not give ${service} something to hold: ${granted.refusal.message}`);
   return id;
 }

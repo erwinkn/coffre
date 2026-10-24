@@ -5,7 +5,7 @@ import type { AccessChange, Admitted } from '@coffre/core/vault';
 
 import { memberStanding, places } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { type ApiContext, denied, need, Refusal, through, withRefusals } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
 import { managedAccount, NOT_THEIRS } from './services.ts';
@@ -157,7 +157,7 @@ export async function setAccess(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
-      credentialScope: ctx.caller.credentialScope,
+      ...through(ctx.caller),
       ...(admit ? { admit } : {}),
       changes: located.map((want) => ({
         projectId: want.projectId,

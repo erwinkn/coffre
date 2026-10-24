@@ -33,6 +33,26 @@
     `__proto__` claim is refused, rather than stored without it; an
     envelope claiming another version of its vault key, and a sealed
     sign-in value spelled another way, no longer open.
+- **A workload uses what its binding does not list, and moves none of it**
+  ([workload-access.md](docs/design/workload-access.md#61-the-rule), its
+  PR 1c). Every vault call now says what kind of credential it came in on,
+  a person's, a bearer's or a workload's key-bound session, and the vault
+  refuses a workload's call that comes with no scope. A workload is handed
+  back a secret or a sensitive value only where its scope's `reads` list
+  the key, by ID, at the place where the value is held: a reference's
+  source, a fork's parent, never the place the request names, so a rename
+  onto a listed name reads nothing new. Anything else the vault refuses
+  `use_only`, whatever the purpose but the proxy's use, a fork's copy
+  included, and so does making a reference to it. The app answers the same
+  first: a read of a whole environment leaves those keys out and names
+  them in `useOnly`, a read of one is refused 403 `use_only`, a dry run
+  never says whether a guess at one is right, and a fork or a reference
+  that would copy or point at one is refused before anything is made.
+  `scopeWithReads` puts a binding's `reads` on a session's scope, for the
+  exchange to call. No session of this kind is issued yet, and bearer
+  tokens and people are unchanged. The vault, deployed first, takes an
+  older app's calls, which say no kind, as before. The Lean model holds
+  the vault to it (`no_laundering`). No database migration.
 - **A credential revoked while its read is under way gets nothing.** A
   read checked its token, handle or MCP connection, then asked the vault,
   which decides on the member and is only told the credential: a token

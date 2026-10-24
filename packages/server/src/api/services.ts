@@ -152,7 +152,8 @@ export async function issuerNow(
       denied(as.ctx, as.action, 'credential_ended'),
     );
   }
-  return { caller: callerFrom(principal, access, policySeq, as?.ctx.caller.credentialScope ?? null), accessSeq };
+  // The credential's kind too: a workload's issuer is a workload, held to what it only uses, never a bearer.
+  return { caller: callerFrom(principal, access, policySeq, as?.ctx.caller.credentialScope ?? null, as?.ctx.caller.kind), accessSeq };
 }
 
 /** Refuse, 409, if the vault changed the issuer's access since `issuerNow` asked: under the head, so no change commits between. */

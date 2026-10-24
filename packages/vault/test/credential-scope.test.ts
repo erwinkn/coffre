@@ -8,8 +8,7 @@ import type { Through } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
-import { openLocalVault } from '../src/local.ts';
-import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase, openLocalVault } from './database.ts';
 
 // A request that came in on a service token or a trust binding carries its
 // scope, and the vault decides on it in every call that takes one (`Through`):
@@ -68,7 +67,7 @@ test('every call that takes a credential scope decides on it: within it a call g
   const marketViewer: CredentialScope = [issuedGrant({ projectId: market.project, environmentId: null, role: 'viewer' })];
 
   /** Each call, as CI with `through`: the scope that lets it through and one that does not, or none for those no service account makes. */
-  const calls: { name: string; call: (through: Through) => Promise<{ ok: boolean }>; within?: CredentialScope; past?: CredentialScope }[] = [
+  const calls: { name: string; call: (through: Partial<Through>) => Promise<{ ok: boolean }>; within?: CredentialScope; past?: CredentialScope }[] = [
     {
       name: 'unwrap',
       call: (through) => vault.unwrap({ principal: CI, purpose: 'reveal', items: [{ secretVersionId }], ...through }),
@@ -114,6 +113,12 @@ test('every call that takes a credential scope decides on it: within it a call g
     for (const malformed of ['all', [{ projectId: market.project, environmentId: null, role: 'root' }], [...marketOwner, ...marketOwner]]) {
       await assert.rejects(call({ credentialScope: malformed as never }), /credentialScope must be a list of grants/, `${name}: ${JSON.stringify(malformed)}`);
     }
+    // A workload is held to what its scope lists: one with none is the app's bug, and so is a kind its principal is not.
+    for (const credentialScope of [undefined, null]) {
+      await assert.rejects(call({ caller: 'workload', credentialScope }), /a workload caller comes with its credential scope/, `${name}: a workload with no scope`);
+    }
+    await assert.rejects(call({ caller: 'person', credentialScope: marketOwner }), /caller must be person for a user: principal/, `${name}: a service as a person`);
+    await assert.rejects(call({ caller: 'admin' as never, credentialScope: marketOwner }), /caller must be/, `${name}: no kind of caller`);
     if (within === undefined || past === undefined) continue;
     assert.equal((await call({ credentialScope: within })).ok, true, `${name}, within its scope`);
     assert.equal((await call({ credentialScope: null })).ok, true, `${name}, a session's`);

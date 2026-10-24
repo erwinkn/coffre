@@ -27,7 +27,6 @@ import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatc
 import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
-import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { signer } from '../src/checkpoint.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
@@ -47,6 +46,8 @@ import {
   run,
   withLogUnlocked,
   type TestDatabase,
+  openLocalVault,
+  type LocalVault,
 } from './database.ts';
 
 /** Every vault here signs, and MACs its entries, with this; a vault started afresh needs it too. */
@@ -421,7 +422,7 @@ test('aliased restore targets keep each source version in its own entry', async 
   const target = { ...first, version: 3 };
   // Workers RPC can preserve aliases; use the implementation without the local JSON transport.
   const vault = openVault(db.vault, await prepareVault(config));
-  const result = await vault.rewrap({ principal: ROOT, items: sources.map((source, i) => ({
+  const result = await vault.rewrap({ principal: ROOT, caller: 'person', items: sources.map((source, i) => ({
     secret: target, ...source, from: i + 1, wrapped: wrappedKeys[i],
   })) });
   assert.ok(result.ok);
@@ -3714,7 +3715,7 @@ for (const [shared, joined] of [[false, false], [true, false], [false, true]] as
     await slow.reached;
     assert.equal((await other.access(ROOT)).role, 'owner');
     // Ada, made an Owner since, comes first among the Owners the quick check finds.
-    if (joined) assert.ok((await other.admit({ actor: ROOT, principal: ADA, role: 'owner' })).ok);
+    if (joined) assert.ok((await other.admit({ actor: ROOT, caller: 'person', principal: ADA, role: 'owner' })).ok);
     slow.release();
     const answer = await pending;
     assert.deepEqual([answer.status, answer.role], ['active', 'owner']);

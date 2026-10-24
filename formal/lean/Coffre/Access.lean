@@ -121,6 +121,18 @@ structure Grant where
   role : String
   deriving Repr, Inhabited, DecidableEq
 
+/-- `ScopeGrant`'s `reads`: the keys there a workload is handed back, by ID, or every one. -/
+inductive Reads where
+  | all
+  | keys (ids : List String)
+  deriving Repr, Inhabited, DecidableEq
+
+/-- Whether a grant's `reads` lists a key: none lists nothing. -/
+def Reads.lists : Option Reads → String → Bool
+  | some .all, _ => true
+  | some (.keys ids), k => ids.contains k
+  | none, _ => false
+
 /-- `ScopeGrant`: a credential's grant, with the columns it kept when issued, or a built-in role's name alone. -/
 structure ScopeGrant where
   project : Option String
@@ -128,6 +140,7 @@ structure ScopeGrant where
   role : String
   cols : Option RoleDef
   sensitive : Option Bool
+  reads : Option Reads := none
   deriving Repr, Inhabited, DecidableEq
 
 def ScopeGrant.place (g : ScopeGrant) : GrantPlace := ⟨g.project, g.env⟩
@@ -169,6 +182,8 @@ structure Holdings where
   cred : Option (List ScopeGrant)
   policy : Policy
   service : Bool
+  /-- `kind`, whether it is `workload`. -/
+  workload : Bool := false
   deriving Repr, Inhabited
 
 def Holdings.withProtected (h : Holdings) (ps : List String) : Holdings :=
@@ -227,6 +242,13 @@ def heldColumns (h : Holdings) (x : Place) : RoleDef :=
 def readsSensitive (h : Holdings) (project : String) : Bool :=
   h.service && (h.cred.getD []).any fun g => g.sensitive == some true && g.project == some project
 
+/--
+`useOnly`: a workload's value that no grant of its scope covering where the
+value is held lists, by key ID. Nobody else's.
+-/
+def useOnly (h : Holdings) (project env secret : String) : Bool :=
+  h.workload && !(h.cred.getD []).any fun g => covers g.place ⟨project, some (env, none)⟩ && Reads.lists g.reads secret
+
 def ownsProject (h : Holdings) (project : String) : Bool :=
   h.cred.isNone && !h.service &&
     ((h.role == "owner" && inScope h.scope ⟨project, none⟩) ||
@@ -263,7 +285,7 @@ structure ServiceAccount where
   admittedBy : Option String
   deriving Repr, Inhabited
 
-def NOTHING (pol : Policy) : Holdings := ⟨"member", EVERYWHERE, [], none, pol, false⟩
+def NOTHING (pol : Policy) : Holdings := ⟨"member", EVERYWHERE, [], none, pol, false, false⟩
 
 def managesService (h : Holdings) (setting : Option Scope) (actor : String) (a : ServiceAccount) : Bool :=
   runsInstance h ||

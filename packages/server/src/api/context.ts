@@ -1,6 +1,6 @@
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
-import type { Refusal as VaultRefusal, Vault } from '@coffre/core/vault';
+import type { Refusal as VaultRefusal, Through, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
@@ -354,8 +354,13 @@ export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provena
     requestId: ctx.requestId,
     operationId,
     credentialId: ctx.provenance ?? null,
-    credentialScope: ctx.caller.credentialScope,
+    ...through(ctx.caller),
   };
+}
+
+/** The credential the caller came in on, as the vault decides on it: its scope and its kind. */
+export function through(caller: Pick<Caller, 'credentialScope' | 'kind'>): Through {
+  return { credentialScope: caller.credentialScope, caller: caller.kind };
 }
 
 /**

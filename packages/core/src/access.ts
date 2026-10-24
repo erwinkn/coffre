@@ -579,6 +579,8 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
     const { projectId, environmentId, role, permissions, sensitive, reads, ...rest } = grant as Record<string, unknown>;
     if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string') return false;
     if (sensitive !== undefined && typeof sensitive !== 'boolean') return false;
+    // A workload's list is an environment's: on a project's grant it would read the whole project.
+    if (reads !== undefined && environmentId === null) return false;
     if (reads !== undefined && reads !== '*' && !(Array.isArray(reads) && reads.every((id) => typeof id === 'string') && new Set(reads).size === reads.length)) return false;
     // As issued, both columns; or, kept before 0.10, a built-in role's name alone, which holds it as it ships.
     if (!ROLE_ID.test(role)) return false;
@@ -622,7 +624,22 @@ export type Holdings = {
   policy?: Policy;
   /** A service account's, which holds each role's normal column everywhere; a person's holds a protected environment's column there. */
   service?: boolean;
+  /**
+   * What the request came in on (`CallerKind`): a workload's key-bound
+   * session is handed back only the values its scope lists (`useOnly`).
+   * Absent, anything but a workload.
+   */
+  kind?: CallerKind;
 };
+
+/**
+ * What kind of credential a request comes in on: a person's (a session or
+ * a personal token), a bearer's (a service token, or one a trust binding
+ * exchanged), or a workload's key-bound session, which reads only plain
+ * values and those its binding lists (docs/design/workload-access.md,
+ * section 6.1). The vault is told it with every call (`Through`).
+ */
+export type CallerKind = 'person' | 'bearer' | 'workload';
 
 /** Someone who holds nothing: a stranger, a removed member, a tampered row. */
 export const NOTHING: Holdings = { role: 'member', scope: EVERYWHERE, grants: [] };
@@ -696,6 +713,76 @@ function scopeHolds(holder: Holdings, permission: Permission, place: Place): boo
  */
 export function readsSensitive(holder: Holdings, projectId: string): boolean {
   return holder.service === true && (holder.credentialScope ?? []).some((grant) => grant.sensitive === true && grant.projectId === projectId);
+}
+
+/** A key, by its id and where its value is held: a reference's source's, an inherited key's parent's. */
+export type HeldKey = { projectId: string; environmentId: string; secretId: string };
+
+/**
+ * Whether a value is use-only to `holder` (docs/design/workload-access.md,
+ * section 6.1): a workload is handed back no secret or sensitive value but
+ * one its credential's scope lists, by the key's id, on a grant that covers
+ * the place where the value is held, never the place a request names. A
+ * rename therefore moves no listing, and no reference, fork or copy moves a
+ * value under one. Nobody else's: their roles and the value's nature decide.
+ * A plain value is no secret, use-only to nobody, so it is never asked of.
+ *
+ *   api-prod lists STRIPE_WEBHOOK_SECRET's id at market/prod
+ *   market/prod/STRIPE_WEBHOOK_SECRET                              read
+ *   STRIPE_SECRET_KEY, renamed STRIPE_WEBHOOK_SECRET once that moved   use only: another id
+ *   market/dev/S, a reference to it, with "*" at market/dev        use only: held in market/prod
+ */
+export function useOnly(holder: Holdings, key: HeldKey): boolean {
+  if (holder.kind !== 'workload') return false;
+  const place: Place = { projectId: key.projectId, environmentId: key.environmentId, environmentSlug: null };
+  return !(holder.credentialScope ?? []).some((grant) => covers(grant, place) && (grant.reads === '*' || (grant.reads?.includes(key.secretId) ?? false)));
+}
+
+/**
+ * A workload's credential scope with its binding's `reads` on it, by
+ * environment ID (docs/design/workload-access.md, section 6.1): each
+ * environment's list on a grant at that environment, the scope's own there,
+ * or, where only a grant on its project reaches it, a grant made at the
+ * environment holding no more than that one does there. What the scope
+ * holds is unchanged, only what of it is handed back: a place it reaches
+ * nowhere lists nothing, and a list a grant carried is replaced, so a
+ * session reads what its binding lists now. `projectOf` names each listed
+ * environment's project; one it does not name, gone since, lists nothing.
+ *
+ *   scope   viewer on market
+ *   reads   { <prod>: { keys: [<STRIPE_WEBHOOK_SECRET>] } }
+ *   result  viewer on market; viewer on market/prod, reading STRIPE_WEBHOOK_SECRET
+ */
+export function scopeWithReads(
+  scope: CredentialScope,
+  reads: Readonly<Record<string, { readonly keys?: readonly string[] | '*' }>> | undefined,
+  projectOf: ReadonlyMap<string, string>,
+): CredentialScope {
+  const unlisted = scope.map(({ reads: _, ...grant }) => grant as ScopeGrant);
+  const result = [...unlisted];
+  for (const [environmentId, { keys }] of Object.entries(reads ?? {})) {
+    const projectId = projectOf.get(environmentId);
+    if (keys === undefined || projectId === undefined) continue;
+    const at = result.findIndex((grant) => grant.projectId === projectId && grant.environmentId === environmentId);
+    if (at >= 0) {
+      result[at] = { ...result[at]!, reads: keys };
+      continue;
+    }
+    const project = unlisted.find((grant) => grant.projectId === projectId && grant.environmentId === null);
+    if (project === undefined) continue;
+    // What the project's grant holds at the environment: its columns, but for what only a project holds.
+    const { permissions, protected: guarded } = scopeDefinition(project);
+    const here = (column: readonly Permission[]) => column.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission));
+    result.push({
+      projectId,
+      environmentId,
+      role: project.role,
+      permissions: { normal: here(permissions), protected: here(guarded) },
+      ...(project.sensitive === undefined ? {} : { sensitive: project.sensitive }),
+      reads: keys,
+    });
+  }
+  return result;
 }
 
 /**

@@ -17,8 +17,7 @@ import { tablesOf, type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { openLocalVault, type LocalVault } from '../src/local.ts';
-import { emptyDatabase, newProject, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase } from './database.ts';
+import { emptyDatabase, newProject, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';

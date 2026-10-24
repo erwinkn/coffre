@@ -43,7 +43,7 @@ import {
 } from '../db/queries.ts';
 import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf } from './caller.ts';
-import { audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { type ApiContext, audited, denied, Refusal, requireInstance, through, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
@@ -719,7 +719,7 @@ export async function putMember(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
-      credentialScope: ctx.caller.credentialScope,
+      ...through(ctx.caller),
     });
     if (!result.ok) throw vaultRefused(result.refusal);
     // Housekeeping: rows of an earlier membership are dead already, by their generation. It follows through on the
@@ -771,7 +771,7 @@ export async function removeMember(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
-      credentialScope: ctx.caller.credentialScope,
+      ...through(ctx.caller),
     });
     if (!result.ok) {
       if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') {
