@@ -8,7 +8,7 @@
 (* enrolls and leaves, and after each exchange and each tick the rule      *)
 (* reads the rows. WorkloadEnrollment.tla holds the races (the count under *)
 (* the head, renewal on the clock). docs/formal.md says what this covers,  *)
-(* what it abstracts and what it does not prove.                          *)
+(* what it abstracts and what it does not prove.                           *)
 (*                                                                         *)
 (* A tick is a renewal period: each running instance renews within it, and *)
 (* a session that stops renewing lives `Life` ticks more. The run is       *)
@@ -62,7 +62,7 @@ Min(a, b) == IF a < b THEN a ELSE b
 
 VARIABLES
     now,
-    roots,          \* the code's sessions: [id, who, created, ends, child]
+    roots,          \* the code's sessions: [id, seq, who, created, ends, child], seq their order
     running,        \* the deployment's running instances, by session
     old,            \* during a redeploy, the instances it replaces
     started,        \* when the redeploy started
@@ -77,7 +77,7 @@ procs == <<pc, op, l, left>>
 vars == <<now, roots, running, old, started, thief, counts, log, fenced, busy, procs>>
 
 -----------------------------------------------------------------------------
-(* The rule, over a set of rows, at a time *)
+(* The rule, over a set of rows, at a time                                 *)
 
 Row(id) == CHOOSE r \in roots : r.id = id
 
@@ -111,11 +111,11 @@ Trip(rows, t) ==
 \* roots.
 Short(n) == Cardinality(LiveIn({r \in roots : ~r.child}, now)) + n - 2 * Replicas
 
-\* The k oldest live roots, which r1's rule fences.
+\* The k oldest live roots, which r1's rule fences, by when they were made.
 Oldest(k) ==
     LET live == LiveIn({r \in roots : ~r.child}, now) IN
     CHOOSE set \in SUBSET live :
-        Cardinality(set) = k /\ \A a \in set, b \in live \ set : a.created <= b.created
+        Cardinality(set) = k /\ \A a \in set, b \in live \ set : a.seq < b.seq
 
 \* An exchange of the rows `new`: refused `frozen` once frozen, and `full`
 \* past the capacity, which counts towards a run of them; or, under r1's
@@ -157,7 +157,8 @@ Begin(p) ==
 
 Done(p) == Goto(p, "idle") /\ UNCHANGED <<op, l, left, counts>>
 
-Root(p, who, child) == [id |-> l[p].id, who |-> who, created |-> now, ends |-> IF child THEN now + Life ELSE Forever, child |-> child]
+Root(p, who, child) == [id |-> l[p].id, seq |-> Cardinality(roots) + 1, who |-> who, created |-> now,
+                        ends |-> IF child THEN now + Life ELSE Forever, child |-> child]
 
 Ended(id, at) == {IF r.id = id THEN [r EXCEPT !.ends = Min(r.ends, at)] ELSE r : r \in roots}
 
@@ -197,7 +198,7 @@ Restart(p) ==
 
 \* A redeploy on the same code starts all `replicas` new instances beside
 \* the old ones, which stop, logging out, within `Overlap`.
-NewRoots(p) == {[Root(p, "dep", FALSE) EXCEPT !.id = <<l[p].id[1], l[p].id[2], i>>] : i \in 1..Replicas}
+NewRoots(p) == {[Root(p, "dep", FALSE) EXCEPT !.id = <<l[p].id[1], l[p].id[2], i>>, !.seq = Cardinality(roots) + i] : i \in 1..Replicas}
 
 Redeploy(p) ==
     /\ pc[p] = "redeploy"
@@ -251,7 +252,7 @@ Tick ==
 
 Init ==
     /\ now = 0
-    /\ roots = {[id |-> <<"init", i>>, who |-> "dep", created |-> 0, ends |-> Forever, child |-> FALSE] : i \in 1..Replicas}
+    /\ roots = {[id |-> <<"init", i>>, seq |-> i, who |-> "dep", created |-> 0, ends |-> Forever, child |-> FALSE] : i \in 1..Replicas}
     /\ running = {<<"init", i>> : i \in 1..Replicas}
     /\ old = {}
     /\ started = 0
@@ -297,12 +298,16 @@ ForeignTo(t) ==
 OwnExcess == Most["redeploy"] * Replicas * Overlap + Most["crash"] * Life
 OwnRoots == Replicas + Most["redeploy"] * Replicas + Most["crash"]
 
+\* What NoFalseContention assumes of the scenario: the deployment's own
+\* events stay within the threshold and `4 × replicas` roots. Checked as an
+\* invariant beside it, so that a scenario past it fails rather than
+\* holding vacuously.
+WithinOwnBudget == OwnExcess <= Threshold /\ OwnRoots <= 4 * Replicas
+
 \* With no foreign holder, the deployment's own crashes, restarts,
 \* redeploys and children never freeze the code, nor fence a session of an
-\* instance still running, while what they add stays within the threshold
-\* and `4 × replicas` roots.
-NoFalseContention ==
-    (OwnExcess <= Threshold /\ OwnRoots <= 4 * Replicas) => (~Frozen /\ fenced \cap (running \cup old) = {})
+\* instance still running.
+NoFalseContention == ~Frozen /\ fenced \cap (running \cup old) = {}
 
 \* A thief whose excess beside the deployment passes the threshold, in any
 \* number of sessions with any gaps, or who makes more than `4 × replicas`

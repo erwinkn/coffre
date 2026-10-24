@@ -46,7 +46,8 @@ FreezingBudget == [p \in FreezingProcs |-> IF p = "a" THEN 3 ELSE 1]
 
 -----------------------------------------------------------------------------
 (* Narrowing: A narrows its session to refunds for an agent, which uses
-   every path, reads and renews, while Omar revokes or freezes the parent. *)
+   every path, reads and renews, while Omar revokes or freezes the parent,
+   or the parent, unrenewed, expires before the child. *)
 
 NarrowProcs == {"a", "agent", "omar"}
 NarrowOps == [p \in NarrowProcs |->

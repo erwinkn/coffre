@@ -6,7 +6,7 @@
 (* children `narrow` makes. docs/formal.md says what this covers, what it  *)
 (* abstracts and what it does not prove.                                   *)
 (*                                                                         *)
-(* Coffre decides a request in one step: the statement of 5.3 (the row,   *)
+(* Coffre decides a request in one step: the statement of 5.3 (the row,    *)
 (* its member's generation, its binding, its ancestors and the freezes),   *)
 (* the proof and the gate's admit, which is one call to one object.        *)
 (* Nothing that ends a session waits for a request, so a request decided   *)
@@ -27,7 +27,8 @@ CONSTANTS
     Budget,         \* Budget[p]: how many it runs, one after another
     MaxTime,        \* how far the clock runs
     HardEnd,        \* the roots' `not_after`
-    Life,           \* how far a renewal moves `expires_at`, and a child's life
+    Life,           \* how far a renewal moves `expires_at`
+    ChildLife,      \* a child's `expiresIn`, which may outlast its parent's expiry
     CacheTicks,     \* how long the proxy keeps a session's vault decision
     Recheck         \* how long an open tunnel runs on its last good check
 
@@ -56,8 +57,10 @@ CONSTANTS
     \* The statement compares the row's generation with its member's in
     \* vault_members, so a removal counts before the app's sweep revokes.
     GenerationInStatement,
-    \* The statement checks each ancestor as it checks the row (8.4).
+    \* The statement checks each ancestor as it checks the row (8.4)...
     AncestorsChecked,
+    \* ...its expiry included: a parent whose process died ends its children.
+    AncestorExpiryChecked,
     \* A child's paths are matched on the resolved upstream URL, after dot
     \* segments, never the path as received (`constraintsAllow`, 8.4).
     TargetResolvedBeforeConstraints,
@@ -147,11 +150,12 @@ EndedBy(s, by) == \E i \in 1..Len(log) : Ends(log[i], s) /\ log[i].time + by <= 
 FrozenBy(targets, by) ==
     \E t \in targets : Newest(t) > 0 /\ log[Newest(t)].kind = "workload.freeze" /\ log[Newest(t)].time + by <= now
 
-\* What the statement finds of one row, freezes aside (5.3).
-RowStands(s) ==
+\* What the statement finds of one row, freezes aside (5.3), its expiry
+\* if `expiry`.
+RowStands(s, expiry) ==
     LET r == sessions[s] IN
     /\ r.made /\ ~r.revoked
-    /\ r.expires > now /\ r.notAfter > now
+    /\ expiry => r.expires > now /\ r.notAfter > now
     /\ ~unbound[r.principal]
     /\ GenerationInStatement => status[r.principal] = "active" /\ gen[r.principal] = r.gen
 
@@ -159,7 +163,7 @@ RowStands(s) ==
 \* (`freezes` FALSE for a renewal, which uses nothing; docs/formal.md).
 Checked(s) == IF AncestorsChecked THEN Line(s) ELSE {s}
 Admits(s, kind, freezes) ==
-    /\ \A x \in Checked(s) : RowStands(x)
+    /\ \A x \in Checked(s) : RowStands(x, x = s \/ AncestorExpiryChecked)
     /\ freezes => ~Frozen(UNION {FreezeTargets(x, kind) : x \in Checked(s)})
 
 \* What is true of s at this state, for the invariants: its line unended by
@@ -334,7 +338,7 @@ Narrow(p) ==
          THEN sessions' = [sessions EXCEPT !["c"] =
                 [made |-> TRUE, principal |-> parent.principal, key |-> "kC", parent |-> op[p].s,
                  constraints |-> {op[p].path} \cap parent.constraints,
-                 notAfter |-> Min(now + Life, parent.notAfter), expires |-> Min(now + Life, parent.notAfter),
+                 notAfter |-> Min(now + ChildLife, parent.notAfter), expires |-> Min(now + ChildLife, parent.notAfter),
                  revoked |-> FALSE, gen |-> parent.gen]]
          ELSE UNCHANGED sessions
     /\ Done(p)
@@ -343,9 +347,9 @@ Narrow(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* The Postgres tunnel (7.1): opened under the statement, it carries bytes *)
-(* while its last good check is under `Recheck` old (the deadline counts   *)
-(* as no, as #296's Tunnel.tla has it), and rechecks run the statement     *)
-(* without the proof.                                                      *)
+(* while its last good check is under `Recheck` old (a recheck that has    *)
+(* not answered by its deadline counts as no), and rechecks run the        *)
+(* statement without the proof.                                            *)
 (***************************************************************************)
 
 TunnelOpen(p) ==

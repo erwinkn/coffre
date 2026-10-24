@@ -545,8 +545,8 @@ workload's own.
   its newest `workload.freeze` or `workload.unfreeze` entry is a freeze
   (8.2), and a lift is one more entry.
 - **The tunnel** is opened under the statement. It carries bytes while its
-  last good check is less than `Recheck` old, so the deadline counts as no,
-  as #296's tunnel model has it. Its rechecks run the statement.
+  last good check is less than `Recheck` old: a recheck that has not
+  answered by its deadline counts as no. Its rechecks run the statement.
 
 | Protection, in the design | Turned off, TLC finds |
 |---|---|
@@ -557,7 +557,8 @@ workload's own.
 | Every request runs the statement before the proxy's value cache (5.3) | a use accepted from a warm cache after its instance was frozen (`FreezeBound`) |
 | A tunnel's recheck runs the statement with its freezes (8.2) | tunnel bytes still flowing a recheck after a freeze (`FreezeBound`) |
 | The statement compares the row's generation with its member's | a request accepted between the vault's removal and the app's sweep (`RevokeBound`) |
-| The statement checks each ancestor (8.4) | the child used after its parent was frozen or revoked (`NarrowSubset`) |
+| The statement checks each ancestor (8.4) | the child used after its parent was frozen, revoked or expired (`NarrowSubset`) |
+| Its expiry included | the child, which narrow gave a longer life, used after its parent stopped renewing and expired (`NarrowSubset`) |
 | A child's paths are matched on the resolved URL, and a path holding an encoded `.`, `/` or `\`, a `%25` or a `;` is refused (8.4): each covers for the other on an encoded dot segment | `/v1/refunds/%2e%2e/charges` forwarded to `/v1/charges` for a child of `/v1/refunds` (`NarrowSubset`) |
 | The refusal of encoded segments alone | `/v1/refunds/..;/charges`, which resolves under `/v1/refunds` and which Tomcat reads as `/v1/charges`, forwarded (`NarrowSubset`) |
 | A child reaches only `/use`, narrow and logout | a child's read accepted (`NarrowSubset`) |
@@ -599,17 +600,19 @@ Time is the database's statement clock, and a session is live while its
 | A code reads sensitive values only from an Owner minter, as a person (R32) | CI's code, which holds sensitive reads itself, reading them (`MinterBound`) |
 | The mint is fenced on the minter's access, as issuing is | Omar demoted while their mint was under way, and the code still reading sensitive values (`MinterBound`) |
 | The mint and promote routes refuse an enrollment session, and `checkPolicy` refuses a `mintedBy` naming the service itself: each covers for the other | the thief inside the app minting a code of its own (`MinterBound`) |
-| They refuse every child | a child of CI's session minting (`MinterBound`) |
+| They refuse every child | a child of CI's session, which holds only the uses it was narrowed to, minting a code that reads CI's values (`MinterBound`) |
 
 Here is the race behind the renewal's condition, with the condition off.
 Instance e1 reads the clock at tick 1, while its session, which expires at
-2, is still live (step 11). At tick 2 the session has expired, so e3's
-exchange counts one live root, e2's, and is admitted (14). Then e1's update
+2, is still live. At tick 2 the session has expired, so e3's exchange
+counts one live root, e2's, and is admitted (step 14). Then e1's update
 lands and revives the session the count saw as dead (15): three live roots.
+With TLC's workers, steps that do not depend on each other, such as 10 and
+11, may print in either order.
 
 ```
- 10. e2        ExCommit          enroll code c1             -> idle            log +token.exchange code c1 time 1 (e2); sessions +[…, expires 3]
- 11. e1        RenewClock        renew                      -> renew.update
+ 10. e1        RenewClock        renew                      -> renew.update
+ 11. e2        ExCommit          enroll code c1             -> idle            log +token.exchange code c1 time 1 (e2); sessions +[…, expires 3]
  13.           Tick                                         ->                 now 1 -> 2
  14. e3        ExCommit          enroll code c1             -> idle            log +token.exchange code c1 time 2 (e3); sessions +[…, expires 4]
  15. e1        RenewUpdate       renew                      -> idle            sessions +[code c1, id <<e1, 2>>, …, expires 3]; sessions -[…, expires 2]
@@ -629,7 +632,7 @@ renewing lives `Life` ticks more, and the run fits in the rule's hour.
 | The excess, `∫ (live − replicas)⁺ dt` over every root, ended ones included | under review r3's rule (the age of the `(replicas + 1)`-th live root), a thief past the threshold who is never frozen (`TripwireFires`) |
 | The count of roots made, more than `4 × replicas` | a thief enrolling and leaving within one renewal, five times, never frozen (`TripwireFires`) |
 | Only roots count, never children | a deployment that narrows and redeploys, frozen (`NoFalseContention`) |
-| A full code answers `full` | under review r1's rule (admit, and fence the oldest live root), a redeploy during a crash's tail fencing the restarted instance's session (`NoFalseContention`) |
+| A full code answers `full` | under review r1's rule (admit, and fence the oldest live root): the new instance of a redeploy crashes, its restart is admitted, and the old instance, still serving its requests, is fenced (`NoFalseContention`) |
 | A `full` answer is no signal | under review r2's rule (two `full` in a row freeze), two redeploys refused during a crash's tail freezing the code (`NoFalseContention`) |
 
 The tripwire is not a guarantee, and the model says so. `CopyCaught` states
@@ -676,8 +679,8 @@ laundered, and so is any copy of that copy.
 | `NotAfter` | No session is usable, or renewed, past `not_after` |
 | `Capacity` | A code has at most `2 × replicas` live roots, under concurrent exchanges and renewals |
 | `Superseded` | No session is made from a code once a supersede names it, none renews after, and each of its sessions ends within a session's life of the supersede |
-| `MinterBound` | A code's sessions hold no more than its minter held at the mint's commit, and read sensitive values only if the minter was then an Owner, as a person; no enrollment session and no child mints or promotes |
-| `NoFalseContention` | With no foreign holder, the deployment's crashes, restarts, redeploys and children never freeze the code, nor fence a running instance's session, while their excess stays within the threshold and their roots within `4 × replicas` |
+| `MinterBound` | A code, and its sessions, hold no more than its minter held at the mint's commit, a child holding only its narrowed uses, and read sensitive values only if the minter was then an Owner, as a person; no enrollment session mints or promotes |
+| `NoFalseContention` | With no foreign holder, the deployment's crashes, restarts, redeploys and children never freeze the code, nor fence a running instance's session, while their excess stays within the threshold and their roots within `4 × replicas` (`WithinOwnBudget`, checked beside it, so a scenario past it fails rather than holding vacuously) |
 | `TripwireFires` | A thief whose excess beside the deployment passes the threshold, in any number of sessions with any gaps, or who makes more than `4 × replicas` roots, has frozen the code |
 | `CopyCaught` | Every copy is frozen out once it has been in longer than the threshold, under the two assumptions above |
 | `NoLaundering` | A workload reads a value only if `reads` lists the key, by ID, where the value is held, and the value reached that key through no copy the workload could not read |
@@ -689,7 +692,7 @@ laundered, and so is any copy of that copy.
 | `WorkloadReplay` | A sends two requests and B one. Eve replays, tampers with, forges and swaps them, and A's gate restarts or rotates | 30 thousand |
 | `WorkloadEnding` | A uses its session, renews it and holds a tunnel open. Omar freezes any target over it, revokes it, untrusts its binding or removes the service, and the clock runs to its `not_after` | 175 thousand |
 | `WorkloadFreezing` | A uses its session and reads through it, while Omar freezes it, its instance or its credential, and Olga lifts either, in any order | 4 thousand |
-| `WorkloadNarrow` | A narrows its session to refunds for an agent, which uses every path, reads and renews. Omar revokes or freezes the parent | 2 thousand |
+| `WorkloadNarrow` | A narrows its session to refunds for an agent, which uses every path, reads and renews. Omar revokes or freezes the parent, or it expires, unrenewed, before the child | 6 thousand |
 | `WorkloadCapacity` | Two instances enroll on one code of one replica, renew, restart and log out, and a third enrolls. The clock runs, and CI promotes the next code, with or without `--now` | 471 thousand |
 | `WorkloadMinting` | Omar (an Owner), Vic (a Viewer who manages the service) or CI mints a code, while Olga demotes Omar. A thief in the app or in a child mints or promotes, and an instance enrolls on what was minted | 9 thousand |
 | `WorkloadDeploys` | One replica crashes once and restarts, trying twice, redeploys twice on its code and narrows once. Nobody else holds the code | 421 thousand |
@@ -728,8 +731,8 @@ laundered, and so is any copy of that copy.
   restore nothing. PR 1a implements renewal this way, and PR 5's SDK can
   count on it.
 - **A tunnel stops when its last good check is older than its recheck
-  interval**, even if no recheck ran (#296's `DeadlineCountsAsNo`), so a
-  late recheck cannot keep bytes flowing. This is for PR 1d.
+  interval**, even if no recheck ran, so a late recheck cannot keep bytes
+  flowing. This is for PR 1d.
 
 ### What they abstract
 
@@ -737,9 +740,17 @@ laundered, and so is any copy of that copy.
   signed it. Thumbprints and digests are injective, and `req` is the signed
   request's fields compared as they are. The encodings (`htu`'s
   normalization, `canonicalRequest`, the path's escapes) are property tests
-  (section 12.1), not modelled. Paths are three values: `refunds`,
-  `charges`, and `dotdot`, which starts with refunds as received and
-  resolves to charges.
+  (section 12.1), not modelled. Paths are four values: `refunds`,
+  `charges`, `dotdot` (`/v1/refunds/%2e%2e/charges`), which starts with
+  refunds as received and resolves to charges, and `semi`
+  (`/v1/refunds/..;/charges`), which resolves under refunds and which the
+  upstream reads as charges.
+- **Platform proofs.** Nobody exchanges a copied platform token here.
+  Spending a bearer ID token once is `Credentials.tla`'s `SingleUse`, in
+  `Exchanging`. An audience or `x-coffre-key` that names the key binds the
+  proof to that key cryptographically, as the proof's signature does here.
+  Keeping workload bindings out of `/api/auth/oidc` is a static match on the
+  binding's policy (4.1), with nothing to interleave.
 - **The gate.** Its `iat` window, its ceiling and its counters (8.1) are
   left out. Several Node processes, each with a gate of its own, are a
   restart to a proof: its nonce names an epoch the other gate never drew.

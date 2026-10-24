@@ -127,6 +127,10 @@ SupersededAt(c) == LET is == {i \in 1..Len(log) : log[i].kind = "enrollment.supe
 NewestAbout(m) == LET is == {i \in 1..Len(log) : log[i].kind = "member.role" /\ log[i].who = m}
                   IN IF is = {} THEN 0 ELSE CHOOSE i \in is : \A j \in is : j <= i
 
+\* What a caller holds: its principal's grants, but a child, which reads
+\* nothing and holds only the uses it was narrowed to (8.4).
+Holds(c) == IF Caller(c).child THEN {} ELSE holdings[Caller(c).principal]
+
 \* A code's scope from the minter's holdings, as the vault answered them.
 CodeScope(have, owner) == (BindingScope \cap have) \ (IF owner \/ ~SensitiveNeedsOwnerMinter THEN {} ELSE {"s"})
 
@@ -188,7 +192,7 @@ Begin(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* The exchange of a code (4.1, step 7): under the head, the tombstone,    *)
-(* the count of the code's live roots, then the session and               *)
+(* the count of the code's live roots, then the session and                *)
 (* `token.exchange`. The steps before (limiters, shape, binding, the       *)
 (* code's hash, vault.access) decide nothing here: left out. A process     *)
 (* that enrolls again has restarted: its old session renews no more.       *)
@@ -297,7 +301,7 @@ MintCommit(p) ==
             THEN Refuse(p)
             ELSE /\ codes' = [codes EXCEPT ![c] = [minted |-> TRUE, scope |-> CodeScope(l[p].have, l[p].owner)]]
                  /\ log' = Append(log, [Entry("enrollment.create", p) EXCEPT !.code = c, !.by = op[p].caller])
-                 /\ minted' = [minted EXCEPT ![c] = [have |-> holdings[k.principal],
+                 /\ minted' = [minted EXCEPT ![c] = [have |-> Holds(op[p].caller),
                                                      owner |-> k.person /\ k.principal \in owners]]
                  /\ Release(p)
                  /\ Goto(p, "idle")
@@ -408,13 +412,14 @@ Superseded ==
     /\ \A u \in renewals : ~\E i \in 1..u.at : log[i].kind = "enrollment.supersede" /\ log[i].code = u.code
     /\ \A r \in sessions : (Tombstoned(r.code) /\ ~r.revoked) => r.expires <= SupersededAt(r.code) + Life
 
-\* A code's sessions never hold more than its minter held when it was
-\* minted, and read a sensitive value only if the minter was an Owner then,
-\* as a person; no enrollment session and no child mints or promotes.
+\* A code, and its sessions, never hold more than its minter held when it
+\* was minted, and read a sensitive value only if the minter was an Owner
+\* then, as a person; no enrollment session mints or promotes, which would
+\* let a thief inside the app outlive every promote.
 MinterBound ==
+    /\ \A c \in Codes : codes[c].minted => codes[c].scope \subseteq minted[c].have
     /\ \A r \in sessions : r.scope \subseteq minted[r.code].have /\ ("s" \in r.scope => minted[r.code].owner)
     /\ \A i \in 1..Len(log) :
-         log[i].kind \in {"enrollment.create", "enrollment.supersede"} =>
-           ~Caller(log[i].by).enrolled /\ ~Caller(log[i].by).child
+         log[i].kind \in {"enrollment.create", "enrollment.supersede"} => ~Caller(log[i].by).enrolled
 
 =============================================================================
