@@ -59,6 +59,8 @@ import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from
 import {
   inheritedScope,
   issuedScope,
+  issuerNow,
+  issuerStill,
   managedAccount,
   notManager,
   parseScope,
@@ -300,8 +302,10 @@ export class WorkloadService {
     // Its scope's shape too, before the issuer is asked anything: what it names is checked once the bindings it replaces are known.
     if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
+      // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, ctx.caller.credentialScope);
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
-      const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
+      const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
@@ -338,15 +342,16 @@ export class WorkloadService {
       // Left out, its scope is what those it replaces reached, so that trusting a workload again never widens it.
       const inherits = input.scope === undefined && replaced.length > 0;
       const { scope, byPath, withheld } = await issuedScope(
-        this.#deps.db, ctx, setting, standing, input.scope, { action: 'token.bind', metadata: details }, inherits ? inheritedScope(replaced) : undefined,
+        this.#deps.db, { ...ctx, caller }, setting, standing, input.scope, { action: 'token.bind', metadata: details }, inherits ? inheritedScope(replaced) : undefined,
       );
       const plan = (replaces: typeof replaced): BindingPlan => ({
         ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, withheld, replaces: replaces.map(({ id, why }) => ({ id, why })),
       });
       if (options.dryRun) return plan(replaced);
 
-      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
-      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+      // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
+      return audited({ ...this.#deps, caller }, async (tx, log) => {
+        await issuerStill(tx, caller, accessSeq);
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
@@ -418,7 +423,9 @@ export class WorkloadService {
     const uploaded = await keysOf(input.jwks);
     const jwksUri = `${UPLOADED}${uploaded.digest}`;
     return withRefusals(this.#deps, async () => {
-      const { standing, managed, setting } = await managedAccount(this.#deps, ctx.caller, serviceId);
+      // The issuer as the vault answers now, held to under the head (`issuerStill`), as in `bind`.
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, ctx.caller.credentialScope);
+      const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
@@ -441,14 +448,15 @@ export class WorkloadService {
       // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
       const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
       for (const row of replaced) {
-        scopes.set(row.id, await issuedScope(this.#deps.db, ctx, setting, standing, undefined, { action: 'token.bind', metadata: details }, inheritedScope([row])));
+        scopes.set(row.id, await issuedScope(this.#deps.db, { ...ctx, caller }, setting, standing, undefined, { action: 'token.bind', metadata: details }, inheritedScope([row])));
       }
       const withheld = [...new Set([...scopes.values()].flatMap((issued) => issued.withheld))].sort();
       const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id), withheld };
       if (options.dryRun) return plan;
 
-      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
-      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+      // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
+      return audited({ ...this.#deps, caller }, async (tx, log) => {
+        await issuerStill(tx, caller, accessSeq);
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);

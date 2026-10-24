@@ -46,6 +46,8 @@ import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
   issuedScope,
+  issuerNow,
+  issuerStill,
   managedAccount,
   notManager,
   personalScope,
@@ -883,9 +885,12 @@ export class SigninService {
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
-      const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope(ctx, serviceId, input.scope, details);
-      // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
-      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+      // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, ctx.caller.credentialScope);
+      const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
+      // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
+      return audited({ ...this.#deps, caller }, async (tx, log) => {
+        await issuerStill(tx, caller, accessSeq);
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,

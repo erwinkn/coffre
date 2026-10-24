@@ -5,7 +5,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
-import { liveEnvironmentSlugs } from '../db/queries.ts';
+import { liveEnvironmentSlugs, wayInStands } from '../db/queries.ts';
 import { can, newestPolicySeq, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
@@ -222,20 +222,55 @@ export const POLICY_CHANGED = 'policy_changed';
  * Collect read and vault events without a transaction; commit before
  * returning anything, through the fence (`audited`). A read that hands
  * back a value the app opened itself says so (`fence`), and goes through
- * it even with nothing to log (`fenced`).
+ * it even with nothing to log (`fenced`). Either way, the way the request
+ * came in must still stand (`credentialStill`).
  */
 export async function recorded<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller'>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'credentialId' | 'via'>,
   work: (log: AuditEntry[], fence: () => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
     const log: AuditEntry[] = [];
     let fencing = false;
     const result = await work(log, () => (fencing = true));
-    if (log.length > 0) await audited(ctx, async (_tx, entries) => { entries.push(...log); });
-    else if (fencing) await fenced(ctx);
+    if (log.length > 0) {
+      await audited(ctx, async (tx, entries) => {
+        await credentialStill(ctx, tx);
+        entries.push(...log);
+      });
+    } else {
+      if (fencing) await fenced(ctx);
+      await credentialStill(ctx, ctx.db);
+    }
     return result;
   });
+}
+
+/**
+ * Refuse, 401, if the way the request came in has ended since it was
+ * checked: its credential revoked, the MCP connection it came through
+ * revoked, or its member removed, even if admitted again since, at a new
+ * generation. The vault releases values on the member's standing and
+ * grants, under their row and its head, and is told the credential only to
+ * name it in its entries; the app checked the credential before asking it,
+ * unlocked. So a read checks it again after the vault has released: under
+ * the head when it commits entries of its own, otherwise with no lock. A
+ * revocation committed before this read is seen; one after came after the
+ * release (formal/Credentials.tla, `CredentialFence`).
+ *
+ *   Ada's token checked, her export asks the vault
+ *   Ada revokes the token                            token.revoke
+ *   the vault releases the values                    secret.read
+ *   checked again: revoked                           401, not the values
+ */
+export async function credentialStill(ctx: Pick<ApiContext, 'caller' | 'credentialId' | 'via'>, db: Queryable): Promise<void> {
+  const stands = await wayInStands(db, {
+    principal: formatMember(ctx.caller.principal),
+    generation: ctx.caller.generation,
+    credentialId: ctx.credentialId,
+    connectionId: ctx.via?.connectionId ?? null,
+  });
+  if (!stands) throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
 }
 
 /**

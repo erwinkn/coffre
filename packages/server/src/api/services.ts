@@ -34,11 +34,11 @@ import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
-import { memberOf, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
-import type { Caller } from './caller.ts';
+import { memberOf, newestAccessSeq, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
 import { audited, denied, Refusal, type ApiContext } from './context.ts';
-import { badRequest, forbidden, notFound } from './errors.ts';
+import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
 
 // Setting up service accounts without running the instance
@@ -115,6 +115,42 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
     denied(ctx, action, 'not_service_manager', { metadata }),
   );
 }
+
+/**
+ * Who issues a credential, as the vault answers now: what they may give it,
+ * and whether its scope reads the sensitive values of a project, where they
+ * are an Owner of it (`ownsProject`, R32), are weighed from this answer,
+ * with the policy it carries. With it, read before the vault was asked, the
+ * newest `policy.change`, which `audited` holds the issuing transaction to
+ * (`policyStill`), and the vault's newest entry about the issuer's access,
+ * which `issuerStill` does, both under the head. The request was
+ * authenticated earlier, on an answer that only the policy fences: a person
+ * demoted since would hand a service account what they can no longer give
+ * it (formal/Issuing.tla, `IssuerFence`).
+ *
+ *   Olga, an Owner of market, asks for a token on market   her answer: Owner, entry 41
+ *   Omar demotes her                                       member.role, entry 57
+ *   her transaction, under the head: 57, not 41            409; asked again, the token reads no sensitive value
+ */
+export async function issuerNow(
+  deps: { db: Queryable; vault: Vault },
+  principal: PrincipalRef,
+  credentialScope: CredentialScope | null = null,
+): Promise<{ caller: Caller; accessSeq: bigint | null }> {
+  const member = formatMember(principal);
+  const policySeq = await newestPolicySeq(deps.db);
+  const accessSeq = await newestAccessSeq(deps.db, member);
+  return { caller: callerFrom(principal, await deps.vault.access(member), policySeq, credentialScope), accessSeq };
+}
+
+/** Refuse, 409, if the vault changed the issuer's access since `issuerNow` asked: under the head, so no change commits between. */
+export async function issuerStill(db: Queryable, issuer: Pick<Caller, 'principal'>, accessSeq: bigint | null): Promise<void> {
+  if ((await newestAccessSeq(db, formatMember(issuer.principal))) === accessSeq) return;
+  throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
+}
+
+/** The reason a credential issued by someone whose access changed meanwhile answers with: asked again, it is weighed as they are now. */
+export const ACCESS_CHANGED = 'access_changed';
 
 // Credentials' scopes (docs/design/instance-roles.md, "Credentials' scopes"):
 // each token and trust binding carries its own, at most what its account
@@ -439,10 +475,9 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
  * where whoever issued it is an Owner of its project now (`ownsProject`,
  * R32), as one they issued now would: those an Owner issued keep reading
  * them, and those anyone else did never do. Each issuer's standing is the
- * vault's, so it is asked before the transaction and nothing fences it:
- * an issuer demoted from Owner between that answer and the commit still
- * seals a row reading them, as a token they issued then would, and the row
- * keeps it from then on, as any issued scope does. In one transaction,
+ * vault's, asked before the transaction (`issuerNow`), and the transaction
+ * commits only while it is still theirs (`issuerStill`): an issuer demoted
+ * from Owner meanwhile seals no row reading them. In one transaction,
  * committed only while the policy is still `policySeq`'s (`policyStill`),
  * with a `token.seal` entry for each scope it wrote, naming those it sealed
  * with it, so a row put back unsealed later, and sealed again, shows in the log.
@@ -453,10 +488,11 @@ export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vau
   const policy = access.policy ?? DEFAULT_POLICY;
   const held = access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy));
   // Each issuer as the vault answers them now, asked before the transaction: no vault call is made inside one.
-  const issuers = new Map<string, Caller>();
-  for (const by of new Set(rows.map((row) => row.createdBy))) issuers.set(by, callerFrom({ type: 'user', id: by }, await vault.access(`user:${by}`), policySeq));
-  const scopes = rows.map((row) => storedScope((readScope(row.scope) ?? held).map((grant) => ({ ...grant, sensitive: ownsProject(issuers.get(row.createdBy)!, grant.projectId!) }))));
+  const issuers = new Map<string, { caller: Caller; accessSeq: bigint | null }>();
+  for (const by of new Set(rows.map((row) => row.createdBy))) issuers.set(by, await issuerNow({ db, vault }, { type: 'user', id: by }));
+  const scopes = rows.map((row) => storedScope((readScope(row.scope) ?? held).map((grant) => ({ ...grant, sensitive: ownsProject(issuers.get(row.createdBy)!.caller, grant.projectId!) }))));
   return audited({ db, chainKey, caller: { policySeq, policy } }, async (tx, log) => {
+    for (const { caller, accessSeq } of issuers.values()) await issuerStill(tx, caller, accessSeq);
     const done = new Map<string, { tokens: string[]; bindings: string[] }>();
     for (const [i, row] of rows.entries()) {
       const scope = scopes[i]!;

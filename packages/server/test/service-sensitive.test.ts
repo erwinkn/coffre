@@ -202,6 +202,37 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   ]);
 });
 
+/** Run `meanwhile` once, as the vault is next asked about `principal`, before it answers. */
+function beforeNextAccess(principal: string, meanwhile: () => Promise<unknown>): void {
+  const access = deps.vault.access;
+  deps.vault.access = async (asked, ...rest) => {
+    if (asked === principal) {
+      deps.vault.access = access;
+      await meanwhile();
+    }
+    return access(asked, ...rest);
+  };
+}
+
+test('an Owner demoted while issuing a token gives it no sensitive value: weighed as the vault answered, committed only while still so (formal/Issuing.tla)', async () => {
+  // Owen is an Owner of backend as his request is checked, and as the vault answers for his token; demoted before it commits.
+  beforeNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
+  await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 409, reason: 'access_changed' });
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+  // Asked again, he is weighed as he is now: a Developer's token, which reads none.
+  const issued = await owen.tokens.issue(CI, { expiresInDays: 30 });
+  assert.deepEqual(await stored(credentials, issued.id), [{ role: 'viewer', sensitive: false }, { role: 'viewer', sensitive: false }]);
+  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+});
+
+test('a trust binding is weighed the same: an Owner demoted while binding a workload binds nothing', async () => {
+  beforeNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
+  await assert.rejects(owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } }), { status: 409, reason: 'access_changed' });
+  assert.deepEqual(await db.owner.select().from(serviceBindings), []);
+  const theirs = await owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } });
+  assert.deepEqual(await stored(serviceBindings, theirs.binding.id), [{ role: 'viewer', sensitive: false }]);
+});
+
 test("an Owner's personal token issues no service token: what it made would outlive it, and its scope makes it no Owner", async () => {
   const personal = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { backend: 'maintainer' } });
   await assert.rejects(bearer(personal.token).tokens.issue(CI, { expiresInDays: 30 }), { status: 403 });
