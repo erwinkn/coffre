@@ -237,7 +237,8 @@ test('gcp, fly and vercel tokens name the key in their audience: one for the pub
 test("a token is refused where its platform's own facts disagree with it", async () => {
   // Entra issues v1 tokens under sts.windows.net and v2 under login.microsoftonline.com, never the other way.
   assert.match(String(await refusal(PLATFORMS.azure, issued(PLATFORMS.azure, { ver: '2.0' }))), /version "2.0".*issues 1.0/);
-  const v2 = { ...PLATFORMS.azure, issuer: `https://login.microsoftonline.com/${TENANT}/v2.0` };
+  // A v2 token's audience is the API's client ID, always.
+  const v2 = { ...PLATFORMS.azure, issuer: `https://login.microsoftonline.com/${TENANT}/v2.0`, policy: { audience: '6c3b1a2d-0e9f-4a8b-b7c6-d5e4f3a2b1c0' } };
   assert.equal(await refusal(v2, issued(v2, { iss: v2.issuer, ver: '2.0' })), null);
   assert.match(String(await refusal(v2, issued(v2, { iss: v2.issuer }))), /version "1.0"/);
   // A cluster names the service account in sub and under kubernetes.io alike.
@@ -256,6 +257,7 @@ test("a binding is refused where it names a platform's IDs in another shape, or 
     [{ ...PLATFORMS.azure, claims: { tid: TENANT, oid: 'web' } }, /object ID/],
     [{ ...PLATFORMS.azure, claims: { tid: randomUUID(), oid: OBJECT } }, /tid is the tenant its issuer names/],
     [{ ...PLATFORMS.azure, issuer: `https://login.microsoftonline.com/${TENANT}/` }, /v2\.0/],
+    [{ ...PLATFORMS.azure, issuer: `https://login.microsoftonline.com/${TENANT}/v2.0` }, /application \(client\) ID, a GUID, never its App ID URI/],
     [{ ...PLATFORMS.azure, issuer: 'https://sts.windows.net/acme.onmicrosoft.com/' }, /tenant's ID/],
     [{ ...PLATFORMS.fly, claims: { org_id: '29873298', app_id: 'web app' } }, /app's ID/],
     [{ ...PLATFORMS.fly, issuer: 'https://oidc.fly.io/acme/web' }, /oidc.fly.io\/<organization>/],

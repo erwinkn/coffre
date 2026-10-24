@@ -83,7 +83,7 @@ export const PROFILE_RULES: { readonly [P in WorkloadProfile]?: ProfileRules } =
     token: none,
   },
   azure: {
-    binding({ issuer, claims }) {
+    binding({ issuer, claims }, policy) {
       const tenant = AZURE_V1.exec(issuer)?.[1] ?? AZURE_V2.exec(issuer)?.[1];
       if (tenant === undefined || !UUID.test(tenant)) {
         throw new BindingInvalid('an azure binding\'s issuer is https://sts.windows.net/<tenant>/ (v1 tokens) or https://login.microsoftonline.com/<tenant>/v2.0 (v2), by the tenant\'s ID');
@@ -91,6 +91,10 @@ export const PROFILE_RULES: { readonly [P in WorkloadProfile]?: ProfileRules } =
       shaped(claims, 'tid', UUID, "the tenant's ID");
       if (claims.tid !== tenant) throw new BindingInvalid('tid is the tenant its issuer names');
       shaped(claims, 'oid', UUID, "the managed identity's object ID (its principal ID): az identity show --query principalId");
+      // A v1 token's aud is the resource as asked for, its App ID URI or client ID; a v2 token's is always the API's client ID.
+      if (AZURE_V2.test(issuer) && !UUID.test(policy.audience ?? '')) {
+        throw new BindingInvalid("a v2 token's audience is the API's application (client) ID, a GUID, never its App ID URI: Entra puts no other in a v2 token");
+      }
     },
     // The issuer says which token version Entra issues, and each version names its own issuer: a token that disagrees is not what was bound.
     token(claims, binding) {

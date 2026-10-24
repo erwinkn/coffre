@@ -287,7 +287,7 @@ that pin one workload, by a field the platform never reuses:
 |---|---|---|---|---|
 | `kubernetes` | the cluster's (`kubectl get --raw /.well-known/openid-configuration`); uploaded keys for a private cluster | `sub`, `kubernetes.io.serviceaccount.uid` | `publicUrl` (the projected volume's `audience`) | the projected file, read again before each exchange |
 | `gcp` | `https://accounts.google.com` | `sub` (the service account's unique numeric ID) | `publicUrl#jkt=<thumbprint>` | `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=…&format=full`, header `Metadata-Flavor: Google` |
-| `azure` | the binding's, exactly one of `https://sts.windows.net/<tenant>/` (v1) or `https://login.microsoftonline.com/<tenant>/v2.0` (v2), whichever the resource app's `accessTokenAcceptedVersion` makes Entra issue | `tid`, `oid` (the managed identity's object ID) | the binding's `audience`, an Entra application ID URI (`api://coffre-acme`): Entra mints tokens only for a registered resource | IMDS `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…` with `Metadata: true`; App Service and Functions use `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` |
+| `azure` | the binding's, exactly one of `https://sts.windows.net/<tenant>/` (v1) or `https://login.microsoftonline.com/<tenant>/v2.0` (v2), whichever the resource app's `accessTokenAcceptedVersion` makes Entra issue | `tid`, `oid` (the managed identity's object ID) | the binding's `audience`: Entra mints tokens only for a registered resource. A v1 token's is the resource as asked for, its application ID URI (`api://coffre-acme`); a v2 token's is always the API's application (client) ID, a GUID | IMDS `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…` with `Metadata: true`; App Service and Functions use `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` |
 | `fly` | `https://oidc.fly.io/<org>` | `org_id`, `app_id` | `publicUrl#jkt=<thumbprint>` | `POST /v1/tokens/oidc` on the machine's `/.fly/api` socket, `{"aud": …}` |
 | `vercel` | `https://oidc.vercel.com/<team>` (team mode) or `https://oidc.vercel.com` (global mode), the binding's | `owner_id`, `project_id`, `environment` (`production` keeps previews out) | `publicUrl#jkt=<thumbprint>` | the function's token (the `x-vercel-oidc-token` header, `VERCEL_OIDC_TOKEN`), exchanged for that audience: `POST https://oidc.vercel.com/~token` `{ "token": …, "aud": … }`, as `@vercel/oidc`'s `getVercelOidcToken({ audience })` does |
 | `github`, `github-reusable…`, `gitlab`, `custom` | as today | as today | `publicUrl#jkt=<thumbprint>` on GitHub; `publicUrl` elsewhere | as today |
@@ -352,7 +352,8 @@ the ECS container endpoint, or IMDSv2):
 ```
 POST https://sts.<region>.amazonaws.com/
 Action=GetCallerIdentity&Version=2011-06-15
-signed headers: host, x-amz-date, x-amz-security-token (if any),
+signed headers: content-type: application/x-www-form-urlencoded; charset=utf-8,
+                host, x-amz-date, x-amz-security-token (if any),
                 x-coffre-audience: <publicUrl>, x-coffre-key: <jkt>
 ```
 
@@ -374,8 +375,8 @@ It sends Coffre the URL, headers and body, never the credentials.
    `x-coffre-key`, each named once, in any case. Any other header is
    refused.
    - `x-coffre-audience` must equal `publicUrl`, and `x-coffre-key` the DPoP
-     key's thumbprint. Both must be among the `SignedHeaders`, with `host`
-     and `x-amz-date`.
+     key's thumbprint. Both must be among the `SignedHeaders`, with
+     `content-type`, `host` and `x-amz-date`.
    - Every header sent is signed, so Coffre forwards nothing the key did not
      sign. `host` may be left out: it is the URL's, which the fetch sends.
      A signed `content-length` must be the body's, 43, which the fetch sends

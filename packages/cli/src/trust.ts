@@ -225,7 +225,9 @@ A workload signs in for a key-bound session, by its platform's proof:
                     [--jwks-file <path>] [--claim <name>=<value> …]
        coffre trust <service> --gcp <service-account-email | unique-id> [--claim …]
        coffre trust <service> --azure --tenant <tenant-id> --object <object-id> --audience <app-id-uri>
-                    [--issuer https://login.microsoftonline.com/<tenant-id>/v2.0] [--claim …]
+       coffre trust <service> --azure --tenant <tenant-id> --object <object-id> --audience <the API's client ID>
+                    --issuer https://login.microsoftonline.com/<tenant-id>/v2.0   for an API that takes v2 tokens
+                    [--claim …]
        coffre trust <service> --fly <organization> --org-id <id> --app-id <id> [--claim …]
        coffre trust <service> --vercel <team> --owner-id team_… --project-id prj_…
                     [--vercel-environment production] [--issuer https://oidc.vercel.com] [--claim …]
@@ -565,13 +567,16 @@ async function platformBinding(platform: Platform, flags: TrustFlags, lookup: Pl
 export function platformLookup(): PlatformLookup {
   return {
     async awsRole(name) {
-      const out = await run('aws', ['iam', 'get-role', '--role-name', name, '--query', 'Role.[RoleId,Arn]', '--output', 'json'], 'add --role-id <AROA…>');
-      const [roleId, arn] = JSON.parse(out) as [string, string];
+      const instead = 'add --role-id <AROA…>';
+      const [roleId, arn] = parsed(await run('aws', ['iam', 'get-role', '--role-name', name, '--query', 'Role.[RoleId,Arn]', '--output', 'json'], instead), 'aws iam get-role', instead) as unknown[];
+      if (typeof roleId !== 'string' || typeof arn !== 'string') throw new Error(`aws iam get-role answered no role ID and ARN; ${instead}`);
       return { roleId, arn };
     },
     async kubernetesIssuer() {
-      const out = await run('kubectl', ['get', '--raw', '/.well-known/openid-configuration'], "add --issuer, the cluster's service account issuer");
-      return (JSON.parse(out) as { issuer: string }).issuer;
+      const instead = "add --issuer, the cluster's service account issuer";
+      const { issuer } = (parsed(await run('kubectl', ['get', '--raw', '/.well-known/openid-configuration'], instead), 'kubectl get --raw', instead) ?? {}) as { issuer?: unknown };
+      if (typeof issuer !== 'string' || issuer === '') throw new Error(`the cluster's discovery names no issuer; ${instead}`);
+      return issuer;
     },
     async kubernetesUid(namespace, name) {
       return (await run('kubectl', ['get', 'serviceaccount', name, '--namespace', namespace, '--output', 'jsonpath={.metadata.uid}'], 'add --uid <uid>')).trim();
@@ -582,6 +587,15 @@ export function platformLookup(): PlatformLookup {
   };
 }
 
+/** A platform CLI's JSON, or a sentence saying what to add instead. */
+function parsed(out: string, what: string, instead: string): unknown {
+  try {
+    return JSON.parse(out);
+  } catch {
+    throw new Error(`${what} answered what is not JSON; ${instead}`);
+  }
+}
+
 /** A platform CLI's output, or a sentence saying what to add instead. */
 function run(command: string, args: string[], instead: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -590,9 +604,11 @@ function run(command: string, args: string[], instead: string): Promise<string> 
         resolve(stdout);
         return;
       }
+      const what = `${command} ${args.slice(0, 2).join(' ')}`;
       const why = (error as NodeJS.ErrnoException).code === 'ENOENT'
         ? `${command} is not installed here`
-        : `${command} ${args.slice(0, 2).join(' ')} failed${stderr.trim() === '' ? '' : `: ${stderr.trim().split('\n')[0]!.slice(0, 200)}`}`;
+        : error.killed ? `${what} did not answer within 30 s`
+        : `${what} failed${stderr.trim() === '' ? '' : `: ${stderr.trim().split('\n')[0]!.slice(0, 200)}`}`;
       reject(new Error(`${why}; ${instead}`));
     });
   });
