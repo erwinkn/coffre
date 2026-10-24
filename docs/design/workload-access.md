@@ -1321,6 +1321,21 @@ new code. Targets:
 | `limit` | 8.1 |
 | `expiring` | an enrollment code 3 days from its end |
 | `frozen` | each freeze and lift, including automatic ones |
+| `unknown_key` | a sign-in whose token names a key its binding's uploaded keys lack: most likely a cluster that rotated its key, which locks out every workload of the service. Once an hour per service at most |
+
+Every other kind follows something a caller proved; `unknown_key` follows
+a token nobody verified, which anyone who knows a service and its issuer
+can send, each naming a `kid` of their own. So its alert is capped per
+service, never per `kid`, and the cap holds across isolates: one
+conditional write on `capped_alerts` (`claimAlert`: insert the service's
+row, or move its time on only if it is an hour old) decides, outside any
+transaction. A refusal capped out costs that one statement and never takes
+the log's head, which unauthenticated traffic must not contend (R35); the
+one that wins appends its entry in a transaction of its own, as every
+alert does. The `kid` is shown in at most 64 characters, each a JWK's kid
+uses or a `?`. Only a request that a binding of the service on the
+token's issuer takes as far as its keys counts; any other refusal stays a
+sampled line in the process log.
 
 They go to the log, which the audit page filters, and to the deployment's own
 function, called in the background after the response (`waitUntil` on
@@ -1902,7 +1917,8 @@ line of registration after the owner has merged:
   transaction of its own; the deployment's `alert` runs after the
   response. A failure of either is logged once to the process log and
   never changes the answer. PRs 3 and 4 call `raiseAlert` for `enrolled`,
-  `contention`, `expiring` and `frozen`.
+  `contention`, `expiring` and `frozen`. Both sign-in routes raise
+  `unknown_key` through `unknownKeyAlert`, capped (8.3).
 - **A child's `paths` are the sent URL's own path**, the upstream's base
   path included: under `upstream: 'https://api.acme.example/v2'`, a
   child limited to `/v2/refunds`. That is what `constraintsAllow` reads

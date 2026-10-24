@@ -346,6 +346,29 @@ BEGIN
 END
 $$;
 
+-- 16c. A capped alert's row only moves its time on: the app renames or deletes none.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE capped_alerts SET service = service',
+        'UPDATE capped_alerts SET kind = kind',
+        'DELETE FROM capped_alerts',
+        'TRUNCATE capped_alerts'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    UPDATE capped_alerts SET raised_at = raised_at;
+    RAISE NOTICE 'PASS: coffre_app moves a capped alert on and never deletes one';
+END
+$$;
+
 -- 16b. Its record goes only through prune_consumed_tokens, two hours after
 -- the token was spent, when no exchange could take it again; checked in a
 -- block of its own, rolled back.

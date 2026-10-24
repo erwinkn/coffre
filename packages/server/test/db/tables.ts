@@ -27,6 +27,7 @@ export const {
   deviceAuthorizations,
   serviceBindings,
   consumedTokens,
+  cappedAlerts,
   secretReferences,
   dismissedKeys,
   oauthClients,

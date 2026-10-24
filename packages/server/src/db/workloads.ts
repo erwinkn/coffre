@@ -4,7 +4,7 @@ import { newestSeqQuery } from '@coffre/db/log';
 import * as dialect from '@coffre/db/dialect';
 import { changedRows, clockMillis, truth } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, eq, inArray, isNotNull, isNull, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow } from '../auth-rows.ts';
 import { hasTombstone, insert, type BindingRow } from './queries.ts';
@@ -308,3 +308,22 @@ export async function keyNames(db: Queryable, ids: readonly string[]): Promise<M
   return new Map(rows.map((row) => [row.id, row.key]));
 }
 
+
+/**
+ * Whether this caller raises `service`'s `kind` alert now: the first to
+ * ask since `everyMs` before `now`, as one conditional write decides, so
+ * that two isolates or processes at once raise it once. A statement of its
+ * own, outside any transaction, so one capped out never waits for, or
+ * holds, the log's head.
+ */
+export async function claimAlert(db: Queryable, service: string, kind: string, now: Date, everyMs: number): Promise<boolean> {
+  const { cappedAlerts } = tablesOf(db);
+  const claimed = await db.insert(cappedAlerts)
+    .values({ service, kind, raisedAt: now })
+    .onConflictDoUpdate({
+      target: [cappedAlerts.service, cappedAlerts.kind],
+      set: { raisedAt: now },
+      setWhere: lt(cappedAlerts.raisedAt, new Date(now.getTime() - everyMs)),
+    });
+  return changedRows(claimed) === 1;
+}

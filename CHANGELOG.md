@@ -66,6 +66,26 @@
   interval and a check's deadline, 70 seconds by default, not the minute
   the docs said ([formal.md](docs/formal.md#the-audit-chain-and-the-tunnel)).
 
+- **A rotated cluster key alerts.** A workload's sign-in whose token is
+  signed by a key its binding's uploaded keys lack (`unknown_key`, most
+  often a cluster that rotated its service-account key) now writes one
+  `workload.alert { kind: 'unknown_key' }` and hands it to the
+  deployment's `workloads.alert`, as limits already do. It names the
+  service, the issuer and the token's `kid` (its first 64 characters, any
+  character a kid does not use shown as `?`), and the commands that upload
+  the keys again (`kubectl get --raw /openid/v1/jwks`, then `coffre trust
+  <service> --issuer … --replace-keys --jwks-file … --apply`). Anyone may
+  send such a token, so a service alerts once an hour at most, whatever
+  the `kid`: one conditional write on the new `capped_alerts` table decides,
+  across isolates and processes, and a refusal capped out opens no
+  transaction and never takes the audit log's head. Only a service with a
+  binding on the token's issuer gets that far; any other refusal stays a
+  line in the process log, which now names the issuer and `kid` of an
+  unknown key too. `/api/auth/oidc` alerts the same for a bearer binding
+  that carries its keys. Run `coffre migrate` before you deploy: it applies
+  `0017_capped_alerts` (`0016_capped_alerts` on SQLite), which only adds a
+  table.
+
 ## 0.11.0 (2026-10-24)
 
 - **Upgrading to 0.11, in short.** Run `coffre migrate` before you deploy,

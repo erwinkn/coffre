@@ -2,9 +2,10 @@ import { SigninError, verifyProof, type SigninProfile } from '@coffre/core/ident
 import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, notFound } from './api/errors.ts';
 import type { SignedInAccount } from './api/signin.ts';
-import { ExchangeRefused, type WorkloadService } from './api/workloads.ts';
+import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
   accessTokenForRequest,
   authenticateRequest,
@@ -179,6 +180,7 @@ export async function exchangeWorkloadToken(
     const body = exchangeBody.parse(asked(await readLimitedJson(request, EXCHANGE_BODY_BYTES)));
     return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
   } catch (error) {
+    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
     if (error instanceof ExchangeRefused) return refuseExchange(error);
     return errorResponse(error);
   }
@@ -205,7 +207,9 @@ const EXCHANGE_SKEW_SECONDS = 60;
  * its limit; its shape; and its `DPoP` header: signed by the key, for this
  * method and URL, within a minute. No nonce, no `ath`: the platform proof
  * is spent or names the key, and the key is the caller's own. Then the
- * proof, by its kind (`WorkloadService.signIn`).
+ * proof, by its kind (`WorkloadService.signIn`). A token signed by a key
+ * the service's uploaded keys lack alerts, once an hour per service at
+ * most (`unknownKeyAlert`), as it does at `/api/auth/oidc`.
  */
 export async function exchangeWorkloadSession(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   const workloads = runtime.workloads;
@@ -224,6 +228,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
     const nonce = await gateNonce(runtime, body.service);
     return jsonResponse(made, 'pending' in made ? 202 : 200, nonce === null ? {} : { 'dpop-nonce': nonce });
   } catch (error) {
+    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
     if (error instanceof ExchangeRefused) return refuseExchange(error);
     return errorResponse(error);
   }

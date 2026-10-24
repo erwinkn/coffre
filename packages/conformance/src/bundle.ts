@@ -15,6 +15,7 @@ import { join, relative } from 'node:path';
 export const SERVER_TABLES = [
   'audit_chain_head',
   'audit_log',
+  'capped_alerts',
   'consumed_tokens',
   'device_authorizations',
   'dismissed_keys',
