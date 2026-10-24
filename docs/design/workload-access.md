@@ -29,10 +29,11 @@ logs. Here is what the attacker can do with the copy:
 
 | The attacker | Gets |
 |---|---|
-| Uses `coffre_enr_…` from their laptop | Refused. The binding pins Railway's static egress addresses (`sources`). |
-| Uses it from inside another Railway service of theirs (the egress pin allows Railway's addresses) | A session, which fences one of the app's live sessions. The app re-enrolls within seconds. Two holders fighting over one code is *contention*: Coffre freezes the binding and alerts. Every use is logged, and none returns Stripe's key. |
+| Uses `coffre_enr_…` while the app's replicas are up | Refused `busy`: the code makes at most `replicas` live sessions, and the app holds them. Three minutes of `busy` is *contention*: Coffre freezes the binding and alerts. |
+| Uses it while a replica is down, from an address the binding's `sources` admits | A session, and an `enrolled` alert naming their address. When the replica comes back it is refused `busy`, which turns into contention and a freeze. Until then, they use Stripe through Coffre, logged and under limits. They never get Stripe's key. |
+| Uses it from an address outside `sources` | Refused. On Railway this narrows rather than proves: its outbound addresses may be shared with other customers. |
 | Copies the session token from a log line or a crash dump | Nothing. The token is useless without the key, which never left the process. |
-| Captures one signed request in transit | Nothing. Each proof is accepted once and names one method and URL. |
+| Captures one signed request in transit | Nothing. Each proof is accepted once, and signs the request it came with: method, URL, query, the headers Coffre forwards, and the body. |
 
 On every platform with a workload identity of its own (Cloudflare, Kubernetes,
 AWS, Google Cloud, Azure, Fly, Vercel, CI), the platform's store holds nothing
@@ -40,10 +41,12 @@ at all.
 
 The whole design follows from one rule. **A workload holds no secret that
 works anywhere else, and every use passes live Coffre policy.** Whatever a
-platform breach copies (env, disk, image, logs, a token), it yields no value
-and no standing credential. What it can do, it does through Coffre, while the
-attacker stays inside, under limits, logged, and only until a freeze or
-revocation stops it.
+platform breach copies (env, disk, image, logs, a token), it yields no value.
+On a platform with an identity of its own it yields no standing credential
+either. On one without, the enrollment code is the one credential a copy
+holds, and section 4.4 makes using it loud and short-lived. Whatever an
+attacker can do, they do through Coffre, under limits, logged, and only
+until a freeze or revocation stops them.
 
 ## 2. Four concepts
 
@@ -107,34 +110,38 @@ into **value**, and the page shows that per binding. A strict instance
 
 | Platform (proof) | A. env/store copy | B. in transit | C. log leak | D. dependency | E. CI | F. root on host | G1. DB copy | G2. Coffre taken over |
 |---|---|---|---|---|---|---|---|---|
-| Cloudflare Workers (service binding, `props`) | **none**: nothing secret exists | **none**: the call never leaves Cloudflare's runtime | **none** | **use** | **use**: a deployer can deploy code that calls the binding | n/a (Cloudflare's runtime) | **none** | **value** |
-| Kubernetes (projected token, `oidc`) | **none**: etcd holds no projected token | **none** | **none** (¹) | **use** | **use**: it can run a pod as the service account | **use**: reads fresh projected tokens | **none** | **value** |
+| Cloudflare Workers (service binding, `props`) | **none**: nothing secret exists | **none**: the call never leaves Cloudflare's runtime | **none** | **use** | **use**: a deployer, or a branch's preview build that keeps the binding (9.2), can run code that calls it | n/a (Cloudflare's runtime) | **none** | **value** |
+| Kubernetes (projected token, `oidc`) | **none**: etcd holds no projected token | **none** | **use** once, for an unspent token, within its 10 to 60 minutes (¹) | **use** | **use**: it can run a pod as the service account | **use**: reads fresh projected tokens | **none** | **value** |
 | AWS: ECS, Lambda, EC2, EKS (`aws`) | **none**: role credentials are runtime-only | **none**: the signed request names the key and is spent once | **use**, until the leaked role credentials expire (²) | **use** | **use** | **use** | **none** | **value** |
-| Google Cloud: Cloud Run, GCE, GKE (`oidc`, `gcp`) | **none** | **none** | **none**: the ID token's audience names the key (section 4.3) | **use** | **use** | **use** | **none** | **value** |
-| Azure, managed identity (`oidc`, `azure`) | **none** | **none** | **use**, at most once, within the token's hour (³) | **use** | **use** | **use** | **none** | **value** |
-| Fly, Vercel (`oidc`) | **none** | **none** | Fly: **none** (audience names the key). Vercel: **use** once (³) | **use** | **use** | **use** | **none** | **value** |
-| GitHub Actions, GitLab CI (`oidc`) | **none** | **none** | **none** on GitHub (audience names the key). GitLab: **use** once (³) | **use** | **use** (it *is* CI) | **use** (the runner) | **none** | **value** |
-| Railway, Render, a VM (`enrollment`) | **use**, *detected*: an `enrolled` alert at once, contention freeze. **none** when `sources` pins an egress the attacker cannot run from. | **none** | as A | **use** | **use**: CI mints codes | **use** | **none** | **value** |
+| Google Cloud, Fly, Vercel, GitHub Actions (`oidc`, audience names the key) | **none** | **none** | **none**: the token works only with the key its audience names (4.2) | **use** | **use** | **use** | **none** | **value** |
+| Azure, managed identity (`oidc`, `azure`) | **none** | **none** | **use**, with any key, until the leaked token expires (up to 24 hours), unless `sources` excludes the attacker (³) | **use** | **use** | **use** | **none** | **value** |
+| GitLab CI (`oidc`) | **none** | **none** | **use** once, for an unspent token (⁴) | **use** | **use** (it *is* CI) | **use** (the runner) | **none** | **value** |
+| Railway, Render, a VM (`enrollment`) | **use**, *detected*: a copied code works only while a replica's slot is free, raises `enrolled` at once, and turns into a contention freeze when the replica returns (4.4). `sources` narrows the addresses it works from. | **none** | as A | **use** | **use**: CI mints codes | **use** | **none** | **value** |
 | *Today: a bearer service token* | **value**, for up to a year | **value** | **value** | **value** | **value** | **value** | **none** | **value** |
 
 Notes:
 
-1. A Kubernetes token that ends up in a log is spent if the pod used it. Its
-   audience cannot name the key, so an unspent one works once, within its
-   10 to 60 minutes.
+1. A projected token in a log is spent if the pod used it. Its audience
+   cannot name the key, so an unspent one works once.
 2. Lambda puts its role's session credentials in the function's runtime
    environment. An env dump in a log therefore lets the attacker sign a
    `GetCallerIdentity` with them until they expire (at most 12 hours). A
-   binding's `sources` closes this off when the attacker is outside the VPC's
-   NAT addresses.
-3. An ID token whose audience cannot name the key is a bearer for its single
-   use. If the attacker spends it first, the workload's own exchange fails
-   with `replayed`, which is loud.
+   binding's `sources` narrows this to the VPC's NAT addresses where the
+   workload has dedicated ones.
+3. Managed identities cache their tokens, so two replicas on one identity,
+   or a restart, present the same token. Its audience cannot name the key,
+   so it cannot be spent once (4.2). A NAT gateway's dedicated addresses in
+   `sources` exclude an attacker outside the network.
+4. GitLab's `id_tokens` audiences are fixed in the job's YAML, so they
+   cannot name a key either. If the attacker spends the token first, the
+   job's own exchange fails with `replayed`, which is loud.
 
-What the table says in one sentence: **no platform-side attacker ever reads a
-value, and none gets anything that outlives their presence.** In every
-**use** cell, a freeze stops the attacker within one request, and a
-revocation does too.
+What the table says in one sentence: **no platform-side attacker ever reads
+a value.** In every **use** cell, a freeze or a revocation stops the attacker
+at their next request. What a copy can hold beyond the attacker's presence
+is bounded per row: an unspent ID token's single use, Azure's cached token
+or Lambda's role credentials until they expire, and an enrollment code until
+the next deploy supersedes it.
 
 The **use** cells under D, E and F cannot be closed by any design. Code that
 runs as the workload *is* the workload. What Coffre can do about them is
@@ -208,18 +215,27 @@ Cache-Control: no-store
   1. the two limiters (per source, and total);
   2. the body, at most 16 KiB;
   3. the shape;
-  4. one read of the service's live bindings of the proof's kind;
+  4. one read of the service's live bindings of the proof's profiles, by an
+     explicit profile filter (`/api/auth/oidc` gains the same filter, to OIDC
+     profiles only, so a binding with no claims is never a match there);
   5. the proof itself;
   6. `vault.access` for the member, outside any transaction;
-  7. the commit, under the log head: re-check member and binding, spend the
-     proof, the enrollment's fencing (section 4.4), insert the credential,
+  7. the commit, under the log head, deciding on database facts only (no
+     gate or vault call inside it): re-check member and binding, spend the
+     proof, the enrollment's capacity (section 4.4), insert the credential,
      append `token.exchange` with `{ kind: 'workload', jkt, proof: 'aws' | 'oidc' | 'enrollment', … }`.
 
   A proof no binding can take costs admission and one read, as today.
 - **Refusals** are 401s, kept out of the audit log as today. Their `reason`
   is the OIDC exchange's set plus `dpop` (the header is missing or bad),
-  `source` (outside the binding's `sources`), `superseded` (an older
-  enrollment), `frozen` and `pending` (section 4.4).
+  `source` (outside the binding's `sources`, or no client address to check),
+  `superseded` (an older enrollment), `busy` (no free slot, with
+  `Retry-After: 30`), `frozen` and `pending` (section 4.4).
+- **What is spent.** A proof that names the key (an ID token whose audience
+  names it, a signed `GetCallerIdentity`) is spent per `(proof, jkt)`: only
+  that key could use it anyway, and the same key presenting a platform's
+  cached token again, to re-prove, is allowed. Any other proof is spent per
+  proof, once, as today. The one exception is `azure` (4.2).
 - **`places`** are the environments of the binding's scope, as a handle's
   `places`. With exactly one, the stable URL `/use/<credential>` works. With
   several, the SDK names the environment (`/use/<project>/<env>/<credential>`),
@@ -241,22 +257,35 @@ that pin one workload, by a field the platform never reuses:
 |---|---|---|---|---|
 | `kubernetes` | the cluster's (`kubectl get --raw /.well-known/openid-configuration`); uploaded keys for a private cluster | `sub`, `kubernetes.io.serviceaccount.uid` | `publicUrl` (the projected volume's `audience`) | the projected file, read again before each exchange |
 | `gcp` | `https://accounts.google.com` | `sub` (the service account's unique numeric ID) | `publicUrl#jkt=<thumbprint>` | `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=…&format=full`, header `Metadata-Flavor: Google` |
-| `azure` | `https://sts.windows.net/<tenant>/` | `tid`, `oid` (the managed identity's object ID) | the binding's `audience`, an Entra application ID URI (`api://coffre-acme`): Entra mints tokens only for a registered resource | IMDS `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…` with `Metadata: true`; App Service and Functions use `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` |
+| `azure` | the binding's, exactly one of `https://sts.windows.net/<tenant>/` (v1) or `https://login.microsoftonline.com/<tenant>/v2.0` (v2), whichever the resource app's `accessTokenAcceptedVersion` makes Entra issue | `tid`, `oid` (the managed identity's object ID) | the binding's `audience`, an Entra application ID URI (`api://coffre-acme`): Entra mints tokens only for a registered resource | IMDS `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…` with `Metadata: true`; App Service and Functions use `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` |
 | `fly` | `https://oidc.fly.io/<org>` | `org_id`, `app_id` | `publicUrl#jkt=<thumbprint>` | `POST /v1/tokens/oidc` on the machine's `/.fly/api` socket, `{"aud": …}` |
-| `vercel` | `https://oidc.vercel.com/<team>` | `owner_id`, `project_id`, `environment` (`production` keeps previews out) | `https://vercel.com/<team>`, fixed by Vercel: the binding's `audience` | the `x-vercel-oidc-token` request header (functions), `VERCEL_OIDC_TOKEN` (builds) |
+| `vercel` | `https://oidc.vercel.com/<team>` (team mode) or `https://oidc.vercel.com` (global mode), the binding's | `owner_id`, `project_id`, `environment` (`production` keeps previews out) | `publicUrl#jkt=<thumbprint>`, through `getVercelOidcToken({ audience })` | `@vercel/oidc`'s `getVercelOidcToken`; the function's default token (the `x-vercel-oidc-token` header, 2 hours, audience fixed to the team) is not used |
 | `github`, `github-reusable…`, `gitlab`, `custom` | as today | as today | `publicUrl#jkt=<thumbprint>` on GitHub; `publicUrl` elsewhere | as today |
 
-- **The audience may name the key.** Where the platform lets the caller pick
-  the audience (GitHub, Google, Fly), the SDK asks for
-  `<publicUrl>#jkt=<thumbprint>`. The exchange accepts that form only when
-  the thumbprint equals the DPoP key's. A copied token is then useless to any
-  other key, whether or not it is spent. Plain `publicUrl` is still
-  accepted, so platforms with a fixed audience keep working. A binding may
-  require the key-naming form with `policy.keyAudience: true`; GitHub
-  bindings made from the page default to it.
-- **`audience` in the policy.** Azure and Vercel cannot mint for an arbitrary
-  URL. Their binding names the exact audience, under its MAC. Every other
-  profile refuses a policy `audience`.
+- **The audience names the key wherever the platform allows it.** Where the
+  caller picks the audience (GitHub, Google, Fly, Vercel), the SDK asks for
+  `<publicUrl>#jkt=<thumbprint>`, and the exchange accepts that form only
+  when the thumbprint equals the DPoP key's. A copied token is then useless
+  to any other key, spent or not. Bindings of these four profiles require
+  that form (`policy.keyAudience`, on by default for them and refused off by
+  the page, which says why). `kubernetes`, `gitlab` and `custom` keep plain
+  `publicUrl`, since their audience is fixed in configuration.
+- **`audience` in the policy.** Azure cannot mint for an arbitrary URL. Its
+  binding names the exact audience, under its MAC. Every other profile
+  refuses a policy `audience`.
+- **Azure's tokens repeat.** Managed identities cache tokens, up to 24
+  hours, so replicas and restarts on one identity present the same one. An
+  `azure` token is therefore spent per `(token, jkt)`, like a key-naming
+  one, although nothing in it names the key: one token makes one session per
+  key. That makes a leaked Azure token usable by another key until it
+  expires (column C), which the binding's page says. A NAT gateway's
+  dedicated addresses in `sources` close it. This is unverified live (no
+  Azure account tonight).
+- **Unverified facts**, to check on first live use: whether Google's
+  metadata server caches identity tokens per audience (harmless under the
+  `(token, jkt)` rule), and that it and Fly accept a `#` in the audience
+  string. If either refuses, the SDK falls back to `publicUrl?jkt=<thumbprint>`,
+  which the exchange accepts the same way.
 - **AWS can also use OIDC.** AWS's outbound identity federation
   (`sts:GetWebIdentityToken`) makes AWS an OIDC issuer for accounts that turn
   it on. A `custom` binding works for those. The `aws` proof below needs no
@@ -281,11 +310,17 @@ It sends Coffre the URL, headers and body, never the credentials.
 
 **What Coffre checks:**
 
-1. **The URL.** It must be exactly `https://sts.amazonaws.com/` or
-   `https://sts.<region>.amazonaws.com/`, with `<region>` matching
-   `^[a-z]{2}(-[a-z]+)+-\d$`. Nothing else is ever fetched, so the URL offers
-   no SSRF.
-2. **The headers.** `x-coffre-audience` must equal `publicUrl`, and
+1. **The URL, method and body.** The URL must be exactly
+   `https://sts.amazonaws.com/` or `https://sts.<region>.amazonaws.com/`,
+   with `<region>` matching `^[a-z]{2}(-[a-z]+)+-\d$`: the commercial
+   partition only, so GovCloud, China and FIPS endpoints are refused. The
+   method is `POST`, and the body exactly
+   `Action=GetCallerIdentity&Version=2011-06-15`. Nothing else is ever
+   fetched, so the proof offers no SSRF.
+2. **The headers.** Coffre rebuilds the request from an allowlist:
+   `authorization`, `content-type`, `host`, `x-amz-date`,
+   `x-amz-security-token`, `x-coffre-audience` and `x-coffre-key`. Any other
+   header is refused. `x-coffre-audience` must equal `publicUrl`, and
    `x-coffre-key` must equal the DPoP key's thumbprint. Both must be among
    the `SignedHeaders`.
 3. **The time.** `x-amz-date` must be within 5 minutes. STS refuses past 15.
@@ -293,7 +328,9 @@ It sends Coffre the URL, headers and body, never the credentials.
    `consumed_tokens`, the table the OIDC exchange already uses, kept 2 hours.
 5. **STS.** Coffre forwards the request with the same transport rules as
    JWKS fetches (`https` only, no redirects, a 5 s deadline, 64 KiB). It
-   parses `<GetCallerIdentityResult>`: `Arn`, `Account` and `UserId`.
+   parses `<GetCallerIdentityResult>`: `Arn`, `Account` and `UserId`. An
+   account's root (`arn:aws:iam::<account>:root`) and a federated user
+   (`…:federated-user/…`) are refused.
 
 **What the binding names.** A role, by its **unique ID**, the `AROA…` prefix
 of `UserId` for an assumed role:
@@ -317,10 +354,10 @@ is the residual risk.
 
 ### 4.4 `enrollment`: platforms that sign nothing
 
-Railway, Render, Heroku and a bare VM give a process no identity a copy lacks.
-An enrollment code is the least that works, and the design spends its
-effort on making a copy **loud**, **contained** and, where the platform
-allows, **pinned**.
+Railway, Render, Heroku and a bare VM give a process no identity that a copy
+of it lacks. An enrollment code is the least that works. The design spends
+its effort on making a copy **loud**, **contained**, **short-lived** and,
+where the platform allows, **narrowed to its addresses**.
 
 **The binding:**
 
@@ -331,78 +368,126 @@ coffre trust api-prod --enrollment --replicas 2 --source 162.220.232.0/24 --mint
 ```json
 { "profile": "enrollment", "issuer": "urn:coffre:enrollment", "claims": {},
   "policy": { "replicas": 2, "sources": ["162.220.232.0/24"], "mintedBy": "token:deploy",
-              "sessionDays": 30, "approve": false } }
+              "sessionDays": 30, "approve": false, "onContention": "freeze" } }
 ```
 
-**Minting a code.** `POST /api/members/token:api-prod/bindings/<id>/enrollments`
-answers `{ "code": "coffre_enr_…", "expiresAt": … }`. These callers may mint:
+**Minting a code is issuing a credential.**
+`POST /api/members/token:api-prod/bindings/<id>/enrollments` answers
+`{ "code": "coffre_enr_…", "expiresAt": …, "withheld": […] }`. Two kinds of
+caller may mint:
 
 - the service's managers, as people (personal tokens refused, as for every
   service-account route);
 - the service named by `mintedBy`, on a workload session: CI's own,
   OIDC-proven.
 
-CI mints one per deploy and sets it as the platform's variable for that
+The code's **scope** is fixed at minting, as a token's is by `issuedScope`.
+It is the binding's scope intersected with what the minter holds at that
+moment. Each place's `sensitive` is true only where the minter is an Owner of
+its project as a person, which R32 requires. A CI service minting is never
+one, so its codes read no sensitive value. The scope is stored in the
+`enrollments` row under its MAC, and every session the code makes carries
+that scope. A binding's `reads` apply only within it. So a Viewer who
+manages `api-prod` and mints a code gets sessions that hold at most a
+Viewer's rights, and never a sensitive value. `withheld` names the places
+whose sensitive values the code will not read, as token issuance does.
+
+CI mints one code per deploy and sets it as the platform's variable for that
 deploy:
 
 ```sh
 railway variables --set "COFFRE_ENROLL=$(coffre enroll api-prod)" --service api --environment production
 ```
 
-The code is a row in `enrollments` (section 11): its hash, its binding, who
-minted it, and `expires_at` (`sessionDays`, at most 90). That date is when
-its sessions end and a new deploy must enroll again. The binding's page
-warns 3 days before.
+`expires_at` is `sessionDays` from minting, at most 90. At that point the
+code's sessions end and a deploy must enroll again. The binding's page warns
+3 days before.
 
 **What a code allows, and what stops a copy:**
 
-1. **Several sessions, at most `replicas` at once.** A code is not single-use,
-   because Railway restarts a crashed container with the same variables, and
-   a single-use code would turn every crash into an outage. Each use makes a
-   session. If the code already has `replicas` live sessions, the oldest is
-   *fenced*: it is revoked (`token.revoke`, `reason: 'fenced'`) in the same
-   transaction, under the log head, so two racing exchanges never leave
-   `replicas + 1` live sessions.
-2. **Contention freezes.** A fenced session that the gate saw within the last
-   2 minutes was alive. Someone else is using the code, so Coffre freezes the
-   binding (`workload.freeze`, `reason: 'contention'`) and alerts. The SDK
-   re-enrolls on `fenced` by itself. A thief who fences an idle replica
-   therefore gets fenced back as soon as that replica next speaks, and that
-   second fence is contention. **A freeze is the default answer to a copy:
-   an outage is better than a silent thief.** It is lifted by hand (section
-   8.2). Setting `onContention: 'alert'` keeps the service up and only alerts.
-3. **Supersession.** The newest code of a binding fences every older code 2
-   minutes after the newest code's first session. That gives a rolling deploy
-   two minutes of overlap. After that, older codes enroll nothing and their
-   sessions end. This is derived on each check: an older code is dead once a
-   newer one has a session older than the overlap. No job runs and nothing is
-   copied.
-4. **`sources`.** CIDRs checked at the exchange and on every request, against
-   the address Coffre's per-source limiter already reads. On Railway Pro,
-   static outbound IPs per environment make this a real attestation: a thief
-   must run code inside that Railway environment. Render's outbound
-   addresses are shared per region, which narrows the risk but proves
-   nothing.
+1. **At most `replicas` live sessions, and nothing live is ever fenced.** A
+   code is not single-use: Railway restarts a crashed container with the
+   same variables, and a single-use code would turn every crash into an
+   outage.
+   - **Liveness is expiry.** An enrollment session lasts 90 seconds past its
+     last renewal, and the SDK renews every 30 seconds.
+   - **A full code answers `busy`.** At the exchange's commit, under the log
+     head, Coffre counts the code's unexpired, unrevoked sessions. If there
+     are `replicas` of them, the answer is `busy` with `Retry-After: 30`.
+     This is a database fact inside the transaction, so two racing exchanges
+     never make `replicas + 1` sessions.
+   - **A restart waits at most 90 seconds.** A crashed replica's session
+     stops renewing, so its restart is admitted within 90 seconds. The SDK
+     retries `busy` for up to 5 minutes. A graceful stop logs out and frees
+     its slot at once.
+2. **Contention: `busy` for three minutes freezes.** After each `busy`, and
+   outside the transaction, the exchange tells the workload's gate (5.2).
+   The gate keeps, per code, when its current run of `busy` answers began. A
+   run that reaches 3 minutes freezes the binding (`workload.freeze`,
+   `reason: 'contention'`) and alerts.
+   - **A crash never reaches it:** the restart is admitted within 90
+     seconds, which ends the run.
+   - **A thief always does.** A thief trying while every replica is up is
+     `busy` until the freeze. A thief who took the slot of a replica that was
+     down keeps that replica `busy` once it returns, until the freeze.
+   - **So does too low a `replicas`.** Scaling a service past it trips the
+     same freeze, and the alert says to raise it.
+   - **Losing the gate is safe.** It forgets the run's start, which delays a
+     freeze and never causes one.
+   - **A freeze is the default answer to a copy.** An outage is better than a
+     silent thief. It is lifted by hand (8.2). `onContention: 'alert'` keeps
+     the service up and only alerts.
+3. **Supersession.** A newer code of the binding supersedes every older one
+   once it has `replicas` live sessions at the same time: the new deploy is
+   fully up. `POST …/enrollments/<id>/promote` (`coffre enroll --promote`)
+   says the same explicitly, for CI after a deploy that succeeded.
+   - **It is recorded, not recomputed.** In the same transaction, Coffre
+     revokes the older codes' sessions (`token.revoke`, `reason:
+     'superseded'`) and appends one `enrollment.supersede` per older code,
+     naming it. The exchange refuses a code that such an entry names,
+     through an index, as a tombstone works.
+   - **A deploy that fails** never reaches `replicas`, so the running
+     deployment keeps its code.
+   - **A rollback** after a successful deploy restores a superseded code. So
+     a rollback job mints a new one, and the docs' Railway recipe does.
+4. **`sources` narrows.** These are CIDRs, checked at the exchange and on
+   every request against the client's address.
+   - **On Workers**, the address is the one Cloudflare vouches for
+     (`CF-Connecting-IP`).
+   - **On Node**, it is the deployment's `clientAddress(request)`, which must
+     be configured for any binding with `sources`. Without it, Node sees only
+     the socket's peer, which behind a load balancer is the balancer. A
+     request with no address is refused with `source`.
+   - **On Railway**, static outbound IPs are per service and region, and
+     Railway does not promise they are dedicated: they "may be shared with
+     other customers". There, `sources` shrinks who could use a copy to code
+     running on Railway, in that region. **It is not an attestation.** It is
+     one where the addresses are dedicated: a cloud NAT gateway, a VM's own
+     static IP.
 5. **Alerts on every enrollment.** Each new session is a `workload.alert`
-   `{ kind: 'enrolled', ip, code }`, delivered at once (section 8.3). A
-   restart at 3 a.m. produces one quiet line. An enrollment from an unknown
-   address is the one to look at.
+   `{ kind: 'enrolled', ip, code }`, delivered at once (8.3). A restart at
+   3 a.m. produces one quiet line. An enrollment from an unknown address is
+   the one to look at.
 6. **`approve: true`**, for workloads that rarely restart. Each session
    starts `pending`: the exchange answers 202
    `{ "pending": "<session id>", "approve": "<page URL>" }`. The SDK retries
-   the exchange with the same key every 5 s for up to 10 minutes, and a
-   manager approves on the page or with `coffre approve <id>`. Each approval
-   is audited.
+   the exchange with the same key every 5 seconds for up to 10 minutes, and
+   each retry with the same key and code returns the same pending session.
+   Pending sessions take no slot. A manager approves on the page or with
+   `coffre approve <id>`. Approval is audited and counts the slot then: a
+   full code answers `busy`.
 
-**What it cannot prevent, stated in the binding's page and the docs:**
+**What it cannot prevent, stated on the binding's page and in the docs:**
 
-- An attacker with the code who enrolls while every real replica is down and
-  never makes a request that fences one. They get an `enrolled` alert from
-  their own address, and `sources` stops them if it is set.
-- An attacker running *inside* the service, the rows D and F of every
-  platform.
-- A compromised CI minting codes for itself (column E). The mint is logged as
-  CI's own act, naming the run.
+- **The code is a standing credential until it is superseded or expires.**
+  An attacker who copies it can enroll whenever a slot is free: a replica
+  down, or `replicas` set higher than the service runs. They get an
+  `enrolled` alert from their own address. Contention follows, and freezes,
+  once a replica wants the slot back.
+- **An attacker running *inside* the service** has the D and F columns of
+  every platform.
+- **A compromised CI can mint codes for itself** (column E). The mint is
+  logged as CI's own act, naming the run, and is bounded by CI's own rights.
 
 ## 5. Sessions: DPoP, the gate, renewal
 
@@ -417,28 +502,66 @@ RFC 7638 form, 43 characters.
 **Every request** carries the session token and a fresh proof:
 
 ```http
-POST /use/stripe/v1/charges HTTP/1.1
+POST /use/stripe/v1/charges?expand[]=balance_transaction HTTP/1.1
 Host: secrets.acme.example
 Authorization: DPoP coffre_wl_7mQ4…
 DPoP: <base64url(header)>.<base64url(payload)>.<base64url(r || s)>
+Content-Type: application/x-www-form-urlencoded
+Idempotency-Key: 5f1c…
+Stripe-Account: acct_1Nv…
+
+amount=2000&currency=eur&source=tok_visa
 ```
 
 ```json
 { "typ": "dpop+jwt", "alg": "ES256", "jwk": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" } }
 { "jti": "pA6p8w2Yb3fQe1kHn0S9qg", "htm": "POST", "htu": "https://secrets.acme.example/use/stripe/v1/charges",
-  "iat": 1792805400, "ath": "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo", "nonce": "g1.7Hq2…" }
+  "iat": 1792805400, "ath": "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo", "nonce": "g1.7Hq2…",
+  "hdr": "content-type idempotency-key stripe-account",
+  "req": "kq9Vg0ZyqH4tD4H7tq3cXb6vR3a1v0Q5yR2mJ8wK1sE" }
 ```
+
+**The proof signs the whole request, and Coffre forwards exactly what it
+signs.** RFC 9449's claims (`htm`, `htu`, `ath`, `nonce`) cover the method,
+the URL without its query, and the token. Two claims of Coffre's own cover
+the rest:
+
+- **`hdr`** names, lowercased and space-separated, the request headers to
+  forward upstream. The SDK lists every header the app set.
+- **`req`** is base64url(SHA-256) of a canonical request:
+
+  ```
+  <the raw query string as sent, without "?", or empty>\n
+  <name>:<value>\n   for each header in hdr, in order, its value as received
+  <the body's SHA-256, hex | the literal x-amz-content-sha256 of a streamed SigV4 upload>
+  ```
+
+Coffre recomputes `req` from what it received, and forwards upstream only
+the headers `hdr` names, plus the credential's injection. A header added on
+the way, by an HTTP library or a proxy, is dropped rather than refused, so
+`user-agent` and `via` do no harm.
+
+- **Bodies.** A buffered body (up to the proxy's 16 MiB) is hashed whole. A
+  streamed SigV4 upload is bound by the payload hash it declares, which S3
+  itself checks against the bytes. A streamed upload signed
+  `UNSIGNED-PAYLOAD` cannot be bound, and a workload may send one only
+  through a credential that says `unsignedUploads: true`, whose page notes
+  that column B is **use** for it.
+- **Cost.** Hashing a body costs CPU in proportion to its size, about 2 ms
+  per MiB on Workers. API calls are kilobytes. Large objects go through
+  streamed SigV4 or delivered minting (7.2).
 
 **The verifier** (`verifyProof` in core) checks, cheapest first:
 
-1. **Shape.** The proof is at most 1 KiB. `typ` is exactly `dpop+jwt` and
+1. **Shape.** The proof is at most 2 KiB. `typ` is exactly `dpop+jwt` and
    `alg` exactly `ES256`.
 2. **The key.** `jwk` has exactly `kty`, `crv`, `x` and `y`, a point on the
    curve, and no `d`.
 3. **The claims.** `jti` is 22 base64url characters (16 bytes). `iat` is an
-   integer.
+   integer. `hdr` holds at most 32 names, none of `authorization`, `dpop`,
+   `cookie`, `host` or a hop-by-hop header.
 4. **The session.** The session row comes from the token's hash, as for any
-   credential (one indexed read, shared with the checks in 5.3).
+   credential (one indexed read, shared with 5.3).
 5. **Key and signature.** `thumbprint(jwk) === row.jkt`, then the signature
    over the JWS signing input.
 6. **What was signed.**
@@ -447,6 +570,9 @@ DPoP: <base64url(header)>.<base64url(payload)>.<base64url(r || s)>
      lowercased, no default port, no query or fragment, and the path as
      received, percent-encoding untouched.
    - `ath` equals base64url(SHA-256(token)).
+   - `req` equals the recomputed digest. A buffered body is checked before
+     anything is sent; a streamed one is bound by its declared hash, as
+     above.
    - `iat` is within ±300 s. The nonce, not the clock, is what makes a proof
      fresh.
 7. **The gate** checks the nonce and the `jti` (5.2).
@@ -458,13 +584,20 @@ holds this (section 12, PR 0).
 **Refusals** are `401` with
 `WWW-Authenticate: DPoP error="invalid_dpop_proof"` and a JSON `reason`, or
 `error="use_dpop_nonce"` with a fresh `DPoP-Nonce` header, as RFC 9449
-section 9 has it. The SDK retries `use_dpop_nonce` once with the new nonce,
-and treats every other refusal as final.
+section 9 has it.
+
+- **`use_dpop_nonce`** is retried once with the new nonce. The SDK cannot
+  resend a body it streamed, so it keeps its nonce fresh instead: every
+  answer carries the gate's current nonce, and the SDK uses the newest.
+  Only a gate restart in the middle of a streamed upload fails it, once, and
+  the caller retries as for any network error.
+- **Every other refusal is final.**
 
 **Why DPoP and not a scheme of our own.** It is a standard with libraries
 in every language, so a sidecar in Go or a client in Python can speak it.
-What it lacks, binding the body, is section 5.5's honest limit and not worth
-a custom format.
+`hdr` and `req` are two extra claims that a DPoP library passes through
+untouched. HTTP Message Signatures (RFC 9421) would cover the same ground
+with a larger surface, and no DPoP library implements it.
 
 ### 5.2 The gate: replay, nonces, live counters
 
@@ -480,46 +613,54 @@ holds what must be both shared and fast.
   database's region: every request already crosses there for its credential
   read, so the hop costs one round trip inside that region.
 - **On Node**, an object in the app's process. A Node deployment runs one
-  app process, as `examples/node` does. Several processes would each hold a
-  gate of their own, with different nonces, and clients would bounce between
-  them. The docs say so, and the gate's nonce makes it fail loudly rather
-  than unsafely (below).
+  app process, as `examples/node` does. Several processes, Coffre itself as
+  more than one replica on Kubernetes included, would each hold a gate of
+  their own, with different nonces, and clients would bounce between them.
+  The gate's nonce makes that fail loudly rather than unsafely (below). The
+  docs say so wherever Coffre on Kubernetes is mentioned.
 
 **Nonces are epochs.** A gate draws a random `epoch` when it starts and
 rotates it every 5 minutes. Its nonce is `g<n>.<epoch>`, 16 random bytes in
 base64url after the rotation's count `n`. It need not be secret: it only
-names an epoch, and a proof must still be signed by the session's key. It accepts proofs carrying the current or the
-previous nonce, and remembers the `jti`s seen under each, for at most 10
-minutes of memory per workload. Everything else answers `use_dpop_nonce`
-with the current nonce.
+names an epoch, and a proof must still be signed by the session's key. The
+gate accepts proofs carrying the current or the previous nonce, and
+remembers the `jti`s seen under each. Everything else answers
+`use_dpop_nonce` with the current nonce.
 
-- **A restart or eviction forgets nothing that matters.** A new epoch means
-  every proof made before it carries an unknown nonce and is refused, so no
-  proof seen before the restart can ever pass again. No `jti` is persisted,
+- **A restart or an eviction forgets nothing that matters.** A new epoch
+  means every proof made before it carries an unknown nonce and is refused,
+  so no proof seen before the restart can pass again. No `jti` is persisted,
   no clock is trusted, and a client pays one retry.
-- **Memory is bounded** by the rate: a workload at 1,000 requests a second
-  holds at most 600,000 `jti`s of 16 bytes, about 10 MB, inside a Durable
-  Object's 128 MB. The gate refuses with 429 past 2,000 requests a second per
-  workload, a limit a deployment may raise.
+- **Memory is bounded by the rate.** The `jti`s are kept as 16-byte keys in
+  two hash sets, one per epoch, never as strings. A workload at the gate's
+  ceiling of 1,000 requests a second (a Durable Object's documented soft
+  limit) holds at most 600,000 of them: about 25 MB with the sets' overhead,
+  within an object's 128 MB. Past the ceiling the gate answers 429 `busy`.
+  A deployment that needs more shards a workload's gates by session (D2).
 
-**The gate's interface:**
+**The gate's interface** is replay and generic counters. The features built
+on it (limits in 8.1, contention in 4.4) use the counters from their own
+code, so PR 1 owns the gate and no later PR edits it:
 
 ```ts
 interface Gate {
+  /** Replay and nonce; then, in the same call, every count the request asks for. */
   admit(request: {
-    session: string; jkt: string; jti: string; nonce: string;
-    ip: string; credential?: { place: string; name: string };
+    session: string; jti: Uint8Array; nonce: string;
+    counts?: { key: string; windowMs: number; most: number }[];
   }): Promise<
     | { ok: true; nonce: string }
     | { ok: false; reason: 'use_dpop_nonce'; nonce: string }
-    | { ok: false; reason: 'replayed' | 'limit' | 'busy' }
+    | { ok: false; reason: 'replayed' | 'busy' }
+    | { ok: false; reason: 'limit'; key: string; retryAfterMs: number }
   >;
-  seen(session: string, withinMs: number): Promise<boolean>;  // enrollment contention
+  /** A run of events per key: when it began, or null once reset. Contention uses it. */
+  run(key: string, event: 'extend' | 'reset'): Promise<{ since: number | null }>;
 }
 ```
 
-**Live counters** (section 8.1) live in the same object, so one call does
-both: replay and limits.
+A count with a window of a day lives in the object's storage, written at
+most every 10 seconds and on eviction. Any shorter window lives in memory.
 
 **The gate is not the source of truth for any decision a person made.**
 Freezes, revocations and grants are in the database and the log, read on each
@@ -528,39 +669,53 @@ counters. It never lets anything through.
 
 ### 5.3 Every request, checked live
 
-A workload request is never answered from a cache of its authority. Per
+A workload request's authentication is never answered from a cache. Per
 request:
 
-1. The token's row: `kind = 'workload'`, not revoked or expired, `not_after`
-   not past, its MAC, and `approved_at` set where its binding says `approve`.
-   Its binding stands: MAC, no revocation, no tombstone, as for an exchanged
-   credential today. Its ancestors stand (section 8.4). Its enrollment is not
-   superseded (4.4). Its source is within `sources`.
-2. The proof (5.1) and the gate (5.2).
-3. **No freeze** names the instance, the service, the binding, the session or
-   the credential being used (section 8.2).
-4. `vault.access(principal)`, as for every request today.
+1. **The row.** The token's row: `kind = 'workload'`, not revoked or
+   expired, `not_after` not past, its MAC, and `approved_at` set where its
+   binding says `approve`. Its binding stands: MAC, no revocation, no
+   tombstone, as for an exchanged credential today. Its ancestors stand
+   (8.4). Its code has no `enrollment.supersede` entry (4.4). Its client
+   address is within `sources`.
+2. **The proof** (5.1) and **the gate** (5.2).
+3. **No freeze** names the instance, the service, the binding, the session
+   or the credential being used (8.2).
 
-Steps 1 and 3 are one SQL statement: the row, its binding, its ancestors,
-its enrollment's supersession and the freezes, joined through their indexes.
-`request-cost.test.ts` holds a workload request to the same number of
-statements as a handle's.
+Steps 1 and 3 are **one SQL statement** on the app's connection: the row,
+its binding, its ancestors, its code's supersession and the freezes, joined
+through their indexes.
 
-Only after that does the proxy look in its value cache. Keyed by session,
-it holds an opened value for `cacheSeconds` (60), as it does for handles. So
-a revocation, a freeze or a lost grant takes effect on the **next request**.
-An open Postgres tunnel ends at its next recheck: at most `recheckSeconds`,
-and the recheck now includes the freeze.
+**What is cached, and for how long.** The vault's decision, meaning grants
+and the opened values, is cached per session for `cacheSeconds` (60), as
+the proxy caches a handle's today. So:
+
+- **Revocation, freeze, expiry, an ancestor's end and supersession** take
+  effect on the next request.
+- **A lost grant** takes effect within `cacheSeconds`, as for handles.
+- **A warm request** therefore costs one SQL statement, one gate call and
+  one ES256 verify, with no vault call. A cold one adds `vault.access` and
+  the opening, through the vault's own connection: two Postgres
+  connections, as a handle's cold request has today.
+- **An open Postgres tunnel** ends at its next recheck, within
+  `recheckSeconds`. For a workload the recheck runs this statement too, so
+  it sees freezes.
+- **Handles stay as they are.** Their warm path asks no database, so a
+  `credential:` freeze reaches a person's handle within `cacheSeconds`,
+  not at once. Workloads see it at once.
 
 ### 5.4 Lifetime and renewal
 
-- **`expiresAt`: one hour.** Renewal proves possession of the key:
-  `POST /api/auth/workload/renew` with the session's own `Authorization` and
-  a proof. It answers `{ "expiresAt": … }`, an hour from now and never past
-  `notAfter`, and updates the row's `expires_at` under its MAC. Renewal has no
-  entry of its own: the gate counts it, and the session's last use shows it.
-  The SDK renews at half-life. A process that died stops renewing, and its
-  session ends within the hour, so "live sessions" means live processes.
+- **`expiresAt`: one hour; 90 seconds for an enrollment session.** Renewal
+  proves possession of the key: `POST /api/auth/workload/renew` with the
+  session's own `Authorization` and a proof. It answers `{ "expiresAt": … }`,
+  never past `notAfter`, and updates the row's `expires_at` under its MAC.
+  Renewal has no entry of its own: the gate counts it, and the session's
+  last use shows it.
+  - The SDK renews at half-life, or every 30 seconds for an enrollment
+    session, whose expiry is its liveness (4.4).
+  - A process that died stops renewing, and its session ends, so "live
+    sessions" means live processes.
 - **`notAfter`: the hard end.**
   - `oidc` and `aws`: the binding's `sessionHours`, 24 unless set, at most
     168.
@@ -575,21 +730,20 @@ and the recheck now includes the freeze.
   bearer credential's lifetime is its exposure, so it must be short. A
   key-bound token's exposure is the key's, and a copied token is worthless at
   any age. What bounds a stolen *capability* here is the proof: accepted
-  once, for one method and URL, within one nonce epoch. Lifetime only bounds
+  once, for one exact request, within one nonce epoch. Lifetime only bounds
   forgotten sessions.
 - **Ending one.** `POST /api/auth/logout` with DPoP revokes the session. The
   SDK calls it on `SIGTERM`.
 
-### 5.5 What the proof does not bind
+### 5.5 What the proof does not stop
 
-DPoP binds the method and URL, not the query string or the body. Take an
-attacker who can *modify* traffic between the app and Coffre, not only read
-it. They can drop a request and send its proof with a different body or
-query, once, within the nonce epoch. That is a man in the middle of TLS, and
-with one they could equally make the app's own requests say whatever they
-like. A passive copy is refused, because the original spends the `jti` first
-(or the copy does, and the original's failure is loud). Binding the body
-would break streaming uploads, so the design leaves it at that.
+Take an attacker who can block traffic between the app and Coffre, not only
+read it: an active man in the middle of TLS. They can hold the app's request
+and deliver it later, within the nonce's epoch, at most 10 minutes. They
+cannot change anything Coffre forwards, because the proof signs it. A
+passive copy that wins the race to Coffre is the app's own request,
+delivered once; the original is then refused as `replayed`. Either way, the
+operation that happens is the one the app asked for, at most once.
 
 ## 6. Use-only, and the escape hatch
 
@@ -608,20 +762,39 @@ precedence, for a session whose binding gives `viewer` on `market/prod`:
 
 - **Where it is enforced.** Both the app and the vault enforce it, as R16's
   sensitivity is.
-  - The app refuses, at its routes, every credential of kind `workload`
-    outside `WORKLOAD_ROUTES` (renew, narrow, logout and `GET /api/me`), with
-    reason `workload`, as it refuses handles.
-  - The proxy's plan gives the app only the plain keys and the listed ones.
-  - The vault gets each place's `reads` in the credential scope it is passed
-    already (`Through`), beside R32's `sensitive`. It refuses every purpose
-    that hands a value back (`handsBack`) unless the key's name is listed, with
-    code `use_only`.
+  - **The API a session reaches** is `WORKLOAD_ROUTES`, typed over the
+    route table as `PERSONAL_TOKEN_ROUTES` is, so a new route must say:
+    - every route a service token reaches today (writes such as `coffre set`
+      from CI, folders, archive, deploy-on-push, audit where granted);
+    - `POST …/bindings/:id/enrollments` and `…/promote`, for the service a
+      binding's `mintedBy` names;
+    - renew, narrow and logout.
+
+    Routes that answer values (`POST /reveals`, a version's value, the plan)
+    answer only plain and listed keys. Every other key is refused, or left
+    out and named, as a person's sensitive keys are. Any other route
+    answers 403 `workload`. A child of `narrow` reaches only `/use`, renew is
+    refused to it, and logout is allowed.
+  - **The proxy's plan** gives the app only the plain keys and the listed
+    ones.
+  - **The vault** gets each place's `reads` in the credential scope it is
+    passed already (`Through`), beside R32's `sensitive`. The field is
+    required, typed `reads: readonly string[] | 'all' | 'bearer'`, so leaving
+    it out is a type error rather than a read. A workload's places carry a
+    list, and a bearer credential's carry `'bearer'`. The vault refuses every
+    purpose that hands a value back (`handsBack`) for a key not in the
+    list, with code `use_only`.
   - The vault trusts the app's scope as it trusts it today. Column G2 is
     unchanged.
 - **The escape hatch is per binding, per place, per key.** `keys` lists names
   exactly. `"*"` means every key of the place, the per-environment hatch,
-  and the page shows it in red. A sensitive key listed still needs an
-  Owner-issued binding.
+  and the page shows it in red.
+  - A sensitive key listed still needs the credential's scope to say
+    `sensitive` for its project (R32): an Owner-issued binding for an OIDC or
+    AWS session, and an Owner-minted code for an enrollment one (4.4).
+  - So no path through `reads`, `narrow` (children never read) or delivered
+    minting (a listed read, under the same rule) hands a sensitive value to
+    a session that a non-Owner made.
 - **Why on the binding.** Reading puts a value where the platform can lose it,
   so the exposure is a property of *that platform*. The same service may run
   on Cloudflare, reading nothing, and in a Railway worker that must hold
@@ -659,7 +832,9 @@ auth: signin({ workloads: { limits, useOnly: true } })
 - **No bearer service credential.** `POST /members/:member/tokens` refuses to
   issue a service token. Existing `coffre_svc_` tokens are refused at use,
   with reason `use_only`. `POST /api/auth/oidc` answers 410 and names
-  `/api/auth/workload`.
+  `/api/auth/workload`. CI jobs keep the API through their workload session
+  (`WORKLOAD_ROUTES`, 6.1): they still write secrets and run deploy-on-push,
+  and read only plain values.
 - **No `reads`** on any binding: a binding that has some is refused at
   creation, and refused at use while `useOnly` is on.
 - **People are unchanged.** Their sensitivity rules are R16's.
@@ -696,16 +871,20 @@ values into platform stores.
 
 ### 7.1 What exists, now for workloads too
 
-The proxy (`/use/<credential>/<path>`), `sign`, `presign`, shaped
-placeholders and the Postgres tunnel all work for a workload session exactly
-as for a handle, with three differences:
+The proxy (`/use/<credential>/<path>`), `sign`, `presign` and the Postgres
+tunnel all work for a workload session as for a handle, with these
+differences:
 
 - **How the caller authenticates.** The workload is the
   `Authorization: DPoP` header and its proof, never a value in the
-  credential's slot. The proxy drops `Authorization` and `DPoP` before
-  forwarding, then fills the rule's slot as today. The check that refuses the
-  handle anywhere else in the request now refuses the workload token
-  anywhere else.
+  credential's slot, so there are no placeholders. The proxy forwards only
+  the headers the proof's `hdr` names (5.1), then fills the rule's slot as
+  today. The check that refuses the handle anywhere else in the request now
+  refuses the workload token anywhere else.
+- **A child's constraints** (8.4) are checked against the resolved upstream
+  target, the URL the proxy is about to send, by `constraintsAllow` in core.
+  The proxy calls it once the target is resolved, never on the path as
+  received.
 - **The plugin capability.** `PluginContext.use(caller, …)` takes either a
   handle or a `WorkloadCaller`, the result of
   `PluginContext.workload(request)`, which runs section 5.3. One function
@@ -759,6 +938,9 @@ credentialProxy({
   for AWS, `{ token, expiresAt }` for GitHub). Only a binding whose `reads`
   lists the minter (`"mints": ["aws"]`) gets it, and the page flags it as a
   value with a lifetime, "exposed for 15 minutes at a time".
+  - **It counts as reading the minter's keys.** A minter whose parent keys
+    include a sensitive one delivers only where the session's scope says
+    `sensitive` for that project (R32, 6.1).
 - **What a child can do** is the minter's to narrow: a session policy on
   `AssumeRole`, an installation token's `permissions` and `repositories`, an
   R2 credential's bucket and prefix. Every mint is one `credential.mint`
@@ -822,15 +1004,19 @@ new code. Targets:
   `coffre freeze token:api-prod` and `coffre unfreeze …`. On the pages, a red
   Freeze button on each service, binding, session and credential.
 - **Derived from the log, never copied.** A target is frozen when its newest
-  allowed `workload.freeze` or `workload.unfreeze` entry is a freeze. The
-  per-request check is an index lookup on
-  `audit_log_freeze_idx (metadata->>'target', seq DESC) WHERE action IN (…) AND decision = 'allow'`.
-  The log is the one place the state lives, under its MACs and chain. A
-  database owner who deletes a freeze entry breaks the chain, which the next
-  verification finds, the same limit as a tombstone's.
-- **A freeze is also a push.** The route tells the workload's gate, which
-  closes its open tunnels at once. Without the push they would end at their
-  next recheck, within `recheckSeconds`.
+  allowed `workload.freeze` or `workload.unfreeze` entry is a freeze.
+  - **Targets have one spelling**, canonicalized by `freezeTarget` in core:
+    `instance`, `token:<name>`, `binding:<uuid>`, `session:<uuid>`, and
+    `credential:<environment uuid>/<name>`, by the environment's ID so a
+    rename moves nothing.
+  - **The per-request check** is an index lookup on
+    `audit_log_freeze_idx ((metadata::jsonb->>'target'), seq DESC) WHERE author = 'app' AND action IN ('workload.freeze', 'workload.unfreeze') AND decision = 'allow'`.
+  - **The log is the one place the state lives**, under its MACs and chain. A
+    database owner who deletes a freeze entry breaks the chain, which the
+    next verification finds, the same limit as a tombstone's.
+- **Tunnels** end at their next recheck, within `recheckSeconds`, whose
+  statement includes the freeze (5.3). Workload tunnels recheck every 15
+  seconds, not 60.
 
 ### 8.3 Alerts
 
@@ -888,6 +1074,14 @@ The answer is `{ "token": "coffre_wl_…", "expiresAt": … }`.
   parent's. The child's `notAfter` is at most the parent's. A child cannot
   read (`reads` is never inherited), mint for delivery, narrow below depth 4,
   or renew.
+- **Paths are matched on what is sent, by segments.** `constraintsAllow`
+  takes the resolved upstream URL, after the WHATWG parser has applied every
+  dot segment (`/v1/refunds/%2e%2e/charges` is `/v1/charges` by then). Each
+  prefix matches whole segments: `/v1/refunds` admits `/v1/refunds` and
+  `/v1/refunds/re_1`, and never `/v1/refundsX`. A narrowed session's request
+  is also refused if its path holds an encoded `.`, `/` or `\` at all, so
+  the upstream cannot read a segment differently from Coffre. A Hegel
+  property generates paths with every such encoding.
 - **Revoked with its parent.** The row stores `ancestors`, the IDs from the
   root down. Every request checks that each ancestor is unrevoked, unexpired
   and unfrozen, in the same statement (5.3). A parent that ends, whether by
@@ -922,7 +1116,7 @@ export function workload(options: {
 export interface Workload {
   readonly service: string;
   readonly places: readonly string[];
-  /** A fetch that signs requests under <url>/use/ and passes anything else through: give it to any SDK that takes one. */
+  /** A fetch that signs requests under <url>/use/ (method, URL, query, every header it was given, the body) and passes anything else through: give it to any SDK that takes one. */
   readonly fetch: typeof fetch;
   /** <url>/use/<name>, or <url>/use/<project>/<env>/<name> with several places. */
   url(name: string): string;
@@ -943,7 +1137,8 @@ export interface UsedCredential {
 ```
 
 - **Lifecycle.** Exchange once, renew at half-life, re-prove before
-  `notAfter`, retry `use_dpop_nonce` once, and re-enroll on `fenced`. The
+  `notAfter`, retry `use_dpop_nonce` once, and retry an enrollment's `busy`
+  for up to 5 minutes. The
   token, the key and the nonce live only in `workload()`'s closure. Nothing
   touches disk or `process.env`.
 - **`enrollment(code)`** removes the code from `process.env` once it is used,
@@ -985,6 +1180,14 @@ account binds it with `props` naming its service:
   its Workers use `enrollment`. The binding's page says this. As of
   2026-10, Cloudflare's API and Terraform may not carry `props` for service
   bindings: deploy with wrangler.
+- **Preview builds keep the binding.** With Workers Builds, a branch's
+  preview version runs with the Worker's bindings, so whoever can push a
+  branch would run code with production's `props`. A Worker that binds
+  Coffre turns off non-production branch builds, or gives previews a wrangler
+  environment of their own, bound to a service with its own binding. `coffre
+  init`'s docs and the binding's page say so. Whether a preview version
+  keeps `props` is to be checked live in PR 6, and the docs say what it
+  found.
 
 ```ts
 // the app Worker: OpenAI's SDK through coffre, no key anywhere
@@ -1005,7 +1208,8 @@ coffre serve --url https://secrets.acme.example --service api-prod --proof kuber
 ```
 
 - **HTTP.** `http://127.0.0.1:7300/use/<credential>/<path>` is forwarded with
-  DPoP, so the app's config names that URL. R14 holds: the app chooses its
+  DPoP, the proof signing the request as the app sent it, so the app's
+  config names that URL. R14 holds: the app chooses its
   own provider URLs, and coffre writes none. `POST /use/<project>/<env>`
   forwards `sign`, `verify`, `presign` and `mint` alike.
 - **Postgres.** Each tunnel in the plan gets a listener on its own port
@@ -1086,69 +1290,98 @@ const coffre = await workload({ url: 'https://secrets.acme.example', service: 'w
 
 ## 10. Cost per request
 
-R27's target is under 10 ms of CPU at p50. A workload request adds this to a
-handle's:
+R27's target is under 10 ms of CPU at p50. Today a warm handle request asks
+neither the database nor the vault: its handle and values come from the
+proxy's cache. A warm workload request asks the database once, and pays
+these:
 
 | Step | CPU (to be measured in PR 1, `pnpm bench:workers`) |
 |---|---|
-| Parse the proof, SHA-256 the token for `ath` | ~20 µs |
+| Parse the proof, SHA-256 the token for `ath`, recompute `req` for a body of kilobytes | ~30 µs |
 | Import the `jwk` (cached per isolate by `jkt`, as a settled value) | ~50 µs cold, 0 warm |
 | One ES256 verify (BoringSSL in workerd) | ~100–200 µs |
-| The gate's RPC, from the caller's side | ~10 µs |
-| The freeze, ancestor and enrollment checks | folded into the credential's one statement |
+| The one SQL statement of 5.3 (row, binding, ancestors, supersession, freezes) | ~100 µs of client work, plus a round trip through Hyperdrive |
+| The gate's RPC, from the caller's side | ~10 µs, plus a round trip inside the database's region |
+| A cold request: `vault.access` and the opening, through the vault's connection | as a handle's cold request today |
 
-So the budget is under 0.5 ms of CPU and one round trip to the gate, inside
-the database's region. The bench reports both cold and warm, and
-`request-cost.test.ts` adds a workload case.
+The budget is under 0.5 ms of CPU on a warm request, plus two round trips:
+one to the database and one to the gate. Freezes and revocations are then
+seen on every request. A body's hash adds about 2 ms per MiB. The bench
+reports cold and warm. `request-cost.test.ts` gains a workload case that
+holds a warm request to one app statement and no vault call.
 
 ## 11. Data model and migration
 
 One migration, `0015_workload_access`, for both engines. It only **adds**
-(AGENTS.md, "expand, then contract"), and code of 0.11 serves on it unchanged.
+(AGENTS.md, "expand, then contract"), and code of 0.11 serves on it
+unchanged. On SQLite, widening the two checks on `credentials` means
+rebuilding the table (create, copy, swap, in one transaction), which PR 0's
+migration does, and its test checks that every row and index survives.
 
 **`credentials`:**
 
 | Change | What |
 |---|---|
 | `credentials_kind_check` | widened with `'workload'` |
-| `credentials_kind_matches_principal` | becomes `(kind IN ('service','workload')) = (principal LIKE 'token:%')`. Only looser; existing rows pass. |
+| `credentials_kind_matches_principal` | becomes `(kind IN ('service','workload')) = (principal LIKE 'token:%')`. It is only looser, so existing rows pass. |
 | `jkt text NULL` | the key's thumbprint. A new check, `kind <> 'workload' OR jkt IS NOT NULL`, which no existing row or old writer can break. |
 | `not_after timestamptz NULL` | the hard end (5.4) |
 | `ancestors text NULL` | JSON array of credential IDs, root first (8.4) |
 | `constraints text NULL` | canonical JSON of a child's limits (8.4) |
 | `enrollment_id uuid NULL REFERENCES enrollments(id)` | the code that made it (4.4) |
 | `approved_at timestamptz NULL`, `approved_by text NULL` | for `approve` bindings (4.4) |
-| index `credentials_enrollment_idx (enrollment_id, created_at) WHERE kind = 'workload'` | fencing and supersession |
+| index `credentials_enrollment_live_idx (enrollment_id, expires_at) WHERE kind = 'workload' AND revoked_at IS NULL` | the capacity count at the exchange |
 
+- **What each kind of workload row holds:**
+
+  | Made by | `created_by` | `scope` | `enrollment_id` | `ancestors`, `constraints` |
+  |---|---|---|---|---|
+  | an `oidc` or `aws` exchange | `binding:<id>` | null, so it holds the binding's, as an exchanged credential does today | null | null |
+  | an enrollment code | `binding:<id>` | the code's, from `enrollments.scope` | the code | null |
+  | `narrow` | `binding:<id>` of its root | its parent's | its root's | set |
+
+  A Cloudflare call has no row (9.2).
 - **Grants.** The runtime login gets no `UPDATE` on `jkt`, `not_after`,
   `ancestors`, `constraints` or `enrollment_id`, as for `places`. It gets
   `UPDATE` on `expires_at` (renew) and `approved_*`.
-- **MAC tuple.** A new kind, `workload_credentials`, in `auth-rows.ts`. It
-  covers the fields of today's tuple, plus `jkt`, `not_after`, `ancestors`,
-  `constraints`, `enrollment_id` and `approved_at`.
+- **MAC tuple.** A `workload` row has one kind of its own,
+  `workload_credentials`, which composes with no other prefix. Its fields are
+  today's credential fields, then `createdBy`, `scope`, `places`, `jkt`,
+  `notAfter`, `ancestors`, `constraints`, `enrollmentId` and `approvedAt`, in
+  that order, with null distinct as everywhere. `kindOf` picks it first,
+  whenever `kind === 'workload'`.
 
 **`service_bindings`:**
 
 | Change | What |
 |---|---|
-| profile check | widened with `kubernetes`, `gcp`, `azure`, `fly`, `vercel`, `aws`, `enrollment`, `cloudflare` |
-| `policy text NULL` | canonical JSON, keys sorted, of `{ audience?, keyAudience?, reads?, sources?, sessionHours?, replicas?, sessionDays?, mintedBy?, approve?, onContention? }`. Each profile allows a fixed subset, checked by `checkPolicy` in core. Immutable like the rest of the binding, with no `UPDATE` grant. |
+| `WORKLOAD_PROFILES` (core; the database has no profile check) | gains `kubernetes`, `gcp`, `azure`, `fly`, `vercel`, `aws`, `enrollment`, `cloudflare` |
+| `policy text NULL` | canonical JSON, keys sorted, of `{ audience?, keyAudience?, reads?, sources?, sessionHours?, replicas?, sessionDays?, mintedBy?, approve?, onContention?, unsignedUploads? }`. Each profile allows a fixed subset, checked by `checkPolicy` in core. The four profiles that are not OIDC always have one, `{}` at least. It is immutable like the rest of the binding, with no `UPDATE` grant. |
 
-The MAC tuple is a new kind, `policed_service_bindings`, chosen when
-`policy` is non-null, as `uploaded_service_bindings` is for `jwks`. For the
-non-OIDC profiles, `issuer` and `jwks_uri` hold their URN, `urn:coffre:aws`,
-`urn:coffre:enrollment` or `urn:coffre:cloudflare`. That satisfies `NOT NULL`
-and keeps "one key source per issuer" a single-column comparison.
+- **MAC tuple.** A non-null `policy` adds the prefix `policed_` last, over
+  whatever `kindOf` composes today, with `policy` appended as the last
+  field. A private cluster's binding with a scope and a policy is
+  `policed_scoped_uploaded_service_bindings`: today's fields, then `jwks`,
+  `scope` and `policy`. A non-OIDC binding is always policed, so its MAC
+  never checks as an OIDC binding's.
+- **Issuer and keys.** For the non-OIDC profiles, `issuer` and `jwks_uri`
+  hold their URN: `urn:coffre:aws`, `urn:coffre:enrollment` or
+  `urn:coffre:cloudflare`. That satisfies `NOT NULL`, and keeps "one key
+  source per issuer" a single-column comparison.
+- **Filtered by profile.** `/api/auth/oidc` and `/api/auth/workload` read
+  bindings by an explicit profile list (4.1), so a binding with no claims
+  never matches a token.
 
 **`enrollments`**, a new table:
 
 ```sql
 CREATE TABLE enrollments (
   id uuid PRIMARY KEY,
-  auth_mac bytea NOT NULL,               -- tuple 'enrollments': id, binding_id, code_hash, created_by, expires_at
+  auth_mac bytea NOT NULL,               -- kind 'enrollments': id, binding_id, code_hash, scope, created_by, created_with, expires_at
   binding_id uuid NOT NULL REFERENCES service_bindings(id),
   code_hash bytea NOT NULL UNIQUE,       -- SHA-256 of coffre_enr_…
   code_hint text NOT NULL,
+  scope text NOT NULL,                   -- the binding's scope ∩ the minter's holdings, R32's sensitive per place (4.4)
   created_at timestamptz NOT NULL,
   created_by text NOT NULL,              -- the principal who minted it
   created_with uuid,                     -- their credential: the CI run's session
@@ -1167,13 +1400,17 @@ grows to `(web|cli|svc|pat|use|wl|enr)`.
 
 **Audit.**
 
-- New app actions: `workload.freeze`, `workload.unfreeze`, `workload.alert`
-  and `credential.mint`.
-- `token.create` gains `kind: 'workload'`, with `parent` for a child.
-- `token.exchange` gains `proof`.
-- `token.revoke` gains `reason: 'fenced'`.
-- The migration adds `audit_log_freeze_idx` (8.2). On SQLite it is
-  `json_extract(metadata, '$.target')`.
+- **New app actions:** `workload.freeze`, `workload.unfreeze`,
+  `workload.alert`, `enrollment.create`, `enrollment.supersede` and
+  `credential.mint`.
+- **Existing actions gain fields:**
+  - `token.create` gains `kind: 'workload'`, with `parent` for a child.
+  - `token.exchange` gains `proof`.
+  - `token.revoke` gains `reason: 'superseded'`.
+- **Indexes.** The migration adds `audit_log_freeze_idx` (8.2) and
+  `audit_log_supersede_idx ((metadata::jsonb->>'enrollmentId')) WHERE author = 'app' AND action = 'enrollment.supersede' AND decision = 'allow'`,
+  the same shape as the unbind tombstones' index. Superseding several codes
+  writes one entry per code. On SQLite, both use `json_extract`.
 
 **Nothing is removed or tightened.** The contract step, D8, would come one
 release after `useOnly` has served everywhere: drop `/api/auth/oidc`, drop
@@ -1181,28 +1418,40 @@ the issuing of `coffre_svc_` tokens, and tighten nothing in the schema.
 
 ## 12. The build: PRs, owners, tests
 
-PR 0 goes first and fast, because everyone else compiles against it. After
-it, PRs 1, 2, 5, 6 and 8 run in parallel. PRs 3, 4, 7 and 9 start once PR 1
-has merged: they touch the exchange and the proxy that PR 1 reshapes. Each
-PR owns its files, and a file another PR also needs is named under one owner
-only, with the hook the other PR calls.
+**Order.**
+
+1. **PR 0 goes first and fast**, because everyone else compiles against it.
+2. **After it, in parallel:** PRs 1, 2, 5, 6 and 8.
+3. **Once PR 1 has merged:** PRs 3, 4 and 7. They plug into the exchange
+   and the proxy that PR 1 reshapes.
+4. **After PRs 3 and 4:** PR 9, which needs their routes.
+
+**Ownership.** Each file has one owner. Where another PR needs to change
+something in it, the owner leaves a named hook, and the other PR adds one
+line of registration after the owner has merged:
+
+- PR 1's exchange dispatches by proof kind through `PROOFS` in
+  `api/workloads.ts`. Each entry is `{ verify(…), commit(tx, …) }`, where
+  `verify` runs before the transaction and `commit` inside it, on
+  database facts. PR 1 registers `oidc`, and PR 2 and PR 3 register theirs.
+- PR 1 owns `gate.ts` whole, the counters included. PRs 3 and 4 use
+  `admit`'s `counts` and `run` from their own files.
 
 | PR | What | Owns | Tests |
 |---|---|---|---|
-| **0. Foundation** | `dpop.ts` in core (`createProof`, `verifyProof`, `thumbprint`, `canonicalHtu`); the token kinds; migration `0015_workload_access` for both engines and the schema; the MAC tuples; `BindingPolicy`, `checkPolicy` and the new profiles' `REQUIRED_CLAIMS`; the `Gate` interface type | `packages/core/src/identity/dpop.ts` (new), `…/identity/tokens.ts`, `…/identity/workloads.ts`, `packages/db/src/schema.ts`, `packages/db/src/migrations/*/0015_*`, `packages/db/src/grants.ts`, `packages/server/src/auth-rows.ts` | Hegel properties: proofs round-trip, and every single-field mutation is refused; the `(r, n−s)` twin has the same `jti`; the thumbprint is canonical whatever the JSON order; `canonicalHtu` is idempotent and keeps percent-encoding; `checkPolicy` is canonical (one digest per policy). The migration applies on both engines, and 0.11's suite passes on the new schema (`pnpm test:compat`). |
-| **1. Sessions** | `POST /api/auth/workload` (`oidc` proof, with the audience naming the key), renew, logout; `authenticateRequest`'s DPoP path and `WORKLOAD_ROUTES`; the vault's `reads` and `use_only`; `PluginContext.workload` and `use(caller)`; the proxy, `sign`, `presign` and the tunnel accepting a workload caller; the Node gate and the `CoffreGates` Durable Object (nonces, `jti`); the one-statement check of 5.3 (freeze clause included, reading the index PR 0 made); `useOnly` | `packages/server/src/api/workloads.ts` (the exchange and its `verifyProof` dispatch), `…/auth.ts`, `…/auth-routes.ts`, `…/api/signin.ts`, `…/plugins.ts`, `…/plugins/credential-proxy.ts`, `…/gate.ts` (new), `…/cloudflare-gates.ts` (new), `packages/vault/src/vault.ts`, `packages/core/src/vault.ts`, `packages/core/src/access.ts` | An exchange per proof shape; a token without its key is refused; a replayed proof is refused, including across a gate restart (a new epoch); `use_dpop_nonce` then success; refusal outside `WORKLOAD_ROUTES`; the vault refuses `reveal` with `use_only`, and lets listed keys through; revocation takes effect on the next request despite a warm value cache; `request-cost.test.ts` statements; `bench:workers` numbers in the PR. |
-| **2. Proofs** | the `aws` verifier; the `kubernetes`, `gcp`, `azure`, `fly` and `vercel` profiles; `coffre trust --aws/--kubernetes/--gcp/--azure/--fly/--vercel` | `packages/server/src/workloads/aws.ts` (new), `…/workloads/profiles.ts` (new; PR 1's dispatch calls `verifyAws`), `packages/cli/src/trust.ts` | A fake STS that checks SigV4 with `@smithy/signature-v4`; `x-coffre-key` not among `SignedHeaders` is refused; another region host, a non-STS URL and a redirect are each refused; the spent signature; fixture tokens per profile, each with a required claim missing refused; a recreated role (new `AROA…`) refused. **Live:** a GetCallerIdentity signed with the `erwinkn-mgmt` SSO credentials against real STS (no resources), and a throwaway Lambda's role (`coffre-ovn-<W#>`, deleted after). |
-| **3. Enrollment** | the `enrollments` routes; `coffre enroll` and `coffre approve`; fencing, contention, supersession, `sources`, `approve` | `packages/server/src/api/enrollments.ts` (new), the `enrollment` branch of the dispatch (one function PR 1 leaves as a stub), `packages/cli/src/enroll.ts` (new) | Concurrency: N exchanges racing on one code never leave more than `replicas` live, on both engines; contention freezes and the next use is `frozen`; supersession after overlap; the overlap window works; `sources` refused at the exchange and per request; `pending` → approve → use. **Live:** a throwaway Railway project (`coffre-ovn-<W#>`): enroll, restart, copy the code to a second service, watch it freeze. |
-| **4. Live policy** | the freeze routes and pages; `limit` in the gate; alerts and `alert(…)` delivery; `narrow` | `packages/server/src/api/freezes.ts` (new), `…/api/narrow.ts` (new), `…/alerts.ts` (new), the counters' half of `gate.ts` (after PR 1), `packages/cli/src/freeze.ts` (new) | Freeze then the next request refused, on HTTP and on a tunnel within one recheck (pushed: at once); lift restores; who may freeze or lift; narrow ⊆ parent (a Hegel property over random constraints); a child dies with any ancestor; a child cannot read, mint or renew; limits with 429 and one alert per window. |
-| **5. SDK and sidecar** | `@coffre/client/workload` and its proofs; `fromCoffre`; `…/workload/postgres`; `coffre serve`; `coffre run --service` in key-bound mode | `packages/client/src/workload.ts` (new), `…/workload-proofs.ts` (new), `…/workload-postgres.ts` (new), `packages/cli/src/serve.ts` (new), the workload branch of `packages/cli/src/workload.ts` | Against a fake server first (the doc's wire format), then the real one once PR 1 lands: renew at half-life, re-prove before `notAfter`, the nonce retry, re-enroll on `fenced`; OpenAI's and Stripe's SDKs through `coffre.fetch`; `pg` through `connect`; the key is non-extractable (`exportKey` rejects); nothing written to disk or env. The packed client still loads on Node 20, 22 and 24 (`test:consumer`). |
-| **6. Cloudflare** | `CoffreWorkload` (`WorkerEntrypoint` with `props`); the `cloudflare` binding; `coffre init` and the examples' wiring of `GATES` and the entrypoint | `packages/server/src/cloudflare-workload.ts` (new), `packages/server/src/cloudflare-handler.ts`, `examples/workers/*`, `packages/cli/src/init.ts` | A miniflare test with two Workers, props naming a service with and without a binding; freeze; limits. Conformance: a Worker with props for an unbound service gets nothing. **Live:** two throwaway Workers on Erwin's personal account (`d56cef42…`), `coffre-ovn-<W#>-*`, deleted and verified gone. |
-| **7. Minting and `verify`** | `minters` (`assumeRole`, `githubInstallation`, `r2Temporary`); `{mint:…}` in rules; `sigv4({ minted })`; the `mint` and `verify` operations; `hmac` and `stripeSignature` | `packages/server/src/plugins/mint/*.ts` (new), `…/plugins/verify.ts` (new), the `mint` and `verify` cases of `credential-proxy.ts`'s `compute` (after PR 1) | A fake STS and a fake GitHub; caching until 60 s before expiry, settled values only; delivered mint refused unless listed; `credential.mint` entries; Stripe's own test vectors for `stripeSignature`. **Live:** `AssumeRole` into a throwaway role (`coffre-ovn-<W#>`), deleted after. |
+| **0. Foundation** | Pure code, schema and types: `dpop.ts` (`createProof`, `verifyProof`, `thumbprint`, `canonicalHtu`, `canonicalRequest` for `req`); `constraintsAllow` and `intersect` (8.4); `freezeTarget`; `BindingPolicy`, `checkPolicy` and the new `WORKLOAD_PROFILES` with their `REQUIRED_CLAIMS`; the token kinds; the `Gate` type; migration `0015_workload_access` for both engines, with SQLite's rebuild; the schema; the MAC kinds | `packages/core/src/identity/dpop.ts` (new), `packages/core/src/identity/constraints.ts` (new), `…/identity/tokens.ts`, `…/identity/workloads.ts`, `packages/db/src/schema.ts`, `packages/db/src/migrations/*/0015_*`, `packages/db/src/grants.ts`, `packages/server/src/auth-rows.ts` | Hegel properties: proofs round-trip, and every single-field mutation is refused (`req` included: a changed query, header or body byte); the `(r, n−s)` twin has the same `jti`; the thumbprint is canonical whatever the JSON order; `canonicalHtu` is idempotent and keeps percent-encoding; `checkPolicy` is canonical (one digest per policy); `intersect` ⊆ both arguments; `constraintsAllow` against a reference over generated paths with every dot-segment and percent-encoding. The migration applies on both engines, SQLite's rebuild keeps every row and index, and 0.11's suite passes on the new schema (`pnpm test:compat`). |
+| **1. Sessions** | `POST /api/auth/workload` with `PROOFS` and `oidc` (audience naming the key, `(proof, jkt)` spending, the explicit profile filter in both exchanges), renew, logout; `authenticateRequest`'s DPoP path and `WORKLOAD_ROUTES`; the vault's required `reads` and `use_only`; `PluginContext.workload` and `use(caller)`; the proxy, `sign`, `presign` and the tunnel accepting a workload caller (forwarding only `hdr`, `constraintsAllow` on the resolved target, `limit`, sockets named by session); the whole gate (Node, and the `CoffreGates` Durable Object); the one statement of 5.3; alerts and `alert(…)` delivery; `useOnly`; the `GATES` wiring in `examples/*`, `dev/deployment` and `coffre init`, and `init` writing `useOnly: true` | `packages/server/src/api/workloads.ts`, `…/auth.ts`, `…/auth-routes.ts`, `…/api/signin.ts`, `…/plugins.ts`, `…/plugins/credential-proxy.ts`, `…/cloudflare-sockets.ts`, `…/gate.ts` (new), `…/cloudflare-gates.ts` (new), `…/alerts.ts` (new), `…/cloudflare-handler.ts`, `packages/vault/src/vault.ts`, `packages/core/src/vault.ts`, `packages/core/src/access.ts`, `examples/*/app/src/coffre.ts`, `examples/*/app/src/server.ts`, `examples/*/app/wrangler.jsonc`, `dev/deployment/*`, `packages/cli/src/init.ts` | An exchange per proof shape; a token without its key is refused; a replayed proof is refused, including across a gate restart (a new epoch); `use_dpop_nonce`, then success; a header outside `hdr` is not forwarded; a changed body is refused; refusal outside `WORKLOAD_ROUTES`; the vault refuses `reveal` with `use_only` and lets listed keys through; revocation and freeze on the next request despite a warm value cache; limits answer 429 with one alert per window; `request-cost.test.ts` (one app statement, no vault call, warm); `bench:workers` numbers in the PR. |
+| **2. Proofs** | the `aws` verifier; the `kubernetes`, `gcp`, `azure`, `fly` and `vercel` profiles; every new `coffre trust` flag (`--aws`, `--kubernetes`, `--gcp`, `--azure`, `--fly`, `--vercel`, `--enrollment`, `--cloudflare`, `--reads`, `--source`, `--replicas`) | `packages/server/src/workloads/aws.ts` (new), `…/workloads/profiles.ts` (new), its `PROOFS` entry, `packages/cli/src/trust.ts` | A fake STS that checks SigV4 with `@smithy/signature-v4`; `x-coffre-key` not among `SignedHeaders` refused; another region host, a non-STS URL, another body, an extra header and a redirect each refused; root and federated users refused; the spent signature; fixture tokens per profile, each with a required claim missing refused; a recreated role (new `AROA…`) refused; an Azure token twice with two keys gives two sessions, and twice with one key is replayed. **Live:** a `GetCallerIdentity` signed with the `erwinkn-mgmt` SSO credentials against real STS (no resources), and a throwaway Lambda's role (`coffre-ovn-<W#>`, deleted after). |
+| **3. Enrollment** | the `enrollments` routes (mint with its scope, promote); `coffre enroll` and `coffre approve`; capacity, contention through `run`, supersession, `sources` with `clientAddress`, `approve` | `packages/server/src/api/enrollments.ts` (new), `…/workloads/enrollment.ts` (new, its `PROOFS` entry), `packages/cli/src/enroll.ts` (new) | Concurrency: N exchanges racing on one code never leave more than `replicas` live, on both engines; a crash's restart is admitted within 90 s and never freezes; three minutes of `busy` freezes; supersession at full `replicas`, and a failed deploy keeps the old code; a Viewer-minted code holds a Viewer's scope and no sensitive value; `sources` refused at the exchange and per request, and a null address is refused; `pending`, then approve, then use. **Live:** a throwaway Railway project (`coffre-ovn-<W#>`): enroll, restart, copy the code to a second service, watch it freeze. |
+| **4. Freeze and narrow** | the freeze routes and `coffre freeze`/`unfreeze`; `narrow` | `packages/server/src/api/freezes.ts` (new), `…/api/narrow.ts` (new), `packages/cli/src/freeze.ts` (new) | Freeze, then the next request is refused on HTTP, and on a tunnel within one recheck; lift restores; who may freeze or lift each target; narrow ⊆ parent; a child dies with any ancestor; a child cannot read, mint or renew; `/v1/refunds/%2e%2e/charges` and `/v1/refundsX` refused for a child of `/v1/refunds`. |
+| **5. SDK and sidecar** | `@coffre/client/workload` and its proofs; `fromCoffre`; `…/workload/postgres`; `coffre serve`; `coffre run --service` in key-bound mode; the CLI's tunnel listener speaking DPoP | `packages/client/src/workload.ts` (new), `…/workload-proofs.ts` (new), `…/workload-postgres.ts` (new), `packages/client/package.json` (its exports), `packages/cli/src/serve.ts` (new), `packages/cli/src/workload.ts`, `packages/cli/src/tunnels.ts` | Against a fake server first (this doc's wire format), then the real one once PR 1 lands: renewal (hourly, and every 30 s for enrollment), re-proof before `notAfter`, the nonce retry and the freshest nonce, `busy` retries; `hdr` and `req` match what the server recomputes; OpenAI's SDK through `coffre.fetch`; `pg` through `connect`; the key is non-extractable (`exportKey` rejects); nothing written to disk or env. The packed client still loads on Node 20, 22 and 24 (`test:consumer`). **Live:** a GitHub Actions workflow in a scratch repository of erwinkn, and `kind` in Docker with the sidecar. |
+| **6. Cloudflare** | `CoffreWorkload` (`WorkerEntrypoint` with `props`); the `cloudflare` binding's server side; its example wiring, after PR 1 | `packages/server/src/cloudflare-workload.ts` (new); after PR 1 merges, the entrypoint's export lines in `examples/workers` and `init.ts` | A miniflare test with two Workers, props naming a service with and without a binding; freeze; limits. Conformance: a Worker with props for an unbound service gets nothing. **Live:** two throwaway Workers on Erwin's personal account (`d56cef42…`), `coffre-ovn-<W#>-*`, including whether a preview version keeps `props`; deleted and verified gone. |
+| **7. Minting and `verify`** | `minters` (`assumeRole`, `githubInstallation`, `r2Temporary`); `{mint:…}` in rules; `sigv4({ minted })`; the `mint` and `verify` operations; `hmac` and `stripeSignature` | `packages/server/src/plugins/mint/*.ts` (new), `…/plugins/verify.ts` (new); after PR 1, the `mint` and `verify` cases of `credential-proxy.ts`'s `compute` | A fake STS and a fake GitHub; caching until 60 s before expiry, settled values only; delivered mint refused unless listed, and refused for a sensitive parent without R32's flag; `credential.mint` entries; Stripe's own test vectors for `stripeSignature`. **Live:** `AssumeRole` into a throwaway role (`coffre-ovn-<W#>`), deleted after. |
 | **8. Formal** | `formal/Workload.tla` and its configurations; `docs/formal.md`'s section | `formal/Workload*.tla`, `formal/Workload*.cfg`, `docs/formal.md` | Section 12.1: each invariant holds, and each fails without its protection. |
-| **9. Pages** | the binding forms for the new profiles; `reads` flagged per platform; a service's sessions, with their last address; the Freeze buttons; the alert filter | `packages/ui/src/pages/*` (the service page and its dialogs) | The UI suite. The page shows "exposed if <platform> is breached" for every listed key. |
+| **9. Pages** | the binding forms for the new profiles; `reads` flagged per platform; a service's sessions, with their last address; codes and their scope; the Freeze buttons; the alert filter | `packages/ui/src/pages/*` (the service page and its dialogs) | The UI suite. The page shows "exposed if <platform> is breached" for every listed key. |
 
 **Docs.** Each PR updates the docs for what it builds. PR 5 writes
-`docs/workloads.md`, the per-platform guide (section 9.4 and the playbook,
-7.3).
+`docs/workloads.md`, the per-platform guide (9.4 and the playbook in 7.3).
 
 ### 12.1 Verification
 
@@ -1215,12 +1464,15 @@ invariant must hold, and must fail with its named protection removed:
 | Invariant | Holds because | Fails without |
 |---|---|---|
 | `CopyIsUseless`: every accepted request was signed by the holder of its session's key | the proof's signature and `jkt` | checking `jkt` against the row |
+| `ForwardedIsSigned`: what Coffre forwards upstream (method, URL, query, headers, body) is what the key signed | `req` recomputed and only `hdr` forwarded | forwarding unlisted headers, or skipping `req` |
 | `ProofOnce`: no `(jkt, jti)` is accepted twice, across gate restarts | nonce epochs | the epoch (a restart forgets `jti`s) |
-| `FreezeBound`: no use is accepted after a freeze of its target commits, and no tunnel byte flows after commit + `Recheck` | the per-request check, uncached | the check before the value cache (a cached session) |
-| `RevokeBound`: the same for revoking a session, an ancestor, a binding or a member | the same | ancestors in the check |
-| `Replicas`: live sessions per enrollment ≤ `replicas`, under concurrent exchanges | fencing under the log head | the head lock at the exchange's commit |
-| `Superseded`: no session is made from, or used under, an older code once a newer code's session is older than the overlap | the derived check at exchange and per request | the per-request half |
-| `NarrowSubset`: a child's rights ⊆ its parent's, at every state | intersection at creation, and ancestors checked live | the ancestor check (a parent narrowed by revocation) |
+| `FreezeBound`: no use is accepted after a freeze of its target commits, and no tunnel byte flows after commit + `Recheck` | the per-request statement, before any cache | the check before the value cache (a cached session) |
+| `RevokeBound`: the same for revoking a session, an ancestor or a binding, superseding a code, and removing the member | the same | ancestors in the statement |
+| `Replicas`: live sessions per code ≤ `replicas`, under concurrent exchanges | the capacity count under the log head | the head lock at the exchange's commit |
+| `NoFalseContention`: with no foreign holder of a code, crashes and restarts of its replicas never freeze it | liveness by expiry (90 s) shorter than the contention run (3 min); nothing live is fenced | fencing the oldest session (r1's design) |
+| `Superseded`: no session is made from, or used under, a code once an `enrollment.supersede` names it | the tombstone check at the exchange and per request | the per-request half |
+| `MinterBound`: a code's sessions never hold more than its minter held at minting, and read a sensitive value only if the minter was an Owner | the code's scope, fixed at minting under its MAC | intersecting with the binding's scope alone |
+| `NarrowSubset`: a child's rights ⊆ its parent's, at every state, on the URL sent upstream | intersection at creation, `constraintsAllow` on the resolved target, ancestors checked live | the ancestor check (a parent ended), or matching the path as received |
 | `NotAfter`: no session is usable, or renewed, past `notAfter` | the row's `not_after` under MAC | the renew bound |
 
 **Property tests** (Hegel, `pnpm test:properties`):
@@ -1231,7 +1483,8 @@ invariant must hold, and must fail with its named protection removed:
 - policy canonicalization;
 - CIDR membership against a reference over generated addresses, IPv4 and
   IPv6;
-- narrow intersection ⊆, over random constraint sets;
+- narrow intersection ⊆, and `constraintsAllow` on resolved URLs, over random constraint sets and paths with every encoding;
+- `canonicalRequest` against a reference, over generated queries, header lists and bodies;
 - a model-based test of the gate: random sequences of admit, rotate and
   restart against a reference set, and the reference must agree.
 
@@ -1263,17 +1516,18 @@ worker, deleted and then verified gone through the provider's API:
      need a per-workload view anyway;
    - (d) **one object per workload**, which also holds limits and liveness.
 
-   (d) has a ceiling of about 2,000 requests a second per workload before
-   sharding. *Reversible:* a workload past it gets several gates, by session
+   (d) has a ceiling of about 1,000 requests a second per workload (a
+   Durable Object's soft limit) before sharding. *Reversible:* a workload past it gets several gates, by session
    hash, with limits split.
 3. **Workloads read only what their binding lists.** The list lives on the
    binding, because the exposure belongs to the platform. *Alternative:* a
    fourth key level, `sealed`, which would decide by key and not by where
    the value lands, and would not distinguish Cloudflare from Railway.
-4. **Enrollment codes are multi-use within `replicas`, with fencing and a
-   contention freeze.** Single-use per boot turns every crash into an
-   outage. *Reversible:* `replicas: 1` with `approve: true` comes close to
-   single-use.
+4. **Enrollment codes are multi-use within `replicas`. Liveness is expiry,
+   nothing live is fenced, and three minutes of `busy` freezes.** Single-use
+   per boot turns every crash into an outage. Fencing the oldest session,
+   r1's design, froze on an ordinary crash. *Reversible:* `replicas: 1` with
+   `approve: true` comes close to single-use.
 5. **Cloudflare through `props`.** The trust root is the account's Workers
    deployers. *Alternative:* enrollment for Workers too, which would put a
    secret where none is needed.
@@ -1289,6 +1543,13 @@ worker, deleted and then verified gone through the provider's API:
    lifetime is still a value, so it is exposed and flagged as one.
 10. **A Node deployment's gate is its process.** A multi-process Node
     deployment is unsupported for workloads until it brings a shared gate.
+11. **A proof signs the whole request** (`hdr`, `req`), and Coffre forwards
+    exactly what it signs. RFC 9449 alone leaves the query, headers and body
+    open to a copier who wins the race. *Alternative:* RFC 9421 message
+    signatures, with a larger surface and no DPoP library support.
+12. **A code's scope is fixed at minting**, intersected with the minter's
+    holdings, as for any issued credential. A code is therefore never a way
+    around R32.
 
 ## 14. Later
 
@@ -1306,7 +1567,5 @@ worker, deleted and then verified gone through the provider's API:
 - **People's handles, key-bound.** `coffre run` would hold a key for its
   child and listen locally, as for workloads. Placeholders would then stop
   being bearers.
-- **Body binding** for buffered requests, a `bh` claim, if a deployment
-  needs it against an active man in the middle.
 - **Railway, Render and Heroku profiles**, the day those platforms sign a
   workload identity. Each one replaces enrollment there.
