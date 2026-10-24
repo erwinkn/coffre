@@ -176,7 +176,8 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   const ok = await writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, {
     warn: (value, message) => console.warn(message, value),
   });
-  // Upkeep, not the logging signal: a failure is said, and the beat stands on the heartbeat alone.
-  await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).catch((error: Error) => console.warn('spent tokens could not be pruned', { err: error.message }));
+  // After the heartbeat, which a failed prune never holds back, and reported as the beat's failure too.
+  const pruned = await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).then(() => null, (error: Error) => error);
   if (!ok) throw new Error('scheduled audit heartbeat failed');
+  if (pruned !== null) throw new Error(`spent tokens could not be pruned: ${pruned.message}`);
 }

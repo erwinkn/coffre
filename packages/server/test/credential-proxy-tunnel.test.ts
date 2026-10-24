@@ -566,6 +566,10 @@ test('a tunnel reaches only the hosts it names, and a private database only with
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })]);
   const session = await pluginSocket(new Request(`${ORIGIN}/use/market/dev/db`, { headers: { authorization: `Bearer ${handle}` } }), runtime, null);
   assert.equal(typeof session, 'function', 'a listed name is dialled');
+  // Its fully qualified spelling is the same host.
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@DB.Acme.Example.:5432/d' });
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })]);
+  assert.equal(typeof await pluginSocket(new Request(`${ORIGIN}/use/market/dev/db`, { headers: { authorization: `Bearer ${handle}` } }), runtime, null), 'function');
   // An address needs no list, as before.
   await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@203.0.113.7:5432/d' });
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);

@@ -571,7 +571,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     // The value is a secret: what is wrong with it is said, never what it is.
     return failure(409, `${path}'s ${tunnel.key} is no postgres:// URL`);
   }
-  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(db.host)) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
+  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(canonicalHost(db.host))) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
   if (tunnel.connect !== undefined) {
     // Inside the binding's private network, plaintext: TLS through it is no option yet.
     if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${place[2]}'s network binding does not carry: sslmode=disable, for a database inside that network`);
@@ -1257,8 +1257,8 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
   }
   // A network binding reaches a whole private network: the tunnel names the hosts in it the URL may name.
   if (tunnel.connect !== undefined && (tunnel.hosts ?? []).length === 0) throw new Error(`credentialProxy: tunnel ${name} dials through a network binding, and names the hosts it reaches there: hosts: ['10.0.1.5']`);
-  // Each as it is dialled, 127.1 as 127.0.0.1: what the URL's host is held to.
-  const hosts = tunnel.hosts?.map((host) => new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname.replace(/^\[|\]$/g, ''));
+  // Each as it is dialled, 127.1 as 127.0.0.1, db.acme.example. as db.acme.example: what the URL's host is held to.
+  const hosts = tunnel.hosts?.map((host) => canonicalHost(new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname));
   if (!insecure && tunnel.connect === undefined && hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams, or a network binding (connect), reaches`);
   return { ...tunnel, ...(hosts === undefined ? {} : { hosts }) };
 }
