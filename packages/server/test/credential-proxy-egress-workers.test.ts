@@ -129,4 +129,9 @@ test("a workload's 55 MB document that declares its Content-Digest streams out o
   assert.equal(whole.length, 1);
   assert.equal(broken.length, 1);
   assert.ok(broken[0]! < body.length, `the upstream got ${broken[0]} bytes of ${body.length}`);
+  // An empty body under that digest: whole once its headers are sent, so refused before they are.
+  const empty = await send(new Uint8Array(0));
+  assert.deepEqual([empty.status, ((await empty.json()) as { message: string }).message], [400, 'the body is not what its Content-Digest says']);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual([whole.length, broken.length], [1, 1], 'nothing of it reached the upstream');
 });

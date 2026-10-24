@@ -14,7 +14,7 @@ import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-import { contentDigest, MAX_DIGESTED_BODY, UNSIGNED_HEADERS } from '@coffre/client/dpop';
+import { contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_HEADERS } from '@coffre/client/dpop';
 import { askedNonce, aws, azure, CoffreError, enrollment, fly, gcp, github, kubernetes, oidc, vercel, workload, type Proof, type Workload } from '@coffre/client/workload';
 
 import { clash, environmentPaths, listOf } from './environments.ts';
@@ -175,6 +175,13 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
         } else {
           // Any other body is signed whole, so it is read whole, hashed as it comes: the chunks as they came, one copy and in
           // memory, never on disk, then its digest and length declared, which coffre streams it on by, checking the bytes.
+          const own = headers.get('content-digest');
+          let declared: string | null;
+          try {
+            declared = own === null ? null : declaredDigest(own);
+          } catch (error) {
+            return answer(400, 'bad_request', (error as Error).message);
+          }
           const chunks: Buffer[] = [];
           const hash = createHash('sha256');
           let size = 0;
@@ -184,7 +191,10 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
             hash.update(chunk);
             chunks.push(chunk);
           }
-          if (!headers.has('content-digest')) headers.set('content-digest', contentDigest(hash.digest('hex')));
+          // Its own, beside an app's digest of another algorithm, which declares nothing to coffre: the body streams all the same.
+          const ours = contentDigest(hash.digest('hex'));
+          if (own === null) headers.set('content-digest', ours);
+          else if (declared === null) headers.set('content-digest', `${own}, ${ours}`);
           headers.set('content-length', String(size));
           again = true;
           body = () => {

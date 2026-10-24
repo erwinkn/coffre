@@ -489,6 +489,12 @@ test('a body other than its Content-Digest says, short of its length, past it, o
   const none = await read((await pluginRoute(new Request(url, { method: 'POST', headers: { 'content-digest': contentDigest(empty), 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: { 'content-digest': contentDigest(empty) }, body: empty } }) }, body: chunked(new Uint8Array(0)), duplex: 'half' } as RequestInit), runtime, IP))!);
   assert.equal(none.status, 200, JSON.stringify(none.body));
   assert.equal(reached.at(-1)!.length, 0);
+  // Another digest on it, added on the way: an empty request is whole once its headers are, so it is refused before any go.
+  const [whole, cut] = [reached.length, broken.length];
+  const stale = await read((await pluginRoute(new Request(url, { method: 'POST', headers: { 'content-digest': contentDigest(other), 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: {}, body: empty } }) }, body: chunked(new Uint8Array(0)), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.deepEqual([stale.status, stale.body.message], [400, 'the body is not what its Content-Digest says']);
+  await sleep(50);
+  assert.deepEqual([reached.length, broken.length], [whole, cut], 'nothing of it reached the upstream');
   // An app's own digest of another algorithm declares nothing: read whole, under 16 MiB, and sent on as it is.
   const sha512 = `sha-512=:${createHash('sha512').update(bytes).digest('base64')}:`;
   const own = await use(held, 'POST', '/use/yousign/v3/documents', { headers: { 'content-digest': sha512 }, body: 'a small body' });

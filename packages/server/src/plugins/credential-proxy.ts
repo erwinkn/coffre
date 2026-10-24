@@ -988,7 +988,8 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
   } catch (error) {
     return failure(400, (error as Error).message);
   }
-  const streamed = (amz || digest !== null) && request.body !== null && /^\d+$/.test(declared);
+  // An empty body is checked before anything goes: with no last byte to hold back, its request is whole once its headers are.
+  const streamed = (amz || (digest !== null && Number(declared) > 0)) && request.body !== null && /^\d+$/.test(declared);
   if (streamed && amz && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
   if (streamed && !amz && Number(declared) > MAX_DIGESTED_BODY) {
     return failure(413, `a body that declares its digest streams through the proxy up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes: send a larger one in parts`);

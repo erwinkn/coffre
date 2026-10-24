@@ -19,7 +19,9 @@
     upload in flight. Size the sidecar's memory limit for the uploads you
     run at once: the process's own (about 120 MB at peak, idle) plus up to
     95 MiB for each. A 55 MB document raised its peak by 70 MB. Past 95
-    MiB, the sidecar answers 413 before sending anything.
+    MiB, the sidecar answers 413 before sending anything. An app's own
+    `Content-Digest` of another algorithm keeps its member, with the
+    sidecar's `sha-256` beside it.
   - **The SDK** (`@coffre/client/workload`) declares the digest of every
     body it reads whole, and streams a body that declares its own. A
     `Content-Digest` the app set stays as it is; one with no `sha-256`

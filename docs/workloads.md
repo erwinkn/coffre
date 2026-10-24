@@ -486,7 +486,9 @@ a body near the limit gets coffre's answer, not the zone's. **Size the
 sidecar's memory limit for the uploads you run at once**: the process's
 own (about 120 MB at its peak in the test, signed in and idle), and up to
 95 MiB more for each upload in flight. A 55 MB Yousign document raised the
-sidecar's peak by 70 MB. An S3 upload, which
+sidecar's peak by 70 MB. An app's own `Content-Digest` of another
+algorithm (`sha-512`) keeps its member, and the sidecar adds its `sha-256`
+beside it. An S3 upload, which
 declares its own hash, streams through without being held, up to 5 GiB.
 
 ```sh

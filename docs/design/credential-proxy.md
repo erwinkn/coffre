@@ -629,7 +629,9 @@ hashes the bytes as they pass (`scanned`, with the handle or session-token
 check and the length) and holds back the last of them until the digest
 matches. A body with other bytes, short of its length or past it, is cut
 off before that last byte, so the upstream, which was told the length,
-never gets a complete request, and the app gets a 400 naming why. On
+never gets a complete request, and the app gets a 400 naming why. An
+empty body has no last byte to hold back, and its request is whole once its
+headers are sent, so it is checked before anything goes. On
 Workers, the length goes with the body through `FixedLengthStream`; on
 Node, fetch sends the header as given and errors the request when the body
 does. A `Content-Digest` whose `sha-256` member is no SHA-256 is a 400; one

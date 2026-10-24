@@ -275,6 +275,15 @@ test('through the sidecar, a 55 MB document is held once, in memory, hashed as i
   const after = peak(run.child.pid!);
   if (before !== null && after !== null) assert.ok(after - before < 1.5 * body.length, `the sidecar grew by ${after - before} bytes for a body of ${body.length}`);
 
+  // An app's own digest of another algorithm stays, beside the sidecar's, which the body streams by; a sha-256 that is none is refused here.
+  const sha512 = `sha-512=:${createHash('sha512').update('a receipt').digest('base64')}:`;
+  const own = await fetch(`${listener}/use/yousign/v3/receipts`, { method: 'POST', headers: { 'content-digest': sha512 }, body: 'a receipt' });
+  assert.equal(own.status, 200, await own.text());
+  assert.equal(coffre.forwarded.at(-1)!.headers['content-digest'], `${sha512}, sha-256=:${createHash('sha256').update('a receipt').digest('base64')}:`);
+  const malformed = await fetch(`${listener}/use/yousign/v3/receipts`, { method: 'POST', headers: { 'content-digest': 'sha-256=:bm90IGEgZGlnZXN0:' }, body: 'a receipt' });
+  assert.equal(malformed.status, 400);
+  assert.match(((await malformed.json()) as { message: string }).message, /Content-Digest declares a body's SHA-256 once/);
+
   // An empty POST declares the empty body's digest, and streams as any other.
   const empty = await fetch(`${listener}/use/yousign/v3/ping`, { method: 'POST' });
   assert.deepEqual(await empty.json(), { size: 0, sha256: createHash('sha256').digest('hex') });
