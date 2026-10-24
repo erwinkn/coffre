@@ -9,6 +9,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { appendEntries, KeyRetired, lockLogHead } from '@coffre/db/log';
+import { SNAPSHOT } from '@coffre/db/dialect';
 import { asc, desc, eq } from 'drizzle-orm';
 
 import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/app.ts';
@@ -19,7 +20,9 @@ import { insertBinding, insertConnection, insertOauthClient, memberStanding } fr
 import { insertSession } from '../src/db/workloads.ts';
 import { sealAnchor } from '../src/anchor.ts';
 import { toErrorBody } from '../src/api/errors.ts';
-import { finishRotation, keyState, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
+import { finishRotation, keyState, keyStateNow, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
+import { newestMove } from '../src/db/rotation.ts';
+import { postgresOnly } from './db/engine.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
@@ -175,7 +178,7 @@ test('from its first step, the old key writes no more; after it, it verifies onl
   const old = startUnder(A);
   const next = startUnder(B, [A]);
   // One step, as a Worker takes it: the rotation is under way, and A is retired already.
-  assert.equal((await rotateStep(deps.db, next, 2)).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, next, { rows: 2 })).kind, 'rotating');
   const late = await old.db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])).catch((error: unknown) => error);
   assert.ok(late instanceof KeyRetired);
   // Refused as an instance a newer deployment replaces, not a bug.
@@ -212,8 +215,8 @@ test('from its first step, the old key writes no more; after it, it verifies onl
 
 test('a rotation cut short goes on from its last step, and every row is signed once', async () => {
   const first = startUnder(B, [A]);
-  assert.equal((await rotateStep(deps.db, first, 3)).kind, 'rotating');
-  assert.equal((await rotateStep(deps.db, first, 3)).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, first, { rows: 3 })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, first, { rows: 3 })).kind, 'rotating');
   // The process dies here. Another start, which knows nothing of it, goes on from where the log says.
   const second = startUnder(B, [A]);
   const standing = await keyState(deps.db, second);
@@ -231,7 +234,7 @@ test('starts that race each other rotate once, each step going on from the one b
   const starts = Array.from({ length: 6 }, () => startUnder(B, [A]));
   await Promise.all(starts.map(async (start) => {
     for (let state = await keyState(deps.db, start); state.kind === 'rotating' || state.kind === 'sealing';) {
-      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, 2) : await finishRotation(deps.db, start);
+      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, { rows: 2 }) : await finishRotation(deps.db, start);
     }
   }));
   const entries = await appEntries();
@@ -290,7 +293,7 @@ test('a key the log refuses: the wrong one, one the log moved on from, or not th
     return state.kind === 'refused' ? state.reason : state.kind;
   };
   assert.equal(await refusal(startUnder(C)), `the app's entries are under ${appLogKey(A).keyId}, a key this app does not hold: it was given the wrong app key, or the one it replaced is missing from previousAuditChainKeys`);
-  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), 2)).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2 })).kind, 'rotating');
   assert.equal(await refusal(startUnder(C, [A, B])), `a rotation to ${appLogKey(B).keyId} is under way, and this app's key is ${appLogKey(C).keyId}: deploy that one as auditChainKey to finish it`);
   assert.equal(await refusal(startUnder(B)), `the rotation under way moves from ${appLogKey(A).keyId}, a key missing from previousAuditChainKeys: put it back to finish it`);
   await settleKey(startUnder(B, [A]));
@@ -400,4 +403,41 @@ test('a CLI login approved but not yet taken is used up: everyone signs in again
   const next = startUnder(B, [A]);
   assert.equal(await keyReady(next), null);
   assert.deepEqual(await next.signin!.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null }), { status: 'expired' });
+});
+
+test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', postgresOnly('SQLite runs one transaction at a time'), async () => {
+  const keys = startUnder(B, [A]);
+  // Its first read sees no step yet; another start's first step commits before the next.
+  const seen = await deps.db.transaction(async (tx) => {
+    const first = await newestMove(tx);
+    assert.equal((await rotateStep(db.owner, keys, { rows: 2 })).kind, 'rotating');
+    return { first, then: await keyState(tx, keys) };
+  }, SNAPSHOT);
+  assert.equal(seen.first, undefined);
+  assert.deepEqual(seen.then, { kind: 'rotating', from: A, next: { table: 'identities', after: null } }, 'the whole verdict is from before the step');
+  // Read now, it is the step's: still rotating, never settled halfway.
+  assert.equal((await keyStateNow(deps.db, keys)).kind, 'rotating');
+});
+
+test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', postgresOnly('SQLite runs one transaction at a time'), async () => {
+  const next = startUnder(B, [A]);
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let locked = () => {};
+  const holding = new Promise<void>((resolve) => (locked = resolve));
+  const held = db.owner.transaction(async (tx) => {
+    await lockLogHead(tx);
+    locked();
+    await released;
+  });
+  await holding;
+  try {
+    assert.deepEqual(await rotateStep(deps.db, next, { wait: false }), { kind: 'busy' });
+    assert.deepEqual(await keyReady(next), { kind: 'rotating' });
+    assert.equal((await appEntries()).filter((entry) => entry.action === 'key.reseal').length, 0);
+  } finally {
+    release();
+    await held;
+  }
+  assert.equal(await keyReady(next), null);
 });

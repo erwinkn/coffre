@@ -1051,10 +1051,11 @@ What it changes, and what it keeps:
 **When may the old key go?** Keep it in `previousAuditChainKeys` for as
 long as the log holds entries written under it, which is for good: it
 verifies them, and nothing else. The app serves without it once the
-rotation is done, the audit watch goes on from its anchor, and the audit
-page from the newest checkpoint; but a walk of the whole log, `coffre
-verify log` included, stops at the first entry under a key it does not
-hold. Escrow it with the vault keys.
+rotation is done, but the audit watch needs it until its anchor has
+verified past `key.rotate` (readiness green after a beat or two), or it
+finds the old key's entries it had still to walk; and a walk of the whole
+log, `coffre verify log` included, stops at the first entry under a key it
+does not hold. Escrow it with the vault keys.
 
 ## MCP clients
 

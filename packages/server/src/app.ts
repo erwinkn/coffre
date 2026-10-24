@@ -19,7 +19,7 @@ import { migrated } from '@coffre/db/schema-version';
 
 import { auditHead, pruneSpentTokens } from './db/queries.ts';
 import { anchorIsOwn } from './anchor.ts';
-import { finishRotation, keyState, rotateStep, type KeyState } from './key-rotation.ts';
+import { finishRotation, keyStateNow, rotateStep, type KeyState } from './key-rotation.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
@@ -192,8 +192,9 @@ export type KeyHeld = { kind: 'rotating' } | { kind: 'refused'; reason: string }
 /**
  * Whether the log is under the app's key: null once it is, known from then
  * on, for the configuration's life. Until then, a step of the rotation to
- * it, each call one (key-rotation.ts): rows signed again, or, once they
- * all are, the audit anchor sealed again and `key.rotate`. What still
+ * it, each call one (key-rotation.ts), if no other start holds the log's
+ * head (`wait` waits for it): rows signed again, or, once they all are,
+ * the audit anchor sealed again and `key.rotate`. What still
  * holds the app back: the rotation; a key the log refuses, which only
  * another deployment of the app's keys changes; or, with keys it replaced
  * configured, a database that cannot be reached, as nothing may be
@@ -202,15 +203,19 @@ export type KeyHeld = { kind: 'rotating' } | { kind: 'refused'; reason: string }
  * reached lets the request through, as `schemaReady` does, to meet the
  * outage as it would anyway.
  */
-export async function keyReady(runtime: CoffreRuntime): Promise<KeyHeld | null> {
+export async function keyReady(runtime: CoffreRuntime, { wait = false }: { wait?: boolean } = {}): Promise<KeyHeld | null> {
   if (runtime.appKey.settled) return null;
   let state: KeyState;
   try {
-    state = await keyState(runtime.db, runtime);
-    if (state.kind === 'rotating') state = await rotateStep(runtime.db, runtime);
+    state = await keyStateNow(runtime.db, runtime);
+    if (state.kind === 'rotating') state = await rotateStep(runtime.db, runtime, { wait });
     if (state.kind === 'sealing') {
-      await resealAnchor(runtime, state.from);
-      state = await finishRotation(runtime.db, runtime);
+      // A store that cannot be used holds the rotation back, and says so: the next step tries again.
+      const sealed = await resealAnchor(runtime, state.from).then(() => true, (error: unknown) => {
+        console.error('the audit anchor could not be sealed again under the new app key: the rotation waits for it', logged(error));
+        return false;
+      });
+      if (sealed) state = await finishRotation(runtime.db, runtime, { wait });
     }
   } catch (error) {
     if (!isUnreachable(error)) throw error;
@@ -232,7 +237,7 @@ export async function keyReady(runtime: CoffreRuntime): Promise<KeyHeld | null> 
 export async function settleKey(runtime: CoffreRuntime): Promise<void> {
   try {
     if (!(await schemaReady(runtime))) return;
-    while ((await keyReady(runtime))?.kind === 'rotating');
+    while ((await keyReady(runtime, { wait: true }))?.kind === 'rotating');
   } catch (error) {
     console.error('the rotation to the app key could not go on: each request tries again', logged(error));
   }

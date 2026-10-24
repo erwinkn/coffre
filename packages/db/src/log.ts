@@ -126,6 +126,20 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
   return head;
 }
 
+/**
+ * Lock the log's head if no one holds it, without waiting: whether it is
+ * held now. For work any caller may do, of which one at a time is enough,
+ * which a request that finds the head taken leaves to the one that has it.
+ * SQLite's transactions hold the whole file, so the head is always free.
+ */
+export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
+  if (engineOf(tx) === 'sqlite') return (await lockedHead(tx)).length > 0;
+  const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(
+    sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`,
+  );
+  return rows.length > 0;
+}
+
 const lockedHead = prepared((db) => {
   const { auditChainHead } = tablesOf(db);
   return forUpdate(

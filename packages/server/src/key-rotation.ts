@@ -21,8 +21,9 @@
 //   (the anchor sealed again)
 //   key.rotate  { from: 'app:1f…' }
 import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
-import type { Database, Queryable } from '@coffre/db';
-import { lockLogHead } from '@coffre/db/log';
+import type { Database, Queryable, Transaction } from '@coffre/db';
+import { SNAPSHOT } from '@coffre/db/dialect';
+import { lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
 
 import { signedAgain, signedBy, type AuthRow, type AuthTable } from './auth-rows.ts';
 import { appendAudit, appLogKey, type AppKeys, type AuditEntry } from './db/audit.ts';
@@ -36,7 +37,7 @@ export const SIGNED_TABLES: readonly AuthTable[] = [
 /** The credentials a rotation signs out: people's sessions, the browser's and the CLI's, which a sign-in gives back. */
 const SESSIONS = new Set(['browser', 'cli']);
 
-/** Rows a step reads and signs again, at most: some 2 ms of CPU warm, 5 cold, well within a Worker's 10. */
+/** Rows a step reads and signs again, at most: their MACs some 1 to 2.5 ms of CPU in Node, warm or cold, to keep a step within a Worker's 10. */
 export const STEP_ROWS = 100;
 
 /** Rows a step names in its entry that it could not sign again, at most; the count is whole. */
@@ -59,7 +60,9 @@ export type KeyState =
   | { kind: 'settled' }
   | { kind: 'rotating'; from: Buffer; next: Cursor }
   | { kind: 'sealing'; from: Buffer }
-  | { kind: 'refused'; reason: string };
+  | { kind: 'refused'; reason: string }
+  /** A step that found the head taken, and left the step to whoever holds it. */
+  | { kind: 'busy' };
 
 /**
  * Where the app stands, from the log. Its newest `key.reseal` or
@@ -111,9 +114,31 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
     if (newest !== undefined && !authentic(newest, under!)) return refused(forged(newest));
   }
   for (const { id, key } of previous) {
-    if (!moved.has(id) && (await wroteUnder(db, id))) return { kind: 'rotating', from: key, next: START };
+    if (moved.has(id)) continue;
+    if (await wroteUnder(db, id)) return { kind: 'rotating', from: key, next: START };
+    unused(id);
   }
   return { kind: 'settled' };
+}
+
+/**
+ * Where the app stands, as `keyState` reads it in one snapshot: its reads
+ * see the log as of one moment, so a step another start commits between
+ * two of them cannot make the verdict a mix of before and after it, such
+ * as `settled` halfway through. No lock: steps take the head themselves.
+ */
+export function keyStateNow(db: Database, keys: AppKeys): Promise<KeyState> {
+  return db.transaction((tx) => keyState(tx, keys), SNAPSHOT);
+}
+
+/**
+ * Whether a step may go on: the head taken, waiting for it, or, with
+ * `wait: false`, only if it is free; a step that finds it taken leaves the
+ * rotation to the start that holds it, and says it is still under way.
+ */
+async function headFor(tx: Transaction, wait: boolean): Promise<boolean> {
+  if (wait) await lockLogHead(tx);
+  return wait || lockLogHeadIfFree(tx);
 }
 
 /**
@@ -126,10 +151,10 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
  * before, and named. Where the app stands after: `sealing` once every row
  * is signed.
  */
-export async function rotateStep(db: Database, keys: AppKeys, rows = STEP_ROWS): Promise<KeyState> {
+export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS, wait = true }: { rows?: number; wait?: boolean } = {}): Promise<KeyState> {
   const unsigned: { table: AuthTable; id: string }[] = [];
   const state = await db.transaction(async (tx): Promise<KeyState> => {
-    await lockLogHead(tx);
+    if (!(await headFor(tx, wait))) return busy;
     const standing = await keyState(tx, keys);
     if (standing.kind !== 'rotating') return standing;
     const { from } = standing;
@@ -181,9 +206,9 @@ export async function rotateStep(db: Database, keys: AppKeys, rows = STEP_ROWS):
  * transaction under the log's head that reads again where it stands. From
  * here on the old key vouches for nothing. Where the app stands after.
  */
-export async function finishRotation(db: Database, keys: AppKeys): Promise<KeyState> {
+export async function finishRotation(db: Database, keys: AppKeys, { wait = true }: { wait?: boolean } = {}): Promise<KeyState> {
   return db.transaction(async (tx): Promise<KeyState> => {
-    await lockLogHead(tx);
+    if (!(await headFor(tx, wait))) return busy;
     const standing = await keyState(tx, keys);
     if (standing.kind !== 'sealing') return standing;
     const fromId = appLogKey(standing.from).keyId;
@@ -192,12 +217,28 @@ export async function finishRotation(db: Database, keys: AppKeys): Promise<KeySt
   });
 }
 
+/** What a step answers when another holds the head: under way, for the start that holds it to go on with. */
+const busy: KeyState = { kind: 'busy' };
+
 /** What a rotation ends of a row as it signs it again: a live session, signed out; a device's approved login not yet taken, used up. */
 function endsAt(table: AuthTable, row: AuthRow, now: Date): { revokedAt: Date } | { consumedAt: Date } | null {
   const fields = row as { kind?: string; revokedAt?: Date | null; decision?: string; consumedAt?: Date | null };
   if (table === 'credentials' && SESSIONS.has(fields.kind!) && fields.revokedAt === null) return { revokedAt: now };
   if (table === 'device_authorizations' && fields.decision === 'approved' && fields.consumedAt === null) return { consumedAt: now };
   return null;
+}
+
+const told = new Set<string>();
+
+/**
+ * Said once a process or isolate: a key in previousAuditChainKeys that
+ * wrote no entry and was never moved from verifies nothing, and costs each
+ * new isolate a read of the log for its first entry.
+ */
+function unused(keyId: string): void {
+  if (told.has(keyId)) return;
+  told.add(keyId);
+  console.warn({ event: 'app_key_unused', keyId }, 'a key in previousAuditChainKeys wrote no entry of the log: it verifies nothing, and can go');
 }
 
 function refused(reason: string): KeyState {
