@@ -71,6 +71,14 @@ export async function forkEnvironment(
     }
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
+    // A sensitive value reached through a reference is never copied into the fork by value: a copy would hold it under
+    // the fork's own project, where R16 and R32 decide who reads it, so an Owner of this project could then reveal it,
+    // or read it through a service token of theirs, though the value is another project's. It stays a reference to its
+    // source, which keeps the value's project. Making one is checked as any reference is (R24, `referenceTargets`), so a
+    // fork of a key whose sensitive source the forker cannot read is refused, never copied (the vault refuses the copy too).
+    for (const item of readable.items) {
+      if (item.via !== undefined && item.secret.sensitive === true && !plan.has(item.key)) plan.set(item.key, item.secret.path);
+    }
 
     // From here, as of the protection it made, if any: each transaction below commits only while that is the newest change.
     const { ctx: protecting, id, protectedAt } = await protectedFork(ctx, place, source, slug, false);
