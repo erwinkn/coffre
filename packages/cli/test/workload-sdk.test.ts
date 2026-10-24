@@ -496,7 +496,7 @@ test("a credential's fetch reaches its own upstream only: a path that climbs out
   const { coffre, session } = await signedIn(t);
   const s3 = session.credential('s3');
   for (const path of ['/../stripe/v1/charges', '/a/../../stripe/v1/charges', '/%2e%2e/stripe/v1/charges', '..']) {
-    assert.throws(() => s3.fetch(path, { method: 'POST' }), /leaves s3's URL/, path);
+    await assert.rejects(s3.fetch(path, { method: 'POST' }), /leaves s3's URL/, path);
   }
   assert.equal(coffre.forwarded.length, 0);
   // Within it, dot segments are the path's own business.

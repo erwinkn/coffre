@@ -492,7 +492,7 @@ function surface(core: Core): Workload {
     fetch: signed,
     url,
     credential: (name) => ({
-      fetch: (path, init) => {
+      fetch: async (path, init) => {
         // A path stays under its credential: `/../stripe/…`, from an object key or a file name, would otherwise spend another.
         const base = url(name);
         const target = new URL(`${base}${path.startsWith('/') ? '' : '/'}${path}`);
