@@ -335,8 +335,19 @@ function impactSentence(weighed: readonly { impact: ImpactLine; only: string | n
 export async function protectEnvironment(ctx: ApiContext, place: ResolvedPath, on: boolean): Promise<ApiContext> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
+  refuseWorkloadAccessChange(ctx);
   if (environment.owner !== null) throw badRequest('a personal config is protected as the environment it is a config of is');
   return protectIds(ctx, project.id, [environment.id], on);
+}
+
+/**
+ * A workload's session changes no one's access (docs/design/workload-access.md,
+ * D15): protecting or unprotecting an environment that exists decides what
+ * every role reads there. A fork it makes may still be protected as its
+ * source is: a new place, which nobody reached before.
+ */
+export function refuseWorkloadAccessChange(ctx: Pick<ApiContext, 'caller'>): void {
+  if (ctx.caller.kind === 'workload') throw new ApiError('forbidden', "a workload's session issues no credential and changes no one's access", 'workload_cannot_issue');
 }
 
 /**

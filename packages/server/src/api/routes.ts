@@ -9,7 +9,7 @@ import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
-import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
+import { badRequest, forbidden, notFound } from './errors.ts';
 import { freeze, freezeInput, listFreezes, unfreeze } from './freezes.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
@@ -329,8 +329,6 @@ export const routes = {
       // The vault's to change, with no transaction of the app's open across it: so asked alone, never with a rename or an
       // archive whose refusal would leave the protection changed and the rest not.
       if (Object.keys(patch).length > 0) throw badRequest('protect or unprotect an environment on its own, not with other changes');
-      // Protection decides what every role reads there: a workload's session changes no one's access (D15).
-      if (ctx.caller.kind === 'workload') throw new ApiError('forbidden', "a workload's session issues no credential and changes no one's access", 'workload_cannot_issue');
       return patchEnvironment(await protectEnvironment(ctx, place, guarded), place, {});
     },
   }),

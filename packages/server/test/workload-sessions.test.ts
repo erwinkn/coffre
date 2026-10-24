@@ -469,6 +469,17 @@ test("a session issues no credential and changes no one's access, in any mode: a
   }
   // A rename of it is a write, which stays.
   assert.equal((await call(held, 'PATCH', '/api/projects/market/prod', { body: { name: 'Production' } })).status, 200);
+  // Nor protect one that exists by forking a protected one onto it; a new fork is still protected as its source is.
+  await root.environments.create('market/dev', { name: 'dev' });
+  await root.environments.protect('market/prod');
+  const isProtected = async (slug: string) => (await root.projects.list()).projects.find((project) => project.slug === 'market')!
+    .environments.find((environment: { slug: string }) => environment.slug === slug) as { protected: boolean };
+  const onto = await call(held, 'PUT', '/api/projects/market/dev', { body: { from: 'prod' } });
+  assert.deepEqual([onto.status, onto.body.reason], [403, 'workload_cannot_issue']);
+  assert.equal((await isProtected('dev')).protected, false, 'unchanged');
+  const fresh = await call(held, 'PUT', '/api/projects/market/staging', { body: { from: 'prod' } });
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+  assert.equal((await isProtected('staging')).protected, true);
   // It still writes, and reads what a service reads.
   assert.equal((await call(held, 'GET', `/api/members/${MEMBER}/tokens`)).status, 200);
 });
