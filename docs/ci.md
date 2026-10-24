@@ -339,9 +339,14 @@ of the same job. Their values, and each line of multiline values, are
 masked before being written to `GITHUB_ENV`. Newlines, quotes, `=` and `%`
 are kept intact. Empty values are exported too.
 
-GitHub blocks `NODE_OPTIONS` through `GITHUB_ENV`, so an environment with
-that key is refused. GitHub's default metadata variables cannot be
-overridden. Other names such as `GITHUB_TOKEN` work.
+A key that a later step's shell, dynamic loader, language runtime or git
+reads as code to run, or as where to load it from, is refused, and the
+export with it, naming the key: `PATH`, `BASH_ENV`, `LD_PRELOAD`,
+`NODE_OPTIONS`, `GIT_SSH_COMMAND`, `PYTHONPATH`, `JAVA_TOOL_OPTIONS` and the
+rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`). Set through
+`GITHUB_ENV`, one such secret would run code in every later step of the
+job. GitHub's default metadata variables cannot be overridden. Other names
+such as `GITHUB_TOKEN` work.
 [GitHub documents these runner rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-environment-variable).
 
 The inputs are `url`, `environment`, one of `token` or `service`, and

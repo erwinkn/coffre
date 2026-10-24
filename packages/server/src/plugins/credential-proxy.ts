@@ -173,6 +173,9 @@ export type Tunnel = { kind: 'postgres'; key: string; hosts?: readonly string[];
  * The environment's `DATABASE_URL` is the real one, `postgres://…`, which
  * coffre logs in with; the app's is the listener's, with the handle as its
  * password. `hosts`, when set, are the only ones the URL may name.
+ * Without them, the URL names its host by address, never by name: whoever
+ * writes the value picks the name, and a name may resolve to a private
+ * address. `insecureUpstreams` lifts this, as it lifts the rest.
  *
  * A database inside a private network, through a VPC Network binding:
  * `postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect: env.REPLICA_NET })`.
@@ -574,6 +577,9 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${place[2]}'s network binding does not carry: sslmode=disable, for a database inside that network`);
   } else if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
     return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, or the tunnel's network binding (connect), allows`);
+  } else if (!proxy.insecure && tunnel.hosts === undefined && !address(db.host)) {
+    // Whoever writes the value picks the name, and a name may resolve to a private address: only the deployment's are dialled by name.
+    return failure(403, `${path}'s ${tunnel.key} names its host by name, which the tunnel ${place[2]} dials only when its hosts list it: a name may resolve to a private address`);
   }
   const key = `${handle}\u0000${path}\u0000${place[2]!}`;
   const network = tunnel.connect;
@@ -1285,16 +1291,39 @@ function checkListed(option: 'generate', listed: Record<string, 'all' | readonly
   return new Map(Object.entries(listed));
 }
 
-/** Whether a host is a literal private, loopback or link-local address, or localhost. */
+/**
+ * A host as it is dialled, so that one spelling is checked for all: lowercase, without
+ * brackets or trailing dots, an address in its one form (127.1, 2130706433 and
+ * 127.0.0.1. are 127.0.0.1; [0:0::1] is ::1).
+ */
+function canonicalHost(host: string): string {
+  const bare = host.replace(/^\[|\]$/g, '');
+  let name: string;
+  try {
+    name = new URL(`http://${bare.includes(':') ? `[${bare}]` : bare}`).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    name = bare.toLowerCase();
+  }
+  return name.replace(/\.+$/, '');
+}
+
+/** Whether a host is an IP address, not a name a resolver could point anywhere. */
+function address(host: string): boolean {
+  const name = canonicalHost(host);
+  return name.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(name);
+}
+
+/** Whether a host is a private, loopback or link-local address, or localhost, however it is written. */
 function privateHost(host: string): boolean {
-  const name = host.replace(/^\[|\]$/g, '').toLowerCase();
+  const name = canonicalHost(host);
   if (name === 'localhost' || name.endsWith('.localhost')) return true;
   const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(name);
   if (v4 !== null) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
     return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
   }
-  if (name.includes(':')) return name === '::1' || name === '::' || /^f[cd]/.test(name) || /^fe[89ab]/.test(name) || name.startsWith('::ffff:');
+  // ::/16 holds loopback, the unspecified address and IPv4 written as IPv6 (::ffff:a00:1, ::7f00:1); 64:ff9b:: is NAT64's.
+  if (name.includes(':')) return /^(?:::|0:)/.test(name) || /^f[cd]/.test(name) || /^fe[89ab]/.test(name) || name.startsWith('64:ff9b:');
   return false;
 }
 

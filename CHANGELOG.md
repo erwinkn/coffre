@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **Breaking: a tunnel with no `hosts` dials only an address.** Its URL is
+  a secret's value, whose host anyone who writes the environment picks,
+  and a name may resolve to a private address, which the lexical check
+  never saw. `postgres('DATABASE_URL', { hosts: ['db.acme.example'] })`
+  dials that name; without `hosts`, a URL that names its host by name is
+  refused with 403, and one that names a public address still works. A
+  tunnel through a network binding (`connect`) names its hosts already.
+  `insecureUpstreams` lifts this, as it lifts the rest. Private addresses
+  are now refused however they are written: `localhost.`, `LOCALHOST`,
+  `127.0.0.1.`, `[::ffff:a00:1]`, `[::7f00:1]`, `[64:ff9b::a00:1]`.
+- **`coffre export --format github` refuses keys a later step would take
+  code from**: `PATH`, `BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`,
+  `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `NODE_PATH`, `PYTHONPATH`,
+  `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `NPM_CONFIG_*` and the
+  rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`), in any case,
+  with an error that names the key and nothing written. Before, only
+  `NODE_OPTIONS`.
+- **Spent ID tokens are forgotten two hours after.** `consumed_tokens`,
+  which refuses a CI run's token sent twice, only grew. The scheduled
+  beat now removes up to 5,000 records a beat of tokens spent over two
+  hours ago: an exchange refuses a token issued over an hour ago, so
+  those guard nothing. The runtime login still deletes no row itself: it
+  calls `prune_consumed_tokens`, which migration 0015 adds and which
+  deletes only those (Postgres; SQLite deletes them directly).
+
 - **A credential revoked while its read is under way gets nothing.** A
   read checked its token, handle or MCP connection, then asked the vault,
   which decides on the member and is only told the credential: a token

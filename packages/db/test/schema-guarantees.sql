@@ -345,6 +345,30 @@ BEGIN
 END
 $$;
 
+-- 16b. Its record goes only through prune_consumed_tokens, two hours after
+-- the token was spent, when no exchange could take it again; checked in a
+-- block of its own, rolled back.
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO consumed_tokens (hash, consumed_at) VALUES
+            (decode(repeat('a1', 32), 'hex'), now() - interval '2 hours 1 minute'),
+            (decode(repeat('a2', 32), 'hex'), now() - interval '1 hour 59 minutes');
+        PERFORM prune_consumed_tokens(1000);
+        IF EXISTS (SELECT 1 FROM consumed_tokens WHERE hash = decode(repeat('a1', 32), 'hex')) THEN
+            RAISE EXCEPTION 'FAIL: prune_consumed_tokens kept a token spent over two hours ago';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM consumed_tokens WHERE hash = decode(repeat('a2', 32), 'hex')) THEN
+            RAISE EXCEPTION 'FAIL: prune_consumed_tokens forgot a token spent within two hours';
+        END IF;
+        RAISE EXCEPTION 'checked' USING ERRCODE = 'C0FFE';
+    EXCEPTION
+        WHEN SQLSTATE 'C0FFE' THEN NULL;
+    END;
+    RAISE NOTICE 'PASS: coffre_app forgets a spent token only two hours after, through prune_consumed_tokens';
+END
+$$;
+
 -- 17. A folder is a label on a project or a secret, which coffre_app moves.
 DO $$
 BEGIN
