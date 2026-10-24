@@ -1465,8 +1465,9 @@ account binds it with `props` naming its service:
   (`issuer: 'urn:coffre:cloudflare'`, no claims), and checks freezes, the
   gate's limits and `vault.access` as for any request. The binding is opt-in
   per service, can be revoked, and is logged like every other binding. There
-  is no session row: each call is authenticated by the platform, and the
-  audit's `credentialId` is `binding:<id>`. PR 1a's
+  is no session row: each call is authenticated by the platform. The app's
+  entries name it by `credentialId` `binding:<id>`; the vault's name no
+  credential, and join the app's on the request's ID. PR 1a's
   `PluginContext.workloadFromBinding(principal, { place, credential })` returns the same
   `WorkloadCaller` as a DPoP request, from the binding and the freezes, so the
   proxy sees one kind of caller.
