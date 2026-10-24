@@ -3,14 +3,15 @@ import test from 'node:test';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
-import { DURABLE_WINDOW_MS, EPOCH_MS, GateState } from '../src/gate.ts';
+import { DURABLE_WINDOW_MS, EPOCH_MS, GateState, SKEW_MS, type Count as Stored } from '../src/gate.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 
 // The gate of docs/design/workload-access.md (section 5.2, PR 1b), against
 // a reference written from the design rather than from the code: random
-// sequences of requests, waits and restarts, and every answer must be the
-// reference's. The reference keeps every proof ever taken, across restarts,
-// so a gate that took one twice disagrees with it.
+// sequences of requests, clock steps both ways, restarts, and, for a
+// Durable Object's gate, writes of its counts and evictions; every answer
+// must be the reference's. The reference keeps every proof ever taken,
+// across restarts, so a gate that took one twice disagrees with it.
 
 const T0 = 1_792_805_400_000;
 /** Small, so that sequences reach it. */
@@ -22,6 +23,9 @@ type Operation =
   /** A clock's step, back too. */
   | { kind: 'wait'; ms: number }
   | { kind: 'restart' }
+  /** A Durable Object's alarm writes its counts; then it is evicted and made again, reading them back. */
+  | { kind: 'flush' }
+  | { kind: 'evict' }
   | { kind: 'nonce' }
   /** `nonce`: which nonce seen so far the proof carries, counting back from the newest; past them all, one no gate gave. */
   | { kind: 'admit'; jti: number | null; nonce: number; counts: Count[] };
@@ -41,18 +45,27 @@ const operation = gs.oneOf<Operation>(
   admit,
   gs.record({
     kind: gs.just('wait' as const),
-    ms: gs.oneOf(gs.sampledFrom([0, 1, 999, 1000, EPOCH_MS - 1, EPOCH_MS, 2 * EPOCH_MS, -1, -1000]), gs.integers({ minValue: -2000, maxValue: 3 * EPOCH_MS })),
+    ms: gs.oneOf(
+      gs.sampledFrom([0, 1, 999, 1000, EPOCH_MS - 1, EPOCH_MS, 2 * EPOCH_MS, -1, -1000, -SKEW_MS, -SKEW_MS - 1, -DURABLE_WINDOW_MS]),
+      gs.integers({ minValue: -2000, maxValue: 3 * EPOCH_MS }),
+    ),
   }),
-  gs.record({ kind: gs.just('wait' as const), ms: gs.sampledFrom([EPOCH_MS, 2 * EPOCH_MS]) }),
+  gs.record({ kind: gs.just('wait' as const), ms: gs.sampledFrom([EPOCH_MS, 2 * EPOCH_MS, DURABLE_WINDOW_MS]) }),
+  gs.record({ kind: gs.just('wait' as const), ms: gs.sampledFrom([-1, -999, -SKEW_MS, -SKEW_MS - 1]) }),
   gs.record({ kind: gs.just('nonce' as const) }),
-  gs.record({ kind: gs.just('restart' as const) }),
+  gs.oneOf<Operation>(gs.record({ kind: gs.just('restart' as const) }), gs.record({ kind: gs.just('flush' as const) }), gs.record({ kind: gs.just('evict' as const) })),
 );
 
 type Answer = { ok: true } | { ok: false; reason: string; key?: string; retryAfterMs?: number; first?: boolean } | 'throws';
+/** A count's requests and refusals: their times, by count. */
+type Times = Map<string, { counted: number[]; refused: number[] }>;
+
+const windowOf = (id: string) => Number(id.split('/')[1]);
+const startOf = (time: number, windowMs: number) => Math.floor(time / windowMs) * windowMs;
 
 /** The reference: what the design says each answer is. */
 class Reference {
-  /** The clock the gate is given, which may go back; and the time it runs at, the latest it was given, which never does. */
+  /** The clock the gate is given, which may go back; and the time it runs at. */
   clock = T0;
   now = T0;
   life = 0;
@@ -63,17 +76,37 @@ class Reference {
   readonly taken: { life: number; epoch: number; jti: number; nonce: string }[] = [];
   second = -1;
   inSecond = 0;
-  /** This life's counted requests and refusals, by count: their times. */
-  counted = new Map<string, number[]>();
-  refused = new Map<string, number[]>();
+  times: Times = new Map();
+  /** A Durable Object's counts of an hour or more, as its alarm last wrote them. */
+  written: Times = new Map();
+
+  readonly durable: boolean;
+
+  constructor(durable: boolean) {
+    this.durable = durable;
+  }
 
   step(ms: number) {
     this.clock += ms;
   }
 
-  /** A call: the gate is given the clock. */
+  /** The gate is given the clock: a step back of `SKEW_MS` at most runs at the time it had; further, it starts over, keeping the counts of windows begun. */
   called() {
-    this.now = Math.max(this.now, this.clock);
+    if (this.clock >= this.now) this.now = this.clock;
+    else if (this.now - this.clock > SKEW_MS) {
+      this.newLife();
+      for (const [id, times] of this.times) {
+        const begun = (time: number) => startOf(time, windowOf(id)) <= this.clock;
+        this.times.set(id, { counted: times.counted.filter(begun), refused: times.refused.filter(begun) });
+      }
+    }
+  }
+
+  newLife() {
+    this.life += 1;
+    this.started = this.clock;
+    this.now = this.clock;
+    this.second = -1;
   }
 
   epoch() {
@@ -92,12 +125,34 @@ class Reference {
   }
 
   restart() {
-    this.life += 1;
-    this.started = this.clock;
-    this.now = this.clock;
-    this.second = -1;
-    this.counted = new Map();
-    this.refused = new Map();
+    this.newLife();
+    this.times = new Map();
+  }
+
+  flush() {
+    if (!this.durable) return;
+    for (const [id, times] of this.times) {
+      if (windowOf(id) >= DURABLE_WINDOW_MS) this.written.set(id, { counted: [...times.counted], refused: [...times.refused] });
+    }
+  }
+
+  /**
+   * Made again from what was written: per count, the window it was last
+   * written in, unless that has ended; the clock then runs from the latest
+   * such window's start.
+   */
+  evict() {
+    this.newLife();
+    this.times = new Map();
+    for (const [id, times] of this.written) {
+      const all = [...times.counted, ...times.refused];
+      if (all.length === 0) continue;
+      const start = startOf(Math.max(...all), windowOf(id));
+      if (start + windowOf(id) <= this.clock) continue;
+      const inWindow = (time: number) => startOf(time, windowOf(id)) === start;
+      this.times.set(id, { counted: times.counted.filter(inWindow), refused: times.refused.filter(inWindow) });
+      this.now = Math.max(this.now, start);
+    }
   }
 
   /** The answer the design gives, its nonce left to `current`. */
@@ -121,28 +176,37 @@ class Reference {
       assert.ok(!this.taken.some((proof) => proof.nonce === nonce && proof.jti === jti), 'a proof was taken twice');
       this.taken.push({ life: this.life, epoch: named.epoch, jti, nonce });
     }
+    const timesOf = (id: string) => {
+      if (!this.times.has(id)) this.times.set(id, { counted: [], refused: [] });
+      return this.times.get(id)!;
+    };
     let past: { id: string; count: Count; start: number } | undefined;
     for (const [i, count] of counts.entries()) {
-      const start = Math.floor(this.now / count.windowMs) * count.windowMs;
-      const inWindow = (this.counted.get(ids[i]!) ?? []).filter((time) => time >= start).length;
+      const start = startOf(this.now, count.windowMs);
+      const inWindow = timesOf(ids[i]!).counted.filter((time) => startOf(time, count.windowMs) === start).length;
       if (inWindow >= count.most && (past === undefined || start + count.windowMs > past.start + past.count.windowMs)) past = { id: ids[i]!, count, start };
     }
     if (past !== undefined) {
-      const first = (this.refused.get(past.id) ?? []).every((time) => time < past.start);
-      this.refused.set(past.id, [...(this.refused.get(past.id) ?? []), this.now]);
+      const { refused } = timesOf(past.id);
+      const first = !refused.some((time) => startOf(time, past.count.windowMs) === past.start);
+      refused.push(this.now);
       return { ok: false, reason: 'limit', key: past.count.key, retryAfterMs: past.start + past.count.windowMs - this.now, first };
     }
-    for (const id of ids) this.counted.set(id, [...(this.counted.get(id) ?? []), this.now]);
+    for (const id of ids) timesOf(id).counted.push(this.now);
     return { ok: true };
   }
 }
 
 const settings = propertySettings(500);
 
-test(`the gate answers as the reference over any requests, clock steps and restarts, and takes no proof twice, seed ${settings.seed}`, () => hegel.test((tc) => {
+test(`the gate answers as the reference over any requests, clock steps, restarts and evictions, and takes no proof twice, seed ${settings.seed}`, () => hegel.test((tc) => {
+  const durable = tc.draw(gs.booleans());
   const operations: Operation[] = tc.draw(gs.arrays(operation, { minSize: 1, maxSize: 60 }));
-  const reference = new Reference();
-  let gate = new GateState(T0, { ceiling: CEILING });
+  const reference = new Reference(durable);
+  const make = () => new GateState(reference.clock, { ceiling: CEILING, durable });
+  let gate = make();
+  /** The object's storage: what its alarm wrote. */
+  const storage = new Map<string, Stored>();
   for (const op of operations) {
     switch (op.kind) {
       case 'wait':
@@ -150,7 +214,16 @@ test(`the gate answers as the reference over any requests, clock steps and resta
         break;
       case 'restart':
         reference.restart();
-        gate = new GateState(reference.clock, { ceiling: CEILING });
+        gate = make();
+        break;
+      case 'flush':
+        reference.flush();
+        for (const [id, held] of gate.flush()) storage.set(id, held);
+        break;
+      case 'evict':
+        reference.evict();
+        gate = make();
+        gate.restore(storage);
         break;
       case 'nonce':
         reference.called();

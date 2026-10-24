@@ -5,9 +5,9 @@
 // `export const CoffreGates = coffre.Gates`.
 //
 // Its epochs and `jti`s live in its memory alone: an eviction starts it
-// with a new epoch, which no proof carries yet. Its counts over a day are
-// written to its storage by an alarm, at most `FLUSH_MS` after they
-// change, and read back when it starts again.
+// with a new epoch, which no proof carries yet. Its counts over an hour or
+// more, a day's included, are written to its storage by an alarm, at most
+// `FLUSH_MS` after they change, and read back when it starts again.
 //
 // The object is asked with `fetch`, not RPC: RPC needs the class to extend
 // `DurableObject` from `cloudflare:workers`, which Node, where the server's

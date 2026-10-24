@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import type { Gate } from '@coffre/core/identity';
 
 import { CoffreGates, workersGates, type GatesNamespace } from '../src/cloudflare-gates.ts';
-import { DURABLE_WINDOW_MS, EPOCH_MS, FLUSH_MS, GATE_CEILING, GateState, processGates } from '../src/gate.ts';
+import { DURABLE_WINDOW_MS, EPOCH_MS, FLUSH_MS, GATE_CEILING, GateState, processGates, SKEW_MS } from '../src/gate.ts';
 
 const T0 = 1_792_805_400_000;
 const SESSION = '0e7a4c1e-5b0c-4f53-9f43-8f5f1c2b9a10';
@@ -62,12 +62,27 @@ test('a nonce is taken for its epoch and the next, and refused from the one afte
   assert.match(gate.nonce(later), /^g4\./);
 });
 
-test('a clock that goes back keeps the epoch: nothing is taken twice', () => {
+test('a clock stepped back a little keeps the epoch; further, the gate starts over: nothing is taken twice either way', () => {
   const gate = new GateState(T0);
   const nonce = gate.nonce(T0 + EPOCH_MS);
   assert.equal(gate.admit(proof(1, nonce), T0 + EPOCH_MS).ok, true);
-  assert.equal(gate.nonce(T0), nonce);
-  assert.deepEqual(gate.admit(proof(1, nonce), T0), { ok: false, reason: 'replayed' });
+  assert.equal(gate.nonce(T0 + EPOCH_MS - SKEW_MS), nonce);
+  assert.deepEqual(gate.admit(proof(1, nonce), T0 + EPOCH_MS - SKEW_MS), { ok: false, reason: 'replayed' });
+  const fresh = gate.nonce(T0);
+  assert.notEqual(fresh, nonce);
+  assert.deepEqual(gate.admit(proof(1, nonce), T0), { ok: false, reason: 'use_dpop_nonce', nonce: fresh });
+});
+
+test('a clock that jumped a day ahead and came back holds the gate there for no longer than a nonce retry', () => {
+  const second = T0 - (T0 % 1000);
+  const gate = new GateState(second);
+  const minute = [{ key: 'stripe', windowMs: 60_000, most: 120 }];
+  assert.equal(gate.admit({ counts: minute }, second + 86_400_000).ok, true);
+  // Back to the real time: two requests a second for an hour pass as they would have.
+  for (let n = 0; n < 7200; n++) {
+    const answer = gate.admit({ counts: minute }, second + 1 + n * 500);
+    assert.ok(answer.ok, `${n}: ${JSON.stringify(answer)}`);
+  }
 });
 
 test('a jti taken under the previous nonce is refused under the current one too, while the gate remembers it', () => {
@@ -103,6 +118,33 @@ test('past several counts, the one whose window ends last says when to retry', (
   const day = Math.floor(T0 / 86_400_000) * 86_400_000;
   const counts = [{ key: 'per-minute', windowMs: 60_000, most: 0 }, { key: 'per-day', windowMs: 86_400_000, most: 0 }];
   assert.deepEqual(gate.admit({ counts }, T0), { ok: false, reason: 'limit', key: 'per-day', retryAfterMs: day + 86_400_000 - T0, first: true });
+});
+
+test("a clock that comes back from far ahead forgets the counts it made there: the window counts from zero when its time comes", () => {
+  const day = Math.ceil(T0 / 86_400_000) * 86_400_000;
+  const gate = new GateState(day - 60_000);
+  const perDay = [{ key: 'stripe', windowMs: 86_400_000, most: 1 }];
+  assert.equal(gate.admit({ counts: perDay }, day + 5000).ok, true);
+  gate.nonce(day - 59_000);
+  assert.equal(gate.admit({ counts: perDay }, day + 1).ok, true);
+});
+
+test("counts read back by an object whose clock is a little behind the window they were written in count on in it", () => {
+  const day = Math.ceil(T0 / 86_400_000) * 86_400_000;
+  const perDay = [{ key: 'stripe', windowMs: 86_400_000, most: 2 }];
+  const before = new GateState(day - 1000, { durable: true });
+  assert.equal(before.admit({ counts: perDay }, day + 300).ok, true);
+  assert.equal(before.admit({ counts: perDay }, day + 301).ok, true);
+  const written = before.flush();
+  const after = new GateState(day - 100, { durable: true });
+  after.restore(written);
+  // Its clock moved to the window's start, the day's whole length is left.
+  assert.deepEqual(after.admit({ counts: perDay }, day - 50), { ok: false, reason: 'limit', key: 'stripe', retryAfterMs: 86_400_000, first: true });
+  assert.equal(after.admit({ counts: perDay }, day + 1000).ok, false);
+  // Written by a clock far ahead: forgotten at the first call, so it cannot hold the gate there.
+  const far = new GateState(day - 3_600_000, { durable: true });
+  far.restore(written);
+  assert.equal(far.admit({ counts: perDay }, day - 3_600_000).ok, true);
 });
 
 test("a Node process's gate keeps no count for a write: only a Durable Object writes them", () => {

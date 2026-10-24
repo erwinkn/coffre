@@ -25,10 +25,16 @@ export const EPOCH_MS = 120_000;
  * epochs at the ceiling, 240,000 `jti`s of 22 characters, about 20 MB.
  */
 export const GATE_CEILING = 1000;
-/** Counts over a window this long or longer survive a Durable Object's eviction, written every `FLUSH_MS`: a day's limit. Shorter ones live in memory. */
+/** Counts over a window this long or longer, an hour's or a day's, survive a Durable Object's eviction, written every `FLUSH_MS`. Shorter ones live in memory. */
 export const DURABLE_WINDOW_MS = 3_600_000;
 /** How often a Durable Object writes its durable counts: an eviction loses at most this much of them. */
 export const FLUSH_MS = 10_000;
+/**
+ * How far back a clock may step and the gate run on at the time it had,
+ * its counts exact: two machines' skew, a Durable Object made again
+ * elsewhere. Past it, the gate starts over as a restart does.
+ */
+export const SKEW_MS = 10_000;
 
 /** Where a runtime finds a workload's gate, by its service's principal (`token:api-prod`). */
 export type Gates = (principal: string) => Gate;
@@ -42,12 +48,17 @@ type Epoch = { nonce: string; seen: Set<string> };
 /**
  * One workload's gate, in memory: what `Gate` asks of it, with the time
  * given on each call. Every method runs to its end without waiting, so no
- * two requests interleave inside one. Its clock never goes back: a call
- * given an earlier time than one before it runs at the later, so a clock
- * stepped back neither revives an epoch nor starts a count's window again.
+ * two requests interleave inside one.
+ *
+ * A clock stepped back by `SKEW_MS` at most runs at the time it had, so it
+ * neither revives an epoch nor starts a count's window again. Stepped back
+ * further, the gate starts over as a restart does: a new epoch, and the
+ * counts of windows not yet begun forgotten. So a clock that jumped ahead
+ * and came back costs a nonce retry, and never holds the gate where it
+ * jumped to.
  */
 export class GateState {
-  readonly #started: number;
+  #started: number;
   readonly #ceiling: number;
   /** Whether its counts over `DURABLE_WINDOW_MS` or more are kept for `flush`: a Durable Object's, which writes them. */
   readonly #durable: boolean;
@@ -148,16 +159,41 @@ export class GateState {
     return this.#dirty.size > 0;
   }
 
-  /** Durable counts as `flush` gave them, read back when a Durable Object starts again: those whose window has ended are left out. */
+  /**
+   * Durable counts as `flush` gave them, read back when a Durable Object
+   * starts again, but those whose window has ended. Its clock moves to the
+   * latest window it keeps, so it counts on in it, a few milliseconds of
+   * skew after an eviction included; one written by a clock far ahead is
+   * forgotten at the next call, which steps back from it.
+   */
   restore(counts: Iterable<[string, Count]>) {
+    const now = this.#latest;
     for (const [id, held] of counts) {
-      if (held.start + windowOf(id) > this.#latest) this.#counts.set(id, { ...held });
+      if (held.start + windowOf(id) <= now) continue;
+      this.#counts.set(id, { ...held });
+      if (held.start > this.#latest) this.#latest = held.start;
     }
   }
 
   #clock(now: number): number {
-    if (now > this.#latest) this.#latest = now;
+    if (now >= this.#latest) this.#latest = now;
+    else if (this.#latest - now > SKEW_MS) this.#restart(now);
     return this.#latest;
+  }
+
+  /** What a restart does, but for the counts of windows begun by `now`. */
+  #restart(now: number) {
+    this.#started = now;
+    this.#latest = now;
+    this.#n = 0;
+    this.#current = epoch(0);
+    this.#previous = null;
+    this.#second = -1;
+    for (const [id, held] of this.#counts) {
+      if (held.start <= now) continue;
+      this.#counts.delete(id);
+      this.#dirty.delete(id);
+    }
   }
 
   #touched(id: string, windowMs: number) {

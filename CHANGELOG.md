@@ -85,7 +85,7 @@
   1,000 requests a second it answers `overloaded`; past a limit, when to
   retry, and whether this is the window's first refusal. On Node the
   gates live in the server's process; on Workers, in a Durable Object per
-  workload, whose counts over a day outlive an eviction. `coffre init`
+  workload, whose counts over an hour or more outlive an eviction. `coffre init`
   writes the `GATES` binding and its migration, `gates: env.GATES` and
   `export const CoffreGates = coffre.Gates`, and `workloads: { useOnly:
   true }`; an older Workers deployment adds them by hand

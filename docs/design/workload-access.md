@@ -768,9 +768,11 @@ gate remembers the `jti`s it took under each. Everything else answers
 nonce is refused under both, whichever of the workload's sessions sends
 it, and it is spent as soon as the gate sees it, even if a count then
 refuses the request. Once both epochs are gone, a proof's nonce is
-refused anyway. The gate's clock never goes back: a time earlier than one
-it was given runs as the later, so a clock stepped back revives no epoch
-and restarts no count.
+refused anyway. A clock stepped back by up to 10 seconds runs at the time
+it had, so it revives no epoch and restarts no count. Stepped back
+further, the gate starts over as a restart does: a new epoch, and the
+counts of windows not yet begun forgotten, so a clock that jumped ahead
+and came back costs a nonce retry rather than holding the gate there.
 
 - **A restart or an eviction forgets nothing that matters.** A new epoch
   means every proof made before it carries an unknown nonce and is refused,
