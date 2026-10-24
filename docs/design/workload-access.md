@@ -942,8 +942,10 @@ precedence, for a session whose binding gives `viewer` on `market/prod`:
       A `workload` caller must come with a credential scope, or the vault
       refuses it outright.
     - The app always materializes a workload's scope into per-place grants,
-      the binding's scope when the row holds none. Each grant carries
-      `reads: readonly string[] | '*'` beside R32's `sensitive`.
+      the binding's scope when the row holds none (`scopeWithReads`). Each
+      environment's grant may carry `reads: readonly string[] | '*'` beside
+      R32's `sensitive`; a project's grant carries none, since on it a list
+      would read the whole project.
     - The vault refuses every purpose but the proxy's `use`, a copy kept
       sensitive included, unless the key is listed at the place where the
       value is held: a reference's source, a fork's parent for an inherited

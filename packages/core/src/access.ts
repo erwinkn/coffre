@@ -580,7 +580,8 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
     if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string') return false;
     if (sensitive !== undefined && typeof sensitive !== 'boolean') return false;
     // A workload's list is an environment's: on a project's grant it would read the whole project.
-    if (reads !== undefined && (environmentId === null || (reads !== '*' && !(Array.isArray(reads) && reads.every((id) => typeof id === 'string') && new Set(reads).size === reads.length)))) return false;
+    if (reads !== undefined && environmentId === null) return false;
+    if (reads !== undefined && reads !== '*' && !(Array.isArray(reads) && reads.every((id) => typeof id === 'string') && new Set(reads).size === reads.length)) return false;
     // As issued, both columns; or, kept before 0.10, a built-in role's name alone, which holds it as it ships.
     if (!ROLE_ID.test(role)) return false;
     if (permissions === undefined) {
