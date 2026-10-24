@@ -837,6 +837,48 @@ for a new nonce at every turn. That fails loudly, never unsafely. The
 gate's counts also start over when the process does, a day's limit
 included.
 
+### Workers of the same account
+
+Another Worker of coffre's Cloudflare account uses it with nothing to
+prove and no secret to hold
+([design](design/workload-access.md#92-cloudflare-workers-a-service-binding-nothing-to-prove)).
+It binds coffre's `CoffreWorkload` entrypoint, its props naming the
+service it runs as, and an owner trusts that service's Workers:
+
+```jsonc
+// the app Worker's wrangler.jsonc
+"services": [{ "binding": "COFFRE", "service": "coffre", "entrypoint": "CoffreWorkload", "props": { "service": "edge-api" } }],
+"preview_urls": false
+```
+
+```sh
+coffre trust edge-api --cloudflare
+```
+
+```ts
+// the app Worker: the proxy through the binding, whose URL's host is any
+const openai = new OpenAI({ apiKey: 'coffre', baseURL: 'https://coffre/use/openai', fetch: (input, init) => env.COFFRE.fetch(new Request(input, init)) });
+const { signature } = await env.COFFRE.sign('dfns-key', challenge);
+```
+
+`sign`, `verify` and `presign` are RPC methods, each with an optional `{
+place: '<project>/<env>' }` for a service that reaches several. A
+deployment `coffre init` writes exports the entrypoint; an older one adds,
+in `app/src/server.ts`:
+
+```ts
+export const CoffreWorkload = coffre.Workload;
+```
+
+Props are the proof, and whoever deploys Workers to the account sets
+them: coffre then trusts every such person as each service they name. A
+binding without props, or with props of any other shape, gets nothing.
+Preview versions run with production's props, so turn off preview URLs
+and non-production branch builds in a Worker that binds coffre, or give
+previews a wrangler environment of their own, with another service's
+props. Where some of the account's deployers should not reach coffre's
+services, run coffre in an account of its own.
+
 ## MCP clients
 
 Claude and other MCP clients connect at `<PUBLIC_URL>/mcp` as the people

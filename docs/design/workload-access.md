@@ -1467,25 +1467,34 @@ account binds it with `props` naming its service:
   per service, can be revoked, and is logged like every other binding. There
   is no session row: each call is authenticated by the platform. The app's
   entries name it by `credentialId` `binding:<id>`; the vault's name no
-  credential, and join the app's on the request's ID. PR 1a's
-  `PluginContext.workloadFromBinding(principal, { place, credential })` returns the same
-  `WorkloadCaller` as a DPoP request, from the binding and the freezes, so the
-  proxy sees one kind of caller.
+  credential, and join the app's on the request's ID. The entrypoint hands
+  each call to `bindingRoute(request, runtime, principal)` (plugins.ts), the
+  principal from its props. Its context's `workload(request, at)` answers
+  from `workloadFromBinding`, with the same `WorkloadCaller` a DPoP request
+  gets, from the binding and the freezes, so the proxy sees one kind of
+  caller. No plugin can name a principal itself: only the entrypoint does.
+- **Props are exactly `{ service }`.** `edge-api` or `token:edge-api`; any
+  other field, or none, refuses the call before a database is opened. A
+  binding without props delivers `{}` (checked live, 2026-10-24), so it gets
+  nothing. The binding reaches `/use` only, never the API, sign-in or the
+  pages.
 - **The trust root is whoever can deploy Workers to the account.** They can
   set any `props`, and they could equally deploy Coffre itself. An account
   whose Workers deployers should not reach Coffre's services needs Coffre in
   an account of its own. Then service bindings do not cross accounts, and
-  its Workers use `enrollment`. The binding's page says this. As of
-  2026-10, Cloudflare's API and Terraform may not carry `props` for service
-  bindings: deploy with wrangler.
-- **Preview builds keep the binding.** With Workers Builds, a branch's
-  preview version runs with the Worker's bindings, so whoever can push a
-  branch would run code with production's `props`. A Worker that binds
-  Coffre turns off non-production branch builds, or gives previews a wrangler
-  environment of their own, bound to a service with its own binding. `coffre
-  init`'s docs and the binding's page say so. Whether a preview version
-  keeps `props` is to be checked live in PR 6, and the docs say what it
-  found.
+  its Workers use `enrollment`. The binding's page says this. Cloudflare's
+  API carries `props` in a script upload's service binding (checked live,
+  2026-10-24), though the script's settings do not echo them back.
+- **Preview versions keep `props`.** Checked live on 2026-10-24: a version
+  uploaded without deploying it, whether it lists its bindings again (as
+  `wrangler versions upload` and Workers Builds do) or keeps them
+  (`keep_bindings`), calls the entrypoint with production's `props`, at its
+  preview URL, which anyone may open by default. So whoever can upload a
+  version, or push a branch that Workers Builds builds, runs code as the
+  service. A Worker that binds Coffre turns off preview URLs
+  (`"preview_urls": false`) and non-production branch builds, or gives
+  previews a wrangler environment of its own, bound with another service's
+  props. `docs/deploy.md` says so.
 
 ```ts
 // the app Worker: OpenAI's SDK through coffre, no key anywhere

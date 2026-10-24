@@ -6,7 +6,7 @@ import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import { CoffreGates, workersGates, type GatesNamespace } from './cloudflare-gates.ts';
 import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
-import { CoffreWorkload } from './cloudflare-workload.ts';
+import { workloadEntrypoint, type CoffreWorkload } from './cloudflare-workload.ts';
 import type { Gates } from './gate.ts';
 import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
@@ -52,7 +52,7 @@ export type CoffreWorker<Env> = {
   /** The workloads' gates' Durable Object class, which `GATES` binds: `export const CoffreGates = coffre.Gates` (docs/design/workload-access.md, section 5.2). */
   Gates: typeof CoffreGates;
   /** The entrypoint another Worker binds with `props` naming its service: `export const CoffreWorkload = coffre.Workload` (section 9.2). */
-  Workload: typeof CoffreWorkload;
+  Workload: CoffreWorkload;
 };
 
 /**
@@ -126,6 +126,6 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,
-    Workload: CoffreWorkload,
+    Workload: workloadEntrypoint<Env>(runtimeFor),
   };
 }
