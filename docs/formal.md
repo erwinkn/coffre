@@ -927,10 +927,10 @@ model as they commit, not over their rows as they are now: so a finder
 hidden or forged since still counts. `Rows` gives the attacker two
 changes of any beat rows at any step, with three beats running and one
 edit behind every cursor, 3.7 million states; with three changes it
-holds too, over 41 million states, which `pnpm formal` does not run. `RepairGoesGreen` is
-progress, checked as an invariant of `Repair`'s runs: once the edit is put
-back and four beats have walked with no edit in place, readiness is
-green.
+holds too, over 41 million states, which `pnpm formal` does not run.
+`RepairGoesGreen` is progress, checked as an invariant of `Repair`'s
+runs: once the edit is put back and four beats have walked with no edit
+in place, readiness is green.
 
 This replaces #296's first fix, rounds 1 to 4 of its first review: a beat read,
 under the head before it appended, the beats committed since its walk
