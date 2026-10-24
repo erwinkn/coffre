@@ -783,10 +783,12 @@ async function boundedText(request: Request, max: number): Promise<string | null
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
   // Nothing the app writes leaves the credential's upstream: no slash or backslash smuggled in a segment, and no dot
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
-  // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it.
+  // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
+  // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
+  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`).
   const climbs = (segment: string): boolean => {
     const read = bytesOf(segment);
-    return /[/\\]/.test(read) || /^\.{1,2}$/.test(read.split(';')[0]!) || (read !== segment && climbs(read));
+    return /[/\\\x00-\x1f\x7f\xc0\xc1]/.test(read) || /^\.{1,2}[ \t]*$/.test(read.split(';')[0]!) || (read !== segment && climbs(read));
   };
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.

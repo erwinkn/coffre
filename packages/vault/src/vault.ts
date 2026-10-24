@@ -1047,14 +1047,15 @@ class VaultService implements Vault {
       {
         action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input,
         // Again in the decision and under the log's head: a sensitive version written since it was loaded is as newest as any,
-        // and a value loosened is still its key's current one.
+        // a value made sensitive in place since is so, and a value loosened is still its key's current one.
         vet: async (db) => {
           const newest = await store.newestSensitive(db, items.map(({ secret }) => secret.secretId));
-          // Read only for a loosening: each source again, current as the decision had it, its key's pointer and its newest.
-          const again = loosens.includes(true) ? new Map((await store.versions(db, items.map(({ secret }) => sources.get(secret)!.id))).map((version) => [version.id, version])) : null;
+          // Each source again: current as the decision had it, its key's pointer and its newest, and its value as held now.
+          const again = new Map((await store.versions(db, items.map(({ secret }) => sources.get(secret)!.id))).map((version) => [version.id, version]));
           return items.map(({ secret }, i) => {
-            if (loosens[i]) return again?.get(sources.get(secret)!.id)?.current === true ? null : 'invalid';
-            return secret.sensitive !== true && newest.has(secret.secretId) ? 'invalid' : null;
+            const now = again.get(sources.get(secret)!.id);
+            if (loosens[i]) return now?.current === true ? null : 'invalid';
+            return secret.sensitive !== true && (newest.has(secret.secretId) || now?.heldSensitive === true) ? 'invalid' : null;
           });
         },
         owns: loosens,
