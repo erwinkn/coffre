@@ -183,7 +183,7 @@ test(`canonicalHtu is idempotent, drops the query, and normalizes the path as Cl
 }, propertySettings(256)));
 
 /** Where the caller picks the token's audience (section 4.2), so it always names the key. */
-const KEY_NAMING_PROFILES: readonly WorkloadProfile[] = ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly'];
+const KEY_NAMING_PROFILES: readonly WorkloadProfile[] = ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly', 'vercel'];
 const ENVIRONMENTS = ['6b1c2d3e-4f50-4a6b-8c7d-8e9fa0b1c2d3', 'a0b1c2d3-e4f5-4061-8273-8495a6b7c8d9'];
 const KEYS = ['0f0e0d0c-0b0a-4908-8706-050403020100', 'ffeeddcc-bbaa-4998-8776-554433221100', '12345678-9abc-4def-8123-456789abcdef'];
 
@@ -196,7 +196,7 @@ function spelled(tc: hegel.TestCase, profile: WorkloadProfile): Record<string, u
   for (const field of allowed) {
     if (field !== 'audience' && field !== 'replicas' && !tc.draw(gs.booleans())) continue;
     switch (field) {
-      case 'audience': policy.audience = tc.draw(gs.sampledFrom(['api://coffre-acme', 'https://vercel.com/acme'])); break;
+      case 'audience': policy.audience = tc.draw(gs.sampledFrom(['api://coffre-acme', 'https://coffre.acme.example'])); break;
       // Off is refused where the caller picks the audience; said on, or not at all, it is on there.
       case 'keyAudience': policy.keyAudience = KEY_NAMING_PROFILES.includes(profile) ? true : tc.draw(gs.booleans()); break;
       case 'reads': policy.reads = Object.fromEntries(some(ENVIRONMENTS).filter((id, i, all) => all.indexOf(id) === i).map((id) => [caseOf(id), {

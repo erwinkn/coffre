@@ -16,7 +16,7 @@ import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
-import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_USAGE } from './trust.ts';
+import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
@@ -1583,32 +1583,7 @@ function waysIn(
 async function trust(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: {
-      github: { type: 'string' },
-      workflow: { type: 'string' },
-      reusable: { type: 'string' },
-      sha: { type: 'string' },
-      'any-repository': { type: 'boolean' },
-      'github-environment': { type: 'string' },
-      gitlab: { type: 'string' },
-      'gitlab-url': { type: 'string' },
-      source: { type: 'string', multiple: true },
-      issuer: { type: 'string' },
-      claim: { type: 'string', multiple: true },
-      branch: { type: 'string' },
-      tag: { type: 'string' },
-      event: { type: 'string', multiple: true },
-      'repository-id': { type: 'string' },
-      'owner-id': { type: 'string' },
-      'project-id': { type: 'string' },
-      'namespace-id': { type: 'string' },
-      scope: { type: 'string', multiple: true },
-      label: { type: 'string' },
-      replace: { type: 'string', multiple: true },
-      'jwks-file': { type: 'string' },
-      'replace-keys': { type: 'boolean' },
-      apply: { type: 'boolean', default: false },
-    },
+    options: TRUST_OPTIONS,
     allowPositionals: true,
   });
   const [service] = positionals;
@@ -1650,7 +1625,7 @@ async function trust(args: string[]): Promise<void> {
   }
   // A repository or project the lookup cannot see comes back here, for bindingFrom to say how to give its IDs.
   const lookup = client(target(), undefined, [400, 404]);
-  const binding = await bindingFrom(flags, (input) => lookup.bindings.lookup(input)).catch((error: unknown) =>
+  const binding = await bindingFrom(flags, (input) => lookup.bindings.lookup(input), { service: member }).catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
   const scope = (() => {
@@ -1660,7 +1635,8 @@ async function trust(args: string[]): Promise<void> {
       throw new UsageError((error as Error).message);
     }
   })();
-  const input = { ...binding, ...(scope === undefined ? {} : { scope }), ...(jwks === undefined ? {} : { jwks }), label: label ?? null, replaces: replace ?? [] };
+  // A workload's binding, its profile and policy, is the route's from PR 1a of docs/design/workload-access.md on: until then, the server refuses it with a 400.
+  const input = { ...binding, ...(scope === undefined ? {} : { scope }), ...(jwks === undefined ? {} : { jwks }), label: label ?? null, replaces: replace ?? [] } as Parameters<CoffreClient['bindings']['preview']>[1];
   const plan = await coffre.bindings.preview(member, input);
   const events = describeEvents(plan);
   if (!apply) {

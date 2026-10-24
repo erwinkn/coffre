@@ -91,6 +91,25 @@
   The design's routes and the `coffre enroll`, `approve`, `freeze`,
   `unfreeze` and `serve` commands are declared, and answer that they are
   not built yet until the changes that serve them land.
+- **Workload access's platform proofs** (its PR 2). An `aws` proof, a
+  `GetCallerIdentity` a role signs with the session's key and this
+  instance under its signature, which coffre sends only to STS's
+  commercial hosts, exactly as signed, and matches to a binding by the
+  role's account and unique ID: a role made again under its name matches
+  nothing, and an account's root, a federated user and an IAM user are
+  refused. The `kubernetes`, `gcp`, `azure`, `fly` and `vercel` profiles
+  check their bindings' IDs and issuers in their platforms' shapes. A
+  Vercel function picks its token's audience, so `vercel` now names the
+  session's key in it, as `gcp` and `fly` do, and its binding names no
+  audience. `coffre trust` makes each of them: `--aws`, `--kubernetes` and
+  `--gcp` (looking up IDs with the aws, kubectl and gcloud you are signed
+  in to), `--azure`, `--fly`, `--vercel`, `--enrollment` and
+  `--cloudflare`, `--workload` for a CI run's, and their policy's flags,
+  `--reads`, `--source` (CIDRs; with `--gitlab`, push, web and schedule
+  still name pipeline sources), `--session-hours`, `--unsigned-uploads`,
+  `--replicas`, `--minted-by`, `--approve`, `--session-days`,
+  `--overlap-minutes` and `--on-contention`. They sign in once
+  `/api/auth/workload` is served. No database migration.
 - **The database tunnel runs on Workers.** `coffre run market/dev -- psql
   "$DATABASE_URL"` now works against a Workers deployment as it does on
   Node: each run's connections to a database go to a Durable Object of
