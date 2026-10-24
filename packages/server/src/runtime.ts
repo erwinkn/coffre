@@ -61,10 +61,11 @@ export function createRuntime(
   vault: Vault,
   /** How an issuer's discovery and keys are fetched: the runtime's own (`workloads/transport.ts`). */
   transport: WorkloadTransport,
+  /** Each workload's gate: none on Workers without a `GATES` binding. */
+  gates?: Gates,
   waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
     promise.catch((error: unknown) => console.error('background task failed', logged(error)));
   },
-  gates?: Gates,
 ): CoffreRuntime {
   let signin: SigninService | null = null;
   let workloads: WorkloadService | null = null;

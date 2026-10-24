@@ -72,7 +72,7 @@ export class GateState {
   /** The second the ceiling counts, and what it took in it. */
   #second = -1;
   #inSecond = 0;
-  /** By `countId`. */
+  /** By `countId`: one per count the deployment's limits name, each kept for good, as its window is until it is asked in another. */
   readonly #counts = new Map<string, Count>();
   /** The durable counts changed since `flush` last took them. */
   readonly #dirty = new Set<string>();
@@ -145,17 +145,14 @@ export class GateState {
 
   /** The durable counts changed since the last call, by `countId`, to write; `unwritten` gives them back if the write fails. */
   flush(): [string, Count][] {
-    const changed = [...this.#dirty].flatMap((id): [string, Count][] => {
-      const held = this.#counts.get(id);
-      return held === undefined ? [] : [[id, { ...held }]];
-    });
+    const changed = [...this.#dirty].map((id): [string, Count] => [id, { ...this.#counts.get(id)! }]);
     this.#dirty.clear();
     return changed;
   }
 
   /** Counts `flush` gave whose write failed: they wait to be written again. */
   unwritten(ids: Iterable<string>) {
-    for (const id of ids) if (this.#counts.has(id)) this.#dirty.add(id);
+    for (const id of ids) this.#dirty.add(id);
   }
 
   /** Whether a durable count waits to be written. */
@@ -193,9 +190,6 @@ export class GateState {
     this.#previous = n === this.#n + 1 ? this.#current : null;
     this.#n = n;
     this.#current = epoch(n);
-    for (const [id, held] of this.#counts) {
-      if (held.start + windowOf(id) <= now && !this.#dirty.has(id)) this.#counts.delete(id);
-    }
   }
 }
 
@@ -207,10 +201,6 @@ function epoch(n: number): Epoch {
 /** A count's name in the gate and in a Durable Object's storage: its window, then its key. */
 function countId(count: GateCount): string {
   return `${count.windowMs}:${count.key}`;
-}
-
-function windowOf(id: string): number {
-  return Number(id.slice(0, id.indexOf(':')));
 }
 
 /**

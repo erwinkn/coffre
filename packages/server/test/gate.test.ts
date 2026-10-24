@@ -152,6 +152,26 @@ test('a window a count starts again in is written even when another count refuse
   assert.equal(again.admit({ counts: [perHour] }, hour + 1).ok, true);
 });
 
+test('a count keeps the window it was last asked in through epochs that pass without it: a clock back in it finds it as it was, as an eviction would', () => {
+  const minute = Math.ceil(T0 / 60_000) * 60_000;
+  const gate = new GateState(minute, { durable: true });
+  const perMinute = [{ key: 'stripe', windowMs: 60_000, most: 1 }];
+  const perHour = [{ key: 'openai', windowMs: 3_600_000, most: 1 }];
+  assert.equal(gate.admit({ counts: perMinute }, minute).ok, true);
+  assert.equal((gate.admit({ counts: perMinute }, minute + 1) as { first: boolean }).first, true);
+  assert.equal(gate.admit({ counts: perHour }, minute + 2).ok, true);
+  const written = gate.flush();
+  // A forward blip of an hour, any request in it, and back: the epochs move on; the counts hold their windows.
+  gate.nonce(minute + 3_600_000);
+  assert.deepEqual(gate.admit({ counts: perMinute }, minute + 3), { ok: false, reason: 'limit', key: 'stripe', retryAfterMs: 60_000 - 3, first: false });
+  const evicted = new GateState(minute + 4, { durable: true });
+  evicted.restore(written);
+  for (const twin of [gate, evicted]) {
+    const hourEnds = Math.floor(minute / 3_600_000) * 3_600_000 + 3_600_000;
+    assert.deepEqual(twin.admit({ counts: perHour }, minute + 5), { ok: false, reason: 'limit', key: 'openai', retryAfterMs: hourEnds - minute - 5, first: true });
+  }
+});
+
 test("counts read back by an object whose clock is a little behind the window they were written in count on in it", () => {
   const day = Math.ceil(T0 / 86_400_000) * 86_400_000;
   const perDay = [{ key: 'stripe', windowMs: 86_400_000, most: 2 }];

@@ -76,7 +76,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
   const resolved = checkNodeConfig(config);
   let runtime: Promise<CoffreRuntime> | undefined;
   const ready = () =>
-    (runtime ??= openDatabase(config.database).then((database) => createRuntime(resolved, database.db, config.vault, nodeTransport(), undefined, processGates())));
+    (runtime ??= openDatabase(config.database).then((database) => createRuntime(resolved, database.db, config.vault, nodeTransport(), processGates())));
   let timer: NodeJS.Timeout | undefined;
   return {
     request(request) {

@@ -79,10 +79,10 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     const entry = configured(env);
     const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
     const left: Promise<unknown>[] = [];
-    const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport(), (promise) => {
+    const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport(), entry.gates, (promise) => {
       left.push(promise);
       ctx.waitUntil(promise);
-    }, entry.gates);
+    });
     let closing: Promise<void> | undefined;
     /**
      * Close the client once `work`, and whatever the invocation left to
@@ -122,7 +122,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     Sockets: socketsObject<Env>((env, state) => {
       const { config, resolved, gates } = configured(env);
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
-      const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise), gates);
+      const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), gates, (promise) => state.waitUntil(promise));
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,
