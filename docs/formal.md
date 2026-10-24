@@ -845,10 +845,7 @@ as often as their budget allows: they hide one (change its `action`,
 `author`, `decision` or `seq`, or delete it, so that no read of beats
 finds it), forge one (make it say it verified to the head, clean), and
 put it back as it was. Either change is an edit in place: a walk over the
-row finds it. Once, at any step, they can also make one of the vault's
-rows of a beat, and chain everything after it again, the head row too
-(`relabel`): the app's walk checks the vault's rows only for their place
-in the chain, so only the vault, by its MACs, finds that.
+row finds it.
 
 - **A heartbeat** (`heartbeat.ts`, `writeAuditHeartbeat`):
   1. in one snapshot, where to resume (`resumePoint`) and the walk from
@@ -870,17 +867,13 @@ in the chain, so only the vault, by its MACs, finds that.
      reached the head, the rest walked and the head signed, or else where
      the walk got to, behind it, unless another call signed as far;
   4. a refusal's entry, in a transaction of its own.
-- **Readiness** (`auditReadiness`, `walkToHead`): in one snapshot, the
-  newest beat, the newest checkpoint, and the next beat's walk, from where
-  it would resume, or the newest checkpoint's prefix if that is further
-  back, to the head; then the vault's verdict on its own entries over the
-  same stretch (`verifyLog`): its MACs, the prefix still there, no refusal
-  since. That is a verification as the audit page runs one, and costs
-  what a beat's walk does: the entries since the newest beat's walk began,
-  at most `CHAIN_WALK`, and the vault's members and grants held to the log
-  (`request-cost.test.ts` holds it to the same however long the log, and
-  to one walk past it). Past `CHAIN_WALK`, readiness is red, as the beat
-  itself would be.
+- **Readiness** (`auditReadiness`, `readiness`): in one snapshot, the
+  newest beat, the newest checkpoint and that the prefix it signed is
+  still there, and the next beat's walk, from where it would resume to
+  the head. That walk costs what a beat's own does: the entries since the
+  newest beat's walk began, at most `CHAIN_WALK` (`request-cost.test.ts`
+  holds it to the same however long the log, and to one walk past it).
+  Past `CHAIN_WALK`, readiness is red, as the beat itself would be.
 
 Why that is enough, by induction over beats. Say beat F found entry e
 edited, its walk having begun at point s, before e. Take any later beat X
@@ -897,9 +890,9 @@ So no walk passes e while F's edit stays, except one that walked over e
 after F found it, which found e as it was put back. Readiness runs X's
 walk, so it is red as long as X would find e or F's row changed. Edited
 again after that, e is a new edit behind every cursor, which the scrub
-finds. "A walk reads F's row and finds it changed" holds for the app's
-rows; a row made one of the vault's is the vault's to check, which
-readiness asks.
+finds. "A walk reads F's row and finds it changed" holds while F stays
+one of the app's rows: one made the vault's is the vault's to check, the
+gap below.
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
@@ -911,8 +904,7 @@ readiness asks.
 | A beat reads where to resume in the snapshot it walks in (`writeAuditHeartbeat`, `OneSnapshot`) | a beat reads where to resume before the finder commits, and walks over the finder's row after, as any row (`FoundStaysRed`, in `Overtaking`); or the finder's row hidden only while it reads where to resume, and put back before it walks (`FoundEditStaysRed`, in `Masking` and `Rows`) | #296's review |
 | A beat counts as where to resume only by its MAC, and only for a point before its own row (`resumePoint`, `CursorByMac`) | the finder's row forged to say it verified to the head: the next walk resumes there, past the edit (`FoundEditStaysRed`, in `Rows`) | this model |
 | No further than where the walk of any broken beat past that point began (`resumePoint`, `NoResumePastFinding`) | two heartbeats at once: the one that walked before an edit commits after the one that found it, and the next walks on from its cursor, past the edit (`FoundStaysRed`, in `Overtaking`; `FoundEditStaysRed`, in `Hiding`, `Reverting`, `Rows`) | this model, fixed with it |
-| Readiness runs the next beat's walk, from where it would resume, to the head (`walkToHead`, `ReadinessWalks`); without it, from the newest checkpoint's prefix only | the same two beats, readiness green on the second until the next beat (`FoundStaysRed`, in `Tampering`); or the finder hidden, and readiness green on the beat before it (`FoundEditStaysRed`, in `Hiding` and `Rows`) | this model, fixed with it |
-| And asks the vault of its entries over the same stretch (`verifyLog`, `ReadinessAsksVault`) | the finder made one of the vault's rows, everything after it chained again: no beat, and no fault to the app's walk; readiness green on the beat before it, through the vault's refusal and the app's writes after it (`FoundEditStaysRed`, in `Relabel`) | #296's review |
+| Readiness runs the next beat's walk, to the head (`auditReadiness`, `ReadinessWalks`) | the same two beats, readiness green on the second until the next beat (`FoundStaysRed`, in `Tampering`); or the finder hidden, and readiness green on the beat before it (`FoundEditStaysRed`, in `Hiding` and `Rows`) | this model, fixed with it |
 | Readiness reads the newest beat and the newest checkpoint in one snapshot (`readiness`) | green on a beat and a checkpoint that were never the newest together (`GreenIsReal`) | this model, fixed with it |
 
 `FoundEditStaysRed` is stated over what the beats found, kept by the
@@ -950,10 +942,31 @@ What it does not claim, as the code does not:
   next. The model's walks are four entries.
 - **Rewinding the database.** Deleting the newest rows, the head row put
   back, is the limit [architecture.md](architecture.md#limits) states: a
-  finder cut so loses its finding, and every row left is genuine. Rewriting
-  them instead is not the same: the app writes on, its head still ahead of
-  the one it remembers, and only the vault's MACs show the change, which
-  is why readiness asks the vault (`Relabel`).
+  finder cut so loses its finding, and every row left is genuine.
+- **A finder made one of the vault's rows, for one beat.** The app's walk
+  checks the vault's rows only for their place in the chain, by their
+  hashes; only the vault holds their MACs. So someone who makes a finder
+  F one of the vault's rows (its `author` changed, its hash computed
+  again), while only the vault's rows come after it, and chains those
+  again, the head row too, leaves the app a whole chain and no beat. An
+  app row after F would fail its MAC, so it must be done before the next
+  one is written. Readiness is then green on the beat before F, for one
+  beat interval at most, the app writing on meanwhile. The vault's next
+  checkpoint finds F by its MAC and refuses, and it refuses every one
+  after, since nothing can put F back without breaking the rows chained
+  to it since: so the next beat stays uncovered, and readiness red for
+  good, on the refusal rather than on F's finding, which the beats after
+  it no longer see. Made so after its checkpoint signed it, F moves the
+  hash that checkpoint signed, and readiness is red at once
+  (`auditHashAt`). The model's attacker keeps each entry's author, so it
+  does not explore this. Closing it means asking the vault about its rows
+  past its newest checkpoint on each readiness probe, bound to the app's
+  walk: `verifyLog` would need a bounded mode that recomputes the hashes
+  up to `upTo` itself, counts no prefix from the first entry, and says it
+  reached `upTo`. Today's verification, with `upTo`, leaves the links to
+  the app, which a row app-claimed in one snapshot and the vault's in the
+  other escapes; and it counts the whole signed prefix, which a readiness
+  probe cannot afford (R25). #296's review, rounds 1 to 3.
 
 The race it found in heartbeats, with readiness's walk off. Two run at
 once, as on two Node instances, each beating on its own timer. Beat 1
@@ -1063,7 +1076,6 @@ availability edge, not a bound, which `StandingStaysOpen` does not see.
 | `Reedit` | Someone edits an entry, reverts it once a beat found it, and edits it again, while beats walk one after another | 24 thousand |
 | `Masking` | A beat walks past an entry before it is edited; another, begun before it, finds the edit and commits after; the finder's row is hidden while a third reads where to resume, and put back before it walks | 110 thousand |
 | `Rows` | Someone edits the entry the newest checkpoint signed, and hides, forges or puts back any beat row, twice, at any step, while three beats run, one with its checkpoint | 2.7 million |
-| `Relabel` | Someone edits the entry the newest checkpoint signed, and once, at any step, makes one of the vault's rows of any beat, chaining everything after it again; two beats run at once with their checkpoints, and one more | 1.3 million |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
 

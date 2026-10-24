@@ -198,12 +198,13 @@
   snapshot it walks in, only from a beat its MAC vouches for, and no
   further than where the walk of any broken beat after that began; so
   every beat row past that point is one the walk reads, and one hidden or
-  changed there is found. Readiness runs that same walk, to the head, and
-  asks the vault of its own entries over it, as the audit page's check
-  does: it is red as soon as a finding stands, while the finder is hidden,
-  and while one is made a row of the vault's, which the app cannot check.
-  Its cost is a beat's walk: the entries since the newest beat's began,
-  and a second call to the vault. A beat
+  changed there is found. Readiness runs that same walk, to the head: it
+  is red as soon as a finding stands, and while the finder is hidden, and
+  when the prefix the newest checkpoint signed is no longer there. Its
+  cost is a beat's walk: the entries since the newest beat's began. One
+  way round it stays open for a beat interval, until the vault's next
+  checkpoint refuses: the finder made one of the vault's rows, which the
+  app's walk checks by hash only ([formal.md](docs/formal.md#the-audit-chain-and-the-tunnel)). A beat
   whose database was out of reach no longer sends the next walk back to
   the first entry. No database migration. Found by `formal/Audit.tla`, which now gives the attacker any
   beat row to hide, forge or put back at any step.

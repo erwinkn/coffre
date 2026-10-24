@@ -690,8 +690,9 @@ warning in the app's log, unless such a refusal stands.
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and the app's, by its MAC, its walk found the chain whole and
 could run (`broken` otherwise), a
-checkpoint after it carries the vault's signature, and the log verifies
-then, from where the next beat would resume to its head, by both authors. A log that stops taking
+checkpoint after it carries the vault's signature over a prefix still
+there, and the next beat's walk, run then, finds the chain whole to its
+head. A log that stops taking
 writes, a vault that stops signing, a cut in the log, an entry forged in
 the app's name or a wrong vault key all turn it red within one beat; an
 entry edited in place, within two laps. There is no heartbeat table.
@@ -735,12 +736,18 @@ committed, so F's row lies past where A verified to, and the next walk
 reads it: it resumes no further than where the walk of any broken beat it
 reads began (`resumePoint`), and finds 812 again. Readiness runs that
 same walk, from the same point to the head, so it is red as soon as F
-commits, and red while F's row is hidden; then asks the vault of its own
-entries over the same stretch, as the audit page's check does, since a
-row made one of the vault's is one the app cannot check. Its cost is the
-entries since the newest beat's walk began, as a beat's own walk: one
-beat's worth of writes. Past 10,000 of them readiness is red, as the beat
-would be. The model of
+commits, and red while F's row is hidden. Its cost is the entries since
+the newest beat's walk began, as a beat's own walk: one beat's worth of
+writes. Past 10,000 of them readiness is red, as the beat would be.
+
+One way round it stays open, for a beat interval: the app's walk checks
+the vault's rows by their hashes only, so F made one of the vault's rows,
+its hash recomputed, while only the vault's rows come after it, and those
+chained again, is no beat and no fault to the app. Readiness is green on
+the beat before F until the vault's next checkpoint finds F by its MAC
+and refuses; from then on no checkpoint covers a beat, and readiness is
+red for good, on that refusal ([formal.md](formal.md#the-audit-chain-and-the-tunnel),
+"A finder made one of the vault's rows"). The model of
 it, against someone who hides, edits and puts back any beat row at any
 step, is [formal.md](formal.md#the-audit-chain-and-the-tunnel).
 
