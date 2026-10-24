@@ -221,6 +221,28 @@ test('a proof signs the path as it goes upstream: one object and another to S3 a
   assert.equal(reason(await verifyProof(proof, await expectation(key, { url: at('a/%62'), method: 'PUT' }))), 'req', 'an escape upstream may read otherwise');
 });
 
+test("htu's path is the one fetch sends, a backslash ending the authority as WHATWG reads it", async () => {
+  for (const url of [
+    'https://secrets.acme.example\\unused/api/members',
+    'https:\\\\secrets.acme.example\\use\\x',
+    'https://secrets.acme.example/use/a\\..\\b',
+    'https://secrets.acme.example?/x',
+    'https://secrets.acme.example#/x',
+  ]) {
+    assert.equal(new URL(canonicalHtu(url)).pathname, new URL(canonicalHtu(new Request(url).url)).pathname, url);
+  }
+  assert.equal(canonicalHtu('https://secrets.acme.example\\unused/api/members'), 'https://secrets.acme.example/unused/api/members');
+});
+
+test('a method is any token, compared exactly, as Fetch sends it', async () => {
+  const key = await generateProofKey();
+  for (const method of ['UPDATEREDIRECTREF', 'M-SEARCH', 'patch']) {
+    const proof = await createProof(key, { method, url: 'https://secrets.acme.example/use/x', iat: NOW });
+    assert.equal(reason(await verifyProof(proof, { method: new Request('https://x.example', { method }).method, url: 'https://secrets.acme.example/use/x', now: NOW * 1000 })), 'ok', method);
+  }
+  await assert.rejects(createProof(key, { method: 'GET IT', url: 'https://secrets.acme.example/use/x' }), TypeError);
+});
+
 test('the signer makes no proof the verifier would refuse for its size', async () => {
   const key = await generateProofKey();
   const long = `https://secrets.acme.example/use/x/${'a'.repeat(900)}`;
@@ -228,4 +250,9 @@ test('the signer makes no proof the verifier would refuse for its size', async (
   assert.ok(proof.length <= MAX_PROOF_LENGTH);
   assert.equal(reason(await verifyProof(proof, { method: 'GET', url: long, token: TOKEN, now: NOW * 1000 })), 'ok');
   await assert.rejects(createProof(key, { method: 'GET', url: `${long}${'a'.repeat(700)}`, token: TOKEN, iat: NOW }), /at most 2048 characters/);
+  // Nor one that signs more headers than it takes: 32 is the most.
+  const many = (count: number) => Array.from({ length: count }, (_, i): [string, string] => [`x-${i}`, 'v']);
+  const most = await createProof(key, { method: 'GET', url: long, token: TOKEN, iat: NOW, content: { headers: many(32), body: await bodyDigest('') } });
+  assert.equal(reason(parseProof(most)), 'ok');
+  await assert.rejects(createProof(key, { method: 'GET', url: long, token: TOKEN, iat: NOW, content: { headers: many(33), body: await bodyDigest('') } }), /at most 32 headers/);
 });

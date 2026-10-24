@@ -152,6 +152,7 @@ test("a scope's grant may carry a workload's reads, by ID or every key", () => {
 });
 
 test("a child's constraints are checked and canonical, and its operations held to them on the URL sent", () => {
+  assert.deepEqual(checkConstraints({ methods: ['M-SEARCH', 'get', 'patch'] }), { methods: ['GET', 'M-SEARCH', 'patch'] });
   const child = checkConstraints({ credentials: ['stripe', 'stripe'], methods: ['post'], paths: ['/v1/refunds', '/v1/refunds/re_1'] });
   assert.deepEqual(child, { credentials: ['stripe'], methods: ['POST'], paths: ['/v1/refunds'] });
   for (const bad of [{ paths: ['v1'] }, { paths: ['/v1/'] }, { paths: ['/v1/%2e'] }, { paths: ['/v1/../x'] }, { paths: ['/v1;x'] }, { methods: ['get it'] }, { places: ['market'] }, { credentials: ['Stripe'] }, { extra: [] }]) {

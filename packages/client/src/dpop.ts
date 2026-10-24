@@ -18,6 +18,8 @@
 
 /** The longest proof, in characters, which the verifier refuses past and the signer never makes. */
 export const MAX_PROOF_LENGTH = 2048;
+/** The most headers one proof signs: the verifier refuses more, and the signer signs no more. */
+export const MAX_SIGNED_HEADERS = 32;
 
 /** A P-256 public key, as a proof carries it: these four members and nothing else. */
 export type PublicJwk = { kty: 'EC'; crv: 'P-256'; x: string; y: string };
@@ -102,6 +104,9 @@ export async function generateProofKey(): Promise<ProofKey> {
   return { privateKey: pair.privateKey, jwk: { kty: kty as 'EC', crv: crv as 'P-256', x: x!, y: y! } };
 }
 
+/** A method, as RFC 9110 writes one: a token, of any length the proof's own limit leaves. */
+export const METHOD_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
 /** RFC 3986's unreserved characters, which an escape never needs. */
 const UNRESERVED = /^[A-Za-z0-9\-._~]$/;
 
@@ -125,7 +130,8 @@ export function canonicalHtu(input: string | URL): string {
   const url = new URL(String(input));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new TypeError(`a proof signs an http or https URL, not ${url.protocol}`);
   // The path as given, before the WHATWG parser removes its dot segments, which it would do before merging slashes.
-  const raw = typeof input === 'string' ? /^[^:/?#]+:\/\/[^/?#]*([^?#]*)/.exec(input)?.[1] ?? url.pathname : url.pathname;
+  // A `\` ends the authority as `/` does, as the WHATWG parser reads an http(s) URL, so the path is the one fetch sends.
+  const raw = typeof input === 'string' ? /^[^:/\\?#]+:[/\\]{2}[^/\\?#]*([^?#]*)/.exec(input)?.[1] ?? url.pathname : url.pathname;
   if (/%(?![0-9A-Fa-f]{2})/.test(raw)) throw new TypeError('a URL a proof signs escapes a character with % and two hex digits, never a lone %');
   const decoded = raw.replace(/%([0-9A-Fa-f]{2})/g, (_, code: string) => {
     const char = String.fromCharCode(parseInt(code, 16));
@@ -158,6 +164,7 @@ function withoutDotSegments(path: string): string {
  * (RFC 9110, section 9.1), so `patch` is not `PATCH`, and a proof signs one.
  */
 export function fetchMethod(method: string): string {
+  if (!METHOD_TOKEN.test(method)) throw new TypeError(`${JSON.stringify(method)} is no HTTP method: a method is a token (RFC 9110, section 9.1)`);
   const upper = method.toUpperCase();
   return ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upper) ? upper : method;
 }
@@ -258,6 +265,7 @@ export async function createProof(
   if (request.nonce !== undefined) claims.nonce = request.nonce;
   if (request.content !== undefined) {
     const headers = signedHeaders(request.content.headers);
+    if (headers.length > MAX_SIGNED_HEADERS) throw new TypeError(`a proof signs at most ${MAX_SIGNED_HEADERS} headers: this request sets ${headers.length}`);
     claims.hdr = headers.map(([name]) => name).join(' ');
     claims.req = await requestDigest({ ...sentTarget(request.url), headers, body: request.content.body });
   }

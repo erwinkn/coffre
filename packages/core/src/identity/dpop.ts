@@ -23,6 +23,8 @@ import {
   fetchMethod,
   fromBase64url,
   MAX_PROOF_LENGTH,
+  MAX_SIGNED_HEADERS,
+  METHOD_TOKEN,
   requestDigest,
   sentTarget,
   thumbprint,
@@ -32,10 +34,8 @@ import {
   type PublicJwk,
 } from '@coffre/client/dpop';
 
-export { canonicalHtu, canonicalRequest, fetchMethod, MAX_PROOF_LENGTH, sentTarget, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
+export { canonicalHtu, canonicalRequest, fetchMethod, MAX_PROOF_LENGTH, MAX_SIGNED_HEADERS, sentTarget, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
 
-/** The most headers one proof signs. */
-export const MAX_SIGNED_HEADERS = 32;
 /** How far a proof's `iat` may be from now: the nonce, not the clock, is what makes a proof fresh. */
 export const PROOF_SKEW_SECONDS = 300;
 
@@ -80,8 +80,6 @@ const refuse = (reason: ProofReason, message: string): ProofRefusal => ({ ok: fa
 const DECODER = new TextDecoder('utf-8', { fatal: true });
 const ENCODER = new TextEncoder();
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]+$/;
-/** A method, a token of RFC 9110: in any case, compared exactly. */
-const METHOD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,16}$/;
 const CLAIMS = new Set(['jti', 'htm', 'htu', 'iat', 'ath', 'nonce', 'hdr', 'req']);
 
 /** A part of the proof as a JSON object, or null for anything else. */
@@ -125,7 +123,7 @@ export function parseProof(proof: string): ParsedProof | ProofRefusal {
   const claims = jsonPart(payloadPart);
   if (claims === null || Object.keys(claims).some((name) => !CLAIMS.has(name))) return refuse('malformed', "a proof's claims are jti, htm, htu, iat, and ath, nonce, hdr, req where they apply");
   if (typeof claims.jti !== 'string' || fromBase64url(claims.jti)?.length !== 16) return refuse('malformed', 'jti is 16 random bytes, in base64url');
-  if (typeof claims.htm !== 'string' || !METHOD.test(claims.htm)) return refuse('malformed', 'htm is the request\'s method');
+  if (typeof claims.htm !== 'string' || !METHOD_TOKEN.test(claims.htm)) return refuse('malformed', 'htm is the request\'s method');
   if (typeof claims.htu !== 'string') return refuse('malformed', 'htu is the request\'s URL');
   if (!Number.isSafeInteger(claims.iat)) return refuse('malformed', 'iat is an integer, in seconds');
   if (claims.ath !== undefined && !isDigest(claims.ath)) return refuse('malformed', 'ath is a SHA-256, in base64url');

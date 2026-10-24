@@ -12,7 +12,7 @@
  *   POST https://api.stripe.com/v1/refunds/%2e%2e/charges refused: it is /v1/charges once parsed
  *   POST https://api.stripe.com/v1/refundsX              refused: a prefix matches whole segments
  */
-import { fetchMethod } from '@coffre/client/dpop';
+import { fetchMethod, METHOD_TOKEN } from '@coffre/client/dpop';
 
 import { CREDENTIAL_NAME } from './workloads.ts';
 
@@ -38,7 +38,6 @@ export class ConstraintsInvalid extends Error {
 }
 
 const PLACE = /^[a-z0-9][a-z0-9-]{0,62}\/[a-z0-9][a-z0-9-]{0,62}(@me)?$/;
-const METHOD = /^[A-Z]{1,16}$/;
 /** A path segment as a constraint names one: no escape, no `;`, no dot segment. */
 const SEGMENT = /^[A-Za-z0-9\-_~!$&'()*+,=:@.]+$/;
 
@@ -72,7 +71,7 @@ function under(path: string, prefix: string): boolean {
 
 /**
  * Constraints as a child asks for them, checked and canonical: each list
- * sorted, without duplicates; methods in upper case; prefixes absolute,
+ * sorted, without duplicates; methods as Fetch sends them; prefixes absolute,
  * with no trailing slash, escape, `;` or dot segment, and none under
  * another, which it would add nothing to. Throws `ConstraintsInvalid`.
  */
@@ -83,7 +82,8 @@ export function checkConstraints(input: unknown): Constraints {
   const checked: { -readonly [K in keyof Constraints]: Constraints[K] } = {};
   const placeList = list(places, 'places', (place) => PLACE.test(place));
   const credentialList = list(credentials, 'credentials', (name) => CREDENTIAL_NAME.test(name));
-  const methodList = list(Array.isArray(methods) ? methods.map((method) => (typeof method === 'string' ? method.toUpperCase() : method)) : methods, 'methods', (method) => METHOD.test(method));
+  // As Fetch sends each, and so as a proof signs it: `get` is GET, and `M-SEARCH` stays itself.
+  const methodList = list(Array.isArray(methods) ? methods.map((method) => (typeof method === 'string' && METHOD_TOKEN.test(method) ? fetchMethod(method) : method)) : methods, 'methods', (method) => METHOD_TOKEN.test(method));
   const pathList = list(paths, 'paths', isPrefix);
   if (placeList !== undefined) checked.places = placeList;
   if (credentialList !== undefined) checked.credentials = credentialList;
@@ -155,7 +155,7 @@ export function constraintsAllow(
   if (constraints.methods === undefined && constraints.paths === undefined) return true;
   if (operation.request === undefined) return false;
   // Exactly, as a proof signs it: a child of POST is refused `post`, which an upstream may read otherwise.
-  if (constraints.methods !== undefined && !constraints.methods.includes(fetchMethod(operation.request.method))) return false;
+  if (constraints.methods !== undefined && !(METHOD_TOKEN.test(operation.request.method) && constraints.methods.includes(fetchMethod(operation.request.method)))) return false;
   if (constraints.paths === undefined) return true;
   let path: string;
   try {
