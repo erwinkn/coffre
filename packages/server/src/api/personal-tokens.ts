@@ -48,6 +48,8 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'DELETE /members/:member/tokens/:id': false,
   // A placeholder for an agent's app, within the token's scope and never past its end: it reaches only the credential proxy.
   'POST /handles': true,
+  // Ending a handle of its own ends nothing it does not outlive: `coffre run` revokes its own when its command ends.
+  'DELETE /handles/:id': true,
   'GET /members/:member/bindings': false,
   'POST /members/:member/bindings': false,
   'POST /members/:member/bindings/keys': false,

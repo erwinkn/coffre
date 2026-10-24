@@ -382,16 +382,21 @@ test('get in a terminal ends its line, so the prompt comes back on one of its ow
 test("a terminal's Ctrl-C reaches a run's command, and the run waits for it; a SIGTERM to the run is passed on to its command", async (t) => {
   const { environment } = await instance(t, { 'market/dev': { values: { API_KEY: 'k' } } });
   const run = (script: string) =>
-    spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/dev', '--', process.execPath, '-e', script], { env: environment(), stdio: 'ignore' });
-  const started = () => new Promise((resolve) => setTimeout(resolve, 1500));
+    spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/dev', '--', process.execPath, '-e', script], { env: environment(), stdio: ['ignore', 'pipe', 'ignore'] });
+  // The command says when its handler is set, the run's set before it started: then the signal goes.
+  const started = async (child: ReturnType<typeof run>) => {
+    let said = '';
+    for await (const chunk of child.stdout!) if ((said += String(chunk)).includes('ready')) return;
+    assert.fail('the command never said it was ready');
+  };
   // Its command answers SIGINT itself, as a psql at its prompt does: the run, sent it too by the terminal, keeps its listeners and waits.
-  const interrupted = run("process.on('SIGINT', () => {}); setTimeout(() => process.exit(7), 3000)");
-  await started();
+  const interrupted = run("process.on('SIGINT', () => {}); console.log('ready'); setTimeout(() => process.exit(7), 1000)");
+  await started(interrupted);
   interrupted.kill('SIGINT');
   assert.deepEqual(await once(interrupted, 'exit'), [7, null]);
   // A SIGTERM sent to the run alone ends its command, which the run does not leave behind.
-  const terminated = run("process.on('SIGTERM', () => process.exit(9)); setTimeout(() => {}, 20000)");
-  await started();
+  const terminated = run("process.on('SIGTERM', () => process.exit(9)); console.log('ready'); setTimeout(() => {}, 20000)");
+  await started(terminated);
   terminated.kill('SIGTERM');
   assert.deepEqual(await once(terminated, 'exit'), [9, null]);
 });
@@ -411,8 +416,7 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     if (req.url === '/use') return send(200, { proxy: 'coffre', credentials: ['schumann'] });
     if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/dev': 'viewer' } });
-    if (req.url === '/api/me') return send(200, { principal: { type: 'user', id: 'dev@acme.example' } });
-    if (req.method === 'DELETE') return send(200, { revoked: true });
+    if (req.method === 'DELETE' && req.url === '/api/handles/h1') return send(200, { revoked: true });
     if (req.url === '/use/market/dev') {
       const at = `http://${req.headers.host}/use/market/dev/schumann`;
       // A placeholder shaped as its client checks it, a JWT here, is no value given as it is.
@@ -448,7 +452,7 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
   assert.match(stderr, /left out, neither proxied nor yours to read: DATABASE_URL/);
   // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle; and
   // once the command ended, the handle revoked, so that nothing the run started holds it after.
-  assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle', 'GET /api/me token', `DELETE /api/members/${encodeURIComponent('user:dev@acme.example')}/tokens/h1 token`]);
+  assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle', 'DELETE /api/handles/h1 token']);
   assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);
 });
 
@@ -538,8 +542,7 @@ for (const raced of [false, true]) {
       const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
       if (url === '/use') return send(200, { proxy: 'coffre', credentials: [] });
       if (url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/local': 'viewer' } });
-      if (url === '/api/me') return send(200, { principal: { type: 'user', id: 'dev@acme.example' } });
-      if (req.method === 'DELETE') return send(200, { revoked: true });
+      if (req.method === 'DELETE' && url === '/api/handles/h1') return send(200, { revoked: true });
       if (url === '/use/market/local') {
         return mine === null
           ? send(200, { environment: 'market/local', env: { REGION: 'eu' }, credentials: {}, left: ['SEAL_KEY', 'TYPED'], generate: { SEAL_KEY: { recipe: 'bytes:32:hex', replaces: 'v-local-1' } } })
@@ -577,7 +580,7 @@ for (const raced of [false, true]) {
     assert.ok(!stderr.includes(value));
     assert.deepEqual(JSON.parse(stdout), { SEAL_KEY: raced ? 'the-other-runs-value' : value, REGION: 'eu' });
     assert.equal(/made your own SEAL_KEY in market\/local@me/.test(stderr), !raced);
-    assert.deepEqual(requests, ['GET /use', 'POST /api/handles', 'GET /use/market/local', 'PATCH /api/secrets/market/local@me', 'GET /use/market/local', 'GET /api/me', 'DELETE /api/members/user:dev@acme.example/tokens/h1']);
+    assert.deepEqual(requests, ['GET /use', 'POST /api/handles', 'GET /use/market/local', 'PATCH /api/secrets/market/local@me', 'GET /use/market/local', 'DELETE /api/handles/h1']);
   });
 }
 

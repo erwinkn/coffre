@@ -104,6 +104,7 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'POST /members/:member/tokens': true,
   'DELETE /members/:member/tokens/:id': true,
   'POST /handles': true,
+  'DELETE /handles/:id': true,
   'GET /members/:member/bindings': true,
   'POST /members/:member/bindings': true,
   'POST /members/:member/bindings/keys': true,

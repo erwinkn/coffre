@@ -1229,11 +1229,7 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     made,
     // A run's handle ends with its command (`run`): no app it started holds it after. Asked quietly: a refusal, or an
     // instance out of reach, leaves the handle to end by itself.
-    revoke: async () => {
-      const api = createClient({ url: to.origin, headers: () => headersFor(to), transport: once });
-      const { principal } = await api.me();
-      await api.tokens.revoke(`user:${principal.id}`, handle.id);
-    },
+    revoke: async () => void (await createClient({ url: to.origin, headers: () => headersFor(to), transport: once }).handles.revoke(handle.id)),
   };
 }
 
