@@ -346,7 +346,7 @@ async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sou
   const access = await runtime.vault.access(caller.principal);
   const id = caller.principal.slice('token:'.length);
   const generation = row?.generation ?? binding.generation;
-  const callerOf = { ...callerFrom({ type: 'service', id }, access, policySeq, scope), kind: 'workload' as const };
+  const callerOf = callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload');
   if (callerOf.generation !== generation) return null;
   return {
     expiresAt: (row?.expiresAt ?? new Date(Date.now() + 60_000)).toISOString(),

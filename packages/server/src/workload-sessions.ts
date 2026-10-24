@@ -16,7 +16,7 @@
 //
 // The API (`authenticateRequest`), renewal, logout and the credential
 // proxy (`PluginContext.workload`) all come through here.
-import type { CredentialScope, ScopeGrant } from '@coffre/core/access';
+import { scopeWithReads, type CredentialScope } from '@coffre/core/access';
 import {
   addressWithin,
   checkConstraints,
@@ -315,17 +315,15 @@ export async function standingSession(
 
 /**
  * What a session reaches, as its caller holds it: its row's scope, an
- * enrollment code's, or else its binding's, never null. Each grant of an
- * environment its binding's `reads` lists carries that list (section 6.1):
- * binding creation gives each such environment a grant of its own, so the
- * list attaches by ID with nothing to look up. A grant without `reads` is
- * use-only, there.
+ * enrollment code's, or else its binding's, never null, with its binding's
+ * `reads` on the grants of the environments they list (`scopeWithReads`).
+ * Binding creation gives each such environment a grant of its own, so the
+ * scope itself says each one's project, with nothing to look up. A grant
+ * without `reads` is use-only, there.
  */
 export function sessionScope(row: Pick<SessionRow, 'scope'>, binding: Pick<BindingRow, 'scope'>, policy: BindingPolicy): CredentialScope {
   const scope = readScope(row.scope ?? binding.scope) ?? [];
-  const reads = policy.reads ?? {};
-  return scope.map((grant): ScopeGrant => {
-    const listed = grant.environmentId === null ? undefined : reads[grant.environmentId]?.keys;
-    return listed === undefined ? grant : { ...grant, reads: listed };
-  });
+  const projectOf = new Map<string, string>();
+  for (const { projectId, environmentId } of scope) if (environmentId != null && projectId !== null) projectOf.set(environmentId, projectId);
+  return scopeWithReads(scope, policy.reads, projectOf);
 }

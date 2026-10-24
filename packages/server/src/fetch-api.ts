@@ -187,9 +187,11 @@ export async function fetchApi(
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
     const response = await serveApi(request, apiContext(runtime, identity));
-    // A workload's every answer carries the gate's current nonce, which its next proof signs (section 5.1).
-    if (identity.workload != null) response.headers.set('dpop-nonce', identity.workload.nonce);
-    return response;
+    if (identity.workload == null) return response;
+    // A workload's every answer carries the gate's current nonce, which its next proof signs (section 5.1): on a copy, whose headers are its own.
+    const answered = new Response(response.body, response);
+    answered.headers.set('dpop-nonce', identity.workload.nonce);
+    return answered;
   } catch (error) {
     return errorResponse(error);
   }

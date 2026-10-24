@@ -18,13 +18,23 @@ const settings = propertySettings(64);
 
 const uuid = gs.fromRegex('[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', { fullmatch: true });
 
-const grant = gs.composite((tc): ScopeGrant => ({
-  projectId: tc.draw(gs.sampledFrom(['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002'])),
-  environmentId: tc.draw(gs.optional(gs.sampledFrom(['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000003']))),
+/** Each environment is of one project: the first two of the first, the third of the second. */
+const PROJECT_OF: Record<string, string> = {
+  '00000000-0000-4000-8000-000000000001': '10000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-000000000002': '10000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-000000000003': '10000000-0000-4000-8000-000000000002',
+};
+
+const grant = gs.composite((tc): ScopeGrant => {
+  const environmentId = tc.draw(gs.optional(gs.sampledFrom(Object.keys(PROJECT_OF))));
+  return {
+  projectId: environmentId === null ? tc.draw(gs.sampledFrom(Object.values(PROJECT_OF))) : PROJECT_OF[environmentId]!,
+  environmentId,
   role: tc.draw(gs.sampledFrom(['viewer', 'developer'])),
   permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] },
   sensitive: tc.draw(gs.booleans()),
-}));
+  };
+});
 
 const reads = gs.composite((tc): NonNullable<BindingPolicy['reads']> => {
   const places = tc.draw(gs.arrays(gs.sampledFrom(['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000004']), { maxSize: 3 }));

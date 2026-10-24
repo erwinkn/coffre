@@ -201,10 +201,7 @@ export async function authenticateRequest(
 
   try {
     // A coffre credential was checked against what the vault says of its member: that answer, not a second call.
-    const caller = {
-      ...callerFrom({ type: principal.type, id: principal.id }, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope),
-      kind: principal.type === 'service' ? 'bearer' as const : 'person' as const,
-    };
+    const caller = callerFrom({ type: principal.type, id: principal.id }, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope);
     // Removal may have raced the credential verification above.
     if (credentialGeneration !== undefined && caller.generation !== credentialGeneration) {
       return unauthenticated(runtime.auth);
@@ -258,7 +255,7 @@ async function authenticateWorkload(
   const id = row.principal.slice('token:'.length);
   try {
     const access = await runtime.vault.access(row.principal);
-    const caller = { ...callerFrom({ type: 'service', id }, access, session.policySeq, sessionScope(row, binding, policy)), kind: 'workload' as const };
+    const caller = callerFrom({ type: 'service', id }, access, session.policySeq, sessionScope(row, binding, policy), 'workload');
     // Removal may have raced the statement.
     if (caller.generation !== row.generation) return unauthenticated(runtime.auth);
     return {

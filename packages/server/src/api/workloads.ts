@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { isCredentialScope, PROJECT_ONLY_PERMISSIONS, scopeDefinition, type CredentialScope, type Permission, type ScopeGrant } from '@coffre/core/access';
+import { isCredentialScope, scopeWithReads, type CredentialScope } from '@coffre/core/access';
 import {
   addressWithin,
   BindingInvalid,
@@ -1367,7 +1367,6 @@ function namedPolicy(policy: BindingPolicy, known: readonly PlaceRow[], named: R
  * by ID with nothing to look up (`sessionScope`).
  */
 function readsScope(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>, scope: CredentialScope, reads: readonly ResolvedRead[], details: Record<string, unknown>): CredentialScope {
-  const grants: ScopeGrant[] = [...scope];
   for (const read of reads) {
     const covering = scope.find((grant) => grant.environmentId === read.environmentId)
       ?? scope.find((grant) => grant.environmentId === null && grant.projectId === read.projectId);
@@ -1379,13 +1378,9 @@ function readsScope(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>, 
         denied(ctx, 'token.bind', 'sensitive_read', { metadata: { ...details, path: read.path, keys: sensitive.map((key) => key.key) } }),
       );
     }
-    if (covering.environmentId === null) {
-      // Its environment's share of the project's grant: what holds in an environment, as a grant there may hold no more.
-      const { permissions, protected: guarded } = scopeDefinition(covering);
-      const there = (column: readonly Permission[]) => column.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission));
-      grants.push({ ...covering, environmentId: read.environmentId, permissions: { normal: there(permissions), protected: there(guarded) } });
-    }
   }
+  // Each listed environment a grant of its own, the project's share there where only the project's reached it; the lists themselves are each request's.
+  const grants = scopeWithReads(scope, readsById(reads), new Map(reads.map((read) => [read.environmentId, read.projectId]))).map(({ reads: _, ...grant }) => grant);
   if (!isCredentialScope(grants)) throw new Error('a binding\'s reads made a scope that does not hold');
   return grants;
 }
