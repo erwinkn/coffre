@@ -126,8 +126,12 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
  * see the log as of one moment, so a step another start commits between
  * two of them cannot make the verdict a mix of before and after it, such
  * as `settled` halfway through. No lock: steps take the head themselves.
+ * Without keys held as replaced, no rotation is this app's to take, and
+ * the reads need no snapshot: one that moves on from its key meanwhile
+ * refuses its appends (`KeyRetired`).
  */
 export function keyStateNow(db: Database, keys: AppKeys): Promise<KeyState> {
+  if (keys.previousChainKeys.length === 0) return keyState(db, keys);
   return db.transaction((tx) => keyState(tx, keys), SNAPSHOT);
 }
 

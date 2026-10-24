@@ -1042,11 +1042,11 @@ What it changes, and what it keeps:
   503 `unavailable`.
 - **A key replaced stays replaced.** A start under a key the log moved on
   from, as a rollback of the deploy would be, answers 503 `app_key`, and
-  the server's log says which keys; so does a start that lists both keys
-  of a rotation under way to another key, or the new key of one whose old
-  key was taken out of `previousAuditChainKeys` before it ended. A start
-  under a third key, given neither, serves as under any key the log does
-  not know. To undo a rotation,
+  the server's log says which keys; so does a start that lists the new
+  key of a rotation under way to another key, or that is the new key of
+  one whose old key was taken out of `previousAuditChainKeys` before it
+  ended. A start that does not hold the new key of a rotation under way
+  serves, as under any key the log does not know. To undo a rotation,
   rotate again to a new key. A key the log does not know, a lost one or
   the wrong one, is served under as before rotations: everyone signs in
   again, every token and binding fails, the log stops verifying, and the
