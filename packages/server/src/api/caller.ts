@@ -16,7 +16,7 @@ import {
   type Role,
   type Scope,
 } from '@coffre/core/access';
-import type { Access, Vault } from '@coffre/core/vault';
+import type { Access, CallerKind, Vault } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { newestVaultSeq } from '@coffre/db/log';
 
@@ -71,6 +71,13 @@ export type Caller = {
   policySeq: bigint | null;
   /** A service account's: it holds each role's normal column, in a protected environment too. */
   service: boolean;
+  /**
+   * What the request came in on: a person's session or token, a bearer
+   * service credential, or a workload's key-bound session, which reads only
+   * plain keys and those its binding lists (docs/design/workload-access.md,
+   * section 6.1). Left out until that design's PR 1a sets it.
+   */
+  kind?: CallerKind;
 };
 
 /** The principal and their live grants, in one vault call. */

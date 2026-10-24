@@ -205,6 +205,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   const {
     credentials,
     deviceAuthorizations,
+    enrollments,
     environments,
     identities,
     projects,
@@ -224,6 +225,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(mcpConnections);
   await owner.delete(oauthClients);
   await owner.delete(credentials);
+  await owner.delete(enrollments);
   await owner.delete(serviceBindings);
   await owner.delete(consumedTokens);
   await owner.delete(deviceAuthorizations);

@@ -56,7 +56,21 @@
   service account sensitive values, and the vault's bulk limit, each
   failing as it must without each of the code's protections
   ([formal.md](docs/formal.md#credentials-issuing-and-the-bulk-limit)).
-
+- **Workload access's foundation**
+  ([workload-access.md](docs/design/workload-access.md), its PR 0). A
+  database migration, `0015_workload_access`, which only adds: a
+  workload's key-bound sessions' columns on `credentials` and their kind,
+  a `policy` on trust bindings, and an `enrollments` table, so the release
+  before serves on it unchanged. `/api/auth/oidc` now takes only bindings
+  of today's five profiles with no policy, as every binding of before is.
+  Google's, Fly's, Vercel's and Entra's issuers now force their own
+  profiles, as github.com's and gitlab.com's do: a new `custom` binding
+  can no longer name them, and the binding they force signs in at
+  `/api/auth/workload` once that is served. Bindings already made are
+  unchanged.
+  The design's routes and the `coffre enroll`, `approve`, `freeze`,
+  `unfreeze` and `serve` commands are declared, and answer that they are
+  not built yet until the changes that serve them land.
 - **The database tunnel runs on Workers.** `coffre run market/dev -- psql
   "$DATABASE_URL"` now works against a Workers deployment as it does on
   Node: each run's connections to a database go to a Durable Object of

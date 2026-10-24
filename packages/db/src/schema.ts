@@ -402,6 +402,14 @@ export const auditLog = pgTable(
     index('audit_log_unbind_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'bindingId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
+    // Whether a target is frozen: its newest allowed freeze or lift (docs/design/workload-access.md, section 8.2).
+    index('audit_log_freeze_idx')
+      .on(sql`((${table.metadata})::jsonb ->> 'target')`, table.seq.desc())
+      .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`),
+    // An enrollment code's tombstone: the app's successful `enrollment.supersede` naming it.
+    index('audit_log_supersede_idx')
+      .on(sql`((${table.metadata})::jsonb ->> 'enrollmentId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'enrollment.supersede' AND ${table.decision} = 'allow'`),
     // The run a credential was issued for: its exchange's entry, by the credential's ID.
     index('audit_log_exchange_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'credentialId')`)
@@ -563,6 +571,8 @@ export const serviceBindings = pgTable(
     claims: text().notNull(),
     // What the credentials it issues reach (`CredentialScope`), JSON; null on a binding of 0.4 the app has not sealed yet.
     scope: text(),
+    // What a workload's binding says beyond its claims (`BindingPolicy`), canonical JSON: null on a binding `/api/auth/oidc` takes, never on another (docs/design/workload-access.md, section 11).
+    policy: text(),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
@@ -727,6 +737,46 @@ export const mcpApprovals = pgTable(
 );
 
 /**
+ * Enrollment codes (docs/design/workload-access.md, section 4.4): what CI
+ * mints for a platform that signs no identity, and the app exchanges for a
+ * workload's session at `/api/auth/workload`. Never a credential itself, and
+ * only ever added: the log says which code a promote superseded. Its scope,
+ * fixed at minting, is the binding's within what the minter held; the MAC
+ * covers everything but its hint and creation time (auth-rows.ts in the server).
+ */
+export const enrollments = pgTable(
+  'enrollments',
+  {
+    id: uuid().primaryKey(),
+    authMac: bytea('auth_mac').notNull(),
+    bindingId: uuid('binding_id').notNull(),
+    // The SHA-256 of the code, `coffre_enr_…`, and enough of it to recognize.
+    codeHash: bytea('code_hash').notNull(),
+    codeHint: text('code_hint').notNull(),
+    // `CredentialScope`, JSON: what its sessions reach, R32's sensitive per place.
+    scope: text().notNull(),
+    createdAt: createdAt(),
+    // Who minted it, and with which of their credentials: a CI run's session.
+    createdBy: text('created_by').notNull(),
+    createdWith: uuid('created_with'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    unique('enrollments_code_hash_key').on(table.codeHash),
+    check('enrollments_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('enrollments_code_hash_check', sql`octet_length(${table.codeHash}) = 32`),
+    check('enrollments_scope_check', sql`${table.scope}::jsonb IS NOT NULL`),
+    foreignKey({
+      name: 'enrollments_binding_id_fkey',
+      columns: [table.bindingId],
+      foreignColumns: [serviceBindings.id],
+    }).onDelete('restrict'),
+    // A binding's codes, newest first, for its page.
+    index('enrollments_binding_idx').on(table.bindingId, table.createdAt.desc()),
+  ],
+);
+
+/**
  * Bearer credentials coffre issues itself: browser sessions, CLI sessions and
  * service tokens.
  *
@@ -758,12 +808,24 @@ export const credentials = pgTable(
     lastUsedIp: text('last_used_ip'),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokedBy: text('revoked_by'),
+    // A workload's session (docs/design/workload-access.md, section 11), null on every other credential:
+    // the thumbprint of the key its proofs are signed by, and its hard end.
+    jkt: text(),
+    notAfter: timestamp('not_after', { withTimezone: true }),
+    // A `narrow` child's: its ancestors' IDs, root first, JSON, and its limits (`Constraints`), canonical JSON.
+    ancestors: text(),
+    constraints: text(),
+    // The enrollment code a session was made from, and, where its binding says `approve`, who approved it.
+    enrollmentId: uuid('enrollment_id'),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    approvedBy: text('approved_by'),
   },
   (table) => [
     unique('credentials_token_hash_key').on(table.tokenHash),
-    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle')`),
+    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload')`),
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
-    check('credentials_kind_matches_principal', sql`(${table.kind} = 'service') = (${table.principal} LIKE 'token:%')`),
+    check('credentials_kind_matches_principal', sql`(${table.kind} IN ('service', 'workload')) = (${table.principal} LIKE 'token:%')`),
+    check('credentials_workload_jkt_check', sql`${table.kind} <> 'workload' OR ${table.jkt} IS NOT NULL`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),
     check('credentials_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     foreignKey({
@@ -783,6 +845,15 @@ export const credentials = pgTable(
     index('credentials_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
     // What a trust binding issued lately, for its rate.
     index('credentials_issued_by_idx').on(table.principal, table.createdBy, table.createdAt),
+    foreignKey({
+      name: 'credentials_enrollment_id_fkey',
+      columns: [table.enrollmentId],
+      foreignColumns: [enrollments.id],
+    }).onDelete('restrict'),
+    // A code's sessions made by the exchange, ended ones too: its capacity and its tripwire's last hour, never a child.
+    index('credentials_enrollment_roots_idx')
+      .on(table.enrollmentId, table.createdAt)
+      .where(sql`${table.kind} = 'workload' AND ${table.ancestors} IS NULL`),
   ],
 );
 

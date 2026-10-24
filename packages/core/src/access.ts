@@ -465,9 +465,12 @@ export type Columns = { normal: readonly Permission[]; protected: readonly Permi
  * edit changes, so it never widens either: a built-in role's, or nothing
  * for any other name. A service's, whether it reads the sensitive values
  * there: true only when an Owner of its project issued it
- * (`readsSensitive`); left out on a person's, who reads none.
+ * (`readsSensitive`); left out on a person's, who reads none. A
+ * workload's, the keys there it may read rather than use, by ID, or `'*'`
+ * for every one (docs/design/workload-access.md, section 6.1): its
+ * binding's `reads` at that place, and left out for any other credential.
  */
-export type ScopeGrant = GrantPlace & { role: Role; permissions?: Columns; sensitive?: boolean };
+export type ScopeGrant = GrantPlace & { role: Role; permissions?: Columns; sensitive?: boolean; reads?: readonly string[] | '*' };
 
 /**
  * A grant of a scope with what its role holds now in `policy`, kept: what a
@@ -573,9 +576,10 @@ export function isCredentialScope(value: unknown): value is CredentialScope {
   const column = (list: unknown) => Array.isArray(list) && list.every((permission) => PERMISSIONS.includes(permission as Permission)) && new Set(list).size === list.length;
   return value.every((grant: unknown) => {
     if (typeof grant !== 'object' || grant === null || Array.isArray(grant)) return false;
-    const { projectId, environmentId, role, permissions, sensitive, ...rest } = grant as Record<string, unknown>;
+    const { projectId, environmentId, role, permissions, sensitive, reads, ...rest } = grant as Record<string, unknown>;
     if (Object.keys(rest).length > 0 || typeof projectId !== 'string' || typeof role !== 'string') return false;
     if (sensitive !== undefined && typeof sensitive !== 'boolean') return false;
+    if (reads !== undefined && reads !== '*' && !(Array.isArray(reads) && reads.every((id) => typeof id === 'string') && new Set(reads).size === reads.length)) return false;
     // As issued, both columns; or, kept before 0.10, a built-in role's name alone, which holds it as it ships.
     if (!ROLE_ID.test(role)) return false;
     if (permissions === undefined) {

@@ -52,6 +52,16 @@ async function main() {
     const proxied = credential('api', { COFFRE_CREDENTIALS: JSON.stringify({ api: `${url}proxy/api` }), COFFRE_HANDLE: 'h' });
     assert.equal((await (await proxied.fetch('/auth', { headers: { 'x-test': 'yes' } })).json()).email, 'me@acme.example');
 
+    // A workload's proof, with WebCrypto alone: a key that never exports, and a signature its own public key checks.
+    const dpop = await import('@coffre/client/dpop');
+    const key = await dpop.generateProofKey();
+    await assert.rejects(crypto.subtle.exportKey('jwk', key.privateKey));
+    const proof = await dpop.createProof(key, { method: 'POST', url: `${url}use/api/x?y=1`, token: 'coffre_wl_x', content: { headers: { 'content-type': 'text/plain' }, body: await dpop.bodyDigest('hi') } });
+    const [head, payload, signature] = proof.split('.');
+    const publicKey = await crypto.subtle.importKey('jwk', key.jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    assert.ok(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, dpop.fromBase64url(signature), new TextEncoder().encode(`${head}.${payload}`)));
+    assert.equal((await dpop.thumbprint(key.jwk)).length, 43);
+
     assert.ok(seen.includes('GET /api/auth yes'), seen.join('\n'));
   } finally {
     server.close();

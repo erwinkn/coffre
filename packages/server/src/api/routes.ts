@@ -1,5 +1,5 @@
 import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, PERMISSIONS, protects, type Permission } from '@coffre/core/access';
-import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet } from '@coffre/core/identity';
+import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, BEARER_PROFILES, type JSONWebKeySet } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
 import { displayName, environmentSlug, folderName, instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { POLICY_REVISION } from '@coffre/core/vault';
@@ -8,7 +8,9 @@ import { z } from 'zod';
 import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
+import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
+import { freeze, freezeInput, listFreezes, unfreeze } from './freezes.ts';
 import { listMembers, memberAccess, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
 import { managedAccount } from './services.ts';
@@ -536,7 +538,7 @@ export const routes = {
   }),
   ...route('POST /members/:member/bindings', {
     input: z.object({
-      profile: z.enum(WORKLOAD_PROFILES),
+      profile: z.enum(BEARER_PROFILES),
       // github.com's or gitlab.com's when left out; a custom binding names its own.
       issuer: z.string().max(400).nullable().default(null),
       // A value, or for what started the run (event_name, pipeline_source), a list of them.
@@ -576,6 +578,31 @@ export const routes = {
   }),
   ...route('DELETE /members/:member/bindings/:id', {
     run: (ctx, { params }) => workloads(ctx).unbind(ctx, serviceId(params.member), params.id),
+  }),
+  // Enrollment codes, for a workload on a platform that signs nothing (docs/design/workload-access.md, section 4.4):
+  // a binding's codes, a new one for a deploy, the one a deploy that came up makes current, and a session approved.
+  ...route('GET /members/:member/bindings/:id/enrollments', {
+    run: (ctx, { params }) => listEnrollments(ctx, { member: params.member, id: params.id }),
+  }),
+  ...route('POST /members/:member/bindings/:id/enrollments', {
+    input: mintInput,
+    run: (ctx, { params, input }) => mintEnrollment(ctx, { member: params.member, id: params.id }, input),
+  }),
+  ...route('POST /members/:member/bindings/:id/enrollments/:enrollment/promote', {
+    input: promoteInput,
+    run: (ctx, { params, input }) => promoteEnrollment(ctx, { member: params.member, id: params.id, enrollment: params.enrollment }, input),
+  }),
+  ...route('POST /members/:member/tokens/:id/approve', {
+    run: (ctx, { params }) => approveSession(ctx, { member: params.member, id: params.id }),
+  }),
+  // Freezes: every use under a target stopped at its next request, and lifted, its sessions, codes and bindings kept (section 8.2).
+  ...route('GET /freezes', { run: (ctx) => listFreezes(ctx) }),
+  ...route('POST /freezes', {
+    input: freezeInput,
+    run: (ctx, { input }) => freeze(ctx, input),
+  }),
+  ...route('DELETE /freezes/:target', {
+    run: (ctx, { params }) => unfreeze(ctx, params.target),
   }),
   // The instance's roles, as an Owner edited and made them, for any member; an Owner of the whole instance edits them
   // (docs/design/roles.md). `?dryRun=1` answers what the change would do to everyone it reaches, and changes nothing.

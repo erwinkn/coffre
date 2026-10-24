@@ -23,6 +23,7 @@ export const {
   auditChainHead,
   identities,
   credentials,
+  enrollments,
   deviceAuthorizations,
   serviceBindings,
   consumedTokens,
