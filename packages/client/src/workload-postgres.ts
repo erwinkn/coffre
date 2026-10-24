@@ -65,7 +65,18 @@ const KEEPALIVE_MS = 30_000;
 export function connect(coffre: Workload, name: string, options: { WebSocket?: WebSocketClass } = {}): TunnelStream {
   const WebSocketImpl = options.WebSocket ?? (globalThis as unknown as { WebSocket?: WebSocketClass }).WebSocket;
   if (WebSocketImpl === undefined) throw new Error("this runtime has no WebSocket of its own (Node 20): connect(coffre, name, { WebSocket }) with the ws package's");
-  return new TunnelStream(coffre, coffre.url(name).replace(/^http/, 'ws'), WebSocketImpl);
+  return new TunnelStream(coffre, tunnelUrl(coffre, name), WebSocketImpl);
+}
+
+/**
+ * The WebSocket URL of the tunnel `name`: always under its environment,
+ * `/use/<project>/<env>/<name>`, which coffre's tunnel route requires,
+ * where `url(name)` shortens a single place's to `/use/<name>`.
+ */
+export function tunnelUrl(coffre: Workload, name: string): string {
+  const url = new URL(coffre.url(name));
+  if (coffre.places.length === 1) url.pathname = `/use/${[...coffre.places[0]!.split('/'), name].map(encodeURIComponent).join('/')}`;
+  return url.href.replace(/^http/, 'ws');
 }
 
 export class TunnelStream extends Duplex {

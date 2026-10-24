@@ -294,7 +294,7 @@ for (const paced of [true, false]) {
     // A query larger than the window goes in frames, each within the credit left.
     const query = `select ${'q'.repeat(3 * 1024 * 1024)}`;
     assert.equal((await pool.query(query)).rows[0].value.length, query.length);
-    assert.ok(coffre.log.includes('GET /use/db upgrade'), coffre.log.join('\n'));
+    assert.ok(coffre.log.includes('GET /use/market/prod/db upgrade'), coffre.log.join('\n'));
     await pool.end();
   });
 }
@@ -489,7 +489,7 @@ test("a tunnel refused before it opened makes the next one ask for the gate's ne
   assert.deepEqual((await client.query('select seven')).rows, [{ value: 'select seven' }]);
   await client.end();
   // The refused one, perhaps twice (undici's WebSocket tries its handshake again), then a renewal for the newest nonce, then the upgrade.
-  assert.deepEqual(coffre.log.slice(-3), ['POST /api/auth/workload/renew use_dpop_nonce', 'POST /api/auth/workload/renew 200', 'GET /use/db upgrade']);
+  assert.deepEqual(coffre.log.slice(-3), ['POST /api/auth/workload/renew use_dpop_nonce', 'POST /api/auth/workload/renew 200', 'GET /use/market/prod/db upgrade']);
 });
 
 test("a credential's fetch reaches its own upstream only: a path that climbs out to another credential is refused", async (t) => {

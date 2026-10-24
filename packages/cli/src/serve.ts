@@ -14,6 +14,7 @@
 // process can use the SDK's key: its boundary is the pod's network
 // namespace, or, on a shared machine, a Unix socket only its owner opens.
 import { workload, type Workload } from '@coffre/client/workload';
+import { tunnelUrl } from '@coffre/client/workload/postgres';
 
 import { instanceOrigin } from './instance.ts';
 import { parse, UsageError } from './manage.ts';
@@ -61,7 +62,7 @@ export async function serve(args: string[], sessionUrl?: string): Promise<void> 
     const lines = [`coffre: ${values.service} in ${coffre.places.join(', ')}, key-bound: ${local.url}/use/<credential>/… forwards to ${origin}, signed`];
     for (const { name, where } of tunnels) {
       // Coffre's end of a tunnel, as the plan names it: a database by name, under the session's environment.
-      const listener = await listen({ key: name, url: coffre.url(name).replace(/^http/, 'ws') }, coffre, { address: where });
+      const listener = await listen({ key: name, url: tunnelUrl(coffre, name) }, coffre, { address: where });
       opened.push(listener);
       lines.push(`coffre: ${name} on ${listener.url}`);
     }
