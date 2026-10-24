@@ -90,3 +90,10 @@ test(`a workload is handed back exactly the keys its binding lists where they ar
     }
   }
 }, settings));
+
+test("a workload's list is an environment's: a scope with one on a project's grant is no scope", () => {
+  const viewer = issuedGrant({ projectId: 'market', environmentId: null, role: 'viewer' });
+  assert.equal(isCredentialScope([{ ...viewer, reads: '*' }]), false);
+  assert.equal(isCredentialScope([{ ...viewer, reads: ['market/prod#a'] }]), false);
+  assert.equal(isCredentialScope([viewer, { ...issuedGrant({ projectId: 'market', environmentId: 'market/prod', role: 'viewer' }), reads: '*' }]), true);
+});

@@ -944,10 +944,10 @@ precedence, for a session whose binding gives `viewer` on `market/prod`:
     - The app always materializes a workload's scope into per-place grants,
       the binding's scope when the row holds none. Each grant carries
       `reads: readonly string[] | '*'` beside R32's `sensitive`.
-    - The vault refuses every purpose that hands a value back
-      (`handsBack`) unless the key is listed at the place where the value
-      is held: a reference's source, a fork's parent for an inherited key.
-      The code is `use_only`.
+    - The vault refuses every purpose but the proxy's `use`, a copy kept
+      sensitive included, unless the key is listed at the place where the
+      value is held: a reference's source, a fork's parent for an inherited
+      key. The code is `use_only`.
     - So `market/dev/S`, a reference to `market/prod/STRIPE_SECRET_KEY`, is
       not readable through a `"*"` listed for `market/dev`.
     - A `copy` for a workload caller is refused unless the source is

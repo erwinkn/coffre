@@ -13,6 +13,7 @@ import { scopeWithReads } from '@coffre/core/access';
 import { and, eq } from 'drizzle-orm';
 
 import { reveal, type PickKeys } from '../src/api/secrets.ts';
+import { issuerNow } from '../src/api/services.ts';
 import { serveApi } from '../src/api/router.ts';
 import { parsePath } from '../src/api/paths.ts';
 import type { ApiContext } from '../src/api/context.ts';
@@ -188,4 +189,11 @@ test("the proxy uses what a workload only uses, and its plan hands back only wha
   assert.deepEqual(plan.values, { STRIPE_WEBHOOK_SECRET: 'whsec_0123', TWILIO_SID: 'AC0123' });
   // Asked by name to expose one it only uses, the read is refused whole.
   await assert.rejects(reveal(ctx, path, { purpose: 'expose', keys: ['STRIPE_SECRET_KEY'], logged: {} }), { reason: 'use_only' });
+});
+
+test('who issues a credential is weighed as the kind of caller the request came in as: a workload stays one', async () => {
+  const ctx = await workload(await byId({ 'market/prod': ['STRIPE_WEBHOOK_SECRET'] }));
+  const { caller } = await issuerNow(ctx, ctx.caller.principal, { ctx, action: 'token.create' });
+  assert.equal(caller.kind, 'workload');
+  assert.deepEqual(caller.credentialScope, ctx.caller.credentialScope);
 });
