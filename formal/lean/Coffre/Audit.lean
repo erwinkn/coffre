@@ -203,8 +203,11 @@ structure Checkpoint (Hash : Type) where
 
 /--
 The idealisation of unforgeability: a checkpoint whose signature verifies is
-one the vault signed, and the vault signs only the log as it is, which only
-grows: its first `seq + 1` entries, `pre`, are the true log's, and verify from
+one the vault signed, and the vault signs only a prefix of the true log: the
+entries as their authors wrote them, which the chain commits to, not whatever
+the table holds when it signs (the vault checks the stretch since its last
+checkpoint before it signs the next, and its scrub finds a row edited behind
+one). Its first `seq + 1` entries, `pre`, are the true log's, and verify from
 genesis to the checkpoint's hash.
 -/
 def Signed (H : Hash → Fields → Mac → Hash) (macOk : Entry Fields Hash Mac → Bool) (genesis : Hash)
@@ -226,8 +229,11 @@ theorem checkpoint_pins_prefix {genesis : Hash} (hI : Injective H genesis) {true
 What `walkChain` reads after a valid checkpoint and accepts, with the true
 log up to the checkpoint before it, is a chain that verifies from genesis:
 the true log's prefix, then entries that each chain on from the one before,
-are their own hash, and carry a MAC that verifies. A walk that stops and goes
-on from where it reached (`verify_append`) accepts the same.
+are their own hash, and pass the walk's MAC check (`macOk`: the app's walk
+checks its own entries' MACs and the vault's by place only, the vault's the
+other way round, each author checking its own over the same stretch). A walk
+that stops and goes on from where it reached (`verify_append`) accepts the
+same.
 -/
 theorem walk_from_checkpoint_extends {genesis : Hash} {trueLog pre rest : List (Entry Fields Hash Mac)}
     {c : Checkpoint Hash} (hc : Signed H macOk genesis trueLog c pre) {head next}
@@ -240,8 +246,10 @@ theorem walk_from_checkpoint_extends {genesis : Hash} {trueLog pre rest : List (
 
 /--
 **Resuming is sound.** A walk that verified `done` from genesis and later
-goes on from where it stopped over `rest` has verified `done ++ rest` from
-genesis, and, under `Injective`, nothing else reaches the head it stops at.
+goes on from where it stopped over `rest` has verified `done ++ rest`, the
+entries it read, from genesis, and, under `Injective`, nothing else reaches
+the head it stops at. A row edited behind where it resumes is not one it
+reads again: the vault's scrub's to find, as R25 means.
 -/
 theorem resume_sound {genesis : Hash} (hI : Injective H genesis) {done rest : List (Entry Fields Hash Mac)}
     {at₁ : Hash} {n₁ head next} (h₁ : verify H macOk done 0 genesis = .ok at₁ n₁)

@@ -347,11 +347,11 @@ the code.
 | `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
 | `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |
 | `no_person_opens_sensitive` | Even when an attacker rewrites the database's sensitivity, owner or place columns, a person is handed only a value whose key the vault wrapped not sensitive for that place, and no personal config's value but their own: the decision trusts the columns, and the wrap refuses to open what they lied about. |
-| `sensitive_value_never_reaches_a_person` | So a value whose key the vault only ever wrapped sensitive (it wraps a sensitive version's key again only as sensitive, but for an Owner's loosening, R30) reaches no person, whatever the database says. |
-| `verify_append`, `resume_sound` | Verifying a log in batches, or going on from where a walk stopped, decides exactly as one walk from genesis (R25). |
+| `sensitive_value_never_reaches_a_person` | So a value whose key the vault only ever wrapped sensitive reaches no person, whatever the database says. That every wrap of a sensitive value's key is sensitive is the theorem's hypothesis, which `rewrap` is written to keep (but for an Owner's loosening, R30). |
+| `verify_append`, `resume_sound` | Verifying a log in batches, or going on from where a walk stopped, decides over the entries it read exactly as one walk from genesis (R25). A row edited behind where it resumes is the vault's scrub's to find. |
 | `head_determines_chain` | Two runs that verify from genesis to the same head are the same entries. |
-| `checkpoint_pins_prefix` | A valid checkpoint pins the log up to it, every field and MAC. |
-| `walk_from_checkpoint_extends` | What a walk from a valid checkpoint accepts is the true log up to it, then entries that chain on, each its own hash with a MAC that verifies. |
+| `checkpoint_pins_prefix` | A valid checkpoint pins the log up to it, every field and MAC, as its authors wrote it (the true log). |
+| `walk_from_checkpoint_extends` | What a walk from a valid checkpoint accepts is the true log up to it, then entries that chain on, each its own hash and passing the walk's MAC check: the app's walk checks its own entries' MACs, the vault's its own, each the other's by place. |
 
 ## What is assumed
 
@@ -376,7 +376,9 @@ theorems that need it, each the standard property, idealised:
 - **Unforgeability** (`Audit.Signed`): a checkpoint that verifies is one the
   vault signed, over a prefix of the log as it was.
 - **MACs**: the chain's proofs take each entry's MAC check as given
-  (`macOk`); who can make one is HMAC's property.
+  (`macOk`): whichever the walk makes, the app's of its own entries or the
+  vault's of its own, each author checking its own over the same stretch.
+  Who can make one is HMAC's property.
 - **About the data**: an environment's id is never `""` (`NoBlankEnv`), and
   contexts are well formed, as `checkContext` makes them.
 
@@ -451,8 +453,15 @@ the store builds, one row an id.
   proved but not compared: `narrowest` is private to the server. Nor is
   `sealCredentials`, which reads a credential of before 0.11 as its issuer
   holds when it is sealed.
-- **The cryptography itself**, as assumed above, and KMS's encryption
-  context, which the model does not encode (only the local KEK's AAD).
+- **The cryptography itself**, as assumed above. KMS's encryption context
+  (`kek/aws-kms.ts`) is not encoded, and needs no injectivity proof: it is a
+  map, so distinct contexts are distinct by construction; KMS binds the
+  ciphertext to the key, whose returned `KeyId` the code checks; and
+  `kekIntegrity`'s adversary is anyone without `kms:Encrypt` on the key.
+- **The rewrap rule.** `rewrap` wraps a sensitive version's key again only as
+  sensitive (`LOOSER`, re-checked under the head), but for an Owner's
+  loosening: what makes `sensitive_value_never_reaches_a_person`'s hypothesis
+  hold. Neither is modelled or compared.
 - **Freshness.** Rolling back the log and all its checkpoints together needs
   no key.
 - **Bytes.** The model encodes the AAD as characters; the code, UTF-8. They

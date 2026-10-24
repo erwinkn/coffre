@@ -312,10 +312,10 @@ theorem no_person_opens_sensitive (A : Assumptions dec decValue kek kekId values
     (hperson : k.principal.startsWith "user:" = true)
     (hb : handsBack (k.purpose.getD "") k.keepsSensitive = true) (hallowed : k.decide vet = none)
     {row : Row Cipher} {m : Plain} (hopen : openRow dec decValue kek kekId (readCtx ownerKey k secretId) row = some m) :
-    ∃ v ∈ values, v.plain = m ∧ ∃ w ∈ wraps, w.dek = v.dek ∧ w.ctx.sensitive = false ∧
-      (w.ctx.owner = none ∨ w.ctx.owner = some (ownerKey k.principal)) := by
+    ∃ v ∈ values, v.plain = m ∧ ∃ w ∈ wraps, w.dek = v.dek ∧ w.ctx = readCtx ownerKey k secretId ∧
+      w.ctx.sensitive = false ∧ (w.ctx.owner = none ∨ w.ctx.owner = some (ownerKey k.principal)) := by
   obtain ⟨w, hw, hctxw, -, v, hv, hdek, hplain, -, -⟩ := open_only_as_sealed A hctx hopen
-  refine ⟨v, hv, hplain, w, hw, hdek.symm, ?_, ?_⟩
+  refine ⟨v, hv, hplain, w, hw, hdek.symm, hctxw, ?_, ?_⟩
   · rw [hctxw]; exact allowed_not_sensitive hperson hb hallowed
   · rw [hctxw]
     simp only [readCtx]
@@ -325,10 +325,12 @@ theorem no_person_opens_sensitive (A : Assumptions dec decValue kek kekId values
       rcases allowed_own_config hallowed o hrow with h | h <;> simp [h]
 
 /--
-So a value whose key the vault only ever wrapped sensitive, as it wraps a
-sensitive version's key again (`LOOSER` in `vault.ts`: only an Owner of its
-project makes one a secret), never reaches a person, whatever the database
-says.
+So a value whose key the vault only ever wrapped sensitive never reaches a
+person, whatever the database says. That every wrap of a sensitive value's
+key is sensitive is a hypothesis here (`honly`): `rewrap` in `vault.ts` is
+written to keep it (`LOOSER`, and its re-check of the newest version under
+the head; only an Owner of the project makes one a secret, R30), and neither
+is modelled.
 -/
 theorem sensitive_value_never_reaches_a_person (A : Assumptions dec decValue kek kekId values wraps)
     (ownerKey : String → String) {v : Value Key Cipher Plain} (hv : v ∈ values)
@@ -338,7 +340,7 @@ theorem sensitive_value_never_reaches_a_person (A : Assumptions dec decValue kek
     (hb : handsBack (k.purpose.getD "") k.keepsSensitive = true) (hallowed : k.decide vet = none)
     {row : Row Cipher} {m : Plain} (hopen : openRow dec decValue kek kekId (readCtx ownerKey k secretId) row = some m) :
     ∃ v' ∈ values, v'.plain = m ∧ v' ≠ v := by
-  obtain ⟨v', hv', hplain, w, hw, hdek, hns, -⟩ := no_person_opens_sensitive A ownerKey hctx hperson hb hallowed hopen
+  obtain ⟨v', hv', hplain, w, hw, hdek, -, hns, -⟩ := no_person_opens_sensitive A ownerKey hctx hperson hb hallowed hopen
   refine ⟨v', hv', hplain, fun heq => ?_⟩
   subst heq
   have := honly w hw hdek
