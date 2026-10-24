@@ -332,20 +332,21 @@ the code.
 | Theorem | In plain words |
 |---|---|
 | `credential_within_holder` | A request on a credential holds nothing its holder does not hold now. |
-| `personal_token_within_issuer` | A personal token holds nothing its issuer did not hold when they made it, whatever happened since: roles widened, environments protected or unprotected, grants added. At a protected environment, it is held to what the issuer held there protected. |
+| `personal_token_within_issuer` | A personal token holds nothing its issuer did not hold when they made it, at the place as it was named then, whatever happened since: roles widened, environments protected or unprotected or renamed, grants added. At a protected environment, it is held to what the issuer held there protected. |
 | `role_edits_never_widen_credentials` | What a credential's scope leaves to its holder is the same under any edit of any role. |
 | `protected_never_widens` | Under valid roles (`definitionProblem`), a person holds no more in an environment once it is protected. |
-| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential one of whose grants in that project an Owner of the project issued (R32). |
+| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). |
 | `no_person_reads_sensitive` | No person, Owner or not, on a session or any token of theirs, is handed back a sensitive value: directly, through a reference, in a fork or in a personal config. |
-| `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant an Owner of the value's own project issued, the source's for a reference. |
+| `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the value's own project, the source's for a reference, whose issuer owned that project. |
 | `copy_keeps_sensitive` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive. |
 | `personal_owner_only`, `personal_holds_no_reference` | A personal config's key opens for its owner alone, and no reference reads into or out of one. |
 | `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24). |
 | `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |
-| `open_only_as_sealed` | A row that opens as a context is a version the vault sealed as exactly that context (project, environment, key, owner, sensitivity), and opens to its value: nothing swaps across them. |
+| `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the vault encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
 | `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |
-| `no_person_opens_sensitive` | Even when an attacker rewrites the database's sensitivity, owner or place columns, no person is handed a value sealed sensitive, nor a personal config's value but their own: the decision trusts the columns, and the wrap refuses to open what they lied about. |
+| `no_person_opens_sensitive` | Even when an attacker rewrites the database's sensitivity, owner or place columns, a person is handed only a value whose key the vault wrapped not sensitive for that place, and no personal config's value but their own: the decision trusts the columns, and the wrap refuses to open what they lied about. |
+| `sensitive_value_never_reaches_a_person` | So a value whose key the vault only ever wrapped sensitive (it wraps a sensitive version's key again only as sensitive, but for an Owner's loosening, R30) reaches no person, whatever the database says. |
 | `verify_append`, `resume_sound` | Verifying a log in batches, or going on from where a walk stopped, decides exactly as one walk from genesis (R25). |
 | `head_determines_chain` | Two runs that verify from genesis to the same head are the same entries. |
 | `checkpoint_pins_prefix` | A valid checkpoint pins the log up to it, every field and MAC. |
@@ -353,14 +354,19 @@ the code.
 
 ## What is assumed
 
-Nothing is assumed in a `sorry` or an `axiom`; `formal-lean.sh` fails on
-either. The cryptography is assumed as hypotheses of the theorems that need
-it, each the standard property, idealised:
+Nothing is assumed in a `sorry` or an `axiom`:
+[`CheckAxioms.lean`](../formal/lean/CheckAxioms.lean) has Lean list what
+every declaration of the proofs depends on, and fails on anything but Lean's
+own three axioms (`propext`, `Classical.choice`, `Quot.sound`), a `sorry` or
+a `native_decide` included. The cryptography is assumed as hypotheses of the
+theorems that need it, each the standard property, idealised:
 
 - **AEAD integrity** (`Envelope.Assumptions`): whatever opens under the KEK
-  is a wrap the vault made, of its DEK, with its AAD; whatever opens under a
-  DEK is that version's value, against anyone who never held the DEK. Each
-  DEK is fresh. We do not prove AES-256-GCM has this property.
+  is a wrap the vault made, of a DEK, with its AAD; whatever opens under a
+  DEK the vault wrapped is the value it encrypted under it, against anyone
+  who never held the DEK. Each DEK encrypts one value; it may be wrapped
+  several times, once a version, as a rewrap does. We do not prove
+  AES-256-GCM has this property.
 - **Collision resistance** (`Audit.Injective`): the entry hash is injective
   and never the genesis hash. This is the symbolic idealisation, stronger
   than collision resistance: a proof under it says an attacker must find a
@@ -369,9 +375,8 @@ it, each the standard property, idealised:
   vault signed, over a prefix of the log as it was.
 - **MACs**: the chain's proofs take each entry's MAC check as given
   (`macOk`); who can make one is HMAC's property.
-- **About the data**: an environment's id is never `""`, and a place carries
-  its environment's current slug (`NoBlankEnv`, `Located`); contexts are
-  well formed, as `checkContext` makes them.
+- **About the data**: an environment's id is never `""` (`NoBlankEnv`), and
+  contexts are well formed, as `checkContext` makes them.
 
 ## How the model is tied to the code
 
@@ -379,9 +384,13 @@ it, each the standard property, idealised:
 world (two projects, their environments, a fork, a personal config, ids no
 row has) that meets every branch: edited and invalid roles, custom roles,
 protected environments and `*`, credentials of 0.10 and of before, services,
-deleted places, lapsed grants, every member status, tampered chains. Each
-case runs through the TypeScript and through the oracle, which runs the very
-definitions the proofs are about.
+deleted places, lapsed grants, every member status, tampered chains, holders
+with no policy, scope grants with no project, and names a plain object
+already holds (`constructor`, `__proto__`). Each case runs through the
+TypeScript and through the oracle, which runs the very definitions the
+proofs are about. A case without a field the code needs is an error to the
+oracle, never an answer, so it cannot pass for one the code would refuse.
+They run a batch of 20,000 at a time.
 
 | Compared | Cases | From |
 |---|---|---|
@@ -402,7 +411,10 @@ config's owner past their credential, a person handed a sensitive value,
 breaks the proofs first.
 
 The vault's per-key decision lives in `decide.ts`, pure, so that it can be
-compared: `#keys` reads, locks and logs around it.
+compared: `#keys` reads, locks and logs around it. It tells a personal
+config's own key from a reference into it by the environments' ids, as the
+model does, where it compared their rows as objects: the same on every map
+the store builds, one row an id.
 
 ## What it found
 
@@ -416,6 +428,13 @@ compared: `#keys` reads, locks and logs around it.
   and it opens. They could as well point the key at the older version: the
   rollback coffre accepts (`docs/design/oidc.md`). Binding the version would
   be a new envelope format.
+- **A lookup read names a plain object already holds.** `allows` read an
+  instance role as `instanceRoles[holder.role]`, and `protectedWithin` a
+  project's protected environments as `protectedIn[projectId]`: a role named
+  `constructor` made `allows` throw, and a project of that id made
+  `givesService` throw. Roles are checked and ids are UUIDs before they get
+  there, so nothing reached it; each lookup now takes only the record's own
+  keys, as `definitionOf` did.
 - **References share by design** (`reference_shares_by_design`): a stronger
   claim than the code makes would be false, so the model says so.
 

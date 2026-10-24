@@ -74,10 +74,12 @@ const unique = <T>(items: T[]): T[] => [...new Set(items)];
 // A small world, so that places, grants and scopes meet often: two projects, their environments by id
 // (`<project>/<slug>`), a fork, a personal config, and ids no row has.
 const PROJECTS = ['market', 'ops'] as const;
+// Names a plain object holds already: no lookup of the code's may find them.
+const INHERITED = ['constructor', '__proto__', 'toString'] as const;
 const SLUGS = ['dev', 'prod', 'fork'] as const;
 const ENVIRONMENTS = [...PROJECTS.flatMap((project) => SLUGS.map((slug) => `${project}/${slug}`)), 'market/dev@ada', 'ghost', ''];
-const ROLE_NAMES = [...Object.keys(ROLES), 'custom', 'ghost'];
-const INSTANCE_ROLE_NAMES = [...Object.keys(INSTANCE_ROLES), 'ghost'];
+const ROLE_NAMES = [...Object.keys(ROLES), 'custom', 'ghost', 'constructor'];
+const INSTANCE_ROLE_NAMES = [...Object.keys(INSTANCE_ROLES), 'ghost', ...INHERITED];
 const PEOPLE = ['user:ada', 'user:bo', 'token:ci', 'service:deploy'];
 
 const slugOf = (environmentId: string): string | null => (environmentId.includes('/') ? environmentId.split('/')[1]!.replace('@ada', '') : null);
@@ -116,7 +118,7 @@ function policy(): Policy {
 }
 
 function place(): Place {
-  const projectId = chance(0.9) ? pick(PROJECTS) : 'ghost';
+  const projectId = chance(0.9) ? pick(PROJECTS) : pick(['ghost', ...INHERITED]);
   if (chance(0.3)) return { projectId };
   const environmentId = chance(0.8) ? pick(ENVIRONMENTS.filter((id) => id.startsWith(projectId))) ?? pick(ENVIRONMENTS) : pick(ENVIRONMENTS);
   return { projectId, environmentId: environmentId ?? 'ghost', environmentSlug: chance(0.1) ? null : slugOf(environmentId ?? '') };
@@ -129,7 +131,8 @@ const columns = (): Columns => ({ normal: column(), protected: column() });
 function scopeGrant(): ScopeGrant {
   const legacy = chance(0.2);
   return {
-    projectId: pick([...PROJECTS, 'ghost']),
+    // A scope the vault stores names a project; the type, and so `issuedGrant`, takes none too.
+    projectId: chance(0.05) ? null : pick([...PROJECTS, 'ghost']),
     environmentId: chance(0.5) ? null : pick(ENVIRONMENTS),
     role: legacy ? pick([...Object.keys(ROLES), 'custom']) : pick(ROLE_NAMES),
     ...(legacy ? {} : { permissions: columns() }),
@@ -143,7 +146,8 @@ function holdings(given?: Policy): Holdings {
     scope: scope(),
     grants: some([grant(), grant(), grant(), grant()], 4),
     ...(credential < 0.4 ? {} : credential < 0.5 ? { credentialScope: null } : { credentialScope: some([scopeGrant(), scopeGrant(), scopeGrant()], 3) }),
-    policy: given ?? policy(),
+    // No policy, now and then: the code reads DEFAULT_POLICY.
+    ...(given === undefined && chance(0.1) ? {} : { policy: given ?? policy() }),
     ...(chance(0.7) ? {} : { service: chance(0.5) }),
   };
 }
@@ -154,8 +158,50 @@ function account(): ServiceAccount {
 
 /** One case: its arguments for the oracle, as the code takes them, and the code's answer. */
 type Case = { op: string; [argument: string]: unknown };
-const cases: { input: Case; expected: unknown }[] = [];
-const add = (input: Case, expected: unknown) => cases.push({ input, expected });
+// Cases run through the oracle a batch at a time, so that ten times as many need no more memory.
+const BATCH = 20_000;
+let cases: { input: Case; expected: unknown }[] = [];
+let total = 0;
+const add = (input: Case, expected: unknown) => {
+  cases.push({ input, expected });
+  if (cases.length >= BATCH) compare();
+};
+// Both sides as JSON, keys sorted: the oracle writes objects in its own order.
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value) ? value.map(canonical)
+    : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, canonical(v)]))
+      : value;
+// How often each yes-or-no function says yes, or a decision allows every key: a generator that only ever met one
+// answer would hold the model to nothing. Undefined for functions that answer otherwise.
+const yes = (value: unknown): boolean | undefined => {
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.length > 0 && value.every((code) => code === null);
+  if (typeof value === 'object' && value !== null && 'ok' in value) return value.ok === true;
+  return undefined;
+};
+const counts = new Map<string, { cases: number; differ: number; yes: number | undefined }>();
+const differing: string[] = [];
+
+function compare(): void {
+  if (cases.length === 0) return;
+  const run = spawnSync(oracle!, { input: cases.map(({ input }) => JSON.stringify(input)).join('\n') + '\n', maxBuffer: 1 << 30, encoding: 'utf8' });
+  if (run.status !== 0) throw new Error(`the oracle failed (${run.status}): ${run.stderr}`);
+  const answers = run.stdout.trimEnd().split('\n');
+  if (answers.length !== cases.length) throw new Error(`the oracle answered ${answers.length} of ${cases.length} cases`);
+  cases.forEach(({ input, expected }, i) => {
+    const count = counts.get(input.op) ?? { cases: 0, differ: 0, yes: yes(expected) === undefined ? undefined : 0 };
+    counts.set(input.op, count);
+    count.cases += 1;
+    if (count.yes !== undefined && yes(expected) === true) count.yes += 1;
+    const answer = JSON.parse(answers[i]!) as unknown;
+    if (JSON.stringify(canonical(answer)) === JSON.stringify(canonical(expected))) return;
+    count.differ += 1;
+    if (differing.length < 5) differing.push(`${input.op}: TypeScript ${JSON.stringify(expected)}, Lean ${answers[i]}\n  case ${JSON.stringify(input)}`);
+  });
+  total += cases.length;
+  cases = [];
+}
+
 const repeat = (n: number, f: () => void) => {
   for (let i = 0; i < n * scale; i += 1) f();
 };
@@ -173,7 +219,7 @@ repeat(4000, () => {
   const at = place();
   add({ op: 'heldColumns', holder, place: at }, heldColumns(holder, at));
   add({ op: 'mayManageAccess', holder, place: at }, mayManageAccess(holder, at));
-  const projectId = pick([...PROJECTS, 'ghost']);
+  const projectId = pick([...PROJECTS, 'ghost', ...INHERITED]);
   // Services on sensitive grants, and Owners, as often as not: what these two are about.
   const service = { ...holder, service: chance(0.7), credentialScope: some([scopeGrant(), { ...scopeGrant(), projectId, sensitive: true }], 2) };
   add({ op: 'readsSensitive', holder: service, projectId }, readsSensitive(service, projectId));
@@ -185,7 +231,7 @@ repeat(4000, () => {
 });
 repeat(4000, () => {
   const given = policy();
-  const g = { projectId: pick(PROJECTS), environmentId: chance(0.5) ? null : pick(ENVIRONMENTS), role: pick(ROLE_NAMES) };
+  const g = { projectId: chance(0.05) ? null : pick(PROJECTS), environmentId: chance(0.5) ? null : pick(ENVIRONMENTS), role: pick(ROLE_NAMES) };
   const held = chance(0.3) ? undefined : heldColumns(holdings(given), place());
   add({ op: 'issuedGrant', grant: g, policy: given, ...(held === undefined ? {} : { held }) }, issuedGrant(g, given, held));
 });
@@ -348,42 +394,13 @@ repeat(2000, () => {
   );
 });
 
-// --- run the oracle, compare -------------------------------------------------
-const run = spawnSync(oracle, { input: cases.map(({ input }) => JSON.stringify(input)).join('\n') + '\n', maxBuffer: 1 << 30, encoding: 'utf8' });
-if (run.status !== 0) throw new Error(`the oracle failed (${run.status}): ${run.stderr}`);
-const answers = run.stdout.trimEnd().split('\n');
-if (answers.length !== cases.length) throw new Error(`the oracle answered ${answers.length} of ${cases.length} cases`);
-
-// Both sides as JSON, keys sorted: the oracle writes objects in its own order.
-const canonical = (value: unknown): unknown =>
-  Array.isArray(value) ? value.map(canonical)
-    : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, canonical(v)]))
-      : value;
-// How often each yes-or-no function says yes, or a decision allows every key: a generator that only ever met one
-// answer would hold the model to nothing. Undefined for functions that answer otherwise.
-const yes = (value: unknown): boolean | undefined => {
-  if (typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.length > 0 && value.every((code) => code === null);
-  if (typeof value === 'object' && value !== null && 'ok' in value) return value.ok === true;
-  return undefined;
-};
-const counts = new Map<string, { cases: number; differ: number; yes: number | undefined }>();
-const differing: string[] = [];
-cases.forEach(({ input, expected }, i) => {
-  const count = counts.get(input.op) ?? { cases: 0, differ: 0, yes: yes(expected) === undefined ? undefined : 0 };
-  counts.set(input.op, count);
-  count.cases += 1;
-  if (count.yes !== undefined && yes(expected) === true) count.yes += 1;
-  const answer = JSON.parse(answers[i]!) as unknown;
-  if (JSON.stringify(canonical(answer)) === JSON.stringify(canonical(expected))) return;
-  count.differ += 1;
-  if (differing.length < 5) differing.push(`${input.op}: TypeScript ${JSON.stringify(expected)}, Lean ${answers[i]}\n  case ${JSON.stringify(input)}`);
-});
+// --- the last batch, and the counts -----------------------------------------
+compare();
 for (const [op, { cases: n, differ, yes: hits }] of [...counts].sort(([a], [b]) => (a < b ? -1 : 1))) {
   const share = hits === undefined ? '' : `, ${`${Math.round((100 * hits) / n)}%`.padStart(4)} yes or allowed`;
-  console.log(`${op.padEnd(18)} ${String(n).padStart(7)} cases${share}${differ === 0 ? '' : `, ${differ} differ`}`);
+  console.log(`${op.padEnd(18)} ${String(n).padStart(8)} cases${share}${differ === 0 ? '' : `, ${differ} differ`}`);
 }
-console.log(`seed ${seed}: ${cases.length} cases`);
+console.log(`seed ${seed}: ${total} cases`);
 if (differing.length > 0) {
   console.error(`\nThe model and the code disagree:\n${differing.join('\n')}`);
   process.exit(1);

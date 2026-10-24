@@ -124,13 +124,13 @@ theorem credential_capped_under_edits {h : Holdings} {s roles instanceRoles p x}
 A personal token's grant at `x₀` keeps its role's columns, each cut down to
 what its issuer held at `x₀` then (`heldColumns`). The theorem: at any place
 `x` and under any policy later, what the token leaves to a request, the
-issuer held at `x` when they made it, as protected or not as `x` is now.
+issuer held at `x` when they made it, named as it was then (`slugOf`, the
+slugs at issue: a rename since changes nothing), and as protected or not as
+`x` is now.
 
-Two assumptions about places, which the database keeps: no grant names an
+One assumption about the data, which the database keeps: no grant names an
 environment of id `""` (`heldColumns` asks at such an environment for one no
-grant names), and a place's slug is the one its environment has (`slugOf`):
-a rename is a change the issuer's current holdings decide, as
-`credential_within_holder` says. -/
+grant names). -/
 
 /-- No grant, of the holder or of its credential, names the environment `""`. -/
 def NoBlankEnv (h : Holdings) : Prop :=
@@ -139,6 +139,16 @@ def NoBlankEnv (h : Holdings) : Prop :=
 /-- A place whose slug is its environment's, as `slugOf` names them. -/
 def Located (slugOf : String → Option String) (x : Place) : Prop :=
   ∀ id slug, x.env = some (id, slug) → slug = slugOf id
+
+/-- A place named as `slugOf` names its environment: as it was at issue. -/
+def Place.named (slugOf : String → Option String) (x : Place) : Place :=
+  ⟨x.project, x.env.map fun e => (e.1, slugOf e.1)⟩
+
+theorem guarded_named {h : Holdings} {slugOf} {x : Place} : guarded h (x.named slugOf) = guarded h x := by
+  unfold guarded Place.named; cases x.env <;> rfl
+
+theorem covers_named {g : GrantPlace} {slugOf} {x : Place} : covers g (x.named slugOf) = covers g x := by
+  unfold covers Place.named Place.envId; cases x.env <;> rfl
 
 theorem covers_project {g : GrantPlace} {proj : String} {x : Place} (hx : x.project = proj)
     (hc : covers g ⟨proj, none⟩ = true) : covers g x = true := by
@@ -224,7 +234,7 @@ theorem mem_within {p : Permission} {col cap : List Permission} (h : p ∈ withi
 
 /-- A grant as a personal token keeps it: its role's columns at `x₀`, within what its issuer held there. -/
 def IssuedBy (h₀ : Holdings) (slugOf : String → Option String) (g : ScopeGrant) : Prop :=
-  ∃ (x₀ : Place) (pol : Policy), Located slugOf x₀ ∧ x₀.project = g.project ∧ x₀.envId = g.env ∧
+  ∃ (x₀ : Place) (pol : Policy), Located slugOf x₀ ∧ g.project = some x₀.project ∧ x₀.envId = g.env ∧
     g.cols = (issuedGrant g.project g.env g.role pol (some (heldColumns h₀ x₀))).cols
 
 theorem guarded_withProtected_every {h : Holdings} {x : Place} {id slug} (he : x.env = some (id, slug)) :
@@ -236,13 +246,16 @@ theorem guarded_withProtected_none {h : Holdings} {x : Place} :
   unfold guarded
   cases x.env <;> simp [protects, Holdings.withProtected]
 
+/-- An environment grant's place at issue is the place now, named as it was then. -/
 theorem located_eq {slugOf : String → Option String} {x₀ x : Place} {g : ScopeGrant} {e : String}
-    (hge : g.env = some e) (hcov : covers g.place x = true) (hproj : x₀.project = g.project)
-    (henv : x₀.envId = g.env) (h₀ : Located slugOf x₀) (h₁ : Located slugOf x) : x₀ = x := by
+    (hge : g.env = some e) (hcov : covers g.place x = true) (hproj : g.project = some x₀.project)
+    (henv : x₀.envId = g.env) (h₀ : Located slugOf x₀) : x₀ = x.named slugOf := by
   unfold covers ScopeGrant.place at hcov
-  simp [hge] at hcov
+  rw [hproj, hge] at hcov
+  simp only [Bool.and_eq_true, beq_iff_eq] at hcov
   obtain ⟨pr, en⟩ := x₀
   obtain ⟨pr', en'⟩ := x
+  simp only at hcov hproj
   cases en with
   | none => simp_all [Place.envId]
   | some a =>
@@ -251,32 +264,38 @@ theorem located_eq {slugOf : String → Option String} {x₀ x : Place} {g : Sco
     | some b =>
       obtain ⟨i, si⟩ := a
       obtain ⟨j, sj⟩ := b
-      simp only [Place.envId, Option.map_some] at henv hcov
+      simp only [Place.envId, Option.map_some, Option.some.injEq] at henv hcov
       have hi : i = e := by simpa [hge] using henv
-      have hj : j = e := by simpa using hcov.2
+      have hj : j = e := hcov.2
       subst hi hj
       have e1 := h₀ _ si rfl
-      have e2 := h₁ _ sj rfl
-      simp_all
+      simp_all [Place.named]
 
 theorem project_place {x₀ : Place} {g : ScopeGrant} (hge : g.env = none)
-    (hproj : x₀.project = g.project) (henv : x₀.envId = g.env) : x₀ = ⟨g.project, none⟩ := by
+    (henv : x₀.envId = g.env) : x₀ = ⟨x₀.project, none⟩ := by
   obtain ⟨pr, en⟩ := x₀
   cases en <;> simp_all [Place.envId]
+
+theorem covers_project_of {g : ScopeGrant} {x : Place} {proj : String} (hp : g.project = some proj)
+    (hcov : covers g.place x = true) : x.project = proj := by
+  unfold covers ScopeGrant.place at hcov
+  rw [hp] at hcov
+  split at hcov <;> simp_all
 
 /--
 **A personal token never holds more than its issuer did.** Whatever the
 policy has become (`h₁.policy`: roles widened, environments protected),
-whatever grants its issuer holds now, a request on a token whose every
-grant `h₀` issued (`IssuedBy`) holds `p` at `x` only if `h₀` held `p` at `x`
-when they issued it, as protected as `x` is now.
+whatever grants its issuer holds now, however its places were renamed since,
+a request on a token whose every grant `h₀` issued (`IssuedBy`) holds `p` at
+`x` only if `h₀` held `p` at `x` when they issued it, named as it was then,
+and as protected as `x` is now.
 -/
 theorem personal_token_within_issuer {h₀ h₁ : Holdings} {slugOf : String → Option String}
     {s : List ScopeGrant} {p : Permission} {x : Place}
     (hcred : h₁.cred = some s) (hissued : ∀ g ∈ s, IssuedBy h₀ slugOf g)
-    (hservice : h₁.service = h₀.service) (hblank : NoBlankEnv h₀) (hx : Located slugOf x)
+    (hservice : h₁.service = h₀.service) (hblank : NoBlankEnv h₀)
     (ha : allows h₁ p x = true) :
-    allows (h₀.withProtected h₁.policy.protectedEnvs) p x = true := by
+    allows (h₀.withProtected h₁.policy.protectedEnvs) p (x.named slugOf) = true := by
   have hs := credential_within_scope hcred ha
   unfold scopeHolds at hs
   simp only [hcred, Option.getD_some, List.any_eq_true, Bool.and_eq_true] at hs
@@ -285,10 +304,9 @@ theorem personal_token_within_issuer {h₀ h₁ : Holdings} {slugOf : String →
   have hdef : scopeDef g = ⟨within (((pol.roles.get? g.role).map (·.normal)).getD []) (some (heldColumns h₀ x₀).normal),
       within (((pol.roles.get? g.role).map (·.prot)).getD []) (some (heldColumns h₀ x₀).prot)⟩ := by
     simp [scopeDef, hcols, issuedGrant]
-  have hg' : guarded (h₀.withProtected h₁.policy.protectedEnvs) x = guarded h₁ x := by
-    simp [guarded, Holdings.withProtected, hservice, protects]
-  have hxproj : x.project = g.project := by
-    unfold covers ScopeGrant.place at hcov; split at hcov <;> simp_all
+  have hg' : guarded (h₀.withProtected h₁.policy.protectedEnvs) (x.named slugOf) = guarded h₁ x := by
+    rw [guarded_named]; simp [guarded, Holdings.withProtected, hservice, protects]
+  have hyproj : (x.named slugOf).project = x₀.project := covers_project_of hproj (by rw [covers_named]; exact hcov)
   by_cases hp : p.projectOnly = true
   · -- A project-wide permission: the normal column, which protection never changes.
     have hin : p ∈ (heldColumns h₀ x₀).normal := by
@@ -298,8 +316,8 @@ theorem personal_token_within_issuer {h₀ h₁ : Holdings} {slugOf : String →
     have h0 : allows h₀ p x₀ = true := by rw [allows_withProtected_projectOnly hp] at hin; exact hin.2
     rw [allows_withProtected_projectOnly hp]
     cases hge : g.env with
-    | none => exact allows_project hxproj (Or.inl hp) (project_place hge hproj henv ▸ h0)
-    | some e => exact located_eq hge hcov hproj henv hloc₀ hx ▸ h0
+    | none => exact allows_project hyproj (Or.inl hp) (project_place hge henv ▸ h0)
+    | some e => exact located_eq hge hcov hproj henv hloc₀ ▸ h0
   · have hpf : p.projectOnly = false := by simpa using hp
     cases hgx : guarded h₁ x with
     | false =>
@@ -308,12 +326,12 @@ theorem personal_token_within_issuer {h₀ h₁ : Holdings} {slugOf : String →
         simp only [holds, hpf, hgx, hdef] at hhold
         exact mem_within (by simpa using hhold)
       simp only [heldColumns, List.mem_filter] at hin
-      have hz : allows (h₀.withProtected []) p x = true := by
+      have hz : allows (h₀.withProtected []) p (x.named slugOf) = true := by
         cases hge : g.env with
         | none =>
-          exact allows_project hxproj (Or.inr guarded_withProtected_none)
-            (project_place hge hproj henv ▸ hin.2)
-        | some e => exact located_eq hge hcov hproj henv hloc₀ hx ▸ hin.2
+          exact allows_project hyproj (Or.inr guarded_withProtected_none)
+            (project_place hge henv ▸ hin.2)
+        | some e => exact located_eq hge hcov hproj henv hloc₀ ▸ hin.2
       rw [allows_withProtected_eq (qs := []) (by rw [hg', hgx, guarded_withProtected_none])]
       exact hz
     | true =>
@@ -322,26 +340,28 @@ theorem personal_token_within_issuer {h₀ h₁ : Holdings} {slugOf : String →
         simp only [holds, hpf, hgx, hdef] at hhold
         exact mem_within (by simpa using hhold)
       simp only [heldColumns, List.mem_filter] at hin
-      obtain ⟨id, slug, hxe⟩ : ∃ id slug, x.env = some (id, slug) := by
+      obtain ⟨id, slug, hye⟩ : ∃ id slug, (x.named slugOf).env = some (id, slug) := by
+        rw [← guarded_named (slugOf := slugOf)] at hgx
         unfold guarded at hgx
-        cases he : x.env with
+        cases he : (x.named slugOf).env with
         | none => simp [he] at hgx
         | some e => exact ⟨e.1, e.2, rfl⟩
       have hsvc : h₀.service = false := by
         unfold guarded at hgx; simp at hgx; rw [← hservice]; exact hgx.1
-      have hgall : guarded (h₀.withProtected [EVERY_ENVIRONMENT]) x = true := by
-        rw [guarded_withProtected_every hxe, hsvc]; rfl
-      have hz : allows (h₀.withProtected [EVERY_ENVIRONMENT]) p x = true := by
+      have hgall : guarded (h₀.withProtected [EVERY_ENVIRONMENT]) (x.named slugOf) = true := by
+        rw [guarded_withProtected_every hye, hsvc]; rfl
+      have hz : allows (h₀.withProtected [EVERY_ENVIRONMENT]) p (x.named slugOf) = true := by
         cases hge : g.env with
         | none =>
-          have hx₀ := project_place hge hproj henv
-          have hany : anyOf x₀ = ⟨g.project, some ("", none)⟩ := by rw [hx₀]; rfl
+          have hx₀ := project_place hge henv
+          have hany : anyOf x₀ = ⟨x₀.project, some ("", none)⟩ := by rw [hx₀]; rfl
           rw [hany] at hin
-          refine allows_blank hxproj hxe ⟨hblank.1, hblank.2⟩ ?_ hin.2
-          rw [guarded_withProtected_every (id := "") (slug := none) rfl, guarded_withProtected_every hxe]
+          refine allows_blank hyproj hye ⟨hblank.1, hblank.2⟩ ?_ hin.2
+          rw [guarded_withProtected_every (id := "") (slug := none) rfl, guarded_withProtected_every hye]
         | some e =>
-          have hx₀ := located_eq hge hcov hproj henv hloc₀ hx
-          have hany : anyOf x₀ = x₀ := by simp [anyOf, hx₀, hxe]
+          have hx₀ := located_eq hge hcov hproj henv hloc₀
+          have hany : anyOf x₀ = x₀ := by
+            rw [hx₀]; simp only [anyOf, hye, Option.isSome_some, ite_true]
           rw [hany, hx₀] at hin
           exact hin.2
       rw [allows_withProtected_eq (qs := [EVERY_ENVIRONMENT]) (by rw [hg', hgx, hgall])]
@@ -424,7 +444,7 @@ def narrowest (now before : ScopeGrant) : ScopeGrant :=
 
 def serviceGrant (caller : Holdings) (project : String) (env : Option String) (role : String)
     (before : Option ScopeGrant) : ScopeGrant :=
-  let now := { issuedGrant project env role caller.policy none with sensitive := some (ownsProject caller project) }
+  let now := { issuedGrant (some project) env role caller.policy none with sensitive := some (ownsProject caller project) }
   match before with
   | none => now
   | some b => narrowest now b
@@ -443,31 +463,36 @@ theorem serviceGrant_sensitive {caller proj env role before} :
   cases before <;> cases ownsProject caller proj <;> simp
 
 theorem serviceGrant_project {caller proj env role before} :
-    (serviceGrant caller proj env role before).project = proj := by
+    (serviceGrant caller proj env role before).project = some proj := by
   unfold serviceGrant narrowest; cases before <;> rfl
 
 /-- What `readsSensitive` takes: a service, on a credential with a grant in the project that reads them. -/
 theorem readsSensitive_iff {h : Holdings} {proj : String} :
     readsSensitive h proj = true ↔ h.service = true ∧ ∃ s, h.cred = some s ∧
-      ∃ g ∈ s, g.sensitive = some true ∧ g.project = proj := by
+      ∃ g ∈ s, g.sensitive = some true ∧ g.project = some proj := by
   unfold readsSensitive
   cases h.cred <;> simp
 
 /--
 **R32.** A request reads a project's sensitive values only as a service, on
-a credential one of whose grants in that project an Owner of the project
-issued: no person, and no Owner of another project, ever handed it them.
+a credential with a grant in that project whose issuer (`issuerOf`, who made
+it by `serviceGrant`) owns the project: no person, and no Owner of another
+project, handed it them.
 -/
-theorem owner_issued_only {h : Holdings} {proj : String} {s : List ScopeGrant}
+theorem owner_issued_only {h : Holdings} {proj : String} {s : List ScopeGrant} (issuerOf : ScopeGrant → Holdings)
     (hcred : h.cred = some s)
-    (hissued : ∀ g ∈ s, ∃ caller project env role before, g = serviceGrant caller project env role before)
+    (hissued : ∀ g ∈ s, ∃ project env role before, g = serviceGrant (issuerOf g) project env role before)
     (hr : readsSensitive h proj = true) :
-    h.service = true ∧ ∃ caller : Holdings, ownsProject caller proj = true := by
+    h.service = true ∧ ∃ g ∈ s, g.project = some proj ∧ g.sensitive = some true ∧ ownsProject (issuerOf g) proj = true := by
   obtain ⟨hs, s', hc', g, hg, hsens, hproj⟩ := readsSensitive_iff.mp hr
   rw [hcred] at hc'; cases hc'
-  obtain ⟨caller, project, env, role, before, rfl⟩ := hissued g hg
-  rw [serviceGrant_project] at hproj
-  subst hproj
-  exact ⟨hs, caller, serviceGrant_sensitive hsens⟩
+  refine ⟨hs, g, hg, hproj, hsens, ?_⟩
+  obtain ⟨project, env, role, before, heq⟩ := hissued g hg
+  have hown := serviceGrant_sensitive (heq ▸ hsens)
+  have hp : project = proj := by
+    have := serviceGrant_project (caller := issuerOf g) (proj := project) (env := env) (role := role) (before := before)
+    rw [← heq, hproj] at this; exact (Option.some.inj this).symm
+  subst hp
+  exact hown
 
 end Coffre

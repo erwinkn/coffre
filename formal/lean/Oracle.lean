@@ -14,21 +14,37 @@ open Lean Coffre
 
 abbrev Parse := Except String
 
+/-! A field the code reads as optional may be absent or null; one it needs is an error when absent, as the code would
+fail on it, so a case the code could not take never passes for one the model answers. -/
+
+/-- An optional field: null when absent. -/
 def field (j : Json) (k : String) : Json := (j.getObjVal? k).toOption.getD Json.null
+
+/-- A field the code needs: present and not null. -/
+def req (j : Json) (k : String) : Parse Json :=
+  match j.getObjVal? k with
+  | .ok v => if v.isNull then throw s!"{k} is null" else pure v
+  | .error _ => throw s!"{k} is missing"
+
+/-- A field the code reads null or not, but never absent (an absent `environmentId` is neither kind of grant). -/
+def present (j : Json) (k : String) : Parse Json :=
+  match j.getObjVal? k with
+  | .ok v => pure v
+  | .error _ => throw s!"{k} is missing"
 
 def str (j : Json) : Parse String := j.getStr?
 
 def optStr (j : Json) : Parse (Option String) :=
   if j.isNull then pure none else some <$> j.getStr?
 
+/-- An optional flag: false when absent, as `=== true` reads it. -/
 def flag (j : Json) : Parse Bool := if j.isNull then pure false else j.getBool?
 
-def arr (j : Json) : Parse (List Json) := if j.isNull then pure [] else (·.toList) <$> j.getArr?
+def list (j : Json) : Parse (List Json) := (·.toList) <$> j.getArr?
 
 def entries (j : Json) : Parse (List (String × Json)) :=
   match j with
   | .obj kvs => pure (kvs.toList.map fun ⟨k, v⟩ => (k, v))
-  | .null => pure []
   | _ => throw "expected an object"
 
 def permission (j : Json) : Parse Permission := do
@@ -37,51 +53,54 @@ def permission (j : Json) : Parse Permission := do
   | some p => pure p
   | none => throw s!"no permission {s}"
 
-def permissions (j : Json) : Parse (List Permission) := do (← arr j).mapM permission
+def permissions (j : Json) : Parse (List Permission) := do (← list j).mapM permission
 
 def roleDef (j : Json) : Parse RoleDef := do
-  pure ⟨← permissions (field j "permissions"), ← permissions (field j "protected")⟩
+  pure ⟨← permissions (← req j "permissions"), ← permissions (← req j "protected")⟩
 
 def columns (j : Json) : Parse RoleDef := do
-  pure ⟨← permissions (field j "normal"), ← permissions (field j "protected")⟩
+  pure ⟨← permissions (← req j "normal"), ← permissions (← req j "protected")⟩
 
 def table {α} (f : Json → Parse α) (j : Json) : Parse (Table α) := do
   (← entries j).mapM fun (k, v) => do pure (k, ← f v)
 
+/-- A holder's policy: `DEFAULT_POLICY` when it has none, as `holder.policy ?? DEFAULT_POLICY` reads it. -/
 def policy (j : Json) : Parse Policy := do
+  if j.isNull then return defaultPolicy
   let protectedIn ← table (fun v => do
-    (← arr v).mapM fun e => do pure (← str (field e "environmentId"), ← optStr (field e "slug"))) (field j "protectedIn")
-  pure ⟨← table roleDef (field j "roles"), ← table roleDef (field j "instanceRoles"),
-    ← (← arr (field j "protected")).mapM str, protectedIn⟩
+    (← list v).mapM fun e => do pure (← str (← req e "environmentId"), ← optStr (field e "slug"))) (← req j "protectedIn")
+  pure ⟨← table roleDef (← req j "roles"), ← table roleDef (← req j "instanceRoles"),
+    ← (← list (← req j "protected")).mapM str, protectedIn⟩
 
 def filter (j : Json) : Parse Filter :=
   if j == Json.str "all" then pure .all
-  else match j.getObjVal? "only" with
-    | .ok xs => do pure (.only (← (← arr xs).mapM str))
-    | .error _ => do pure (.except (← (← arr (field j "except")).mapM str))
+  else match j.getObjVal? "only", j.getObjVal? "except" with
+    | .ok xs, _ => do pure (.only (← (← list xs).mapM str))
+    | _, .ok xs => do pure (.except (← (← list xs).mapM str))
+    | _, _ => throw "a filter is all, only or except"
 
-def scope (j : Json) : Parse Scope := do pure ⟨← filter (field j "projects"), ← filter (field j "environments")⟩
+def scope (j : Json) : Parse Scope := do pure ⟨← filter (← req j "projects"), ← filter (← req j "environments")⟩
 
 def place (j : Json) : Parse Place := do
-  let project ← str (field j "projectId")
+  let project ← str (← req j "projectId")
   match ← optStr (field j "environmentId") with
   | none => pure ⟨project, none⟩
   | some env => pure ⟨project, some (env, ← optStr (field j "environmentSlug"))⟩
 
 def grant (j : Json) : Parse Grant := do
-  pure ⟨⟨← optStr (field j "projectId"), ← optStr (field j "environmentId")⟩, ← str (field j "role")⟩
+  pure ⟨⟨← optStr (← present j "projectId"), ← optStr (← present j "environmentId")⟩, ← str (← req j "role")⟩
 
 def scopeGrant (j : Json) : Parse ScopeGrant := do
   let perms := field j "permissions"
   let sens := field j "sensitive"
-  pure { project := ← str (field j "projectId"), env := ← optStr (field j "environmentId"), role := ← str (field j "role"),
+  pure { project := ← optStr (← present j "projectId"), env := ← optStr (← present j "environmentId"), role := ← str (← req j "role"),
          cols := ← if perms.isNull then pure none else some <$> columns perms,
          sensitive := ← if sens.isNull then pure none else some <$> sens.getBool? }
 
 def holdings (j : Json) : Parse Holdings := do
   let cred := field j "credentialScope"
-  pure { role := ← str (field j "role"), scope := ← scope (field j "scope"), grants := ← (← arr (field j "grants")).mapM grant,
-         cred := ← if cred.isNull then pure none else some <$> (← arr cred).mapM scopeGrant,
+  pure { role := ← str (← req j "role"), scope := ← scope (← req j "scope"), grants := ← (← list (← req j "grants")).mapM grant,
+         cred := ← if cred.isNull then pure none else some <$> (← list cred).mapM scopeGrant,
          policy := ← policy (field j "policy"), service := ← flag (field j "service") }
 
 def optScope (j : Json) : Parse (Option Scope) := if j.isNull then pure none else some <$> scope j
@@ -89,7 +108,7 @@ def optScope (j : Json) : Parse (Option Scope) := if j.isNull then pure none els
 def optDef (j : Json) : Parse (Option RoleDef) := if j.isNull then pure none else some <$> roleDef j
 
 def account (j : Json) : Parse ServiceAccount := do
-  let grants ← (← arr (field j "grants")).mapM fun g => do pure (← str (field g "role"), ← place (field g "place"))
+  let grants ← (← list (← req j "grants")).mapM fun g => do pure (← str (← req g "role"), ← place (← req g "place"))
   pure ⟨grants, ← optStr (field j "admittedBy")⟩
 
 def status (j : Json) : Parse Status := do
@@ -101,23 +120,23 @@ def status (j : Json) : Parse Status := do
   | s => throw s!"no status {s}"
 
 def reader (j : Json) : Parse Reader := do
-  pure ⟨← status (field j "status"), ← holdings (field j "live"), ← holdings (field j "all")⟩
+  pure ⟨← status (← req j "status"), ← holdings (← req j "live"), ← holdings (← req j "all")⟩
 
-def secretPlace (j : Json) : Parse SecretPlace := do pure ⟨← str (field j "projectId"), ← str (field j "environmentId")⟩
+def secretPlace (j : Json) : Parse SecretPlace := do pure ⟨← str (← req j "projectId"), ← str (← req j "environmentId")⟩
 
 def envRows (j : Json) : Parse (Table EnvRow) := do
-  (← arr j).mapM fun pair => do
-    let id ← str (field pair "id")
-    let e := field pair "row"
-    pure (id, ⟨← str (field e "projectId"), ← str (field e "slug"), ← optStr (field e "owner"),
-      ← optStr (field e "parentId"), ← flag (field e "deleted")⟩)
+  (← list j).mapM fun pair => do
+    let id ← str (← req pair "id")
+    let e ← req pair "row"
+    pure (id, ⟨← str (← req e "projectId"), ← str (← req e "slug"), ← optStr (field e "owner"),
+      ← optStr (← present e "parentId"), ← (← req e "deleted").getBool?⟩)
 
 def code (c : Code) : Json := match c with | some s => Json.str s | none => Json.null
 
 def jsonPerms (ps : List Permission) : Json := Json.arr (ps.map (Json.str ·.name)).toArray
 
 def jsonGrant (g : ScopeGrant) : Json :=
-  Json.mkObj ([("projectId", Json.str g.project), ("environmentId", match g.env with | some e => Json.str e | none => Json.null),
+  Json.mkObj ([("projectId", match g.project with | some p => Json.str p | none => Json.null), ("environmentId", match g.env with | some e => Json.str e | none => Json.null),
     ("role", Json.str g.role)] ++
     (match g.cols with
       | some c => [("permissions", Json.mkObj [("normal", jsonPerms c.normal), ("protected", jsonPerms c.prot)])]
@@ -137,7 +156,7 @@ def aadCtx (j : Json) : Parse Envelope.Ctx := do
 
 /-- `verifyEntries`' control, each entry's hash and MAC checked by the driver, which holds the keys. -/
 def verifyCase (j : Json) : Parse Json := do
-  let es ← (← arr (field j "entries")).mapM fun e => do
+  let es ← (← list (← req j "entries")).mapM fun e => do
     pure (← (field e "seq").getNat?, ← str (field e "prev"), ← str (field e "hash"), ← flag (field e "hashOk"), ← flag (field e "macOk"))
   let nth (i : Nat) := es.getD i (0, "", "", false, false)
   let H (p : String) (i : Nat) (_ : Unit) : String :=
@@ -161,7 +180,7 @@ def answer (j : Json) : Parse Json := do
   | "issuedGrant" =>
     let g := field j "grant"
     let held := field j "held"
-    pure (jsonGrant (issuedGrant (← str (field g "projectId")) (← optStr (field g "environmentId")) (← str (field g "role"))
+    pure (jsonGrant (issuedGrant (← optStr (← present g "projectId")) (← optStr (← present g "environmentId")) (← str (← req g "role"))
       (← policy (field j "policy")) (← if held.isNull then pure none else some <$> columns held)))
   | "readsSensitive" => pure (Json.bool (readsSensitive (← holdings (field j "holder")) (← str (field j "projectId"))))
   | "ownsProject" => pure (Json.bool (ownsProject (← holdings (field j "holder")) (← str (field j "projectId"))))
@@ -177,7 +196,7 @@ def answer (j : Json) : Parse Json := do
     pure (Json.bool (managesService (← holdings (field j "holder")) (← optScope (field j "setting")) (← str (field j "actor"))
       (← account (field j "account"))))
   | "issuesCredential" =>
-    let sc ← (← arr (field j "scope")).mapM fun g => do pure (← str (field g "role"), ← place (field g "place"), ← optDef (field g "kept"))
+    let sc ← (← list (← req j "scope")).mapM fun g => do pure (← str (← req g "role"), ← place (← req g "place"), ← optDef (field g "kept"))
     pure (Json.bool (issuesCredential (← holdings (field j "holder")) (← optScope (field j "setting")) (← str (field j "actor"))
       (← account (field j "account")) sc))
   | "handsBack" => pure (Json.bool (handsBack (← str (field j "purpose")) (← flag (field j "keepsSensitive"))))
@@ -185,11 +204,12 @@ def answer (j : Json) : Parse Json := do
     let r ← reader (field j "reader")
     let principal ← str (field j "principal")
     let p ← permission (field j "permission")
-    let secrets ← (← arr (field j "secrets")).mapM secretPlace
-    let held ← (← arr (field j "at")).mapM secretPlace
-    let envs ← envRows (field j "environments")
-    let needs ← (← arr (field j "needs")).mapM fun n => if n.isNull then pure none else some <$> permissions n
-    let owns ← (← arr (field j "owns")).mapM flag
+    let secrets ← (← list (← req j "secrets")).mapM secretPlace
+    let held ← (← list (← req j "at")).mapM secretPlace
+    if held.length < secrets.length then throw "a place for each secret"
+    let envs ← envRows (← req j "environments")
+    let needs ← (← list (← req j "needs")).mapM fun n => if n.isNull then pure none else some <$> permissions n
+    let owns ← (if (field j "owns").isNull then pure [] else list (field j "owns")) >>= (·.mapM flag)
     let codes := (List.range secrets.length).map fun i =>
       keyRefusal r principal p (secrets.getD i default) (held.getD i default) envs (needs.getD i none) (owns.getD i false)
     pure (Json.arr (codes.map code).toArray)
@@ -199,8 +219,8 @@ def answer (j : Json) : Parse Json := do
     let principal ← str (field j "principal")
     let purpose ← optStr (field j "purpose")
     let keeps ← flag (field j "keepsSensitive")
-    let codes ← (← arr (field j "codes")).mapM optStr
-    let secrets ← (← arr (field j "secrets")).mapM fun s => do pure (← str (field s "projectId"), ← flag (field s "sensitive"))
+    let codes ← (← list (← req j "codes")).mapM optStr
+    let secrets ← (← list (← req j "secrets")).mapM fun s => do pure (← str (field s "projectId"), ← flag (field s "sensitive"))
     let out := (List.range secrets.length).map fun i =>
       let (project, sensitive) := secrets.getD i ("", false)
       sensitiveRefusal (codes.getD i none) r a principal purpose keeps project sensitive

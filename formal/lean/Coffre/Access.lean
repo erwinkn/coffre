@@ -123,14 +123,14 @@ structure Grant where
 
 /-- `ScopeGrant`: a credential's grant, with the columns it kept when issued, or a built-in role's name alone. -/
 structure ScopeGrant where
-  project : String
+  project : Option String
   env : Option String
   role : String
   cols : Option RoleDef
   sensitive : Option Bool
   deriving Repr, Inhabited, DecidableEq
 
-def ScopeGrant.place (g : ScopeGrant) : GrantPlace := ⟨some g.project, g.env⟩
+def ScopeGrant.place (g : ScopeGrant) : GrantPlace := ⟨g.project, g.env⟩
 
 /-- `scopeDefinition`: what it kept, which no edit of the policy changes. -/
 def scopeDef (g : ScopeGrant) : RoleDef :=
@@ -147,6 +147,17 @@ structure Policy where
   deriving Repr, Inhabited
 
 def EVERY_ENVIRONMENT : String := "*"
+
+/-- `INSTANCE_ROLES`, as coffre ships them. -/
+def builtinInstanceRoles : Table RoleDef :=
+  [ ("member", ⟨[], []⟩),
+    ("auditor", ⟨[.auditRead], [.auditRead]⟩),
+    ("developer", ⟨[.read, .use, .write], [.use, .write]⟩),
+    ("admin", ⟨[.auditRead, .envManage, .grantManage, .projectManage], [.auditRead]⟩),
+    ("owner", ⟨Permission.all, Permission.all.filter (!·.projectOnly)⟩) ]
+
+/-- `DEFAULT_POLICY`: what a holder with no policy holds under. -/
+def defaultPolicy : Policy := ⟨builtinRoles, builtinInstanceRoles, [], []⟩
 
 def protects (pol : Policy) (envId : String) : Bool :=
   pol.protectedEnvs.contains envId || pol.protectedEnvs.contains EVERY_ENVIRONMENT
@@ -198,7 +209,7 @@ def within (col : List Permission) (cap : Option (List Permission)) : List Permi
   | some c => col.filter (c.contains ·)
 
 /-- `issuedGrant`: the role's columns now, each no more than its issuer holds there (`heldColumns`). -/
-def issuedGrant (project : String) (env : Option String) (role : String) (pol : Policy)
+def issuedGrant (project : Option String) (env : Option String) (role : String) (pol : Policy)
     (cap : Option RoleDef) : ScopeGrant :=
   let d := pol.roles.get? role
   { project, env, role, sensitive := none,
@@ -214,7 +225,7 @@ def heldColumns (h : Holdings) (x : Place) : RoleDef :=
    Permission.all.filter (allows (h.withProtected [EVERY_ENVIRONMENT]) · (anyOf x))⟩
 
 def readsSensitive (h : Holdings) (project : String) : Bool :=
-  h.service && (h.cred.getD []).any fun g => g.sensitive == some true && g.project == project
+  h.service && (h.cred.getD []).any fun g => g.sensitive == some true && g.project == some project
 
 def ownsProject (h : Holdings) (project : String) : Bool :=
   h.cred.isNone && !h.service &&

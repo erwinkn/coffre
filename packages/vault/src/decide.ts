@@ -42,9 +42,11 @@ export function personalRefusal(
   environments: ReadonlyMap<string, EnvironmentRow>,
 ): RefusalCode | null | undefined {
   const own = environments.get(secret.environmentId);
-  const held = at.environmentId === secret.environmentId ? own : environments.get(at.environmentId);
+  const elsewhere = at.environmentId !== secret.environmentId;
+  const held = elsewhere ? environments.get(at.environmentId) : own;
   if (own?.owner == null && held?.owner == null) return undefined;
-  if (own !== held || principal !== own?.owner || own.parentId === null) return 'personal';
+  // Held elsewhere, a reference into or out of one; or not its owner's.
+  if (elsewhere || own === undefined || principal !== own.owner || own.parentId === null) return 'personal';
   const parent = placeIn({ projectId: secret.projectId, environmentId: own.parentId }, environments);
   // Its owner reads what they wrote while they read or use the environment it configures (R8).
   const gone = own.deleted || (environments.get(own.parentId)?.deleted ?? true);

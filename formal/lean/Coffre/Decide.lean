@@ -194,14 +194,15 @@ theorem service_reads_sensitive_only_owner_issued (k : KeyRead) (vet : Code)
     (hallowed : k.decide vet = none) : readsSensitive k.reader.live k.secret.project = true := by
   unfold KeyRead.decide at hallowed; rw [hs] at hallowed; exact sensitiveRefusal_service hb hallowed
 
-/-- And so, with `owner_issued_only`, only on a grant an Owner of that project issued. -/
-theorem service_sensitive_from_owner (k : KeyRead) (vet : Code) {s : List ScopeGrant}
+/-- And so, with `owner_issued_only`, only on a grant in that project whose issuer owns it. -/
+theorem service_sensitive_from_owner (k : KeyRead) (vet : Code) {s : List ScopeGrant} (issuerOf : ScopeGrant → Holdings)
     (hs : k.sensitive = true) (hb : handsBack (k.purpose.getD "") k.keepsSensitive = true)
     (hcred : k.reader.live.cred = some s)
-    (hissued : ∀ g ∈ s, ∃ caller project env role before, g = serviceGrant caller project env role before)
+    (hissued : ∀ g ∈ s, ∃ project env role before, g = serviceGrant (issuerOf g) project env role before)
     (hallowed : k.decide vet = none) :
-    k.reader.live.service = true ∧ ∃ caller : Holdings, ownsProject caller k.secret.project = true :=
-  owner_issued_only hcred hissued (service_reads_sensitive_only_owner_issued k vet hs hb hallowed)
+    k.reader.live.service = true ∧ ∃ g ∈ s, g.project = some k.secret.project ∧ g.sensitive = some true ∧
+      ownsProject (issuerOf g) k.secret.project = true :=
+  owner_issued_only issuerOf hcred hissued (service_reads_sensitive_only_owner_issued k vet hs hb hallowed)
 
 /-- A fork copies a sensitive value only where its app keeps it sensitive, for anyone, a service too. -/
 theorem copy_keeps_sensitive (k : KeyRead) (vet : Code) (hs : k.sensitive = true)
@@ -290,9 +291,6 @@ theorem reference_made_by_reader {r holder source envs sens}
     simp only [hs, ↓reduceIte] at hu
     exact refuses_none hu
 
-/-- A policy with the built-in roles, nothing protected. -/
-def shippedPolicy : Policy := ⟨builtinRoles, [("member", ⟨[], []⟩)], [], []⟩
-
 /--
 **A reference shares, by design.** Bo, a Viewer of `web/dev` alone, reads
 `web/dev/API`, a reference Ada made to `api/dev/KEY`, which Bo cannot read
@@ -302,7 +300,7 @@ and its permissions from where it lives. The guarantee is
 -/
 theorem reference_shares_by_design :
     let envs : Table EnvRow := [("web-dev", ⟨"web", "dev", none, none, false⟩), ("api-dev", ⟨"api", "dev", none, none, false⟩)]
-    let bo : Holdings := ⟨"member", EVERYWHERE, [⟨⟨some "web", some "web-dev"⟩, "viewer"⟩], none, shippedPolicy, false⟩
+    let bo : Holdings := ⟨"member", EVERYWHERE, [⟨⟨some "web", some "web-dev"⟩, "viewer"⟩], none, defaultPolicy, false⟩
     let r : Reader := ⟨.active, bo, bo⟩
     let read : KeyRead := ⟨r, "user:bo", some "reveal", false, ⟨"api", "api-dev"⟩, ⟨"web", "web-dev"⟩, envs, false⟩
     read.decide none = none ∧ refuses r .read (placeIn (⟨"api", "api-dev"⟩ : SecretPlace) envs) false = some "no_grant" := by
