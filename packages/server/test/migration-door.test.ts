@@ -181,5 +181,5 @@ test('without an audit watch, the scheduled run asks the vault to checkpoint and
   const actions = (await written()).map((row) => row.action);
   assert.deepEqual([actions.includes('audit.heartbeat'), actions.at(-1)], [false, 'audit.checkpoint']);
   const ready = await ask(runtime, '/readyz');
-  assert.deepEqual([ready.status, JSON.parse(ready.body)], [200, { ok: true }]);
+  assert.deepEqual([ready.status, JSON.parse(ready.body)], [200, { ok: true, watched: false }]);
 });

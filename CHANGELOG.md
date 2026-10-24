@@ -62,9 +62,10 @@
   entry.
   - **It is a plugin, `auditWatch`**, which `coffre init` writes into both
     kinds of deployment. Without it, `/readyz` says the database is
-    migrated, the scheduled run still has the vault checkpoint the log,
-    and the log is verified when someone asks (`coffre verify log`, the
-    audit page).
+    migrated, with `watched: false`, the scheduled run still has the vault
+    checkpoint the log and warns once that nothing watches it, and the log
+    is verified when someone asks (`coffre verify log`, the audit page). A
+    deployment that upgrades without adding the plugin is in that state.
   - **An empty store re-anchors by itself**: the first beat after the
     watch is added, or after its store was lost, walks the log whole,
     10,000 entries a beat and more between beats, with `/readyz` green

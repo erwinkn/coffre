@@ -844,7 +844,8 @@ one chain and MACed by its author, and the vault's signed checkpoint of it
 every five minutes. Someone who can write the database without the keys
 cannot change it unseen, but without the audit watch nothing looks until
 someone verifies the log (`coffre verify log`, or the audit page from the
-newest checkpoint), and `/readyz` says only that the database is migrated.
+newest checkpoint), and `/readyz` says only that the database is migrated,
+with `watched: false`; the scheduled job says so in the log once.
 
 The audit watch, a plugin of coffre's own, looks for you: every five
 minutes it writes a heartbeat, walks the log from what it last verified,
@@ -934,7 +935,13 @@ coffre audit accept-loss 9400 9411
 
 a range that must hold the entry the finding names. It is logged in their
 name with the finding, which stays in the log, and alerted; the watch goes
-on past the range, and finds tampering anywhere else as before.
+on past the range, and finds tampering anywhere else as before. Pick a
+range with an entry after it where you can: with none, the watch goes on
+from the entry before the range, and walks whatever the log holds from
+there again. The acceptance is the watch's alone: where the lost entries
+were cut from between others, a check of the log itself, `coffre verify
+log` or the audit page, still finds the gap, since nothing erases what
+was found.
 
 If the store cannot be reached, the beat fails and readiness is red, and
 both recover by themselves once it answers: what it holds was not lost.

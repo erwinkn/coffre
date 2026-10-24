@@ -151,11 +151,12 @@ ReadyWith(a) ==
 ReadyNow == ReadyWith(anchor)
 
 \* The entry a finding names verifies again, alone (audit-watch.ts, `repaired`):
-\* a point the anchor holds by its hash, any other by its own.
+\* its hash and, the app's, its MAC; a point the anchor holds, by the hash
+\* it holds too.
 Repaired(a) ==
-    IF a.found = a.verified THEN Carries(a.verified, a.vver)
-    ELSE IF a.found = a.at THEN Carries(a.at, a.ver)
-    ELSE a.found <= Len(log) /\ ~AppFault(a.found)
+    /\ a.found <= Len(log) /\ ~AppFault(a.found)
+    /\ (a.found = a.verified => Carries(a.verified, a.vver))
+    /\ (a.found = a.at => Carries(a.at, a.ver))
 
 \* The app's walk from a point toward the prefix ending at c, at most Walk
 \* entries (walkChain, `to`): where it got to, and the first fault.

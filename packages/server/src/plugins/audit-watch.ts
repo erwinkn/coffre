@@ -13,7 +13,7 @@
 // (watch.ts), never a client of either.
 import { verifyCheckpoint, type Checkpoint, type LogHead } from '@coffre/core/vault';
 
-import type { AnchorFields, AnchorFinding, AnchorStore, AuditAnchor } from '../anchor.ts';
+import { walking, type AnchorFields, type AnchorFinding, type AnchorStore, type AuditAnchor } from '../anchor.ts';
 import type { CoffrePlugin } from '../plugins.ts';
 import { Refusal, watcher, WATCH, type WatchContext } from '../watch.ts';
 
@@ -126,8 +126,9 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
       ctx.warn({ err: error.message }, 'the audit anchor could not be read again after another wrote it first');
       return null;
     });
-    if (lost === WRITES_LOST || prev === null || now === null || !ctx.own(now) || now.epoch !== prev.epoch || !samePoint(now.checkpoint, prev.checkpoint)) {
-      ctx.warn({}, 'another beat wrote the audit anchor first: the next goes on from it');
+    const overtaken = prev === null || now === null || !ctx.own(now) || now.epoch !== prev.epoch || !samePoint(now.checkpoint, prev.checkpoint);
+    if (overtaken || lost === WRITES_LOST) {
+      ctx.warn({}, overtaken ? 'another beat wrote the audit anchor first: the next goes on from it' : 'walks between beats kept writing the audit anchor first: the next beat goes on from them');
       return false;
     }
     prev = now;
@@ -186,11 +187,6 @@ export async function walkOn(ctx: WatchContext, anchors: AnchorStore): Promise<b
   return (await commit(ctx, anchors, prev, prev, fields)) === 'written' && walking(fields);
 }
 
-/** Whether an anchor has a backlog to walk: a checkpoint it has not verified through, and nothing found. */
-export function walking(anchor: Omit<AnchorFields, 'at' | 'beat'>): boolean {
-  return anchor.checkpoint !== null && anchor.finding === null && anchor.verified?.seq !== anchor.checkpoint.seq;
-}
-
 /**
  * One walk from where the anchor says the app verified to, toward the
  * prefix `target` signed, the anchor's own checkpoint first, which the log
@@ -246,15 +242,16 @@ function sameOr(was: AnchorFinding | null, found: AnchorFinding): AnchorFinding 
 }
 
 /**
- * Whether the entry a finding names verifies again, alone: a point the
- * anchor holds by its hash, any other entry by its link to the one before,
- * its hash, and the app's MAC if it is the app's. Two reads, however long
+ * Whether the entry a finding names verifies again, alone: by its link to
+ * the one before, its hash, and the app's MAC if it is the app's; and a
+ * point the anchor holds, by the hash it holds too, so that a hash column
+ * put back over a rewritten entry clears nothing. Two reads, however long
  * it stood.
  */
 async function repaired(ctx: WatchContext, seq: number, anchor: Fields): Promise<boolean> {
   const point = [anchor.verified, anchor.checkpoint].find((held) => held?.seq === seq);
-  if (point !== undefined) return (await ctx.log.hashAt(seq)) === point!.hash;
-  return (await ctx.log.check(seq, 'log'))?.ok === true;
+  const alone = await ctx.log.check(seq, 'log');
+  return alone?.ok === true && (point === undefined || alone.hash === point.hash);
 }
 
 /**
@@ -353,7 +350,9 @@ export async function acceptLoss(ctx: WatchContext, anchors: AnchorStore, range:
   // as that is the finding accepted, in the same epoch. Anything else, and the log says it was not applied.
   let stored = prev;
   for (let lost = 0; ; lost++) {
-    const next = ctx.seal({ checkpoint: null, verified: resumes, finding: null, beat: stored.beat, reanchor: null, epoch: prev.epoch + 1, at: stored.at });
+    // The anchored checkpoint stays if the range is all past it; a re-anchoring goes on.
+    const checkpoint = stored.checkpoint !== null && stored.checkpoint.seq < from ? stored.checkpoint : null;
+    const next = ctx.seal({ checkpoint, verified: resumes, finding: null, beat: stored.beat, reanchor: stored.reanchor, epoch: prev.epoch + 1, at: stored.at });
     const written = await anchors.write(stored, next).catch((error: Error) => error);
     if (written === true) break;
     const now = written === false ? await anchors.read().catch(() => null) : null;

@@ -118,6 +118,11 @@ export function admits(stored: AuditAnchor | null, prev: AuditAnchor | null, nex
   return next.epoch === stored.epoch && seqOf(next.checkpoint) >= seqOf(stored.checkpoint) && seqOf(next.verified) >= seqOf(stored.verified);
 }
 
+/** Whether an anchor has a backlog to walk: a checkpoint it has not verified through, and nothing found. */
+export function walking(anchor: Omit<AnchorFields, 'at' | 'beat'>): boolean {
+  return anchor.checkpoint !== null && anchor.finding === null && anchor.verified?.seq !== anchor.checkpoint.seq;
+}
+
 function seqOf(point: { seq: number } | null): number {
   return point === null ? -1 : point.seq;
 }

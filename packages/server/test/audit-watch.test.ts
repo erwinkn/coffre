@@ -186,6 +186,33 @@ test('an app entry the walk finds edited stands, checked alone each beat, until 
   assert.equal((await ready(slow)).ok, true);
 });
 
+test('a finding at the anchored entry clears only once the entry verifies, not when its hash column is put back', async () => {
+  const b = (log = warned().log) => writeAuditHeartbeat(db.runtime, chainKey, slow, anchor, log);
+  // Far enough from the first entry that the vault's scrub, an entry a call, does not reach it here.
+  for (let i = 0; i < 10; i++) await append();
+  await b(quiet);
+  const { checkpoint } = await anchored();
+  // The vault signs past the anchor, as a beat that lost its write leaves it: its own checks start after the entry.
+  await append();
+  assert.ok((await slow.checkpoint()).ok);
+  const seq = BigInt(checkpoint!.seq);
+  const [row] = (await entries()).filter((entry) => entry.seq === seq);
+  const set = (columns: { metadata?: string; hash?: Buffer }) => withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set(columns).where(eq(auditLog.seq, seq)));
+  // The anchored entry rewritten, its hash with it: the anchor no longer holds.
+  await set({ metadata: '{"rewritten":true}', hash: Buffer.alloc(32, 9) });
+  assert.equal(await b(), false);
+  assert.equal((await anchored()).finding?.seq, checkpoint!.seq);
+  // Its hash column put back, the rewritten content left: it still does not verify.
+  await set({ hash: row!.hash });
+  assert.equal(await b(), false);
+  assert.equal((await anchored()).finding?.seq, checkpoint!.seq);
+  assert.equal((await ready(slow)).ok, false);
+  // Put back whole, it clears.
+  await set({ metadata: row!.metadata });
+  assert.equal(await b(), true);
+  assert.equal((await anchored()).finding, null);
+});
+
 test('a finding cleared walks on from the anchor, and finds what else was changed behind it', async () => {
   const x = await appFinding();
   await append();

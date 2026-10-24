@@ -178,17 +178,17 @@ export const SPENT_TOKENS_PER_BEAT = 5000;
 
 /**
  * Readiness: the database migrated, and, with an audit watch, what it says
- * (plugins/audit-watch.ts). Without one, nothing more: the log is
- * verified only when someone asks (`coffre verify log`).
+ * (plugins/audit-watch.ts). Without one, nothing more, and `watched: false`
+ * says so: the log is verified only when someone asks (`coffre verify log`).
  */
 async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<string, unknown>> {
   const watch = watchOf(runtime);
   try {
-    if (!(await migrated(runtime.db))) return watch === null ? { ok: false } : { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false, anchored: false };
+    if (!(await migrated(runtime.db))) return watch === null ? { ok: false, watched: false } : { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false, anchored: false };
   } catch {
-    return { ok: false };
+    return watch === null ? { ok: false, watched: false } : { ok: false };
   }
-  if (watch === null) return { ok: true };
+  if (watch === null) return { ok: true, watched: false };
   const said = await watch.hooks.readiness(watch.context());
   return { ...said, ok: said.ok };
 }
@@ -203,6 +203,7 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   if (!(await schemaReady(runtime))) throw new Error(MIGRATING);
   const watch = watchOf(runtime);
+  if (watch === null) unwatched(runtime);
   const context = watch?.context();
   const watched = watch === null ? true : await watch.hooks.scheduled(context!);
   // Asked once a run: the watch's own call, when it made one, is this one.
@@ -216,6 +217,19 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   // An empty log has nothing to sign: no failure without a watch, whose beat is an entry.
   if (signed !== null && watch === null && !(await logIsEmpty(runtime))) throw new Error(`the vault did not checkpoint the audit log: ${signed}`);
   if (pruned !== null) throw new Error(`spent tokens could not be pruned: ${pruned.message}`);
+}
+
+const told = new WeakSet<object>();
+
+/**
+ * Said once a configuration, the isolate's or the process's: a deployment
+ * that left the audit watch out, or upgraded without adding it, sees that
+ * nothing watches the log.
+ */
+function unwatched(runtime: CoffreRuntime): void {
+  if (told.has(runtime.plugins)) return;
+  told.add(runtime.plugins);
+  console.warn('no audit watch: the audit log is verified only when someone asks (coffre verify log), and /readyz says only that the database is migrated. Add auditWatch to plugins (docs/deploy.md, "The audit watch").');
 }
 
 /** Whether the log holds no entry yet; a database that cannot say, no. */

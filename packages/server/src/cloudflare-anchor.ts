@@ -16,8 +16,7 @@
 // none is left (`walkOn`).
 //
 // Asked with `fetch`, not RPC, as the gates are (cloudflare-gates.ts).
-import { admits, type AnchorStore, type AuditAnchor } from './anchor.ts';
-import { walking } from './plugins/audit-watch.ts';
+import { admits, walking, type AnchorStore, type AuditAnchor } from './anchor.ts';
 
 /** The Durable Object binding the deployment hands the watch: `durableAnchor(env.ANCHOR)`. */
 export type AnchorNamespace = {
@@ -50,6 +49,9 @@ const WALK_EVERY_MS = 1000;
 export function durableAnchor(namespace: AnchorNamespace, options: { name?: string } = {}): AnchorStore {
   const name = options.name ?? KEY;
   const ask = async <T>(call: AnchorCall): Promise<T> => {
+    if (typeof namespace?.idFromName !== 'function') {
+      throw new Error('there is no ANCHOR binding: add the CoffreAnchor Durable Object, its binding and its migration to app/wrangler.jsonc (docs/deploy.md, "The audit watch")');
+    }
     const object = namespace.get(namespace.idFromName(name));
     const response = await object.fetch(new Request('https://anchor/', { method: 'POST', body: JSON.stringify(call) }));
     if (!response.ok) throw new Error(`the audit anchor failed: ${response.status} ${await response.text()}`);
