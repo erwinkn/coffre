@@ -17,12 +17,25 @@ import { routes, type Check, type Route } from './routes.ts';
  * The most an API request body may be, read as it streams and abandoned
  * past this: a control-plane request, a bulk secret write its largest. Well
  * above anything the CLI or UI sends for a typical change, though a very
- * large `.env` import (over this, or over a route's key cap) is refused
- * with a 400 and must be split. Bounded so no request buffers an unbounded
- * body; the body's value count is held to `MAX_BODY_NODES` in `readJson`
- * before validation, which is what keeps a parse within R27's budget.
+ * large `.env` import (over this, or over `MAX_BODY_KEYS`) is refused with a
+ * 400 and must be split. Bounded so no request buffers an unbounded body;
+ * the body's value count is held to `MAX_BODY_NODES` in `readJson` before
+ * validation, which is what keeps a parse within R27's budget.
  */
 const API_BODY_BYTES = 1024 * 1024;
+
+/**
+ * The most top-level entries a request body may name, refused before it is
+ * validated. A bulk write, a dismissal map and an access patch are objects
+ * keyed by name, and validation does work (sometimes an error) per entry, so
+ * the count is held here, before the schema walks every one. Above the
+ * vault's 1000-key bulk-read cap, so a write may name more keys than one read
+ * returns, as a large environment does; above any real one. Nested
+ * collections (a scope, a binding's claims) are bounded by the body's total
+ * value count (`MAX_BODY_NODES`); this bounds the top-level maps that would
+ * otherwise drive a costly per-entry union before any key cap applied.
+ */
+const MAX_BODY_KEYS = 2000;
 
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
 
@@ -200,6 +213,11 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
       }
     }
     const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
+    // An object body naming more than the cap is refused before validation walks every entry (R27): no route's body
+    // carries more top-level entries, and a larger one drives per-entry work a key cap would only catch after the fact.
+    if (raw !== null && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length > MAX_BODY_KEYS) {
+      throw badRequest(`the body names more than ${MAX_BODY_KEYS} entries`);
+    }
     const input = def.input === undefined ? undefined : def.input.parse(raw);
     const query =
       request.method === 'GET' || def.query === undefined
