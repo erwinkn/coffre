@@ -835,7 +835,9 @@ password, which the app never holds
 ([design](design/credential-proxy.md#5-the-other-shapes)). The deployment
 adds the proxy, `credentialProxy({ … tunnels: { db: postgres('DATABASE_URL',
 { hosts: ['db.acme.example'] }) } })` in its `plugins`, and its route,
-`app/src/routes/use.$.ts`:
+`app/src/routes/use.$.ts` (without `hosts`, the URL must name its host by
+address: a name, which whoever writes the value picks, may resolve to a
+private address):
 
 ```ts
 import { createFileRoute } from '@tanstack/react-router';

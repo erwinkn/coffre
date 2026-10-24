@@ -557,11 +557,28 @@ test('a tunnel reaches only the hosts it names, and a private database only with
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
   await assert.rejects(appClient().connect());
   // Loopback written the ways Node still dials it, with TLS asked for: refused all the same.
-  for (const host of ['127.1', '2130706433', '0x7f000001', 'localhost.']) {
+  for (const host of ['127.1', '2130706433', '0x7f000001', '127.0.0.1.', 'localhost.', 'LOCALHOST', '[::ffff:7f00:1]', '[0:0:0:0:0:0:0:1]']) {
     await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@${host}:5432/d` });
     runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
-    await assert.rejects(appClient().connect(), host);
+    assert.equal((await upgradeRefusal()).status, 403, host);
   }
+  // A name, which may resolve to a private address, only when the tunnel's hosts list it: the value's writer picks it, not the deployment.
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@db.acme.example:5432/d' });
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
+  const refused = await upgradeRefusal();
+  assert.equal(refused.status, 403);
+  assert.match(refused.message, /names its host by name, which the tunnel db dials only when its hosts list it/);
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })]);
+  const session = await pluginSocket(new Request(`${ORIGIN}/use/market/dev/db`, { headers: { authorization: `Bearer ${handle}` } }), runtime, null);
+  assert.equal(typeof session, 'function', 'a listed name is dialled');
+  // Its fully qualified spelling is the same host.
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@DB.Acme.Example.:5432/d' });
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })]);
+  assert.equal(typeof await pluginSocket(new Request(`${ORIGIN}/use/market/dev/db`, { headers: { authorization: `Bearer ${handle}` } }), runtime, null), 'function');
+  // An address needs no list, as before.
+  await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@203.0.113.7:5432/d' });
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
+  assert.equal(typeof await pluginSocket(new Request(`${ORIGIN}/use/market/dev/db`, { headers: { authorization: `Bearer ${handle}` } }), runtime, null), 'function');
   assert.throws(() => credentialProxy({ credentials: { db: { upstream: 'https://x.example', inject: { kind: 'header', name: 'x', template: '{K}' } } }, tunnels: { db: postgres('DATABASE_URL') } }), /a credential and a tunnel/);
 });
 
@@ -691,6 +708,7 @@ test("a tunnel's network binding is checked with the configuration: missing, it 
   // Private hosts, with a binding and without insecureUpstreams; never without it.
   assert.doesNotThrow(tunnel({ hosts: ['10.0.1.5'], connect: { connect: () => Promise.reject(new Error('unused')) } }));
   assert.throws(tunnel({ hosts: ['10.0.1.5'] }), /names a private host/);
+  for (const host of ['localhost.', 'LocalHost', '127.1', '::ffff:10.0.1.5', '[fd00::5]']) assert.throws(tunnel({ hosts: [host] }), /names a private host/, host);
 });
 
 test("a dial through a network binding still under way when the app leaves is given up: the socket that comes after is closed", postgresOnly, async () => {

@@ -17,6 +17,7 @@ import { preferencesIn, type Preferences } from '@coffre/core/pages';
 import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
+import { pruneSpentTokens } from './db/queries.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
@@ -170,11 +171,20 @@ function migrating(request: Request): Response {
   return new Response(page, { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'retry-after': '30' } });
 }
 
-/** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */
+/**
+ * Spent tokens forgotten a beat: a beat every five minutes forgets up to
+ * 60,000 an hour, where one binding's exchanges spend at most 3,600.
+ */
+export const SPENT_TOKENS_PER_BEAT = 5000;
+
+/** The scheduled audit heartbeat and checkpoint, then spent tokens' upkeep. Throws so the scheduler reports failures. */
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   if (!(await schemaReady(runtime))) throw new Error(MIGRATING);
   const ok = await writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, {
     warn: (value, message) => console.warn(message, value),
   });
+  // After the heartbeat, which a failed prune never holds back, and reported as the beat's failure too.
+  const pruned = await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).then(() => null, (error: Error) => error);
   if (!ok) throw new Error('scheduled audit heartbeat failed');
+  if (pruned !== null) throw new Error(`spent tokens could not be pruned: ${pruned.message}`);
 }

@@ -716,7 +716,9 @@ streams and WebCrypto only), each connection does this:
    opened (one `credential.use` entry, `tunnel: true`, cached for a
    minute).
 2. Checks the URL's host against `hosts` (and refuses a private address,
-   or `sslmode=disable`, without `insecureUpstreams`).
+   or `sslmode=disable`, without `insecureUpstreams`). A tunnel with no
+   `hosts` dials only an address: whoever writes the value picks its
+   host, and a name may resolve to a private address.
 3. Speaks Postgres's startup to the app as a server. It answers
    `SSLRequest` and `GSSENCRequest` with `N`, since the hop to the
    listener is local, and asks for a cleartext password. That password
@@ -941,7 +943,7 @@ The deployment opts in, in code. `coffre init` writes the object's wiring
 
 ```ts
 // app/src/coffre.ts: sockets: env.SOCKETS, and, to open the tunnel,
-//   plugins: [credentialProxy({ … tunnels: { db: postgres('DATABASE_URL') } })], with its route, routes/use.$.ts
+//   plugins: [credentialProxy({ … tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })], with its route, routes/use.$.ts
 // app/src/server.ts
 export default { fetch: (request, env, ctx) => coffre.upgrade(request, env) ?? handler.fetch(request, { context: coffre.request(env, ctx) }) };
 export const CoffreSockets = coffre.Sockets;
@@ -1415,8 +1417,12 @@ is reversible.
    environment it is a config of (0.9): its owner reads that environment,
    so exposing it there too gives them nothing new, and a deployment that
    generates values in personal configs (below) keeps what it exposes.
-9. **No DNS pinning yet.** Literal private addresses are refused. A name
-   that resolves to one is the operator's DNS.
+9. **No DNS pinning yet.** Private addresses are refused however they are
+   written (`127.1`, `localhost.`, `[::ffff:a00:1]`). A name that resolves
+   to one is the operator's DNS when the operator wrote it: an upstream, or
+   a tunnel's `hosts`. A tunnel's URL is a secret's value, which anyone who
+   writes the environment picks, so without `hosts` it dials only an
+   address (W157).
 10. **Redaction of values 8 characters or longer**, in headers and text
     bodies; never a plain value's (0.9).
 11. **Bodies read whole, up to 16 MiB**, so the upstream gets a

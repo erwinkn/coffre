@@ -173,6 +173,9 @@ export type Tunnel = { kind: 'postgres'; key: string; hosts?: readonly string[];
  * The environment's `DATABASE_URL` is the real one, `postgres://…`, which
  * coffre logs in with; the app's is the listener's, with the handle as its
  * password. `hosts`, when set, are the only ones the URL may name.
+ * Without them, the URL names its host by address, never by name: whoever
+ * writes the value picks the name, and a name may resolve to a private
+ * address. `insecureUpstreams` lifts this, as it lifts the rest.
  *
  * A database inside a private network, through a VPC Network binding:
  * `postgres('REPLICA_URL', { hosts: ['10.0.1.5'], connect: env.REPLICA_NET })`.
@@ -202,7 +205,7 @@ export function privateKey(key: string): Signer {
 export type CredentialProxyOptions = {
   /** By name, as the proxy's URLs say it: lowercase letters, digits and dashes. */
   credentials: Record<string, Credential>;
-  /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL') }`. */
+  /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) }`. */
   tunnels?: Record<string, Tunnel>;
   /** Private keys, by name as credentials are, that coffre signs with for the app: `{ 'dfns-key': privateKey('DFNS_PRIVATE_KEY') }`. */
   signers?: Record<string, Signer>;
@@ -568,12 +571,15 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     // The value is a secret: what is wrong with it is said, never what it is.
     return failure(409, `${path}'s ${tunnel.key} is no postgres:// URL`);
   }
-  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(db.host)) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
+  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(canonicalHost(db.host))) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
   if (tunnel.connect !== undefined) {
     // Inside the binding's private network, plaintext: TLS through it is no option yet.
     if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${place[2]}'s network binding does not carry: sslmode=disable, for a database inside that network`);
   } else if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
     return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, or the tunnel's network binding (connect), allows`);
+  } else if (!proxy.insecure && tunnel.hosts === undefined && !address(db.host)) {
+    // Whoever writes the value picks the name, and a name may resolve to a private address: only the deployment's are dialled by name.
+    return failure(403, `${path}'s ${tunnel.key} names its host by name, which the tunnel ${place[2]} dials only when its hosts list it: a name may resolve to a private address`);
   }
   const key = `${handle}\u0000${path}\u0000${place[2]!}`;
   const network = tunnel.connect;
@@ -1260,8 +1266,8 @@ function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Reso
   }
   // A network binding reaches a whole private network: the tunnel names the hosts in it the URL may name.
   if (tunnel.connect !== undefined && (tunnel.hosts ?? []).length === 0) throw new Error(`credentialProxy: tunnel ${name} dials through a network binding, and names the hosts it reaches there: hosts: ['10.0.1.5']`);
-  // Each as it is dialled, 127.1 as 127.0.0.1: what the URL's host is held to.
-  const hosts = tunnel.hosts?.map((host) => new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname.replace(/^\[|\]$/g, ''));
+  // Each as it is dialled, 127.1 as 127.0.0.1, db.acme.example. as db.acme.example: what the URL's host is held to.
+  const hosts = tunnel.hosts?.map((host) => canonicalHost(new URL(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}`).hostname));
   if (!insecure && tunnel.connect === undefined && hosts?.some(privateHost)) throw new Error(`credentialProxy: tunnel ${name} names a private host, which only insecureUpstreams, or a network binding (connect), reaches`);
   return { ...tunnel, ...(hosts === undefined ? {} : { hosts }) };
 }
@@ -1294,18 +1300,43 @@ function checkListed(option: 'generate', listed: Record<string, 'all' | readonly
   return new Map(Object.entries(listed));
 }
 
-/** Whether a host is a literal private, loopback or link-local address, or localhost. */
+/**
+ * A host as a URL parsed it (every caller's has been: 127.1 and 2130706433
+ * are 127.0.0.1 there, [0:0::1] is ::1), without brackets or trailing dots,
+ * which the parser keeps on a name: `localhost.` is localhost.
+ */
+function canonicalHost(host: string): string {
+  return host.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.+$/, '');
+}
+
+/** Whether a host is an IP address, not a name a resolver could point anywhere. */
+function address(host: string): boolean {
+  const name = canonicalHost(host);
+  return name.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(name);
+}
+
+/** Whether a host is a private, loopback or link-local address, or localhost, however it is written. */
 function privateHost(host: string): boolean {
-  // `localhost.` is `localhost`, as a resolver reads a name with its root's dot.
-  const name = host.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
+  const name = canonicalHost(host);
   if (name === 'localhost' || name.endsWith('.localhost')) return true;
   const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(name);
   if (v4 !== null) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19));
   }
-  if (name.includes(':')) return name === '::1' || name === '::' || /^f[cd]/.test(name) || /^fe[89ab]/.test(name) || name.startsWith('::ffff:');
-  return false;
+  if (!name.includes(':')) return false;
+  // 6to4 carries an IPv4 address in its next 32 bits: 2002:a00:1:: is 10.0.0.1's.
+  const [first, high, low] = hextets(name);
+  if (first === 0x2002) return privateHost(`${high! >> 8}.${high! & 255}.${low! >> 8}.${low! & 255}`);
+  // ::/16 holds loopback, the unspecified address and IPv4 written as IPv6 (::ffff:a00:1, ::7f00:1); 64:ff9b:: is NAT64's; fe80::/10 is link-local, fec0::/10 site-local.
+  return /^(?:::|0:)/.test(name) || /^f[cd]/.test(name) || /^fe[89a-f]/.test(name) || name.startsWith('64:ff9b:');
+}
+
+/** An IPv6 address as a URL writes it (hex groups, `::` once at most), as its eight groups. */
+function hextets(address: string): number[] {
+  const [head, tail] = address.split('::').map((part) => (part === '' ? [] : part.split(':')));
+  const groups = tail === undefined ? head! : [...head!, ...Array<string>(8 - head!.length - tail.length).fill('0'), ...tail];
+  return groups.map((group) => parseInt(group, 16));
 }
 
 function answer(body: unknown): Response {

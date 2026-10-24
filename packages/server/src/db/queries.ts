@@ -1246,6 +1246,26 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
 }
 
 /**
+ * Forget up to `atMost` spent tokens, those spent over two hours ago: an
+ * exchange refuses a token issued over an hour ago (`MAX_TOKEN_AGE_SECONDS`),
+ * so their records guard nothing. On Postgres the runtime login deletes no
+ * row itself, and asks `prune_consumed_tokens`, which deletes only those
+ * (migration 0016). How many went.
+ */
+export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
+  if (dialect.engineOf(db) === 'postgres') {
+    const { rows } = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`);
+    return rows[0]!.pruned;
+  }
+  const { consumedTokens } = tablesOf(db);
+  const old = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(lt(consumedTokens.consumedAt, sql`${clockMillis(db)} - ${SPENT_TOKENS_KEPT_MS}`)).limit(atMost);
+  return changedRows(await db.delete(consumedTokens).where(inArray(consumedTokens.hash, old)));
+}
+
+/** How long a spent token's record is kept: prune_consumed_tokens's two hours, which SQLite applies here. */
+export const SPENT_TOKENS_KEPT_MS = 2 * 60 * 60 * 1000;
+
+/**
  * How many credentials a binding issued since `since`, up to `atMost`: the
  * count stops there. Through `credentials_issued_by_idx`, it visits that
  * binding's last minute, not the expired history a CI service runs up.

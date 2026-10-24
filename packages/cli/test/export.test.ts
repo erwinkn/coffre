@@ -68,12 +68,16 @@ test('GitHub masks escape percent, CR and LF, and mask each nonempty line as wel
   assert.ok(commands.every((line) => line.startsWith('::add-mask::')));
 });
 
-test('GitHub refuses invalid entries and keys the runner cannot set', () => {
-  for (const key of ['NOT-A-NAME', 'NODE_OPTIONS']) {
-    assert.throws(() => githubEnvironment([[key, 'private']]), /valid variable name|cannot be set/);
-  }
+test('GitHub refuses invalid entries and keys a later step would take code from', () => {
+  assert.throws(() => githubEnvironment([['NOT-A-NAME', 'private']]), /valid variable name/);
   assert.throws(() => githubEnvironment([['K', 'a\0b']]), /NUL/);
-  assert.deepEqual(readEnvironment(githubEnvironment([['GITHUB_TOKEN', 'a literal bearer']])), { GITHUB_TOKEN: 'a literal bearer' });
+  // What a later step would take code from, each named, a family by any of its names, and in any case; a credential beside them, never.
+  for (const key of ['NODE_OPTIONS', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'BASH_ENV', 'PATH', 'LD_AUDIT', 'MAVEN_OPTS', 'GRADLE_OPTS', 'CFLAGS', 'LDFLAGS', 'CGO_LDFLAGS', 'GIT_SSH_COMMAND', 'GIT_CONFIG_KEY_0', 'NODE_PATH', 'PYTHONPATH', 'PYTHONSTARTUP', 'PERL5OPT', 'RUBYOPT', 'JAVA_TOOL_OPTIONS', 'npm_config_script_shell', 'NPM_CONFIG_PNPMFILE', 'PNPM_CONFIG_NODE_OPTIONS', 'pnpm_config_script_shell', 'PNPM_CONFIG_PNPMFILE', 'MAVEN_ARGS', 'GOCACHEPROG', 'GOAUTH', 'BROWSER', 'PYTHONWARNINGS', 'PreBuildEvent', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER', 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER', 'CARGO_BUILD_RUSTC', 'CARGO_REGISTRIES_ACME_CREDENTIAL_PROVIDER', 'CC', 'MAKEFLAGS', 'ld_preload', 'Path']) {
+    assert.throws(() => githubEnvironment([['GOOD', 'kept'], [key, 'private']]), new RegExp(`^Error: ${key} cannot be set through GITHUB_ENV`), key);
+  }
+  for (const key of ['GITHUB_TOKEN', 'GIT_AUTHOR_NAME', 'PATHNAME', 'NODE_ENV', 'PYTHONUNBUFFERED', 'ENVIRONMENT', 'LDAP_URL', 'NPM_CONFIG_OTP', 'PNPM_CONFIG_REGISTRY', 'PIP_INDEX_URL', 'GOPRIVATE', 'NPM_CONFIG__AUTHTOKEN', 'NPM_TOKEN', 'CARGO_REGISTRIES_ACME_TOKEN', 'CARGO_REGISTRY_TOKEN', 'CARGO_TARGET_DIR', 'CCACHE_DIR', 'ENV', 'LD_SDK_KEY', 'LD_CLIENT_SIDE_ID', 'MY_OPTS']) {
+    assert.deepEqual(readEnvironment(githubEnvironment([[key, 'a literal value']])), { [key]: 'a literal value' }, key);
+  }
 });
 
 test('existing dotenv round-trips multiline and command-shaped values; shell export executes none of them', (t) => {

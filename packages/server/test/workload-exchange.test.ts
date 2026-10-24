@@ -11,11 +11,12 @@ import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProf
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, credentials, serviceBindings } from './db/tables.ts';
+import { auditLog, consumedTokens, credentials, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
-import { exchangeCandidates, exchangesSince } from '../src/db/queries.ts';
+import { runScheduled } from '../src/app.ts';
+import { exchangeCandidates, exchangesSince, pruneSpentTokens } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -293,6 +294,23 @@ test('a token is spent once used, in any spelling: the ES256 twin of a signature
   const outcomes = await Promise.all([trade(both), trade(both)]);
   assert.deepEqual(outcomes.map((outcome) => outcome.status).sort(), [200, 401]);
   assert.equal((await db.owner.select().from(credentials)).length, 2, 'one for the first token, one for the pair');
+});
+
+test('the scheduled beat forgets a token two hours after it was spent, never sooner, and a bounded number at a time', async () => {
+  const jwt = token(ec);
+  assert.equal((await trade(jwt)).status, 200);
+  // Records the owner dates: three spent just over two hours ago, one just under.
+  const spent = (byte: number, minutes: number) => ({ hash: Buffer.alloc(32, byte), consumedAt: new Date(Date.now() - minutes * 60_000) });
+  await db.owner.insert(consumedTokens).values([spent(1, 121), spent(2, 121), spent(3, 121), spent(4, 119)]);
+  // Which of those are left, by their byte.
+  const left = async () => (await db.owner.select({ hash: consumedTokens.hash }).from(consumedTokens))
+    .flatMap(({ hash }) => (hash.equals(Buffer.alloc(32, hash[0])) ? [hash[0]] : [])).sort().join();
+  assert.equal(await pruneSpentTokens(db.runtime, 2), 2);
+  assert.equal((await left()).split(',').length, 2);
+  await runScheduled(runtime);
+  assert.equal(await left(), '4', 'the beat took the third, and the young one stays');
+  assert.equal(await pruneSpentTokens(db.runtime, 10), 0);
+  assert.equal((await trade(jwt)).body.reason, 'replayed', 'the token just spent stays spent');
 });
 
 test('refusals say why, never what a binding expects, and a stranger never reaches the vault', async () => {

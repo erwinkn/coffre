@@ -24,8 +24,8 @@ function asNonEmptyString(value: unknown): string | null {
 /**
  * Verifies Cloudflare Access JWTs.
  *
- * Signature and claim verification for the TanStack request boundary. The
- * boundary also rejects `x-middleware-subrequest` before calling this verifier.
+ * Signature and claim verification of the token Access sends with each
+ * request.
  */
 export class AccessIdentityVerifier implements IdentityVerifier {
   readonly #config: AccessVerifierConfig;

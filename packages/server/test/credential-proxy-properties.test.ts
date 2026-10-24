@@ -396,13 +396,18 @@ test(`a tunnel reaches its hosts however they and the URL write them, and nothin
   if (expected !== null) assert.equal(typeof opened !== 'function', expected, opened instanceof Response ? await opened.clone().text() : 'opened');
 }, settings));
 
-test(`a tunnel's URL naming localhost, a trailing dot or not, is refused without insecureUpstreams, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
+test(`a tunnel dials a URL's host by name only when its hosts list it, and never localhost, a trailing dot or not, without insecureUpstreams, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
   const name = tc.draw(gs.sampledFrom([...LOOPBACK_NAMES, ...PUBLIC_NAMES]));
-  const opened = await credentialProxy({ cacheSeconds: 0, credentials: {}, tunnels: { db: postgres('DATABASE_URL') } }).routes!.socket!(
+  const listed = tc.draw(gs.booleans());
+  const proxy = () => credentialProxy({ cacheSeconds: 0, credentials: {}, tunnels: { db: postgres('DATABASE_URL', listed ? { hosts: [name] } : {}) } });
+  // Listed, localhost is refused with the configuration.
+  if (listed && LOOPBACK_NAMES.includes(name)) return void assert.throws(proxy, /names a private host/, name);
+  const opened = await proxy().routes!.socket!(
     new Request(`${PUBLIC}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}` } }),
     coffre({ DATABASE_URL: `postgres://app:pw@${name}:5432/app` }),
   );
-  assert.equal(typeof opened !== 'function', LOOPBACK_NAMES.includes(name), name);
+  // Unlisted, any name is refused: whoever writes the value picks it, and it may resolve to a private address.
+  assert.equal(typeof opened === 'function', listed, name);
 }, settings));
 
 // SASLprep, as Postgres runs it on a SCRAM password (RFC 4013, src/common/saslprep.c).
