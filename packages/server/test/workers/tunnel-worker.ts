@@ -8,6 +8,7 @@
 import { CoffreError } from '@coffre/client';
 
 import { forwardSocket, socketsObject, type SocketsNamespace } from '../../src/cloudflare-sockets.ts';
+import { inTime } from '../../src/socket-admission.ts';
 import type { PluginContext } from '../../src/plugins.ts';
 import type { WorkersSocket } from '../../src/workers-socket.ts';
 import { credentialProxy, postgres, type Network } from '../../src/plugins/credential-proxy.ts';
@@ -22,6 +23,12 @@ const REFUSED = `coffre_use_${'f'.repeat(43)}`;
 
 /** The handle the stand-in refuses at once, as a timed-out admission is, while its decision goes on a second. */
 const SLOW = `coffre_use_${'s'.repeat(43)}`;
+
+/** The handle whose URL each admission reads in turn, half a second each, as on the object's one database client. */
+const TURNS = `coffre_use_${'t'.repeat(43)}`;
+
+/** The handle the stand-in takes 20 s to check, as an instance under a burst of runs does, then lets in. */
+const LOADED = `coffre_use_${'l'.repeat(43)}`;
 
 /** The private address the replica's URL names, and the binding's stand-in. */
 const REPLICA = '10.9.8.7';
@@ -63,17 +70,20 @@ export const CoffreSockets = socketsObject<Env>((env) => {
   });
   const uses = new Map<string, number>();
   let refusals = 0;
+  /** The reads of `TURNS`'s URL, one after another. */
+  let reading: Promise<void> = Promise.resolve();
   const real = new URL(env.DATABASE_URL);
   const replica = `postgres://${real.username}:${real.password}@${REPLICA}:5432${real.pathname}?sslmode=disable`;
   const coffre = {
     publicUrl: 'https://secrets.acme.example',
     // As coffre's, a database read away: admissions in a burst overlap, as on Cloudflare.
     handle: async (handle: string) => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve) => setTimeout(resolve, handle === LOADED ? 20_000 : 20));
       if (handle === REFUSED && (refusals += 1) <= 33) throw new CoffreError(401, 'unauthorized', 'not yet');
       return { expiresAt: new Date(Date.now() + 3_600_000).toISOString(), paths: ['market/dev'] };
     },
     use: async (handle: string) => {
+      if (handle === TURNS) await (reading = reading.then(() => new Promise((resolve) => setTimeout(resolve, 500))));
       const used = (uses.get(handle) ?? 0) + 1;
       uses.set(handle, used);
       if (handle === REVOKED && used > 3) throw new CoffreError(401, 'unauthorized', 'the handle was revoked');
@@ -91,7 +101,8 @@ export const CoffreSockets = socketsObject<Env>((env) => {
       hold(new Promise((resolve) => setTimeout(resolve, 1000)));
       return Promise.resolve(new Response('coffre took too long to decide', { status: 503 }));
     }
-    return proxy.routes!.socket!(request, coffre);
+    // In the time coffre gives an admission, as `admitSocket` gives it.
+    return inTime(proxy.routes!.socket!(request, coffre), hold);
   };
 });
 

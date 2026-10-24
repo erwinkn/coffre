@@ -10,6 +10,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,8 @@ const NAME = 'coffre-tunnel-workers-test';
 let dir: string;
 let worker: Unstable_DevWorker;
 let at: string;
+/** workerd's inspector, for the heap the object's isolate holds. */
+let inspector: number;
 const listeners: { close(): void }[] = [];
 
 before(async () => {
@@ -48,9 +51,13 @@ before(async () => {
   );
   // Bundled from the packages' sources, as the tests read them.
   process.env.WRANGLER_BUILD_CONDITIONS = 'coffre:source,workerd,worker,browser';
+  const free = createServer().listen(0, '127.0.0.1');
+  await once(free, 'listening');
+  inspector = (free.address() as AddressInfo).port;
+  free.close();
   worker = await unstable_dev(fileURLToPath(new URL('./workers/tunnel-worker.ts', import.meta.url)), {
     config: join(dir, 'wrangler.json'),
-    local: true, ip: '127.0.0.1', port: 0, inspectorPort: 0, persist: false, logLevel: 'error',
+    local: true, ip: '127.0.0.1', port: 0, inspectorPort: inspector, persist: false, logLevel: 'error',
     experimental: { disableExperimentalWarning: true, disableDevRegistry: true },
   });
   at = `ws://${worker.address}:${worker.port}`;
@@ -151,6 +158,29 @@ test('an object holds 32 connections of a run at most, a burst of them included:
   }
   assert.equal(again.event, 'open');
   for (const { ws } of [...burst, again]) ws.close();
+});
+
+test("a pool's 32 connections opened at once are all let in, though each admission reads the URL in turn", { skip, timeout: 90_000 }, async () => {
+  // Half a second each, one after another: together, 16 s, past one admission's time to decide had they all started at once.
+  const turns = `coffre_use_${'t'.repeat(43)}`;
+  const open = async () => {
+    const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${turns}`, 'coffre-tunnel-flow': 'credit' } });
+    ws.on('error', () => undefined);
+    const [event, answer] = (await Promise.race([once(ws, 'open').then(() => ['open']), once(ws, 'unexpected-response').then(([, response]) => ['refused', response])])) as [string, { statusCode: number }?];
+    return { ws, event, status: answer?.statusCode };
+  };
+  const burst = await Promise.all(Array.from({ length: 32 }, open));
+  assert.deepEqual(burst.map(({ event, status }) => status ?? event).filter((outcome) => outcome !== 'open'), []);
+  for (const { ws } of burst) ws.close();
+});
+
+test('an admission that takes 20 s, as under a burst of runs at once, is let in', { skip, timeout: 60_000 }, async () => {
+  const loaded = `coffre_use_${'l'.repeat(43)}`;
+  const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${loaded}`, 'coffre-tunnel-flow': 'credit' } });
+  ws.on('error', () => undefined);
+  const [event] = (await Promise.race([once(ws, 'open').then(() => ['open']), once(ws, 'unexpected-response').then(([, response]) => ['refused', response])])) as [string];
+  assert.equal(event, 'open');
+  ws.close();
 });
 
 test("a connection refused at admission frees its slot: 33 refused, then one let in", { skip, timeout: 60_000 }, async () => {
@@ -270,4 +300,75 @@ test("a large result goes no faster than the app counts it: uncounted, the objec
   await done;
   assert.ok(received > 64_000 * 1000, `the whole result came: ${received} bytes`);
   ws.close();
+});
+
+/** The JavaScript heap workerd's isolate holds once garbage is collected, in bytes, through its inspector. */
+async function heapUsed(): Promise<number> {
+  const [target] = (await (await fetch(`http://127.0.0.1:${inspector}/json`)).json()) as { webSocketDebuggerUrl: string }[];
+  const cdp = new WebSocket(target!.webSocketDebuggerUrl);
+  await once(cdp, 'open');
+  let id = 0;
+  const call = (method: string) =>
+    new Promise<{ result?: { usedSize: number } }>((resolve) => {
+      const mine = ++id;
+      cdp.on('message', (data: Buffer) => {
+        const answer = JSON.parse(data.toString()) as { id?: number; result?: { usedSize: number } };
+        if (answer.id === mine) resolve(answer);
+      });
+      cdp.send(JSON.stringify({ id: mine, method }));
+    });
+  try {
+    await call('HeapProfiler.collectGarbage');
+    return (await call('Runtime.getHeapUsage')).result!.usedSize;
+  } finally {
+    cdp.close();
+  }
+}
+
+test("a long result streamed through the object leaves its heap as it was: each chunk is let go once sent", { skip, timeout: 180_000 }, async () => {
+  const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
+  await once(ws, 'message');
+  let received = 0;
+  let tail = Buffer.alloc(0);
+  let reached: { at: number; then: () => void } | null = null;
+  let readied: () => void = () => {};
+  ws.on('message', (data: Buffer, binary: boolean) => {
+    if (!binary) return;
+    received += data.length;
+    ws.send(String(data.length));
+    tail = Buffer.concat([tail, data]).subarray(-6);
+    if (tail.length === 6 && tail.equals(Buffer.from([0x5a, 0, 0, 0, 5, 0x49]))) readied();
+    if (reached !== null && received >= reached.at) reached.then();
+  });
+  const idle = () => new Promise<void>((resolve) => (readied = resolve));
+  const params = Buffer.from('user\0app\0database\0app\0\0');
+  const startup = Buffer.alloc(8);
+  startup.writeInt32BE(8 + params.length, 0);
+  startup.writeInt32BE(196608, 4);
+  const message = (type: string, body: Buffer) => {
+    const head = Buffer.alloc(5);
+    head.write(type, 0);
+    head.writeInt32BE(body.length + 4, 1);
+    return Buffer.concat([head, body]);
+  };
+  const login = idle();
+  ws.send(Buffer.concat([startup, params]));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  ws.send(message('p', Buffer.from(`${HANDLE}\0`)));
+  await login;
+  // 1.2 GB of rows, counted as they come; the heap read at 200 MB and again at 1 GB, the session still open, so that what
+  // the other objects of this isolate did before is in both.
+  const done = idle();
+  const at200 = new Promise<void>((resolve) => (reached = { at: 200e6, then: resolve }));
+  ws.send(message('Q', Buffer.from(`SELECT repeat('x', 1000) FROM generate_series(1, 1200000)\0`)));
+  await at200;
+  reached = null;
+  const before = await heapUsed();
+  const at1000 = new Promise<void>((resolve) => (reached = { at: 1000e6, then: resolve }));
+  await at1000;
+  reached = null;
+  const during = await heapUsed();
+  await done;
+  ws.close();
+  assert.ok(during - before < 8 * 1024 * 1024, `the object's heap grew ${Math.round((during - before) / 1024)} KiB over 800 MB`);
 });
