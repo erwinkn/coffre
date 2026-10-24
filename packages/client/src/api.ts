@@ -447,6 +447,7 @@ export type Api = {
         [key: string]: string;
       };
       sensitive: string[];
+      useOnly: string[];
       version: string | null;
     };
   };

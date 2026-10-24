@@ -5,3 +5,4 @@ if (!allowed) throw new Error('Usage: pnpm test:properties [--long] [--seed=<uns
 await import('../packages/core/test/audit-properties.test.ts');
 await import('../packages/core/test/access-properties.test.ts');
 await import('../packages/core/test/workload-properties.test.ts');
+await import('../packages/core/test/use-only-properties.test.ts');

@@ -458,9 +458,9 @@ export const routes = {
   ...route('POST /reveals', {
     input: z.object({ path: z.string().max(400) }),
     run: async (ctx, { input }) => {
-      // A person's read of a whole environment names the sensitive values it left out.
-      const { operationId, values, sensitive, version } = await reveal(ctx, parsePath(input.path, [2, 3]));
-      return { operationId, values, sensitive, version };
+      // A read of a whole environment names what it left out: a person's sensitive values, and a workload's it only uses.
+      const { operationId, values, sensitive, useOnly, version } = await reveal(ctx, parsePath(input.path, [2, 3]));
+      return { operationId, values, sensitive, useOnly, version };
     },
   }),
 

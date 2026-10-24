@@ -103,7 +103,7 @@ import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/g
 import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
-import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, type SecretPlace } from './decide.ts';
+import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -336,6 +336,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   personal: "a personal config's values are its owner's alone",
   sensitive: "a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it",
   not_owner_issued: 'a service account reads a sensitive value only on a token or trust binding an Owner of its project issued',
+  use_only: "a workload uses this value through coffre and never holds it: list it in its binding's reads, where the value is held, if it must",
   not_allowed: 'not allowed to change this',
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
@@ -397,13 +398,21 @@ type Correlation = { requestId?: string | null; operationId?: string | null; cre
 
 /**
  * What the one asking holds through the credential their request came in
- * on: no more than its scope (`allows`). A scope that is not one is a bug
- * of the app's, which fails the call.
+ * on: no more than its scope (`allows`), and, a workload's, handed back
+ * only what the scope lists (`useOnly`). A scope that is not one, a kind of
+ * caller its principal cannot be, or a workload with no scope to list what
+ * it reads, is a bug of the app's, which fails the call. None said is an
+ * app older than 0.11, which has no workloads (`Through`).
  */
-function through(standing: Standing, { credentialScope }: Through): Standing {
-  if (credentialScope == null) return standing;
-  if (!isCredentialScope(credentialScope)) throw new Error('credentialScope must be a list of grants, one a place');
-  return { ...standing, live: { ...standing.live, credentialScope }, all: { ...standing.all, credentialScope } };
+function through(standing: Standing, { credentialScope, caller }: Through): Standing {
+  const { principal } = standing;
+  if (caller !== undefined && !(caller === 'person' ? principal.startsWith('user:') : (caller === 'bearer' || caller === 'workload') && principal.startsWith('token:'))) {
+    throw new Error(`caller must be person for a user: principal, bearer or workload for a token: one, got: ${String(caller)}`);
+  }
+  if (caller === 'workload' && credentialScope == null) throw new Error('a workload caller comes with its credential scope, which lists what it reads');
+  if (credentialScope != null && !isCredentialScope(credentialScope)) throw new Error('credentialScope must be a list of grants, one a place');
+  const held = { ...(credentialScope == null ? {} : { credentialScope }), ...(caller === undefined ? {} : { kind: caller }) };
+  return { ...standing, live: { ...standing.live, ...held }, all: { ...standing.all, ...held } };
 }
 
 /** The credential a CI run's request came in on, as its entries record it: copied, never decided on. */
@@ -1206,6 +1215,8 @@ class VaultService implements Vault {
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
       let codes = keyRefusals(reader, { principal, permission: call.permission, secrets, at, environments, needs, owns: call.owns });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) codes = await call.vet(d.tx, d.reads);
+      // Where each value is held, the secret itself, a reference's source or a fork's parent: what a workload lists.
+      codes = useOnlyRefusals(codes, reader, { action, purpose: call.input.purpose, secrets });
       codes = sensitiveRefusals(codes, reader, {
         action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive, secrets, viaReference: call.viaReference,
       });
@@ -1412,7 +1423,7 @@ class VaultService implements Vault {
         const source = sources.get(item.source.secretId);
         if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
         if (source.secretId === item.holder.secretId) return 'invalid';
-        return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) === 'sensitive');
+        return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) ?? 'secret');
       });
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));
