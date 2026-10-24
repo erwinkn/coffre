@@ -82,6 +82,8 @@ function proxy(options: { recheckSeconds?: number } = {}) {
       stripe: { upstream: `${upstreamAt}/stripe`, inject: header('authorization', `Bearer {STRIPE_KEY}`) },
       // The same key, counted: three a minute for this service, and none for any other.
       metered: { upstream: `${upstreamAt}/stripe`, inject: header('authorization', `Bearer {STRIPE_KEY}`), limit: (service) => (service === MEMBER ? { perMinute: 3 } : undefined) },
+      // A rule that sends its key under the DPoP scheme: a handle's app sends its handle there.
+      dpopped: { upstream: `${upstreamAt}/dpopped`, inject: header('authorization', 'DPoP {STRIPE_KEY}') },
       s3: { upstream: `${upstreamAt}/s3`, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
     },
     signers: { 'dfns-key': privateKey('SIGNING_KEY') },
@@ -247,6 +249,10 @@ test('only the headers the proof signs go upstream, with the real key in place o
   // The token in what goes upstream, signed by the app itself, is refused: it goes no further than coffre.
   const leaked = await use(held, 'POST', '/use/stripe/v1/notes', { headers: { 'x-note': held.token }, body: '' });
   assert.equal(leaked.status, 400, JSON.stringify(leaked.body));
+  // A handle sent under the DPoP scheme, as a rule that takes `DPoP {KEY}` has its app send it, is a handle's request: the proxy's own refusal, no session's.
+  const handled = await read((await pluginRoute(new Request(`${ORIGIN}/use/dpopped/v1/x`, { headers: { authorization: `DPoP coffre_use_${'h'.repeat(43)}` } }), runtime, IP))!);
+  assert.equal(handled.status, 401);
+  assert.equal(handled.headers.get('www-authenticate'), null, JSON.stringify(handled.body));
   assert.match(leaked.body.message as string, /session token/);
   assert.equal(reached.length, 2);
 });
@@ -305,6 +311,18 @@ test('a streamed SigV4 upload is bound by the payload hash it declares; UNSIGNED
   assert.equal(buffered.status, 200, JSON.stringify(buffered.body));
   assert.equal(reached.at(-1)!.sha256, hash);
   assert.equal(reached.length, 3);
+  // A copier adds the hash of the signed body to a buffered request, with other bytes: coffre signs the hash the proof
+  // bound, never the bytes that came, so the upstream refuses them.
+  const good = 'the body the app signed';
+  const evil = 'the bytes a copier sent';
+  const goodHash = createHash('sha256').update(good).digest('hex');
+  const added = await use(held, 'PUT', '/use/s3/bucket/swapped', { body: evil, signed: { body: good }, added: { 'x-amz-content-sha256': goodHash } });
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.equal(reached.at(-1)!.headers['x-amz-content-sha256'], goodHash, 'the bound hash is signed, which the bytes do not match');
+  assert.notEqual(reached.at(-1)!.sha256, goodHash);
+  // An empty body is no body, whatever its header says, on every platform.
+  assert.equal((await use(held, 'PUT', '/use/s3/bucket/empty', { headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }, body: '' })).status, 200);
+  assert.equal(reached.length, 5);
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, strict);
   await bind({ unsignedUploads: true });
   const loose = await session();
@@ -401,7 +419,7 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.equal(plan.body.environment, 'market/prod');
   assert.deepEqual(plan.body.values, { REGION: 'eu-west-3' }, 'its plain value, and no secret one: it uses them');
-  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'metered', 's3', 'stripe']);
+  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe']);
   assert.deepEqual(plan.body.tunnels, { db: { key: 'DATABASE_URL', url: 'wss://secrets.acme.example/use/market/prod/db' } });
   assert.deepEqual([...(plan.body.useOnly as string[])].sort(), ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'SIGNING_KEY', 'STRIPE_KEY']);
 });

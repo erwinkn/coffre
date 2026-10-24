@@ -451,7 +451,7 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
  */
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
   // A workload's proof signs the request's content as every request under /use does: here, no body.
-  const caller = await refused(coffre.workload(request, { place: path, credential: null, body: await bodyDigest(new Uint8Array(0)) }));
+  const caller = await workloadOf(request, coffre, { place: path, credential: null, body: await bodyDigest(new Uint8Array(0)) });
   if (caller instanceof Response) return caller;
   if (caller !== null) return answering(caller, () => workloadPlan(coffre, proxy, caller, caller.path ?? path));
   const handle = bearer(request);
@@ -626,7 +626,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   const tunnel = proxy.tunnels.get(name);
   if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
   const path = `${place[0]}/${place[1]}`;
-  const caller = await refused(coffre.workload(request, { place: path, credential: name }));
+  const caller = await workloadOf(request, coffre, { place: path, credential: name });
   if (caller instanceof Response) return caller;
   if (caller !== null) return workloadTunnel(request, coffre, proxy, caller, name, tunnel);
   const handle = bearer(request);
@@ -827,7 +827,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const credential = operation === 'presign' ? proxy.credentials.get(name) : undefined;
   if (operation === 'sign' && signer === undefined) return failure(404, 'sign names a signer of this instance\'s: its deployment\'s credentialProxy names them, signers: { … }');
   if (operation === 'presign' && credential?.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
-  const caller = await refused(coffre.workload(request, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? credential!).limit) }));
+  const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? credential!).limit) });
   if (caller instanceof Response) return caller;
   const run = (who: User, at: string) => (operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : presign(coffre, proxy, at, who, credential!, given));
   if (caller !== null) return answering(caller, async () => (caller.path === null ? failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone') : run(caller, caller.path)));
@@ -1010,12 +1010,23 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
 /** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */
 const sent = (name: string) => !DROPPED.has(name) && !name.startsWith('cf-') && !name.startsWith('x-forwarded-');
 
-/** The session token a workload's request carries (`Authorization: DPoP <token>`), which goes no further than coffre; null for none, a Cloudflare call's. */
+/** The session token a workload's request carries (`Authorization: DPoP coffre_wl_…`), which goes no further than coffre; null for none, a Cloudflare call's. */
 function sessionToken(request: Request): string | null {
-  return DPOP.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
+  return SESSION.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
 }
 
-const DPOP = /^DPoP\s+(\S+)$/i;
+const SESSION = /^DPoP\s+(coffre_wl_\S+)$/i;
+
+/**
+ * The request's workload (`PluginContext.workload`), its refusal as the
+ * answer, or null for no workload. A credential whose rule sends its key
+ * under the DPoP scheme (`header('authorization', 'DPoP {TOKEN}')`) has the
+ * app send its handle there: that is a handle's request, and no session's.
+ */
+async function workloadOf(request: Request, coffre: PluginContext, at: WorkloadAt): Promise<WorkloadUse | Response | null> {
+  if (sessionToken(request) === null && /^DPoP\s/i.test(request.headers.get('authorization') ?? '')) return null;
+  return refused(coffre.workload(request, at));
+}
 
 /** The request's answer with the gate's newest nonce on it, which the workload signs its next proof with (`DPoP-Nonce`); as it is for any other caller. */
 function nonced(response: Response, caller: WorkloadUse | null): Response {
@@ -1056,22 +1067,26 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   const token = sessionToken(request);
   const at = { place: path, credential: credential.name, ...countsOf(credential.name, credential.limit) };
   // No session: a Cloudflare call's caller, or no workload at all, which costs nothing to learn and leaves the body unread.
-  let caller = token === null ? await refused(coffre.workload(request, at)) : null;
+  let caller = token === null ? await workloadOf(request, coffre, at) : null;
   if (caller instanceof Response) return caller;
   if (token === null && caller === null) return null;
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return nonced(aimed, caller);
   const content = await carried(request, credential);
   if (content instanceof Response) return nonced(content, caller);
+  // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
+  // the proof bound. Through a sigv4 credential, a body of any bytes signs the hash its `x-amz-content-sha256` declares,
+  // which the upstream checks against them, streamed or not (any other value binds nothing); every other request, an
+  // empty body's included whatever its header says, the bytes' own digest.
+  let payload: string | undefined;
   if (token !== null) {
-    // The body's line in `req`: through a sigv4 credential, the hash a body's `x-amz-content-sha256` declares, which coffre
-    // signs again and the upstream checks against the bytes, streamed or not (any other value binds nothing); else the
-    // bytes' own, an empty body's included.
     const declared = request.headers.get('x-amz-content-sha256');
-    const body = credential.inject.kind === 'sigv4' && declared !== null && request.body !== null
+    const bytes = content.streamed ? content.declared !== '0' : (content.body?.byteLength ?? 0) > 0;
+    const body = credential.inject.kind === 'sigv4' && declared !== null && bytes
       ? (/^[0-9a-f]{64}$/.test(declared) ? declared : UNSIGNED_BODY)
       : await bodyDigest(content.body ?? new Uint8Array(0));
-    caller = await refused(coffre.workload(request, { ...at, body }));
+    payload = body === UNSIGNED_BODY ? 'UNSIGNED-PAYLOAD' : body;
+    caller = await workloadOf(request, coffre, { ...at, body });
     if (caller instanceof Response) return caller;
   }
   const workload = caller!;
@@ -1086,7 +1101,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     for (const [name, value] of request.headers) if ((workload.hdr === null || workload.hdr.includes(name)) && sent(name)) headers.set(name, value);
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
     const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
-    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: null, secret });
+    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: null, secret, ...(payload === undefined ? {} : { payload }) });
   });
 }
 
@@ -1110,6 +1125,8 @@ type Sending = Aim & Carried & {
   back: string | null;
   /** What authenticated the request to coffre and goes no further: the handle, a workload's session token; null for a Cloudflare call. */
   secret: { pattern: RegExp; length: number; what: string } | null;
+  /** The payload hash a sigv4 credential signs, as a session's proof bound it (its body line); else the request's own, or its bytes'. */
+  payload?: string;
 };
 
 /**
@@ -1129,8 +1146,9 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     if (inject.kind === 'sigv4') {
       // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
       for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
-      // The client's own hash, as a streamed upload declared it, or as sent on; or the body's, an empty one's included, as SigV4 has it when no header says otherwise.
-      const given = streamed ? request.headers.get('x-amz-content-sha256') : headers.get('x-amz-content-sha256');
+      // The hash the session's proof bound; else the client's own, as a streamed upload declared it or as sent on; or the
+      // body's, an empty one's included, as SigV4 has it when no header says otherwise.
+      const given = out.payload ?? (streamed ? request.headers.get('x-amz-content-sha256') : headers.get('x-amz-content-sha256'));
       const payload = given ?? hex(await crypto.subtle.digest('SHA-256', body ?? new Uint8Array(0)));
       await signV4(request.method, target, headers, payload, {
         accessKeyId: render(inject.accessKeyId, values),

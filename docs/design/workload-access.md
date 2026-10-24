@@ -1838,6 +1838,9 @@ line of registration after the owner has merged:
 
 **As PR 1d built it**, where the design left a choice:
 
+- **Only `DPoP coffre_wl_…` is a session.** A credential whose rule sends
+  its key under the DPoP scheme has its app send a handle there, which
+  stays a handle's request.
 - **The URL alone routes a workload's request** (D17). Nothing tells a
   session's environments by name before its one statement runs, so
   `/use/<a>/…` is credential `<a>`'s stable URL whenever `<a>` names a
@@ -1860,9 +1863,11 @@ line of registration after the owner has merged:
   body: coffre signs the declared hash again and S3 checks the bytes
   against it. A body sent `UNSIGNED-PAYLOAD`, streamed or buffered, is
   refused (403 `unsigned_upload`) unless the binding says
-  `unsignedUploads`. A request with no body signs `bodyDigest('')` whatever
-  its header says, so a GET needs no `unsignedUploads`. Every other request
-  signs its bytes' digest. `standingSession` holds the `unsignedUploads`
+  `unsignedUploads`. A request whose body has no bytes (a GET, an empty
+  POST, a streamed `content-length: 0`) signs `bodyDigest('')` whatever its
+  header says, on every platform, so it needs no `unsignedUploads`. Every
+  other request signs its bytes' digest. The payload hash coffre signs
+  again is that same line, never re-read from the headers it forwards. `standingSession` holds the `unsignedUploads`
   clause, beside the binding's other policy checks.
 - **Every HTTP request under `/use` signs its content**: forwarding, the
   plan (an empty body) and `POST /use…`. A sign or presign body is
