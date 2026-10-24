@@ -13,6 +13,15 @@ import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
 import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
+/**
+ * The most an API request body may be, read as it streams and abandoned
+ * past this: a control-plane request, a bulk secret write its largest (a
+ * key count has its own cap, `MAX_BULK_KEYS`, and each value is at most
+ * 64 KiB), well above anything the CLI or UI sends, and bounded so no
+ * request buffers an unbounded body or parses one past R27's CPU budget.
+ */
+const API_BODY_BYTES = 4 * 1024 * 1024;
+
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
 
 type Compiled = {
@@ -188,7 +197,7 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
         throw badRequest(`"${value}" is not a valid ${name}`);
       }
     }
-    const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, {});
+    const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
     const input = def.input === undefined ? undefined : def.input.parse(raw);
     const query =
       request.method === 'GET' || def.query === undefined

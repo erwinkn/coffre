@@ -53,27 +53,12 @@ export async function readLimitedText(request: Request, max: number): Promise<st
   }
 }
 
-/** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */
-export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
-  const text = await readLimitedText(request, max);
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw badRequest('the body is not JSON');
-  }
-}
-
-/** A JSON body, or `fallback` when the body is empty. */
-export async function readJson(request: Request, fallback?: unknown): Promise<unknown> {
-  let text: string;
-  try {
-    text = await request.text();
-  } catch {
-    throw badRequest('the body could not be read');
-  }
-  if (text.length === 0 && fallback !== undefined) return fallback;
-  // Validation would quietly drop a `__proto__` key (a secret named that,
-  // say), so the write would succeed and store nothing: refuse it outright.
+/**
+ * Parse a JSON body, refusing a `__proto__` key. Validation would quietly
+ * drop one (a secret named that, say), so the write would succeed and store
+ * nothing: refuse it outright.
+ */
+function parseJsonBody(text: string): unknown {
   let proto = false;
   let body: unknown;
   try {
@@ -86,4 +71,20 @@ export async function readJson(request: Request, fallback?: unknown): Promise<un
   }
   if (proto) throw badRequest('__proto__ cannot be used as a key');
   return body;
+}
+
+/** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */
+export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
+  return parseJsonBody(await readLimitedText(request, max));
+}
+
+/**
+ * A JSON body of at most `max` bytes, or `fallback` when the body is empty.
+ * Every body is bounded: the stream is abandoned past the limit, so an
+ * oversize or endless body never buffers (the heart of R27's CPU budget).
+ */
+export async function readJson(request: Request, max: number, fallback?: unknown): Promise<unknown> {
+  const text = await readLimitedText(request, max);
+  if (text.length === 0 && fallback !== undefined) return fallback;
+  return parseJsonBody(text);
 }
