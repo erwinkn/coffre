@@ -188,7 +188,7 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
     publicUrl: 'https://coffre.test',
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
-    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
+    schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
     plugins: [],
   };
@@ -232,7 +232,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     // Every token is simply the email of whoever holds it, and never expires.
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
-    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
+    schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
     plugins: [],
   };

@@ -13,18 +13,20 @@
   each step a `key.reseal` entry, and then writes `key.rotate`; it signs
   browser and CLI sessions out, and keeps service and personal tokens,
   handles, workloads' sessions (one awaiting approval included), trust
-  bindings, enrollment codes, linked accounts and MCP connections. It
+  bindings, enrollment codes, linked accounts and MCP connections; a CLI
+  login approved but not yet taken is used up. Before `key.rotate`, it
   seals the audit anchor again under the new key. Until it is done, the
   app answers 503 `rotating`, each request taking it a step further, and a
-  Node process finishes it before it serves: wait on `/readyz` after the
-  deploy.
+  Node process steps it to the end as it starts: wait on `/readyz` after
+  the deploy.
   - **From the first step, the old key writes nothing**: an append under a
     key the log moved on from is refused, so an instance still running the
     old key during the deploy has its writes refused. From `key.rotate`, it
     vouches for no row, and verifies only the log's entries from before the
     first step: an entry under it after is a finding. A key replaced cannot
     come back: a start under it answers 503 `app_key`, and so does a start
-    under a key the log does not know. Keep the old key configured, and
+    under a key the log does not know, or an instance still writing under
+    the old one. Keep the old key configured, and
     escrowed: a walk of the whole log needs it.
   - **Rotations are crash-safe and race-free**: each step is one
     transaction under the log's head, and goes on from the step before,

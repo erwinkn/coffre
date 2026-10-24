@@ -21,7 +21,7 @@ RotatingOps == [p \in RotatingProcs |->
       [] p = "attacker" -> {ForgeRow(1), ForgeRow(2), ForgeEntry}]
 RotatingBudget == [p \in RotatingProcs |->
     CASE p = "old" -> 1
-      [] p \in {"new1", "new2"} -> 2
+      [] p \in {"new1", "new2"} -> 3
       [] p = "attacker" -> 2]
 
 =============================================================================

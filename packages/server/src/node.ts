@@ -84,11 +84,12 @@ const BACKLOG_MARGIN_MS = 30_000;
 export function createCoffre(config: NodeConfig): CoffreNode {
   const resolved = checkNodeConfig(config);
   let runtime: Promise<CoffreRuntime> | undefined;
-  // A rotation to a new app key goes to its end before the first request is served: a Worker's CPU limit is not Node's.
+  // A rotation to a new app key goes on to its end as the process starts, beside the requests, which answer 503
+  // `rotating` meanwhile, `/livez` and `/readyz` aside: a Worker's CPU limit is not Node's.
   const ready = () =>
-    (runtime ??= openDatabase(config.database).then(async (database) => {
+    (runtime ??= openDatabase(config.database).then((database) => {
       const rt = createRuntime(resolved, database.db, config.vault, nodeTransport(), undefined, processGates());
-      await settleKey(rt);
+      void settleKey(rt);
       return rt;
     }));
   let timer: NodeJS.Timeout | undefined;

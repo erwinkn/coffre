@@ -3,7 +3,8 @@
 (* The app key's rotation (server key-rotation.ts): starts under the new   *)
 (* key B step it, each step a transaction under the log's head that signs  *)
 (* the next row again under B if A signed it, and appends a `key.reseal`   *)
-(* saying where the next goes on, the last one `key.rotate` too; while     *)
+(* saying where the next goes on; once none is left, a step of its own     *)
+(* appends `key.rotate` (finishRotation, after the anchor's reseal); while *)
 (* instances still under the old key A write rows and entries, and someone *)
 (* who holds A and can write the database writes rows and entries under A  *)
 (* past every check. docs/formal.md says what this covers, what it         *)
@@ -55,8 +56,9 @@ Rotated == \E i \in 1..Len(log) : log[i].kind = "rotate"
 \* The first entry that names A as moved from: A writes nothing from there.
 FirstMove == IF Moves = {} THEN Len(log) + 1 ELSE CHOOSE i \in Moves : \A j \in Moves : i <= j
 
-\* Where the rotation stands, as a step reads it: done, or the next row.
-Standing == IF Rotated THEN N + 1
+\* Where the rotation stands, as a step reads it: the next row; N + 1,
+\* every row signed and `key.rotate` to write; N + 2, done.
+Standing == IF Rotated THEN N + 2
             ELSE IF Moves = {} THEN 1
             ELSE log[CHOOSE i \in Moves : \A j \in Moves : j <= i].next
 
@@ -109,9 +111,10 @@ WriteCommit(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* A step of the rotation, under B (rotateStep): the head, where it        *)
-(* stands, then the next row signed again if A signed it, and the step's   *)
-(* entries. A step finds it done, and writes nothing.                      *)
+(* A step of the rotation, under B (rotateStep, finishRotation): the head,  *)
+(* where it stands, then the next row signed again if A signed it and its  *)
+(* `key.reseal`; or, every row signed, `key.rotate`. A step finds it done, *)
+(* and writes nothing.                                                     *)
 (***************************************************************************)
 
 StepRead(p) ==
@@ -130,12 +133,13 @@ StepHead(p) ==
 StepWork(p) ==
     /\ pc[p] = "step.work"
     /\ LET r == l[p].next IN
-       IF r > N \/ Len(log) + 2 > MaxLen
+       IF r > N + 1 \/ Len(log) >= MaxLen
          THEN UNCHANGED <<rows, log>>
+         ELSE IF r = N + 1
+         THEN /\ Entry([key |-> "B", kind |-> "rotate", by |-> "new", next |-> r])
+              /\ UNCHANGED rows
          ELSE /\ rows' = IF rows[r].key = "A" THEN [rows EXCEPT ![r].key = "B"] ELSE rows
-              /\ LET step == [key |-> "B", kind |-> "reseal", by |-> "new", next |-> r + 1]
-                     rotate == [key |-> "B", kind |-> "rotate", by |-> "new", next |-> r + 1]
-                 IN log' = log \o (IF r = N THEN <<step, rotate>> ELSE <<step>>)
+              /\ Entry([key |-> "B", kind |-> "reseal", by |-> "new", next |-> r + 1])
     /\ Release(p)
     /\ Goto(p, "idle")
     /\ UNCHANGED <<op, l, left>>

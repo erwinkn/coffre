@@ -66,13 +66,6 @@ export type WatchContext = {
   seal(fields: AnchorFields): AuditAnchor;
   own(anchor: AuditAnchor): boolean;
   keyId: string;
-  /**
-   * Whether a record is the watcher's, sealed under the key the app last
-   * moved on from (key-rotation.ts), which it may seal again under its own:
-   * the one thing a key the app replaced still vouches for. False when the
-   * app holds no such key.
-   */
-  resealable(anchor: AuditAnchor): boolean;
 };
 
 /** What a watcher does, beside its plugin's routes. Each hook gets its own context, and its own store. */
@@ -95,8 +88,12 @@ export type Watcher = {
   walkOn(ctx: WatchContext, store?: AnchorStore): Promise<boolean>;
   /** An Owner's acceptance of lost entries, `actor`'s, in their request's context. A refusal throws a `Refusal`. */
   acceptLoss(ctx: WatchContext, range: { from: number; to: number }): Promise<{ resumes: number | null }>;
-  /** Once the app has moved to a new key: its record sealed again under it, if it is `resealable`. Whether it is the app's now. */
-  reseal(ctx: WatchContext): Promise<boolean>;
+  /**
+   * The app's rotation to a new key, before its `key.rotate`: the record
+   * sealed again under the new key if `from`, the old key's check, says the
+   * old key sealed it. A store it cannot use throws.
+   */
+  reseal(ctx: WatchContext, from: (anchor: AuditAnchor) => boolean): Promise<void>;
 };
 
 /** What a watcher refuses a request for, which the API answers 400 with: never anything else it throws. */
@@ -122,8 +119,6 @@ export type WatchDeps = {
   chainKey: Buffer;
   /** The keys `chainKey` replaced, which verify the entries from before the app moved on from each. */
   previousChainKeys?: readonly Buffer[];
-  /** The key the app last moved on from, if it holds it (`CoffreRuntime['appKey']`). */
-  movedFrom?: Buffer | null;
   vault: Pick<Vault, 'checkpoint' | 'about'>;
   alert?: (text: string) => void;
   warn?: (obj: unknown, msg: string) => void;
@@ -174,6 +169,5 @@ export function watchContext(deps: WatchDeps): WatchContext {
     seal: (fields) => sealAnchor(chainKey, fields),
     own: (anchor) => anchorIsOwn(chainKey, anchor),
     keyId: anchorKeyId(chainKey),
-    resealable: (anchor) => deps.movedFrom != null && anchorIsOwn(deps.movedFrom, anchor),
   };
 }

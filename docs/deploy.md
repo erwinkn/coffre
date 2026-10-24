@@ -984,10 +984,11 @@ for the vault key ([keys.md](keys.md#a-local-key)).
    with the old one; on Node, both in `.env`.
 4. **Deploy, then wait for readiness.** The first start under the new key
    signs every row the old key signed again under the new one, a step of
-   100 rows a request, and then writes `key.rotate`. Until then every
-   request but `/livez` and `/readyz` answers 503 `rotating`, and each one,
-   `/readyz` too, takes it a step further; on Node, the process goes to the
-   end before it serves. So a deploy that waits on readiness finishes it:
+   100 rows a request, seals the audit anchor again under it, and then
+   writes `key.rotate`. Until then every request but `/livez` and `/readyz`
+   answers 503 `rotating`, and each one, `/readyz` too, takes it a step
+   further; a Node process also steps it to the end as it starts. So a
+   deploy that waits on readiness finishes it:
 
    ```sh
    until curl -fsS https://secrets.example.com/readyz; do sleep 1; done
@@ -996,7 +997,8 @@ for the vault key ([keys.md](keys.md#a-local-key)).
    Many rows take many steps: an instance with 20,000 credentials, most of
    them CI runs' spent ones, takes two hundred.
 5. **Check.** The audit log shows the rotation's `key.reseal` steps, each
-   naming how many rows it signed again, how many sessions it signed out,
+   naming how many rows it signed again, how many sessions and approved
+   device logins it ended,
    and any row it could not sign because neither key had signed it, which
    fails as it did before; then `key.rotate`. `coffre verify log` verifies
    the whole log; `coffre verify keys` takes the new key as the one the
@@ -1010,7 +1012,8 @@ What it changes, and what it keeps:
   bindings, enrollment codes and MCP connections go on. An MCP client's
   access token lasts minutes and is signed with the key, not stored: the
   client refreshes it once, with its connection's refresh token. A sign-in
-  or an MCP approval under way when the rotation runs starts again.
+  or an MCP approval under way when the rotation runs starts again, and a
+  CLI login approved but not yet taken is used up: the CLI logs in again.
 - **The old key writes nothing from the rotation's first step.** The step's
   `key.reseal` names it, and the log refuses an append under a key it names
   so: an instance still running the old key, as during the seconds a
@@ -1019,8 +1022,13 @@ What it changes, and what it keeps:
   vouches for no row, and verifies only the log's entries from before the
   first step: an entry under it after that is a finding, the watch's and
   `coffre verify log`'s.
-- **The anchor is sealed again** under the new key: what it says is what
-  it said ([the audit watch](#the-audit-watch)).
+- **The anchor is sealed again** under the new key, before `key.rotate`:
+  what it says is what it said ([the audit watch](#the-audit-watch)). After
+  `key.rotate`, a record under the old key is foreign, as any other key's:
+  a store the rotation cannot reach holds it back until it can.
+- **A database that cannot be reached serves nothing** while
+  `previousAuditChainKeys` is set, until the app knows its key stands:
+  503 `unavailable`.
 - **A key replaced stays replaced.** A start under a key the log moved on
   from, as a rollback of the deploy would be, answers 503 `app_key`, and
   the server's log says which keys; so does a start under a key the log
@@ -1032,9 +1040,13 @@ What it changes, and what it keeps:
 - **A leaked key's window closes with the rotation.** An entry forged
   with the old key after the first step is a finding; a row forged with
   it before `key.rotate` is signed again with the rest, as a rotation
-  cannot tell it from the instance's own. When the old key leaked, review each service's tokens and bindings after the rotation
+  cannot tell it from the instance's own. When the old key leaked, review
+  each service's tokens and bindings after the rotation
   (`coffre tokens <service>`, `coffre trust <service>`), and your own
   (`coffre tokens`).
+- **A key replaced without a rotation**, as before this release, is moved
+  from once it is listed in `previousAuditChainKeys`: the rows it signed
+  are signed again, and its entries verify only before that rotation.
 
 **When may the old key go?** Keep it in `previousAuditChainKeys` for as
 long as the log holds entries written under it, which is for good: it

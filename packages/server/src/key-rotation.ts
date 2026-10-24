@@ -9,7 +9,8 @@
 //
 // It goes a step at a time, each a transaction under the log's head: a
 // step signs up to `STEP_ROWS` rows again and appends a `key.reseal` entry
-// that says where the next goes on, the last one `key.rotate` too. So a
+// that says where the next goes on. Once every row is signed, the audit
+// anchor is sealed again under the new key, and then `key.rotate`. So a
 // rotation survives a crash between steps and goes on from the last, any
 // number of isolates or processes may step it at once, one after another
 // under the head, and a Worker's step stays within its CPU. The app serves
@@ -17,6 +18,7 @@
 //
 //   key.reseal  { from: 'app:1f…', resealed: 69, signedOut: 31, unsigned: [], next: { table: 'credentials', after: '7c…' } }
 //   key.reseal  { from: 'app:1f…', resealed: 12, signedOut: 0, unsigned: [], next: null }
+//   (the anchor sealed again)
 //   key.rotate  { from: 'app:1f…' }
 import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import type { Database, Queryable } from '@coffre/db';
@@ -24,7 +26,7 @@ import { lockLogHead } from '@coffre/db/log';
 
 import { signedAgain, signedBy, type AuthRow, type AuthTable } from './auth-rows.ts';
 import { appendAudit, appLogKey, type AppKeys, type AuditEntry } from './db/audit.ts';
-import { newestAppEntry, newestMove, reseal, signedRowsAfter, type Resealed } from './db/rotation.ts';
+import { movedFrom, newestAppEntry, newestMove, reseal, signedRowsAfter, wroteUnder, type Resealed } from './db/rotation.ts';
 
 /** Every table whose rows carry the app's MAC, in the order a rotation signs them again. */
 export const SIGNED_TABLES: readonly AuthTable[] = [
@@ -48,63 +50,81 @@ export type Cursor = { table: AuthTable; after: string | null };
 const START: Cursor = { table: SIGNED_TABLES[0]!, after: null };
 
 /**
- * Where the app stands with its key, as the log says: under it, with the
- * key the log last moved from if this app still holds it, the audit
- * anchor's to seal again (`movedFrom`); moving to it from `from`, going on
- * from `next`; or refused, and why, for a key the log has moved on from
- * or does not know.
+ * Where the app stands with its key, as the log says: under it; moving to
+ * it from `from`, its rows going on from `next`; every row signed again,
+ * the audit anchor to seal again before `key.rotate` (`sealing`); or
+ * refused, and why, for a key the log has moved on from or does not know.
  */
 export type KeyState =
-  | { kind: 'settled'; movedFrom: Buffer | null }
+  | { kind: 'settled' }
   | { kind: 'rotating'; from: Buffer; next: Cursor }
+  | { kind: 'sealing'; from: Buffer }
   | { kind: 'refused'; reason: string };
 
 /**
- * Where the app stands, from the log: its newest `key.reseal` or
- * `key.rotate`, and when it has none, its newest entry. Each checked by its
- * MAC under the key it names, which the app must hold. Two indexed reads,
- * at most.
+ * Where the app stands, from the log. Its newest `key.reseal` or
+ * `key.rotate`, checked by its MAC under the key it names, says whether a
+ * rotation is under way, and to which key. Then the app's key must be one
+ * no entry names as moved from, and a key it holds as replaced that has
+ * written entries the log has not moved from is one to move from, whatever
+ * came after: an entry under the new key before the rotation began, say,
+ * which no door lets through, changes nothing. Without a move, the app's
+ * newest entry must be under a key it holds. A few indexed reads; a key it
+ * holds as replaced is looked for among the entries until one is found.
  */
 export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> {
   const current = appLogKey(keys.chainKey).keyId;
-  const held = new Map([keys.chainKey, ...keys.previousChainKeys].map((key) => [appLogKey(key).keyId, key]));
+  const previous = keys.previousChainKeys.map((key) => ({ id: appLogKey(key).keyId, key }));
+  const held = new Map([[current, keys.chainKey], ...previous.map(({ id, key }) => [id, key] as const)]);
   const move = await newestMove(db);
+  if (move !== undefined) {
+    const under = held.get(move.keyId);
+    if (under === undefined) {
+      return refused(`the log moved on to ${move.keyId}, a key this app does not hold: a deployment given a newer app key replaced this one, and a key the app moved on from writes no more`);
+    }
+    if (!authentic(move, under)) return refused(forged(move));
+    if (move.action === 'key.reseal') {
+      if (move.keyId !== current) {
+        return refused(`a rotation to ${move.keyId} is under way, and this app's key is ${current}: deploy that one as auditChainKey to finish it`);
+      }
+      const from = held.get(move.subjectPrincipal ?? '');
+      if (from === undefined) {
+        return refused(`the rotation under way moves from ${move.subjectPrincipal}, a key missing from previousAuditChainKeys: put it back to finish it`);
+      }
+      const next = nextOf(move);
+      if (next === undefined) return refused(`entry ${move.seq}, the rotation's last step, does not say where it goes on`);
+      return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next };
+    }
+  }
+  const moved = await movedFrom(db, [...held.keys()]);
+  if (moved.has(current)) {
+    return refused(`the log moved on from ${current}, this app's key: a key the app moved on from writes no more, and comes back only as a new key's rotation`);
+  }
+  // The log is under the key its newest rotation moved to, a key this app replaced: it moves on from that one in turn.
+  if (move !== undefined && move.keyId !== current) return { kind: 'rotating', from: held.get(move.keyId)!, next: START };
   if (move === undefined) {
     const newest = await newestAppEntry(db);
-    if (newest === undefined || newest.keyId === current) return { kind: 'settled', movedFrom: null };
-    const from = held.get(newest.keyId);
-    if (from === undefined) {
+    const under = newest === undefined ? undefined : held.get(newest.keyId);
+    if (newest !== undefined && under === undefined) {
       return refused(`the app's entries are under ${newest.keyId}, a key this app does not hold: it was given the wrong app key, or the one it replaced is missing from previousAuditChainKeys`);
     }
-    return authentic(newest, from) ? { kind: 'rotating', from, next: START } : refused(forged(newest));
+    if (newest !== undefined && !authentic(newest, under!)) return refused(forged(newest));
   }
-  const under = held.get(move.keyId);
-  if (under === undefined) {
-    return refused(`the log moved on to ${move.keyId}, a key this app does not hold: a deployment given a newer app key replaced this one, and a key the app moved on from writes no more`);
+  for (const { id, key } of previous) {
+    if (!moved.has(id) && (await wroteUnder(db, id))) return { kind: 'rotating', from: key, next: START };
   }
-  if (!authentic(move, under)) return refused(forged(move));
-  const from = held.get(move.subjectPrincipal ?? '');
-  if (move.action === 'key.rotate') {
-    // Under this key since; or under one this app replaced, which it moves on from in turn.
-    return move.keyId === current ? { kind: 'settled', movedFrom: from ?? null } : { kind: 'rotating', from: under, next: START };
-  }
-  if (move.keyId !== current) {
-    return refused(`a rotation to ${move.keyId} is under way, and this app's key is ${current}: deploy that one as auditChainKey to finish it`);
-  }
-  if (from === undefined) {
-    return refused(`the rotation under way moves from ${move.subjectPrincipal}, a key missing from previousAuditChainKeys: put it back to finish it`);
-  }
-  const next = nextOf(move);
-  return next === undefined ? refused(`entry ${move.seq}, the rotation's last step, does not say where it goes on`) : { kind: 'rotating', from, next };
+  return { kind: 'settled' };
 }
 
 /**
  * One step of the rotation, in a transaction under the log's head: where
  * it stands read again under it, then up to `rows` rows signed again from
  * there, and its entry. Rows the old key signed are signed under the new
- * one, and a session is signed out as well; rows the new one signed
- * already are left; a row neither signed is left as it is, which fails it
- * as it failed before, and named. Where the app stands after.
+ * one; a session is signed out as well, and a device's login approved but
+ * not yet taken is used up; rows the new one signed already are left; a
+ * row neither signed is left as it is, which fails it as it failed
+ * before, and named. Where the app stands after: `sealing` once every row
+ * is signed.
  */
 export async function rotateStep(db: Database, keys: AppKeys, rows = STEP_ROWS): Promise<KeyState> {
   const unsigned: { table: AuthTable; id: string }[] = [];
@@ -122,16 +142,16 @@ export async function rotateStep(db: Database, keys: AppKeys, rows = STEP_ROWS):
       const read = await signedRowsAfter(tx, table, after, asked);
       const changes: Resealed[] = [];
       for (const row of read) {
-        const session = table === 'credentials' && SESSIONS.has((row as AuthRow & { kind: string }).kind) && (row as { revokedAt: Date | null }).revokedAt === null;
-        const mac = signedAgain(from, keys.chainKey, table, row, (session ? { revokedAt: now } : {}) as never);
-        if (mac !== null) changes.push({ id: row.id, was: row.authMac, mac, signOut: session ? now : null });
+        const ends = endsAt(table, row, now);
+        const mac = signedAgain(from, keys.chainKey, table, row, (ends === null ? {} : ends) as never);
+        if (mac !== null) changes.push({ id: row.id, was: row.authMac, mac, ends: ends === null ? null : now });
         // Signed under the new key already, by a step that was cut short; or by neither, and left.
         else if (!signedBy(keys.chainKey, table, row)) unsigned.push({ table, id: row.id });
       }
       const changed = new Set(await reseal(tx, table, changes));
       for (const change of changes) {
         if (!changed.has(change.id)) unsigned.push({ table, id: change.id });
-        else if (change.signOut !== null) signedOut += 1;
+        else if (change.ends !== null) signedOut += 1;
         else resealed += 1;
       }
       left -= read.length;
@@ -140,21 +160,44 @@ export async function rotateStep(db: Database, keys: AppKeys, rows = STEP_ROWS):
       next = read.length < asked ? (following === undefined ? null : { table: following, after: null }) : { table, after: read.at(-1)!.id };
     }
     const fromId = appLogKey(from).keyId;
-    const step: AuditEntry = {
+    await appendAudit(tx, keys.chainKey, [{
       ...ROTATION,
       action: 'key.reseal',
       decision: 'allow',
       subject: fromId,
       metadata: { from: fromId, resealed, signedOut, unsigned: unsigned.slice(0, NAMED), unsignedCount: unsigned.length, next },
-    };
-    const rotated: AuditEntry = { ...ROTATION, action: 'key.rotate', decision: 'allow', subject: fromId, metadata: { from: fromId } };
-    await appendAudit(tx, keys.chainKey, next === null ? [step, rotated] : [step]);
-    return next === null ? { kind: 'settled', movedFrom: from } : { kind: 'rotating', from, next };
+    }]);
+    return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next };
   });
   if (unsigned.length > 0) {
     console.error({ event: 'auth_row_unsigned', rows: unsigned.slice(0, NAMED), count: unsigned.length }, 'rows neither app key signed are left as they are, and fail as before');
   }
   return state;
+}
+
+/**
+ * The rotation's end, once its rows are signed and the caller has sealed
+ * the audit anchor again under the new key: `key.rotate`, in a
+ * transaction under the log's head that reads again where it stands. From
+ * here on the old key vouches for nothing. Where the app stands after.
+ */
+export async function finishRotation(db: Database, keys: AppKeys): Promise<KeyState> {
+  return db.transaction(async (tx): Promise<KeyState> => {
+    await lockLogHead(tx);
+    const standing = await keyState(tx, keys);
+    if (standing.kind !== 'sealing') return standing;
+    const fromId = appLogKey(standing.from).keyId;
+    await appendAudit(tx, keys.chainKey, [{ ...ROTATION, action: 'key.rotate', decision: 'allow', subject: fromId, metadata: { from: fromId } }]);
+    return { kind: 'settled' };
+  });
+}
+
+/** What a rotation ends of a row as it signs it again: a live session, signed out; a device's approved login not yet taken, used up. */
+function endsAt(table: AuthTable, row: AuthRow, now: Date): { revokedAt: Date } | { consumedAt: Date } | null {
+  const fields = row as { kind?: string; revokedAt?: Date | null; decision?: string; consumedAt?: Date | null };
+  if (table === 'credentials' && SESSIONS.has(fields.kind!) && fields.revokedAt === null) return { revokedAt: now };
+  if (table === 'device_authorizations' && fields.decision === 'approved' && fields.consumedAt === null) return { consumedAt: now };
+  return null;
 }
 
 function refused(reason: string): KeyState {
@@ -170,11 +213,12 @@ function forged(entry: StoredEntry): string {
   return `entry ${entry.seq}, in the app's name under ${entry.keyId}, does not carry its MAC: forged, or rewritten since`;
 }
 
-/** Where the step `entry` wrote said the next goes on, if it says. */
-function nextOf(entry: StoredEntry): Cursor | undefined {
+/** Where the step `entry` wrote said the next goes on: null for no row left, undefined if it does not say. */
+function nextOf(entry: StoredEntry): Cursor | null | undefined {
   try {
     const { next } = JSON.parse(entry.metadata) as { next?: { table?: unknown; after?: unknown } | null };
-    if (typeof next !== 'object' || next === null) return undefined;
+    if (next === null) return null;
+    if (typeof next !== 'object') return undefined;
     const table = SIGNED_TABLES.find((name) => name === next.table);
     const after = next.after === null || typeof next.after === 'string' ? next.after : undefined;
     return table === undefined || after === undefined ? undefined : { table, after };

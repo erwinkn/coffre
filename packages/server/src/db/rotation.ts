@@ -20,6 +20,23 @@ export async function newestMove(db: Queryable): Promise<StoredEntry | undefined
   return row as StoredEntry | undefined;
 }
 
+/** Which of `keyIds` an app's `key.reseal` or `key.rotate` names as the key it moves from. */
+export async function movedFrom(db: Queryable, keyIds: readonly string[]): Promise<Set<string>> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .selectDistinct({ keyId: auditLog.subjectPrincipal })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), inArray(auditLog.action, [...MOVES_FROM]), inArray(auditLog.subjectPrincipal, [...keyIds])));
+  return new Set(rows.map((row) => row.keyId!));
+}
+
+/** Whether the app wrote any entry under `keyId`: read until the first, which for a key replaced is among the oldest. */
+export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.author, 'app'), eq(auditLog.keyId, keyId))).orderBy(asc(auditLog.seq)).limit(1);
+  return row !== undefined;
+}
+
 /** The app's newest entry, unchecked. */
 export async function newestAppEntry(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
@@ -48,33 +65,40 @@ export async function signedRowsAfter(tx: Transaction, table: AuthTable, after: 
   return (await (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit)) as AuthRow[];
 }
 
-/** A row signed again: its MAC as read, which it must still carry, and its new one; a session also signed out. */
-export type Resealed = { id: string; was: Buffer; mac: Buffer; signOut: Date | null };
+/** A row signed again: its MAC as read, which it must still carry, and its new one; and when it ends, a session signed out or a device's login used up. */
+export type Resealed = { id: string; was: Buffer; mac: Buffer; ends: Date | null };
 
 /**
  * Each row given its new MAC, if it still carries the one it was read with:
  * a row changed since keeps its change, and the MAC it was changed under. A
- * session signed out is revoked as coffre revokes one. The ids of those it
- * changed. One statement on Postgres for each kind, one a row on SQLite.
+ * session that ends is revoked as coffre revokes one, a device's login is
+ * consumed. The ids of those it changed. One statement on Postgres for each
+ * kind, one a row on SQLite.
  */
 export async function reseal(tx: Transaction, table: AuthTable, rows: readonly Resealed[]): Promise<string[]> {
   const target = signedTable(tx, table);
   const changed: string[] = [];
   if (engineOf(tx) === 'sqlite') {
     for (const row of rows) {
-      const set = row.signOut === null ? { authMac: row.mac } : { authMac: row.mac, revokedAt: row.signOut, revokedBy: 'coffre' };
+      const set = row.ends === null ? { authMac: row.mac } : { authMac: row.mac, ...ending(table, row.ends) };
       if (changedRows(await tx.update(target).set(set as never).where(and(eq(target.id, row.id), eq(target.authMac, row.was)))) > 0) changed.push(row.id);
     }
     return changed;
   }
-  for (const signOut of [false, true]) {
-    const some = rows.filter((row) => (row.signOut !== null) === signOut);
+  for (const ends of [false, true]) {
+    const some = rows.filter((row) => (row.ends !== null) === ends);
     if (some.length === 0) continue;
     const values = sql.join(some.map((row) => sql`(${row.id}::uuid, ${row.was}::bytea, ${row.mac}::bytea)`), sql`, `);
-    const revoke = signOut ? sql`, revoked_at = ${some[0]!.signOut}, revoked_by = 'coffre'` : sql``;
-    const updated = await rowsOf<{ id: string }>(tx, sql`UPDATE ${target} AS t SET auth_mac = v.mac${revoke}
+    const at = some[0]!.ends;
+    const end = !ends ? sql`` : table === 'device_authorizations' ? sql`, consumed_at = ${at}` : sql`, revoked_at = ${at}, revoked_by = 'coffre'`;
+    const updated = await rowsOf<{ id: string }>(tx, sql`UPDATE ${target} AS t SET auth_mac = v.mac${end}
       FROM (VALUES ${values}) AS v(id, was, mac) WHERE t.id = v.id AND t.auth_mac = v.was RETURNING t.id`);
     changed.push(...updated.map((row) => row.id));
   }
   return changed;
+}
+
+/** The columns that end a row as a rotation ends it: a device's login consumed, a session revoked. */
+function ending(table: AuthTable, at: Date): Record<string, unknown> {
+  return table === 'device_authorizations' ? { consumedAt: at } : { revokedAt: at, revokedBy: 'coffre' };
 }

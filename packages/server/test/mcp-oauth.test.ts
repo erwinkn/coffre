@@ -62,7 +62,7 @@ before(async () => {
   if (auth.mode !== 'signin') throw new Error('unreachable');
   const service = new SigninService({ ...deps, signin: auth.signin });
   const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport });
-  runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true, movedFrom: null }, rotateAfterDays: 365, plugins: [] };
+  runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [] };
   off = { ...runtime, mcp: null };
 });
 

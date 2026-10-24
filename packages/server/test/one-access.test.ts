@@ -52,7 +52,7 @@ before(async () => {
     publicUrl: ORIGIN,
     verifier: service,
     waitUntil,
-    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
+    schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
     plugins: [],
   };

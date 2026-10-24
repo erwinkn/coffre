@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { KeyRetired } from '@coffre/db/log';
+
 import { logged } from '../logged.ts';
 
 /**
@@ -104,6 +106,10 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
     const body: ErrorBody = { error: error.code, message: error.message };
     if (error.reason !== undefined) body.reason = error.reason;
     return { status: error.status, body };
+  }
+  // An instance still under a key the log moved on from, as for the seconds a deploy takes: refused, not a bug.
+  if (error instanceof KeyRetired) {
+    return { status: 503, body: { error: 'app_key', message: 'this instance runs under an app key the audit log has moved on from: a newer deployment replaces it' } };
   }
   if (error instanceof z.ZodError) {
     const issue = error.issues[0];

@@ -40,12 +40,8 @@ export type CoffreRuntime = {
   plugins: ResolvedConfig['plugins'];
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
-  /**
-   * Whether the log is under the app's key, for as long as the
-   * configuration lives (key-rotation.ts), and the key the log last moved
-   * from, if the app still holds it: the audit anchor's to seal again.
-   */
-  appKey: { settled: boolean; movedFrom: Buffer | null };
+  /** Whether the log is under the app's key, for as long as the configuration lives (key-rotation.ts). */
+  appKey: { settled: boolean };
   /**
    * Each workload's gate (gate.ts): the process's on Node, the `GATES`
    * Durable Objects on Workers. Absent on Workers without that binding,
@@ -127,7 +123,7 @@ export function createRuntime(
 function knownOf(config: ResolvedConfig): Known {
   let kept = known.get(config);
   if (kept === undefined) {
-    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false, movedFrom: null } };
+    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false } };
     known.set(config, kept);
   }
   return kept;
@@ -145,7 +141,7 @@ export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (act
   return {
     hooks,
     context: (actor) =>
-      watchContext({ db: runtime.db, chainKey: runtime.chainKey, previousChainKeys: runtime.previousChainKeys, movedFrom: runtime.appKey.movedFrom, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
+      watchContext({ db: runtime.db, chainKey: runtime.chainKey, previousChainKeys: runtime.previousChainKeys, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
   };
 }
 

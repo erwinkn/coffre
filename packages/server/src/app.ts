@@ -18,7 +18,8 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { auditHead, pruneSpentTokens } from './db/queries.ts';
-import { keyState, rotateStep, type KeyState } from './key-rotation.ts';
+import { anchorIsOwn } from './anchor.ts';
+import { finishRotation, keyState, rotateStep, type KeyState } from './key-rotation.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
@@ -148,7 +149,8 @@ const SERVED_WHILE_MIGRATING = new Set(['/livez', '/readyz']);
 async function door(runtime: CoffreRuntime): Promise<((request: Request) => Response) | null> {
   if (!(await schemaReady(runtime))) return migrating;
   const held = await keyReady(runtime);
-  return held === null ? null : held.kind === 'rotating' ? rotating : wrongKey;
+  if (held === null) return null;
+  return held.kind === 'rotating' ? rotating : held.kind === 'refused' ? wrongKey : unreachable;
 }
 
 /**
@@ -184,38 +186,48 @@ function migrating(request: Request): Response {
   return new Response(page, { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'retry-after': '30' } });
 }
 
+/** What holds the app back from serving under its key (`keyReady`). */
+export type KeyHeld = { kind: 'rotating' } | { kind: 'refused'; reason: string } | { kind: 'unreachable' };
+
 /**
  * Whether the log is under the app's key: null once it is, known from then
  * on, for the configuration's life. Until then, a step of the rotation to
- * it, each call one (key-rotation.ts), and what still holds the app back:
- * the rotation, or a key the log refuses, which only another deployment
- * of the app's keys changes. Once a rotation is done, the audit anchor is
- * sealed again under the new key. A database that cannot be reached lets
- * the request through, as `schemaReady` does.
+ * it, each call one (key-rotation.ts): rows signed again, or, once they
+ * all are, the audit anchor sealed again and `key.rotate`. What still
+ * holds the app back: the rotation; a key the log refuses, which only
+ * another deployment of the app's keys changes; or, with keys it replaced
+ * configured, a database that cannot be reached, as nothing may be
+ * checked under a key the log has not settled while a rotation may be due.
+ * Without them there is none to be due, and a database that cannot be
+ * reached lets the request through, as `schemaReady` does, to meet the
+ * outage as it would anyway.
  */
-export async function keyReady(runtime: CoffreRuntime): Promise<Exclude<KeyState, { kind: 'settled' }> | null> {
+export async function keyReady(runtime: CoffreRuntime): Promise<KeyHeld | null> {
   if (runtime.appKey.settled) return null;
   let state: KeyState;
   try {
     state = await keyState(runtime.db, runtime);
+    if (state.kind === 'rotating') state = await rotateStep(runtime.db, runtime);
+    if (state.kind === 'sealing') {
+      await resealAnchor(runtime, state.from);
+      state = await finishRotation(runtime.db, runtime);
+    }
   } catch (error) {
-    if (isUnreachable(error)) return null;
-    throw error;
+    if (!isUnreachable(error)) throw error;
+    return runtime.previousChainKeys.length === 0 ? null : { kind: 'unreachable' };
   }
-  const stepped = state.kind === 'rotating';
-  if (stepped) state = await rotateStep(runtime.db, runtime);
   if (state.kind === 'refused') refusedKey(runtime, state.reason);
-  if (state.kind !== 'settled') return state;
-  runtime.appKey.movedFrom = state.movedFrom;
+  if (state.kind === 'refused') return state;
+  if (state.kind !== 'settled') return { kind: 'rotating' };
   runtime.appKey.settled = true;
-  if (stepped) await resealAnchor(runtime);
   return null;
 }
 
 /**
  * The rotation stepped to its end, or until the log refuses the key, once
- * the database is migrated: what a Node process does before it serves, where no step has a Worker's CPU
- * to keep within. A failure is said, and each request's door steps again.
+ * the database is migrated: what a Node process runs as it starts, beside
+ * the requests, whose door steps it too. A failure is said, and each
+ * request's door steps again.
  */
 export async function settleKey(runtime: CoffreRuntime): Promise<void> {
   try {
@@ -226,11 +238,17 @@ export async function settleKey(runtime: CoffreRuntime): Promise<void> {
   }
 }
 
-/** The audit anchor sealed again under the app's key, by the audit watch if there is one: said if it fails, which the next beat tries again. */
-async function resealAnchor(runtime: CoffreRuntime): Promise<void> {
+/**
+ * The audit anchor sealed again under the app's key, from the key the
+ * rotation moves from, by the audit watch if there is one: before
+ * `key.rotate`, after which the old key vouches for nothing, the anchor
+ * included. A store that cannot be used holds the rotation back, and the
+ * next step tries again.
+ */
+async function resealAnchor(runtime: CoffreRuntime, from: Buffer): Promise<void> {
   const watch = watchOf(runtime);
   if (watch === null) return;
-  await watch.hooks.reseal(watch.context()).catch((error: Error) => console.error('the audit anchor could not be sealed again under the new app key: the next beat tries again', logged(error)));
+  await watch.hooks.reseal(watch.context(), (anchor) => anchorIsOwn(from, anchor));
 }
 
 const ROTATING = 'coffre is moving to its new app key, signing its rows again under it: each request takes it a step further';
@@ -251,6 +269,11 @@ function wrongKey(request: Request): Response {
   if (!(request.headers.get('accept') ?? '').includes('text/html')) return errorResponse(new ApiError('app_key', WRONG_KEY), { 'retry-after': '30' });
   const page = `<!doctype html><html lang="en"><meta charset="utf-8"><title>coffre's app key</title><p>${WRONG_KEY}.</p></html>`;
   return new Response(page, { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'retry-after': '30' } });
+}
+
+/** The answer while the database cannot say where the app's key stands: nothing is checked under a key it has not settled. */
+function unreachable(): Response {
+  return errorResponse(new ApiError('unavailable', "coffre's database cannot be reached"), { 'retry-after': '5' });
 }
 
 const refusals = new WeakMap<object, string>();
@@ -281,11 +304,11 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
     return watch === null ? { ok: false, watched: false } : { ok: false };
   }
   // Below its key, each ask a step of the rotation: a deploy that waits on readiness takes it to its end.
-  const held = await keyReady(runtime).catch((error: unknown) => {
+  const held = await keyReady(runtime).catch((error: unknown): KeyHeld => {
     console.error('the rotation to the app key could not go on', logged(error));
-    return { kind: 'rotating' as const };
+    return { kind: 'rotating' };
   });
-  if (held !== null) return { ok: false, ...(held.kind === 'rotating' ? { rotating: true } : { appKey: false }) };
+  if (held !== null) return { ok: false, ...(held.kind === 'rotating' ? { rotating: true } : held.kind === 'refused' ? { appKey: false } : {}) };
   if (watch === null) return { ok: true, watched: false };
   const said = await watch.hooks.readiness(watch.context());
   return { ...said, ok: said.ok };
@@ -301,7 +324,9 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   if (!(await schemaReady(runtime))) throw new Error(MIGRATING);
   const held = await keyReady(runtime);
-  if (held !== null) throw new Error(held.kind === 'rotating' ? `${ROTATING}: the scheduled job runs once it has` : held.reason);
+  if (held !== null) {
+    throw new Error(held.kind === 'rotating' ? `${ROTATING}: the scheduled job runs once it has` : held.kind === 'refused' ? held.reason : "coffre's database cannot be reached");
+  }
   const watch = watchOf(runtime);
   if (watch === null) unwatched(runtime);
   const context = watch?.context();

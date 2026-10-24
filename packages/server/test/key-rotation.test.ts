@@ -15,9 +15,11 @@ import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/
 import { authMac, signedBy, type AuthTable } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
 import { appendAudit, appLogKey, CHAIN_START, walkChain } from '../src/db/audit.ts';
-import { insertBinding, insertOauthClient, memberStanding } from '../src/db/queries.ts';
+import { insertBinding, insertConnection, insertOauthClient, memberStanding } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
-import { keyState, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
+import { sealAnchor } from '../src/anchor.ts';
+import { toErrorBody } from '../src/api/errors.ts';
+import { finishRotation, keyState, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
@@ -101,7 +103,12 @@ beforeEach(async () => {
   });
   const code = { id: randomUUID(), bindingId, codeHash: randomBytes(32), codeHint: 'coffre_enr_x', scope: '{}', createdBy: ROOT, createdWith: null, expiresAt: new Date(Date.now() + 86_400_000) };
   await db.owner.insert(enrollments).values({ ...code, authMac: authMac(A, 'enrollments', code) });
-  await insertOauthClient(deps.db, A, { id: randomUUID(), name: 'Claude', redirectUris: '["http://127.0.0.1/callback"]' });
+  const clientId = randomUUID();
+  await insertOauthClient(deps.db, A, { id: clientId, name: 'Claude', redirectUris: '["http://127.0.0.1/callback"]' });
+  await insertConnection(deps.db, A, {
+    id: randomUUID(), principal: `user:${ROOT}`, generation: 1, clientId, clientName: 'Claude', clientHost: null, registration: 'dcr',
+    scopes: '["read"]', redirectUri: 'http://127.0.0.1/callback', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt: new Date(Date.now() + 86_400_000),
+  });
   held = { browser: browser.credential.token, cli: cli.credential.token, service: token.token, personal: personal.token };
 });
 
@@ -125,12 +132,11 @@ async function verifies(token: string, runtime: CoffreRuntime): Promise<boolean>
 
 test('the first start under a new key signs every row again under it, signs people out, and writes key.rotate once', async () => {
   const before = await signedUnder(A);
-  // Every signed table holds a row under A but MCP's connections, which a rotation signs as any other (SIGNED_TABLES).
-  assert.ok(Object.entries(before).every(([table, rows]) => (rows.length > 0 || table === 'mcp_connections') && rows.every(Boolean)), JSON.stringify(before));
+  assert.ok(Object.values(before).every((rows) => rows.length > 0 && rows.every(Boolean)), JSON.stringify(before));
   const next = startUnder(B, [A]);
   assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null } });
   assert.equal(await keyReady(next), null);
-  assert.deepEqual(next.appKey, { settled: true, movedFrom: A });
+  assert.deepEqual(next.appKey, { settled: true });
 
   const after = await signedUnder(B);
   assert.deepEqual(Object.fromEntries(Object.entries(after).map(([table, rows]) => [table, rows.every(Boolean)])), Object.fromEntries(SIGNED_TABLES.map((table) => [table, true])));
@@ -150,7 +156,7 @@ test('the first start under a new key signs every row again under it, signs peop
     ['key.reseal', appLogKey(B).keyId, appLogKey(A).keyId, 'system:coffre-key-rotation'],
     ['key.rotate', appLogKey(B).keyId, appLogKey(A).keyId, 'system:coffre-key-rotation'],
   ]);
-  assert.deepEqual(JSON.parse(moves[0]!.metadata), { from: appLogKey(A).keyId, resealed: 8, signedOut: 2, unsigned: [], unsignedCount: 0, next: null });
+  assert.deepEqual(JSON.parse(moves[0]!.metadata), { from: appLogKey(A).keyId, resealed: 9, signedOut: 2, unsigned: [], unsignedCount: 0, next: null });
   // Another start is settled at once, and writes nothing.
   const again = startUnder(B, [A]);
   assert.equal(await keyReady(again), null);
@@ -170,7 +176,11 @@ test('from its first step, the old key writes no more; after it, it verifies onl
   const next = startUnder(B, [A]);
   // One step, as a Worker takes it: the rotation is under way, and A is retired already.
   assert.equal((await rotateStep(deps.db, next, 2)).kind, 'rotating');
-  await assert.rejects(old.db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])), KeyRetired);
+  const late = await old.db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])).catch((error: unknown) => error);
+  assert.ok(late instanceof KeyRetired);
+  // Refused as an instance a newer deployment replaces, not a bug.
+  assert.equal(toErrorBody(late).status, 503);
+  assert.equal(toErrorBody(late).body.error, 'app_key');
   assert.equal(await keyReady(next), null);
   assert.equal(await verifies(held.service, old), false, 'A vouches for no row');
   // Someone who holds A and can write the database appends under it after the rotation, past the append's own check.
@@ -211,7 +221,7 @@ test('a rotation cut short goes on from its last step, and every row is signed o
   await settleKey(second);
   assert.equal(second.appKey.settled, true);
   const steps = (await appEntries()).filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { resealed: number; signedOut: number });
-  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 10, JSON.stringify(steps));
+  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 11, JSON.stringify(steps));
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
   assert.equal((await appEntries()).filter((entry) => entry.action === 'key.rotate').length, 1);
   await walked(second);
@@ -220,12 +230,14 @@ test('a rotation cut short goes on from its last step, and every row is signed o
 test('starts that race each other rotate once, each step going on from the one before', async () => {
   const starts = Array.from({ length: 6 }, () => startUnder(B, [A]));
   await Promise.all(starts.map(async (start) => {
-    for (let state = await keyState(deps.db, start); state.kind === 'rotating'; state = await rotateStep(deps.db, start, 2));
+    for (let state = await keyState(deps.db, start); state.kind === 'rotating' || state.kind === 'sealing';) {
+      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, 2) : await finishRotation(deps.db, start);
+    }
   }));
   const entries = await appEntries();
   assert.equal(entries.filter((entry) => entry.action === 'key.rotate').length, 1);
   const steps = entries.filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { resealed: number; signedOut: number; next: unknown });
-  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 10);
+  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 11);
   assert.equal(new Set(steps.map((step) => JSON.stringify(step.next))).size, steps.length, 'no step went on from where another had');
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
   // A start with a third key, racing too late, finds the log under B, a key it does not hold.
@@ -284,6 +296,12 @@ test('a key the log refuses: the wrong one, one the log moved on from, or not th
   await settleKey(startUnder(B, [A]));
   // Rolled back to A, with or without B: the log moved on, and A writes no more.
   assert.equal(await refusal(startUnder(A)), `the log moved on to ${appLogKey(B).keyId}, a key this app does not hold: a deployment given a newer app key replaced this one, and a key the app moved on from writes no more`);
+  const rolledBack = startUnder(A, [B]);
+  assert.equal(await refusal(rolledBack), `the log moved on from ${appLogKey(A).keyId}, this app's key: a key the app moved on from writes no more, and comes back only as a new key's rotation`);
+  const before = (await appEntries()).length;
+  const answered = await respond(new Request(`${ORIGIN}/api/me`), rolledBack, null, async () => new Response('served'));
+  assert.deepEqual([answered.status, (await answered.json()).error], [503, 'app_key']);
+  assert.equal((await appEntries()).length, before, 'a refused start writes nothing');
   // Once rotated, B no longer needs A to serve.
   assert.equal(await refusal(startUnder(B)), 'settled');
   // The door says so in general terms; the server's log says which keys.
@@ -331,13 +349,55 @@ test('the audit anchor is sealed again under the new key, and readiness is green
   assert.deepEqual([(await ready(next)).ok, (await ready(next)).anchored], [true, true]);
 });
 
-test('a beat seals again an anchor the rotation left under the old key, when its own reseal could not', async () => {
+test('a rotation cut short before its anchor was sealed again seals it at the next start; after key.rotate, nothing seals a record under the old key', async () => {
   const anchor = testAnchor();
   await runScheduled(startUnder(A, [], [auditWatch({ anchor })]));
-  // The rotation finished, and the process died before it sealed the anchor again.
-  await settleKey(startUnder(B, [A]));
+  // Every row signed, and the process died before the anchor was sealed again: no key.rotate yet.
+  const cut = startUnder(B, [A]);
+  assert.equal((await rotateStep(deps.db, cut)).kind, 'sealing');
+  assert.equal((await appEntries()).filter((entry) => entry.action === 'key.rotate').length, 0);
   assert.equal((await anchor.read())!.keyId, appLogKey(A).keyId);
   const next = startUnder(B, [A], [auditWatch({ anchor })]);
-  await runScheduled(next);
-  assert.equal((await anchor.read())!.keyId, appLogKey(B).keyId);
+  assert.equal(await keyReady(next), null);
+  const sealed = (await anchor.read())!;
+  assert.equal(sealed.keyId, appLogKey(B).keyId);
+  // Someone who holds A, and can write the store, writes a record of their own under it: it stays foreign, red.
+  const { keyId: _k, mac: _m, ...fields } = sealed;
+  const forged = sealAnchor(A, { ...fields, finding: null, at: Date.now() });
+  assert.equal(await anchor.write(sealed, forged), true);
+  await assert.rejects(runScheduled(next), /heartbeat failed/);
+  assert.deepEqual(await anchor.read(), forged);
+  const ready = await respond(new Request(`${ORIGIN}/readyz`), next, null, async () => (await coffreRoute(new Request(`${ORIGIN}/readyz`), next, null))!);
+  assert.equal((await ready.json()).ok, false);
+});
+
+test('an entry under the new key before the rotation began changes nothing: the old key is still moved from', async () => {
+  // However it got there: a start that wrote under B before its first step.
+  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'early', action: 'audit.heartbeat', decision: 'allow' }]));
+  const next = startUnder(B, [A]);
+  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null } });
+  await settleKey(next);
+  assert.equal(next.appKey.settled, true);
+  assert.equal(await verifies(held.service, next), true);
+  await assert.rejects(startUnder(A).db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])), KeyRetired);
+});
+
+test('a database that cannot be reached serves nothing before the key is settled', async () => {
+  const next = startUnder(B, [A]);
+  const lost = Object.assign(new Error('Network connection lost.'), { code: 'ECONNRESET' });
+  const broken = new Proxy(next.db, { get: (target, key) => (key === 'select' || key === 'transaction' || key === 'selectDistinct' ? () => { throw lost; } : Reflect.get(target, key)) });
+  const runtime = { ...next, db: broken as Database };
+  const answered = await respond(new Request(`${ORIGIN}/api/me`), runtime, null, async () => new Response('served'));
+  assert.deepEqual([answered.status, (await answered.json()).error], [503, 'unavailable']);
+  assert.equal(runtime.appKey.settled, false);
+  assert.equal((await keyState(deps.db, next)).kind, 'rotating');
+});
+
+test('a CLI login approved but not yet taken is used up: everyone signs in again', async () => {
+  const old = startUnder(A);
+  const started = await old.signin!.startDevice({ clientLabel: 'second laptop', sourceIp: null });
+  await old.signin!.decideDevice(await contextFor(deps, ROOT), started.userCode, true);
+  const next = startUnder(B, [A]);
+  assert.equal(await keyReady(next), null);
+  assert.deepEqual(await next.signin!.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null }), { status: 'expired' });
 });

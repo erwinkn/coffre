@@ -68,7 +68,7 @@ beforeEach(async () => {
     publicUrl: ORIGIN,
     verifier: signin,
     waitUntil,
-    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
+    schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
     plugins: [],
   } as CoffreRuntime;
