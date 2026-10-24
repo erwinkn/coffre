@@ -14,6 +14,8 @@ import { postgresOnly } from './engine.ts';
 const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.head_hash',
   'audit_chain_head.next_seq',
+  // A capped alert's last time, moved on when it is raised again (T98).
+  'capped_alerts.raised_at',
   // A workload's session: approved by a person, where its binding asks, and renewed (docs/design/workload-access.md).
   'credentials.approved_at',
   'credentials.approved_by',

@@ -140,7 +140,9 @@ export type ExchangeReason =
  * A refused exchange: 401 with its reason, 429 when too many come at once,
  * 503 when the issuer cannot be asked. Nobody was authenticated, so none of
  * it goes in the audit log (anyone can mint a genuine token from their own
- * repository); the process log has a line, sampled.
+ * repository); the process log has a line, sampled. One exception: a key
+ * a service's uploaded keys lack alerts its managers, once an hour at most
+ * (`UnknownKey`).
  */
 export class ExchangeRefused extends Error {
   readonly reason: ExchangeReason;
@@ -151,6 +153,46 @@ export class ExchangeRefused extends Error {
     this.reason = reason;
     this.status = status;
   }
+}
+
+/**
+ * `unknown_key` under a service's uploaded keys: the token names a key they
+ * lack, most likely the one its issuer rotated to, which locks out every
+ * workload of the service until an Owner uploads the keys again. It says
+ * which binding, issuer and key, for the alert that tells them
+ * (`unknownKeyAlert`); the token is unverified, so `kid` is shown as
+ * `shownKid` bounds it.
+ */
+export class UnknownKey extends ExchangeRefused {
+  /** The service, `token:<name>`. */
+  readonly service: string;
+  /** The newest of its bindings on the issuer, whose keys the token was held to. */
+  readonly binding: Pick<BindingRow, 'id' | 'profile'>;
+  readonly issuer: string;
+  readonly kid: string | null;
+  constructor(service: string, binding: Pick<BindingRow, 'id' | 'profile'>, issuer: string, kid: string | null) {
+    super('unknown_key', `the token's key${kid === null ? '' : ` ${kid}`} is not among those uploaded for ${issuer}: if it rotated its keys, replace them`);
+    this.service = service;
+    this.binding = binding;
+    this.issuer = issuer;
+    this.kid = kid;
+  }
+}
+
+/** How much of a token's `kid` a refusal shows. */
+const MAX_SHOWN_KID = 64;
+
+/**
+ * A token's `kid` as a refusal shows it, in the process log, the audit log
+ * and a person's alert: anyone may write the header, so its first 64
+ * characters, each outside what a JWK's kid uses (base64url, base64, a
+ * thumbprint's `:`) a `?`. Null when it names none.
+ */
+export function shownKid(header: Record<string, unknown>): string | null {
+  const { kid } = header;
+  if (typeof kid !== 'string') return null;
+  const shown = kid.slice(0, MAX_SHOWN_KID).replace(/[^A-Za-z0-9._~+/=:-]/g, '?');
+  return kid.length > MAX_SHOWN_KID ? `${shown}…` : shown;
 }
 
 /** The proofs a workload signs in with, by the one key of its body's `proof`: `{ "proof": { "aws": … } }`. */
@@ -279,9 +321,7 @@ const OIDC: ProofKind = {
         : await verifyWorkloadToken(input, JSON.parse(newest.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
     } catch (error) {
       if (error instanceof IssuerUnavailable) return new ExchangeRefused('issuer_unavailable', error.message, 503);
-      if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') {
-        return new ExchangeRefused('unknown_key', `the token's key is not among those uploaded for ${issuer}: if it rotated its keys, replace them`);
-      }
+      if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') return new UnknownKey(ctx.service, newest, issuer, shownKid(decoded.header));
       return refused(error);
     }
     if (taking.length === 0) {
@@ -963,9 +1003,7 @@ export class WorkloadService {
         : await verifyWorkloadToken(token, JSON.parse(newest.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
     } catch (error) {
       if (error instanceof IssuerUnavailable) throw new ExchangeRefused('issuer_unavailable', error.message, 503);
-      if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') {
-        throw new ExchangeRefused('unknown_key', `the token's key is not among those uploaded for ${issuer}: if it rotated its keys, replace them`);
-      }
+      if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') throw new UnknownKey(member, newest, issuer, shownKid(decoded.header));
       throw refused(error);
     }
     const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member);
@@ -1246,14 +1284,15 @@ function runClaims(claims: Record<string, unknown>): Record<string, string | num
   return run;
 }
 
-/** One line per reason and service a minute: enough to see a refusal, not a flood. */
+/** One line per reason and service a minute, in this isolate: enough to see a refusal, not a flood. An unknown key's names its issuer and key. */
 function logRefusal(error: ExchangeRefused, service: string, sourceIp: string | null): void {
   const key = `${error.reason} ${String(service).slice(0, 120)}`;
   const now = Date.now();
   if ((refusalsLogged.get(key) ?? 0) > now - REFUSAL_LOG_MS) return;
   refusalsLogged.set(key, now);
   if (refusalsLogged.size > 1000) refusalsLogged.delete(refusalsLogged.keys().next().value!);
-  console.error({ event: 'workload_exchange_refused', reason: error.reason, service: key.slice(error.reason.length + 1), sourceIp }, error.message);
+  const named = error instanceof UnknownKey ? { issuer: error.issuer, kid: error.kid } : {};
+  console.error({ event: 'workload_exchange_refused', reason: error.reason, service: key.slice(error.reason.length + 1), sourceIp, ...named }, error.message);
 }
 
 /** The member still stands where `standing` said, read under the log's head (`#stillMember` in signin.ts). */

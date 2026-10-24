@@ -64,6 +64,7 @@ await pool.query('DELETE FROM device_authorizations');
 await pool.query('DELETE FROM identities');
 await pool.query('DELETE FROM service_bindings');
 await pool.query('DELETE FROM consumed_tokens');
+await pool.query('DELETE FROM capped_alerts');
 await pool.query('DELETE FROM vault_grants');
 await pool.query('DELETE FROM vault_members');
 await pool.query('DELETE FROM dismissed_keys');

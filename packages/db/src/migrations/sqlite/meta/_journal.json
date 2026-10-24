@@ -113,6 +113,13 @@
       "when": 1792803757926,
       "tag": "0015_workload_access",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1792835446455,
+      "tag": "0016_capped_alerts",
+      "breakpoints": true
     }
   ]
 }

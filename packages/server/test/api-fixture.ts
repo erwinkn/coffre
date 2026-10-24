@@ -243,6 +243,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
     secretVersions,
     serviceBindings,
     consumedTokens,
+    cappedAlerts,
     secretReferences,
     dismissedKeys,
     mcpApprovals,
@@ -258,6 +259,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(enrollments);
   await owner.delete(serviceBindings);
   await owner.delete(consumedTokens);
+  await owner.delete(cappedAlerts);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
   // A reference names its vault entry: it goes before the log.

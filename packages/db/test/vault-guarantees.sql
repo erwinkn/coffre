@@ -206,6 +206,7 @@ BEGIN
         'SELECT * FROM service_bindings',
         'SELECT * FROM consumed_tokens',
         'SELECT prune_consumed_tokens(1)',
+        'SELECT * FROM capped_alerts',
         'SELECT * FROM secret_references',
         'SELECT * FROM dismissed_keys',
         'UPDATE projects SET folder = folder',

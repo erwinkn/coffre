@@ -106,6 +106,15 @@ then signs with the new one and drops the old. A binding verifies with the
 keys uploaded with it, and nothing else. So a token signed by the new key is
 refused, `unknown_key`, until coffre has that key too.
 
+coffre tells you when that happens: the first such refusal raises a
+`workload.alert` of kind `unknown_key`, in the audit log and through the
+deployment's `workloads.alert` (a Slack webhook, a pager), naming the
+service, the issuer and the key the token names, with the commands below.
+A token's header is anyone's to write, so a service alerts at most once an
+hour, whatever key its tokens name; the refusals in between are a
+sampled line in the process log (at most one a minute),
+`workload_exchange_refused`, which names the issuer and the key too.
+
 Upload the cluster's keys again as soon as the new one is served, while the
 set holds both:
 
@@ -137,4 +146,5 @@ In the pages, open a binding's Claims, then Replace keys.
   binding (`coffre untrust api-deploy <binding-id> --apply`) or the service
   account's grant.
 - **No discovery.** coffre never fetches the issuer's keys, so it learns of
-  a rotation only when you upload the new keys.
+  a rotation only when a pod's token is signed by the new key: then it
+  alerts, but the pods stay locked out until you upload the new keys.

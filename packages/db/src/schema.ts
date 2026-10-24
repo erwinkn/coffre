@@ -614,6 +614,24 @@ export const consumedTokens = pgTable(
 );
 
 /**
+ * When a service's capped alert was last raised, by kind: the refusal of a
+ * token signed by a key its uploaded keys lack (`unknown_key`) alerts once
+ * an hour, however many isolates see it. One conditional write per refusal
+ * decides (`claimAlert`), so that the many it caps never reach the log's
+ * head. Only a request that a binding of the service on the token's issuer
+ * gets as far as its keys writes here: a row per service, at most, per kind.
+ */
+export const cappedAlerts = pgTable(
+  'capped_alerts',
+  {
+    service: text().notNull(),
+    kind: text().notNull(),
+    raisedAt: timestamp('raised_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [primaryKey({ name: 'capped_alerts_pkey', columns: [table.service, table.kind] })],
+);
+
+/**
  * MCP clients that registered themselves (RFC 7591), the fallback to Client
  * ID Metadata Documents, which need no row. The ID is the client's
  * `client_id`. Its redirects are under its MAC: a database writer cannot add

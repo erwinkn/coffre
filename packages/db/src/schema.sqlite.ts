@@ -558,6 +558,16 @@ export const consumedTokens = sqliteTable(
   (table) => [check('consumed_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
 );
 
+export const cappedAlerts = sqliteTable(
+  'capped_alerts',
+  {
+    service: text().notNull(),
+    kind: text().notNull(),
+    raisedAt: time('raised_at').notNull(),
+  },
+  (table) => [primaryKey({ name: 'capped_alerts_pkey', columns: [table.service, table.kind] })],
+);
+
 /**
  * MCP clients that registered themselves (RFC 7591), the fallback to Client
  * ID Metadata Documents, which need no row. The ID is the client's
