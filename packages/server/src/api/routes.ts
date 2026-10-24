@@ -458,10 +458,13 @@ export const routes = {
     run: (ctx, { input }) => listReferences(ctx, parsePath(input.path, [1, 2, 3]), (places) => readersAt(ctx, places)),
   }),
   ...route('POST /reveals', {
-    input: z.object({ path: z.string().max(400) }),
+    // `keys`: of an environment, these only, as `coffre export --keys` reads them: the rest is neither opened nor logged.
+    input: z.object({ path: z.string().max(400), keys: z.array(secretKey).min(1).max(2000).optional() }),
     run: async (ctx, { input }) => {
+      const path = parsePath(input.path, [2, 3]);
+      if (input.keys !== undefined && path.key !== undefined) throw badRequest('keys names keys of an environment: give its path, <project>/<environment>');
       // A read of a whole environment names what it left out: a person's sensitive values, and a workload's it only uses.
-      const { operationId, values, sensitive, useOnly, version } = await reveal(ctx, parsePath(input.path, [2, 3]));
+      const { operationId, values, sensitive, useOnly, version } = await reveal(ctx, path, undefined, input.keys);
       return { operationId, values, sensitive, useOnly, version };
     },
   }),

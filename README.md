@@ -233,11 +233,17 @@ a browser signed in to coffre does: `packages/cli/src/commands.ts` maps each
 route to its command, and a test fails when a route has neither a command
 nor a reason.
 
-`coffre export market/prod --format github` appends values to `GITHUB_ENV`
-for subsequent GitHub Actions steps and emits mask commands for the values
-and their individual lines before writing the file. It refuses outside an
-Actions step without `GITHUB_ENV`, and refuses `NODE_OPTIONS`, which the
-runner blocks there. GitHub's default metadata variables cannot be overridden.
+`coffre export market/prod --format github --keys 'DATABASE_URL STRIPE_*'`
+appends the keys it names, by name or by prefix, to `GITHUB_ENV` for
+subsequent GitHub Actions steps, and emits mask commands for their values
+and their individual lines before writing the file. Every later step sees
+them, so the workflow names them: `--keys` is required there, a name or a
+prefix that matches no key stops it before anything is read, and only the
+keys named are read. It refuses outside an Actions step without
+`GITHUB_ENV`, and refuses a key a later step would run code from, as
+`BASH_ENV` or `NODE_OPTIONS` ([docs/ci.md](docs/ci.md#github-actions)).
+GitHub's default metadata variables cannot be overridden. `--keys` reads
+some keys in the other formats too.
 
 The default `dotenv` format is data for `.env` parsers, including coffre's
 import, with escaped line breaks. Do not source it as shell code. For a shell,

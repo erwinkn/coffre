@@ -1677,6 +1677,14 @@ export async function reveal(
    * before anything is logged or opened.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string },
+  /**
+   * Of a whole environment, these keys only (`coffre export --keys`): read
+   * as the whole is, and what it leaves out named as the whole's would be,
+   * but a key it does not name is neither opened, nor logged, nor counted
+   * by the vault's bulk limit. A key the environment does not hold is left
+   * out, not refused: the caller listed it first.
+   */
+  only?: readonly string[],
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence, at) => {
@@ -1725,15 +1733,17 @@ export async function reveal(
       versionId: told(item) ? item.secretVersionId : null,
       recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
     }))) : use.keys;
-    const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
+    const picked = chosen ?? only;
+    const pick = picked === undefined ? null : new Set(picked);
+    const wanted = (item: { key?: string }) => pick === null || item.key === undefined || pick.has(item.key);
     // What a read of a whole environment leaves out, naming it: a person's sensitive values, which nobody is handed,
     // and a workload's values it only uses.
     const whole = use === undefined && path.key === undefined;
     const sensitiveTo = (item: Readable) => whole && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
     const usedOnlyTo = (item: Readable) => whole && usedOnly(item);
     const rows = read.items.filter((item) => wanted(item) && !sensitiveTo(item) && !usedOnlyTo(item));
-    const sensitive = read.items.filter(sensitiveTo).map((item) => item.key);
-    const usesOnly = read.items.filter(usedOnlyTo).map((item) => item.key);
+    const sensitive = read.items.filter((item) => wanted(item) && sensitiveTo(item)).map((item) => item.key);
+    const usesOnly = read.items.filter((item) => wanted(item) && usedOnlyTo(item)).map((item) => item.key);
     const unreadable = read.unreadable.filter(wanted);
     // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
     if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
@@ -1806,7 +1816,7 @@ export async function reveal(
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
-      log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
+      log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: only === undefined ? 'empty_environment' : 'no_named_key' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
     return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };

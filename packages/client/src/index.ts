@@ -240,8 +240,8 @@ export function createClient(options: ClientOptions) {
     secrets: {
       /** Keys, versions and who changed what; never values. */
       list: (path: string) => call('GET /secrets/:project/:environment', place(path)),
-      /** Decrypts one secret, or every secret in an environment. Logged in your name. */
-      reveal: (path: string) => call('POST /reveals', {}, { path }),
+      /** Decrypts one secret, or every secret in an environment, or, `keys` named, those of it only. Logged in your name. */
+      reveal: (path: string, keys?: string[]) => call('POST /reveals', {}, keys === undefined ? { path } : { path, keys }),
       /** One transaction, a version and an audit entry per key; `null` archives. */
       set: (path: string, values: RouteInput<'PATCH /secrets/:project/:environment'>) =>
         call('PATCH /secrets/:project/:environment', place(path), values) as Promise<SetResult>,

@@ -130,7 +130,7 @@ test('the Action takes one of a token or a service, and a service only with the 
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
     const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
     // As GitHub passes them, a default included.
-    const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'false' };
+    const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci', INPUT_KEYS: 'DATABASE_URL STRIPE_*', INPUT_REQUIRE_COMPLETE: 'false' };
     const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
     const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: path, ...inputs, ...env }, timeout: 10_000 });
     for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
@@ -143,27 +143,52 @@ test('the Action takes one of a token or a service, and a service only with the 
     assert.match(noIdToken.stderr, /permissions: id-token: write/);
     const service = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
     assert.equal(service.status, 0, service.stderr);
-    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github app/ci\nstdin: \n`);
+    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`);
     const token = run({ INPUT_TOKEN: 'coffre_svc_x' });
     assert.equal(token.status, 0, token.stderr);
     // The token piped to login, never an argument; the export as that session; and the session forgotten after.
     assert.equal(
         token.stdout,
         `npx ran with: ${cli} login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
-            `npx ran with: ${cli} --url https://coffre.example.com export --format github app/ci\nstdin: \n`,
+            `npx ran with: ${cli} --url https://coffre.example.com export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`,
     );
     assert.ok(!token.stderr.includes('coffre_svc_x'));
     // Several environments, by spaces or lines as a YAML block gives them: a word each, read together.
     const several = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'deploy/prod  auth/prod\nwww/prod\n' });
     assert.equal(several.status, 0, several.stderr);
-    assert.equal(several.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github deploy/prod auth/prod www/prod\nstdin: \n`);
+    assert.equal(several.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github --keys=DATABASE_URL STRIPE_* deploy/prod auth/prod www/prod\nstdin: \n`);
+    // The keys, by spaces or lines too, go to the CLI as one argument, unexpanded: STRIPE_* is no file glob.
+    writeFileSync(join(dir, 'STRIPE_KEY'), '');
+    const lines = spawnSync('/bin/bash', ['-e', '-c', shell], { cwd: dir, encoding: 'utf8', env: { PATH: path, ...inputs, INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_KEYS: 'STRIPE_*\n--format\n' }, timeout: 10_000 });
+    assert.equal(lines.status, 0, lines.stderr);
+    assert.equal(lines.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github --keys=STRIPE_*\n--format\n app/ci\nstdin: \n`);
     // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
     const homes = readFileSync(join(dir, 'homes'), 'utf8').trim().split('\n');
-    assert.equal(new Set(homes).size, 3, 'one home per step, shared by its commands');
+    assert.equal(new Set(homes).size, 4, 'one home per step, shared by its commands');
     for (const home of homes) {
         assert.notEqual(home, process.env.HOME);
         assert.equal(existsSync(home), false, `${home} outlived the step`);
     }
+});
+
+test('the Action needs the workflow to name the keys it exports, and stops before anything is read without them', (t) => {
+    const dir = checkout(t);
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho npx-must-not-run\nexit 0\n', { mode: 0o755 });
+    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
+    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
+    // Left out, GitHub passes it empty; a YAML block of blank lines is as empty.
+    for (const keys of [undefined, '', ' \n\n']) {
+        const env = { PATH: `${bin}:/usr/bin:/bin`, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' };
+        const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: keys === undefined ? env : { ...env, INPUT_KEYS: keys }, timeout: 10_000 });
+        assert.equal(ran.status, 1);
+        assert.match(ran.stderr, /^::error::coffre needs `keys:`, the keys to export to the later steps, by name or prefix: `keys: DATABASE_URL STRIPE_\*`\. To hand every key to one process instead, run it with `coffre run <environment> -- <cmd>`\.\n$/);
+        assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
+    }
+    const declared = text.match(/\n  keys:\n((?:    [^\n]*\n)+)/)[1];
+    assert.match(declared, /required: true/);
 });
 
 test('require-complete checks each environment before anything is read, and stops the step with an annotation for each that lacks keys', (t) => {
@@ -191,7 +216,7 @@ exit 0
         rmSync(join(dir, 'calls'), { force: true });
         const ran = spawnSync('/bin/bash', ['-e', '-o', 'pipefail', '-c', shell], {
             encoding: 'utf8',
-            env: { PATH: `${bin}:/usr/bin:/bin`, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', ...env },
+            env: { PATH: `${bin}:/usr/bin:/bin`, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_KEYS: 'DATABASE_URL', ...env },
             timeout: 10_000,
         });
         return { ...ran, calls: existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n') : [] };
@@ -224,9 +249,9 @@ exit 0
     const complete = run({ INPUT_ENVIRONMENT: 'app/ci app/staging', INPUT_REQUIRE_COMPLETE: 'true' });
     assert.equal(complete.status, 0, complete.stderr);
     assert.equal(complete.stdout, 'app/ci has every key of its sibling environments\napp/staging has every key of its sibling environments\n');
-    assert.deepEqual(complete.calls, [signIn, `${login} missing app/ci --check`, `${login} missing app/staging --check`, `${login} export --format github app/ci app/staging`]);
+    assert.deepEqual(complete.calls, [signIn, `${login} missing app/ci --check`, `${login} missing app/staging --check`, `${login} export --format github --keys=DATABASE_URL app/ci app/staging`]);
     const service = run({ INPUT_TOKEN: '', INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' });
     assert.equal(service.status, 0, service.stderr);
     const as = `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy`;
-    assert.deepEqual(service.calls, [`${as} missing app/ci --check`, `${as} export --format github app/ci`]);
+    assert.deepEqual(service.calls, [`${as} missing app/ci --check`, `${as} export --format github --keys=DATABASE_URL app/ci`]);
 });

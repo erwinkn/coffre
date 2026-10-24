@@ -157,6 +157,22 @@ test('the bulk limit counts each secret read once in its window, trips with its 
   assert.equal((await dev.secrets.reveal('market/dev/SMTP_URL')).values.SMTP_URL, 'smtp://dev');
 });
 
+test('a read of some keys of an environment counts only those against the bulk limit', async () => {
+  const limited = testDeps(db.runtime, [ROOT], {
+    vault: testVault([ROOT], { bulkLimit: { count: 3, windowMinutes: 1 } }, deps.vault),
+  });
+  const admin = clientFor(limited, ROOT);
+  const dev = clientFor(limited, DEV);
+  await admin.members.add(`user:${DEV}`);
+  await admin.access.set(`user:${DEV}`, { 'market/dev': 'developer' });
+  await admin.secrets.set('market/dev', { A: 'a', B: 'b', C: 'c', D: 'd', E: 'e' });
+
+  // Five keys, three of them named: three in the window, read twice. The whole would be five.
+  assert.deepEqual((await dev.secrets.reveal('market/dev', ['A', 'B', 'C'])).values, { A: 'a', B: 'b', C: 'c' });
+  assert.deepEqual((await dev.secrets.reveal('market/dev', ['C', 'A', 'B'])).values, { A: 'a', B: 'b', C: 'c' });
+  await assert.rejects(dev.secrets.reveal('market/dev', ['D']), { status: 403, code: 'bulk_limit', reason: 'bulk_limit' });
+});
+
 test('a vault given the wrong KEK answers every request with 503, its entries stop verifying, and readiness goes red', async () => {
   // Restored with another key under the same id: the app's key is right, the vault's KEK is not. Its
   // keys come from its KEK, so it holds none the log's entries are under: it writes nothing, and says why.

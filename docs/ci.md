@@ -311,6 +311,7 @@ steps:
       url: https://secrets.acme.example
       token: ${{ secrets.COFFRE_TOKEN }}
       environment: market/prod
+      keys: DATABASE_URL STRIPE_*
   - run: ./deploy
 ```
 
@@ -327,8 +328,24 @@ steps:
       url: https://secrets.acme.example
       service: token:api-deploy
       environment: market/prod
+      keys: DATABASE_URL STRIPE_*
   - run: ./deploy
 ```
+
+`keys` names what the job gets: each key by its name, or every key that
+starts with a prefix, `STRIPE_*`, separated by spaces or lines. It is
+required, and a bare `*` is refused. Whatever the Action exports, every
+later step of the job sees, so the workflow, which its reviewers read,
+says what that is, as `env: FOO: ${{ secrets.FOO }}` does for GitHub's
+own secrets. Without it, anyone who may only write `market/prod` could add
+`BASH_ENV` or a build tool's hook there, and the next step would run
+their code with the job's access. A name that none of the environments
+holds, or a prefix that starts none of their keys, stops the step before
+anything is read, as a typo should: `market/prod holds no key that --keys
+names as DATABSE_URL. Nothing was read`. Only the keys named are read,
+logged and counted against the vault's bulk limit; the others are never
+opened. To hand every key of an environment to one process, and to no
+other step, run it with `coffre run market/prod -- ./deploy`.
 
 The Action uses your job's existing Node, which must be version 20 or newer,
 and runs `@coffre/cli` at the same exact version as the tag. It leaves your
@@ -341,20 +358,23 @@ are kept intact. Empty values are exported too.
 
 A key that a later step's shell, dynamic loader, language runtime or git
 reads as code to run, or as where to load it from, is refused, and the
-export with it, naming the key: `PATH`, `BASH_ENV`, `LD_PRELOAD`,
+export with it, before anything is read, naming the key, whether `keys`
+names it or a prefix finds it: `PATH`, `BASH_ENV`, `LD_PRELOAD`,
 `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `PYTHONPATH`, `JAVA_TOOL_OPTIONS` and the
 rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`). Set through
 `GITHUB_ENV`, one such secret would run code in every later step of the
-job. The list blocks the common one-variable hijacks; it is not
-exhaustive, and it is a tripwire, not a boundary: anyone who may write
-keys to an environment the Action exports is trusted with code execution
-in that job. GitHub's default metadata variables cannot be overridden.
+job. The list is a backstop behind `keys`, not a boundary: it blocks the
+common one-variable hijacks and is not exhaustive. Prefer names to broad
+prefixes: what a prefix matches, whoever writes the environment chooses.
+GitHub's default metadata variables cannot be overridden.
 Other names such as `GITHUB_TOKEN` work.
 [GitHub documents these runner rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-environment-variable).
 
-The inputs are `url`, `environment`, one of `token` or `service`, and
+The inputs are `url`, `environment`, `keys`, one of `token` or `service`, and
 `require-complete`. `environment` takes several environments, separated by
-spaces or lines, read together as [above](#several-environments):
+spaces or lines, read together as [above](#several-environments): each key
+`keys` names comes from whichever holds it, and an environment it names
+none of is not read. Only the keys named clash:
 
 ```yaml
   - uses: erwinkn/coffre/action@v<version>
@@ -362,6 +382,9 @@ spaces or lines, read together as [above](#several-environments):
       url: https://secrets.acme.example
       service: token:api-deploy
       environment: deploy/prod auth/prod
+      keys: |
+        CLOUDFLARE_API_TOKEN
+        GITHUB_CLIENT_*
       require-complete: true
 ```
 
@@ -377,12 +400,13 @@ With `service`, the run's ID token and the credential it buys are masked too.
 To use an installed CLI directly inside a step:
 
 ```sh
-coffre --url https://secrets.acme.example --service api-deploy export market/prod --format github
+coffre --url https://secrets.acme.example --service api-deploy export market/prod --format github --keys 'DATABASE_URL STRIPE_*'
 ```
 
-It requires `GITHUB_ENV`. The `json`, `dotenv` and `shell` formats write to
-stdout and do not issue GitHub mask commands. Use `github` when loading
-values into an Actions job.
+It requires `GITHUB_ENV`, and `--keys`, as the Action requires `keys`. The
+`json`, `dotenv` and `shell` formats write to stdout and do not issue
+GitHub mask commands; they take `--keys` too, and read every key without
+it. Use `github` when loading values into an Actions job.
 
 ## Cloudflare Workers
 

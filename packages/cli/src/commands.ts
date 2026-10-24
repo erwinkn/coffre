@@ -179,12 +179,17 @@ export const SECTIONS = [
       },
       {
         command: 'export',
-        usage: [`export    ${P}... [--format dotenv|json|shell|github]`, '          [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]'],
+        usage: [
+          `export    ${P}... [--keys <KEY | PREFIX_*>...] [--format dotenv|json|shell|github]`,
+          '          [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]',
+        ],
         about: [
-          'several, as run takes them; --output-file writes them to a',
-          'file only you can read, which --watch keeps current: it',
-          'asks their version each interval, reads only once it',
-          'changed, and runs --on-change after each new file',
+          'several, as run takes them; --keys reads only the keys it',
+          'names, each one some environment must hold, and github',
+          'needs it; --output-file writes them to a file only you can',
+          'read, which --watch keeps current: it asks their version',
+          'each interval, reads only once it changed, and runs',
+          '--on-change after each new file',
         ],
       },
       {

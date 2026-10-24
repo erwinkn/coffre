@@ -14,6 +14,26 @@ export function environmentPaths(positionals: readonly string[]): string[] {
 }
 
 /**
+ * What `export --keys` names, words apart by spaces or lines: a key by its
+ * name, `DATABASE_URL`, or the keys that start with a prefix, `STRIPE_*`.
+ * Never every key: `coffre run` hands them all to one process.
+ */
+export function keyPatterns(text: string): string[] {
+  const patterns = text.split(/\s+/).filter((word) => word !== '');
+  if (patterns.length === 0) throw new UsageError('--keys names the keys to export: --keys "DATABASE_URL STRIPE_*"');
+  for (const pattern of patterns) {
+    if (pattern === '*') throw new UsageError('--keys names keys, or the keys a prefix starts, STRIPE_*, never all of them: `coffre run <project>/<environment> -- <command>` hands every key to one process');
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}\*?$/.test(pattern)) throw new UsageError(`--keys takes key names, or a prefix and *, as STRIPE_*, not "${pattern}"`);
+  }
+  return [...new Set(patterns)];
+}
+
+/** Whether `key` is one `pattern` names (`keyPatterns`). */
+export function keyNamed(pattern: string, key: string): boolean {
+  return pattern.endsWith('*') ? key.startsWith(pattern.slice(0, -1)) : key === pattern;
+}
+
+/**
  * The keys two of the environments both define, by the pair, said in a
  * line without a value: `deploy/prod and auth/prod both define API_URL and
  * TOKEN`. Null when each key is in one environment only.
