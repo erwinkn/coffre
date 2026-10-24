@@ -897,10 +897,13 @@ trip 50 to 80 ms from Europe, a run's first connection 2 to 3 seconds and
 the next ones under one. A run may open 32 connections at once. A
 Durable Object is reset now and then, and Cloudflare resets a connection
 whose app has read nothing for two minutes: the app's driver sees the
-connection drop, and a pool opens another. Every admission of a run's
-first connection writes to the audit log, so an instance admits a burst
-of runs at the pace of its database: on that setup, about one run a
-second.
+connection drop, and a pool opens another. A run writes three entries to
+the app's audit log as it starts (its handle, its plan, its first
+connection's use), each under the log's one lock, so an instance admits a
+burst of runs at the pace of its database: on that setup, about one and a
+half runs a second. 64 runs started at once were all admitted within 45
+seconds but a few; past that, some fail with 500 or 503 while the lock is
+waited on, and a run started again gets in.
 
 ## Backups, restores and monitoring
 
