@@ -226,7 +226,7 @@ export const POLICY_CHANGED = 'policy_changed';
  * came in must still stand (`credentialStill`).
  */
 export async function recorded<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'credentialId' | 'via'>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>,
   work: (log: AuditEntry[], fence: () => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
@@ -256,22 +256,34 @@ export async function recorded<T>(
  * unlocked. So a read checks it again after the vault has released: under
  * the head when it commits entries of its own, otherwise with no lock. A
  * revocation committed before this read is seen; one after came after the
- * release (formal/Credentials.tla, `CredentialFence`). Issuing a service
- * account a credential checks it too, under the head (`issuerNow`).
+ * release (formal/Credentials.tla, `CredentialFenceUnderHead` and
+ * `CredentialFenceUnlocked`). Issuing a service account a credential checks
+ * it too, under the head (`issuerNow`). A refusal is logged, `action`
+ * refused as `credential_ended`, after the vault's release if there was one.
  *
  *   Ada's token checked, her export asks the vault
  *   Ada revokes the token                            token.revoke
  *   the vault releases the values                    secret.read
  *   checked again: revoked                           401, not the values
  */
-export async function credentialStill(ctx: Pick<ApiContext, 'caller' | 'credentialId'> & Partial<Pick<ApiContext, 'via'>>, db: Queryable): Promise<void> {
+export async function credentialStill(
+  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>,
+  db: Queryable,
+  action = 'secret.read',
+): Promise<void> {
   const stands = await wayInStands(db, {
     principal: formatMember(ctx.caller.principal),
     generation: ctx.caller.generation,
     credentialId: ctx.credentialId,
     connectionId: ctx.via?.connectionId ?? null,
   });
-  if (!stands) throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
+  // Logged, so that a release the vault logged before this read shows withheld, not handed to an ended credential.
+  if (!stands) {
+    throw new Refusal(
+      new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'),
+      denied(ctx, action, 'credential_ended', { metadata: { credentialId: ctx.credentialId } }),
+    );
+  }
 }
 
 /**

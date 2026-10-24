@@ -75,7 +75,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId'>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -891,7 +891,7 @@ export class SigninService {
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
-        await credentialStill(ctx, tx);
+        await credentialStill(ctx, tx, 'token.create');
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,

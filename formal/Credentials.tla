@@ -57,10 +57,12 @@ CONSTANTS
     \* standingBinding; api/signin.ts, #liveCredential, bindingStands).
     BindingCheckedAtUse,
     \* Once the vault has released a value, the app reads the credential and
-    \* the account's generation again before it answers, under the head when
-    \* it commits entries of its own (server api/context.ts, recorded,
-    \* credentialStill).
-    CredentialFence
+    \* the account's generation again before it answers (server
+    \* api/context.ts, recorded, credentialStill): under the head when it
+    \* commits entries of its own, as through the proxy, and with no lock
+    \* when it has none, as an export.
+    CredentialFenceUnderHead,
+    CredentialFenceUnlocked
 
 None == "none"
 \* Credentials are named as entries are, by the operation that made them,
@@ -299,7 +301,7 @@ UseAppHead(p) == pc[p] = "use.apphead" /\ TakeHead(p, "use.commit")
 
 UseCommit(p) ==
     /\ pc[p] = "use.commit"
-    /\ IF CredentialFence /\ ~StillLive(Cred(l[p].cred))
+    /\ IF CredentialFenceUnderHead /\ ~StillLive(Cred(l[p].cred))
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("credential.use", p) EXCEPT !.cred = l[p].cred])
               /\ Release(p)
@@ -311,7 +313,7 @@ UseCommit(p) ==
 \* release.
 UseFence(p) ==
     /\ pc[p] = "use.fence"
-    /\ IF CredentialFence /\ ~StillLive(Cred(l[p].cred))
+    /\ IF CredentialFenceUnlocked /\ ~StillLive(Cred(l[p].cred))
          THEN Refuse(p)
          ELSE Read(p, "use.answer", l[p])
 

@@ -185,6 +185,8 @@ test('a token revoked while its read is under way gets nothing: the read checks 
   const issued = await ada.tokens.issue(ADA, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   beforeNextRelease(() => root.tokens.revoke(ADA, issued.id));
   assert.equal(await reads(issued.token, 'dev'), 401);
+  // The vault's release is in the log, and after it, the app's refusal: withheld, not handed to a revoked token.
+  assert.deepEqual(await refusals('secret.read'), ['credential_ended']);
   // Removed and added again meanwhile: the vault finds her active, but at a generation the token was not issued at.
   const again = await ada.tokens.issue(ADA, { label: 'again', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   beforeNextRelease(async () => {

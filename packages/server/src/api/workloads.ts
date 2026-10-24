@@ -352,7 +352,7 @@ export class WorkloadService {
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
-        await credentialStill(ctx, tx);
+        await credentialStill(ctx, tx, 'token.bind');
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
@@ -458,7 +458,7 @@ export class WorkloadService {
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
-        await credentialStill(ctx, tx);
+        await credentialStill(ctx, tx, 'token.bind');
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);

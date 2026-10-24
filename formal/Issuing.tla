@@ -30,8 +30,10 @@ CONSTANTS
     \* an Owner of the project, is weighed from the vault's answer about
     \* them, read after the newest entry about their access, and committed
     \* only while that entry is still the newest, under the head (server
-    \* api/services.ts, freshIssuer and issuerStill).
+    \* api/services.ts, issuerNow and issuerStill): issuing a token, and
+    \* sealing one (sealCredentials).
     IssuerFence,
+    SealIssuerFence,
     \* Issuing reads the service account's standing again under the head
     \* (server api/signin.ts, issueServiceToken, #stillMember).
     ServiceRecheckInIssue,
@@ -235,7 +237,7 @@ SealHead(p) == pc[p] = "seal.head" /\ TakeHead(p, "seal.commit")
 \* left as it is, and logs nothing.
 SealCommit(p) ==
     /\ pc[p] = "seal.commit"
-    /\ IF IssuerFence /\ NewestAbout(op[p].who) # l[p].seq
+    /\ IF SealIssuerFence /\ NewestAbout(op[p].who) # l[p].seq
          THEN Refuse(p)
          ELSE IF SealCompareAndSet /\ legacy # "unsealed"
            THEN Refuse(p)
