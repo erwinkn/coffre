@@ -452,6 +452,10 @@ test("a workload binding's policy, from its flags: each one its profile takes, c
   await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, workload: true }), /--workload is for --github, --gitlab and --issuer/);
   await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, gcp: '1' }), /name one platform, not --aws and --gcp/);
   await assert.rejects(workload({ gcp: '1', tenant: TENANT }), /--tenant is --azure's/);
+  // What narrows a CI run's binding narrows no workload's: refused, never dropped.
+  for (const flag of ['branch', 'event', 'github-environment', 'workflow', 'namespace-id'] as const) {
+    await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, [flag]: flag === 'event' ? ['push'] : 'x' }), new RegExp(`--${flag} says which CI runs a --github or --gitlab binding takes: --aws has none`));
+  }
 
   for (const bad of ['market=A', 'market/prod', 'market/prod=', 'market/prod/eu=A', 'market/prod=*,A']) assert.throws(() => readsFrom([bad]), /--reads takes|name keys, or \*/, bad);
   assert.throws(() => readsFrom(['market/prod=A', 'market/prod=B']), /names market\/prod twice/);
@@ -496,6 +500,8 @@ test("a workload's plan says what it trusts, how its sessions live, and what eac
     '  from     10.0.0.0/8',
     '',
   ].join('\n'));
+  // A workload's plan says nothing of a CI run's events.
+  assert.equal(describeEvents(plan), null);
   const enrollment = { ...plan, profile: 'enrollment' as const, issuer: 'urn:coffre:enrollment', claims: {}, policy: { replicas: 2, mintedBy: 'token:deploy' } };
   assert.match(describePlan('token:api-prod', enrollment, null), /\n  reads    nothing: every secret value is used through coffre, never read\n  codes    minted by its managers and service:deploy, 30 days each; up to 4 sessions of 2 replicas\n           freezes when a copy contends past 15 minutes of overlap\n$/);
   const gcp = { ...plan, profile: 'gcp' as const, issuer: 'https://accounts.google.com', jwksUri: 'https://www.googleapis.com/oauth2/v3/certs', claims: { sub: '104729384756102938475' }, policy: { keyAudience: true as const } };

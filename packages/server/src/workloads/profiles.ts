@@ -35,6 +35,11 @@ const GOOGLE_ID = /^[1-9]\d{0,31}$/;
 const AZURE_V1 = /^https:\/\/sts\.windows\.net\/([0-9a-f-]{36})\/$/;
 const AZURE_V2 = /^https:\/\/login\.microsoftonline\.com\/([0-9a-f-]{36})\/v2\.0$/;
 const FLY_ISSUER = /^https:\/\/oidc\.fly\.io\/[a-z0-9][a-z0-9-]{0,62}$/;
+/**
+ * Fly's IDs are digits in its documentation's tokens, unchecked live: kept
+ * loose, which fails closed, since a token's `org_id` and `app_id` are IDs
+ * and a binding naming a name matches none.
+ */
 const FLY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const VERCEL_ISSUER = /^https:\/\/oidc\.vercel\.com(\/[a-z0-9][a-z0-9-]{0,62})?$/;
 const VERCEL_OWNER = /^(team_)?[A-Za-z0-9]{8,64}$/;
@@ -112,6 +117,9 @@ export const PROFILE_RULES: { readonly [P in WorkloadProfile]?: ProfileRules } =
   },
   aws: {
     binding({ claims }) {
+      // Its proof says the account and the role, and nothing else a binding could narrow by.
+      const extra = Object.keys(claims).filter((name) => name !== 'account' && name !== 'role_id');
+      if (extra.length > 0) throw new BindingInvalid(`an aws binding names its role's account and role_id alone, not ${extra.join(', ')}`);
       shaped(claims, 'account', AWS_ACCOUNT, 'the account\'s 12 digits');
       shaped(claims, 'role_id', AWS_ROLE_ID, "the role's unique ID, AROA…, which a role made again under the same name does not keep: aws iam get-role --role-name <name> --query Role.RoleId");
     },

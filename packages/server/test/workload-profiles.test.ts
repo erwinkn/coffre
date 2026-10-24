@@ -264,6 +264,7 @@ test("a binding is refused where it names a platform's IDs in another shape, or 
     [{ ...PLATFORMS.vercel, issuer: 'https://oidc.vercel.com/acme/web' }, /team mode/],
     [{ profile: 'aws', issuer: null, claims: { account: '671742253563', role_id: 'AIDAZ3EXAMPLEUSER001' }, token: {}, lifetime: 0, another: {} }, /AROA/],
     [{ profile: 'aws', issuer: null, claims: { account: '6717-4225-3563', role_id: 'AROAZ3EXAMPLE7QXYZAB' }, token: {}, lifetime: 0, another: {} }, /12 digits/],
+    [{ profile: 'aws', issuer: null, claims: { account: '671742253563', role_id: 'AROAZ3EXAMPLE7QXYZAB', session: 'ingest-fn' }, token: {}, lifetime: 0, another: {} }, /account and role_id alone, not session/],
   ];
   for (const [platform, message] of refused) {
     assert.throws(() => bindingOf(platform), (error: unknown) => error instanceof BindingInvalid && message.test(error.message), `${platform.profile} ${JSON.stringify(platform.claims)} ${platform.issuer}`);

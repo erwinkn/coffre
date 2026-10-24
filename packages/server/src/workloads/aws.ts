@@ -4,7 +4,7 @@ import { differingClaims, PROFILE_URNS } from '@coffre/core/identity';
 
 import { ExchangeRefused, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
 import { liveBindings, memberStanding, type BindingRow } from '../db/queries.ts';
-import { FETCH_DEADLINE_MS, MAX_BODY_BYTES, USER_AGENT } from './transport.ts';
+import { capped, FETCH_DEADLINE_MS, FetchRefused, USER_AGENT } from './transport.ts';
 
 /**
  * The `aws` proof (docs/design/workload-access.md, section 4.3): a
@@ -49,8 +49,10 @@ const STS_URL = /^https:\/\/sts(?:\.([a-z]{2}(?:-[a-z]+)+-\d))?\.amazonaws\.com\
  * the body's own digest.
  */
 const FORWARDED = ['authorization', 'content-type', 'host', 'x-amz-content-sha256', 'x-amz-date', 'x-amz-security-token', 'x-coffre-audience', 'x-coffre-key'] as const;
-/** Those its signature must cover, whatever else it does. */
-const MUST_SIGN = ['host', 'x-amz-date', 'x-coffre-audience', 'x-coffre-key'] as const;
+/** Those its signature must cover, whatever else it does: without `content-type`, the fetch would send its own, and STS would not read the form. */
+const MUST_SIGN = ['content-type', 'host', 'x-amz-date', 'x-coffre-audience', 'x-coffre-key'] as const;
+/** A header value as SigV4 signs it and a fetch sends it: printable ASCII. */
+const HEADER_VALUE = /^[\x20-\x7e]+$/;
 
 const AUTHORIZATION = /^AWS4-HMAC-SHA256 Credential=([A-Z0-9]{16,128})\/(\d{8})\/([a-z0-9-]{1,32})\/sts\/aws4_request, ?SignedHeaders=([a-z0-9;-]{1,512}), ?Signature=[0-9a-f]{64}$/;
 const AMZ_DATE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
@@ -86,7 +88,7 @@ export function checkAwsRequest(input: unknown, expected: { publicUrl: string; j
     const lower = name.toLowerCase();
     if (!(FORWARDED as readonly string[]).includes(lower)) return malformed(`has a header coffre does not forward: ${name.slice(0, 64)}`);
     if (Object.hasOwn(headers, lower)) return malformed(`names ${lower} twice`);
-    if (typeof value !== 'string' || value === '' || value.length > MAX_HEADER_BYTES || /[\p{Cc}]/u.test(value)) {
+    if (typeof value !== 'string' || value.length > MAX_HEADER_BYTES || !HEADER_VALUE.test(value)) {
       return malformed(`has a ${lower} that is no header value`);
     }
     headers[lower] = value;
@@ -113,7 +115,7 @@ export function checkAwsRequest(input: unknown, expected: { publicUrl: string; j
   const sentHost = url.slice('https://'.length, -1);
   if (headers.host !== undefined && headers.host !== sentHost) return malformed(`says host ${headers.host}, and is sent to ${sentHost}`);
   delete headers.host;
-  if (headers['content-type'] !== undefined && !FORM.test(headers['content-type'])) return malformed('has a content-type other than application/x-www-form-urlencoded');
+  if (!FORM.test(headers['content-type']!)) return malformed('has a content-type other than application/x-www-form-urlencoded');
   if (headers['x-amz-content-sha256'] !== undefined && headers['x-amz-content-sha256'] !== BODY_DIGEST) return malformed("has an x-amz-content-sha256 other than its body's");
 
   if (headers['x-coffre-audience'] !== expected.publicUrl) {
@@ -163,26 +165,13 @@ export function stsFetch(fetchImpl: typeof fetch = (input, init) => fetch(input,
     } catch (error) {
       throw new StsUnavailable('could not be reached', { cause: error });
     }
-    const reader = response.body?.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
+    let body: Uint8Array;
     try {
-      for (;;) {
-        if (reader === undefined) break;
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > MAX_BODY_BYTES) {
-          await reader.cancel();
-          throw new StsUnavailable(`answered more than ${MAX_BODY_BYTES} bytes`);
-        }
-        chunks.push(value);
-      }
+      body = await capped(new URL(request.url), response.body);
     } catch (error) {
-      if (error instanceof StsUnavailable) throw error;
-      throw new StsUnavailable('answered what could not be read', { cause: error });
+      throw new StsUnavailable(error instanceof FetchRefused ? 'answered more than a proof\'s answer, or what could not be read' : 'answered what could not be read', { cause: error });
     }
-    return { status: response.status, body: Buffer.concat(chunks).toString('utf8') };
+    return { status: response.status, body: Buffer.from(body).toString('utf8') };
   };
 }
 
@@ -196,10 +185,14 @@ function element(xml: string, name: string, { text }: { text: boolean } = { text
   return text && /[<&]/.test(inner) ? null : inner;
 }
 
+/** What STS answers, as a 400 or a 429, when it is asked too often: STS unavailable for now, not the proof refused. */
+const THROTTLED = new Set(['Throttling', 'ThrottlingException', 'RequestLimitExceeded', 'TooManyRequestsException']);
+
 /**
  * STS's answer, read: the caller's identity from a 200, or why STS refused
  * it. A 4xx is STS saying the signature, the key or the token is wrong,
- * named by its error code; anything else is STS unavailable.
+ * named by its error code, unless it is throttling; anything else is STS
+ * unavailable, which the caller tries again.
  */
 export function readStsAnswer(answer: { status: number; body: string }): CallerIdentity | ExchangeRefused {
   if (answer.status === 200) {
@@ -208,8 +201,9 @@ export function readStsAnswer(answer: { status: number; body: string }): CallerI
     if (arn == null || userId == null || account == null) throw new StsUnavailable('answered 200 without one GetCallerIdentityResult');
     return { account: account.trim(), arn: arn.trim(), userId: userId.trim() };
   }
+  const code = element(answer.body, 'Code');
+  if (answer.status === 429 || (code !== null && THROTTLED.has(code))) throw new StsUnavailable(`is throttling (${answer.status}${code === null ? '' : `: ${code}`})`);
   if (answer.status >= 400 && answer.status < 500) {
-    const code = element(answer.body, 'Code');
     const named = code !== null && /^[A-Za-z.]{1,64}$/.test(code) ? `: ${code}` : '';
     return new ExchangeRefused('signature', `STS refused the aws proof (${answer.status}${named})`);
   }
@@ -285,21 +279,14 @@ export function awsProof(options: AwsProofOptions = {}): ProofKind {
       if (request instanceof ExchangeRefused) return request;
       const bindings = await awsBindings(ctx);
       if (bindings.length === 0) return new ExchangeRefused('no_match', `${ctx.service.slice('token:'.length)} has no aws binding`);
-      let answer: CallerIdentity | ExchangeRefused;
+      let identity: AwsIdentity | ExchangeRefused;
       try {
-        answer = readStsAnswer(await sts(request));
+        const answer = readStsAnswer(await sts(request));
+        identity = answer instanceof ExchangeRefused ? answer : assumedRole(answer);
       } catch (error) {
         if (!(error instanceof StsUnavailable)) throw error;
         console.error({ event: 'sts_unavailable', region: request.region, requestId: ctx.requestId, error: error.message }, 'STS could not check an aws proof');
         return new ExchangeRefused('issuer_unavailable', 'STS could not be asked about the aws proof: try again', 503);
-      }
-      if (answer instanceof ExchangeRefused) return answer;
-      let identity: AwsIdentity | ExchangeRefused;
-      try {
-        identity = assumedRole(answer);
-      } catch (error) {
-        if (!(error instanceof StsUnavailable)) throw error;
-        return new ExchangeRefused('issuer_unavailable', 'STS answered what coffre cannot read: try again', 503);
       }
       if (identity instanceof ExchangeRefused) return identity;
       const binding = matchAwsBinding(bindings, identity);

@@ -222,20 +222,20 @@ binding, with no stored secret; or, for CI without OIDC, with a bearer token: co
 A workload signs in for a key-bound session, by its platform's proof:
        coffre trust <service> --aws arn:aws:iam::<account>:role/<name> [--role-id AROA…]
        coffre trust <service> --kubernetes <namespace>/<service-account> [--issuer <url>] [--uid <uid>]
-                    [--jwks-file <path>]
-       coffre trust <service> --gcp <service-account-email | unique-id>
+                    [--jwks-file <path>] [--claim <name>=<value> …]
+       coffre trust <service> --gcp <service-account-email | unique-id> [--claim …]
        coffre trust <service> --azure --tenant <tenant-id> --object <object-id> --audience <app-id-uri>
-                    [--issuer https://login.microsoftonline.com/<tenant-id>/v2.0]
-       coffre trust <service> --fly <organization> --org-id <id> --app-id <id>
+                    [--issuer https://login.microsoftonline.com/<tenant-id>/v2.0] [--claim …]
+       coffre trust <service> --fly <organization> --org-id <id> --app-id <id> [--claim …]
        coffre trust <service> --vercel <team> --owner-id team_… --project-id prj_…
-                    [--vercel-environment production] [--issuer https://oidc.vercel.com]
+                    [--vercel-environment production] [--issuer https://oidc.vercel.com] [--claim …]
        coffre trust <service> --enrollment --replicas <n> [--minted-by <service>] [--approve]
                     [--session-days 30] [--overlap-minutes 15] [--on-contention freeze|alert]
        coffre trust <service> --cloudflare
        coffre trust <service> (--github … | --gitlab … | --issuer …) --workload
          and, for any of them:
                     [--reads <project>/<env>=<KEY>,… | <project>/<env>=*] [--source <cidr> …]
-                    [--session-hours 24] [--unsigned-uploads] [--claim <name>=<value> …]
+                    [--session-hours 24] [--unsigned-uploads]
          --aws, --kubernetes and --gcp look up the IDs they bind with the aws, kubectl and gcloud you
          are signed in to; --role-id, --uid and a unique ID skip the lookup
          --reads lists the values its sessions may read, which its platform then holds: every other
@@ -287,7 +287,7 @@ function listOf(values: string[] | undefined): string[] | undefined {
  * that run unreviewed code; and what each of those chosen exposes.
  */
 export function describeEvents(binding: Pick<BindingPlan, 'profile' | 'claims'>): string | null {
-  if (binding.profile === 'custom') return null;
+  if (!binding.profile.startsWith('github') && binding.profile !== 'gitlab') return null;
   const gitlab = binding.profile === 'gitlab';
   const chosen = claimValues(binding.claims[gitlab ? 'pipeline_source' : 'event_name']);
   const tag = gitlab ? binding.claims.ref_type === 'tag' : String(binding.claims.ref).startsWith('refs/tags/');
@@ -323,6 +323,9 @@ const PLATFORM_ONLY: Partial<Record<keyof TrustFlags, readonly string[]>> = {
   'owner-id': ['github', 'vercel'],
   'project-id': ['gitlab', 'vercel'],
 };
+
+/** The flags that say which CI runs a binding takes, which no workload's platform has. */
+const CI_ONLY = ['workflow', 'reusable', 'sha', 'any-repository', 'github-environment', 'gitlab-url', 'branch', 'tag', 'event', 'repository-id', 'namespace-id'] as const satisfies readonly (keyof TrustFlags)[];
 
 /** Each policy flag, by the field it sets. */
 const POLICY_FLAGS = {
@@ -373,6 +376,8 @@ export async function bindingFrom(
 
   if (platforms.length === 1) {
     if (flags.workload === true) throw new Error(`--${kind} makes a workload's binding: --workload is for --github, --gitlab and --issuer`);
+    const ci = CI_ONLY.find((flag) => flags[flag] !== undefined);
+    if (ci !== undefined) throw new Error(`--${ci} says which CI runs a --github or --gitlab binding takes: --${kind} has none`);
     if (pipelines !== undefined && pipelines.length > 0) throw new Error(`--source takes CIDRs, such as 162.220.232.0/24: ${pipelines.join(', ')} is none`);
     const binding = await platformBinding(kind as Platform, flags, options.platforms ?? platformLookup());
     return checked(binding, { ...binding.policy, ...policy }, options.service);

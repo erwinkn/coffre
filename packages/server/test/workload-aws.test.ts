@@ -211,8 +211,13 @@ test('a proof whose signature leaves out the key or the audience is refused, and
   await bind();
   await refused(await signed(ROLE, { unsigned: ['x-coffre-key'] }), 'signature', /does not cover x-coffre-key/);
   await refused(await signed(ROLE, { unsigned: ['x-coffre-audience'] }), 'signature', /does not cover x-coffre-audience/);
+  // Without a signed content-type, the fetch would send its own, and STS would not read the form.
+  await refused(await signed(ROLE, { unsigned: ['content-type'] }), 'signature', /does not cover content-type/);
+  const good = await signed(ROLE);
+  const { 'content-type': _, ...untyped } = good.headers;
+  await refused({ ...good, headers: untyped }, 'malformed', /signs content-type, and does not send it/);
   // Every header sent is signed, or coffre would forward what no key signed.
-  await refused(await signed(ROLE, { unsigned: ['content-type'] }), 'malformed', /content-type unsigned/);
+  await refused(await signed(ROLE, { headers: { 'x-amz-content-sha256': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }, unsigned: ['x-amz-content-sha256'] }), 'malformed', /sends x-amz-content-sha256 unsigned/);
   assert.equal(sts.calls, 0);
 });
 
@@ -247,6 +252,19 @@ test('a proof for another host, URL or body, or with another header, is refused 
   await refused({ ...good, headers: { ...good.headers, host: 'evil.example' } }, 'malformed', /says host evil.example/);
   await refused({ ...good, headers: { ...good.headers, 'x-amz-date': `${good.headers['x-amz-date']}\r\nx-evil: 1` } }, 'malformed', /no header value/);
   await refused(await signed(ROLE, { headers: { 'content-type': 'application/json' } }), 'malformed', /content-type/);
+  // A value SigV4 would sign, and a fetch send, is printable ASCII: anything else is the proof's fault, never STS unavailable.
+  for (const value of ['abc€', 'tab\there', '']) {
+    await refused({ ...good, headers: { ...good.headers, 'x-amz-security-token': value } }, 'malformed', /no header value/);
+  }
+  // The scope's day is x-amz-date's; SignedHeaders are listed once each, sorted; each one signed is sent.
+  const authorization = good.headers.authorization!;
+  const day = /\/(\d{8})\//.exec(authorization)![1]!;
+  await refused({ ...good, headers: { ...good.headers, authorization: authorization.replace(`/${day}/`, '/20200101/') } }, 'malformed', /another day than its credential's scope/);
+  for (const list of ['host;content-type;x-amz-date;x-amz-security-token;x-coffre-audience;x-coffre-key', 'content-type;host;host;x-amz-date;x-amz-security-token;x-coffre-audience;x-coffre-key']) {
+    await refused({ ...good, headers: { ...good.headers, authorization: authorization.replace(/SignedHeaders=[^,]+/, `SignedHeaders=${list}`) } }, 'malformed', /twice or out of order/);
+  }
+  const { 'x-amz-security-token': _token, ...tokenless } = good.headers;
+  await refused({ ...good, headers: tokenless }, 'malformed', /signs x-amz-security-token, and does not send it/);
   await refused(await signed(ROLE, { checksum: true, headers: { 'x-amz-content-sha256': 'e'.repeat(64) } }), 'malformed', /x-amz-content-sha256/);
   for (const input of [null, 'proof', [], { ...good, method: 'GET' }, { url: good.url, headers: good.headers }, { ...good, headers: [] }]) {
     await refused(input, 'malformed');
@@ -281,6 +299,14 @@ test("STS's refusal is the proof's, a redirect or an outage is STS unavailable, 
   };
   await unavailable(() => new Response(null, { status: 307, headers: { location: 'https://evil.example/' } }));
   await unavailable(() => new Response('<ErrorResponse/>', { status: 500 }));
+  // Throttling is STS's 400, or a 429: try again, not a refused proof.
+  for (const [status, code] of [[400, 'Throttling'], [400, 'RequestLimitExceeded'], [429, 'TooManyRequestsException']] as const) {
+    await unavailable(() => new Response(`<ErrorResponse><Error><Type>Sender</Type><Code>${code}</Code><Message>Rate exceeded</Message></Error></ErrorResponse>`, { status }));
+  }
+  // An Arn, a UserId and an Account that disagree are no answer either.
+  const disagreeing = `<GetCallerIdentityResult><Arn>${ROLE.arn}</Arn><UserId>${ROLE.userId}</UserId><Account>123456789012</Account></GetCallerIdentityResult>`;
+  await unavailable(() => new Response(`<R>${disagreeing}</R>`, { status: 200 }));
+  await unavailable(() => new Response(`<R>${disagreeing.replace(`:${session}<`, ':another-session<')}</R>`.replace('123456789012', ACCOUNT), { status: 200 }));
   await unavailable(() => new Response('<GetCallerIdentityResponse></GetCallerIdentityResponse>', { status: 200 }));
   await unavailable(() => new Response('x'.repeat(65 * 1024), { status: 200 }));
   // Two results, or a value with markup, is no answer to read.
@@ -310,7 +336,7 @@ test('a service with no aws binding refuses the proof after one read, and asks S
   assert.equal(sts.calls, 0);
 });
 
-test('stsFetch reads at most 64 KiB, follows no redirect, and says STS is unavailable when it cannot be reached', async () => {
+test('stsFetch follows no redirect, under a deadline, and hands a redirect back as the status it is', async () => {
   let init: RequestInit | undefined;
   const transport: StsTransport = stsFetch(async (_, given) => {
     init = given;
