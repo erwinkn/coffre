@@ -82,10 +82,12 @@ test('a streamed upload to an AWS-signed credential is bound by its declared dig
     const response = await session.fetch(`${session.url('s3')}/bucket/key`, { method: 'PUT', headers: { 'x-amz-content-sha256': declared }, body: stream(), duplex: 'half' } as RequestInit);
     assert.equal(response.status, 200, await response.text());
   }
+  // A request with no body signs the empty body's digest, whatever it declares.
+  assert.equal((await session.fetch(`${session.url('s3')}/bucket/key`, { headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } })).status, 200);
   // A Request object's stream streams too.
   const request = new Request(`${session.url('s3')}/bucket/other`, { method: 'PUT', headers: { 'x-amz-content-sha256': digest }, body: stream(), duplex: 'half' } as RequestInit);
   assert.equal((await session.fetch(request)).status, 200);
-  assert.deepEqual(coffre.forwarded.map((sent) => sent.body), ['object bytes', 'object bytes', 'object bytes']);
+  assert.deepEqual(coffre.forwarded.map((sent) => sent.body), ['object bytes', 'object bytes', '', 'object bytes']);
 });
 
 test('a nonce the gate no longer knows is refused once, and the request sent again with the new one; the newest is always used', async (t) => {

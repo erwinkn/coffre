@@ -408,7 +408,8 @@ function surface(core: Core): Workload {
     const streamed = init?.body instanceof ReadableStream || (input instanceof Request && init?.body === undefined);
     const stream = declared !== null && request.body !== null && streamed ? request.body : null;
     const bytes = stream === null && request.body !== null ? new Uint8Array(await request.arrayBuffer()) : null;
-    const line = declared === null ? await bodyDigest(bytes ?? new Uint8Array()) : SHA256_HEX.test(declared) ? declared : UNSIGNED_BODY;
+    // A request with no body signs the empty body's digest, whatever it declares, as coffre recomputes it.
+    const line = declared === null || (stream === null && (bytes === null || bytes.length === 0)) ? await bodyDigest(bytes ?? new Uint8Array()) : SHA256_HEX.test(declared) ? declared : UNSIGNED_BODY;
     const send = async () => {
       const { token } = await core.current();
       const headers = new Headers(request.headers);

@@ -172,7 +172,8 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       const headers = new Headers();
       for (let i = 0; i < req.rawHeaders.length; i += 2) headers.append(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
       const declared = headers.get('x-amz-content-sha256');
-      const line = options.sigv4?.includes(credential ?? '') && declared !== null ? (/^[0-9a-f]{64}$/.test(declared) ? declared : UNSIGNED_BODY) : await bodyDigest(body);
+      // As the server reads it: a SigV4 credential's request with a body is bound by the digest it declares; any other, by its bytes.
+      const line = options.sigv4?.includes(credential ?? '') && declared !== null && body.length > 0 ? (/^[0-9a-f]{64}$/.test(declared) ? declared : UNSIGNED_BODY) : await bodyDigest(body);
       const session = await authenticate(req, res, { headers, body: line });
       if (session === 'use_dpop_nonce') return record('use_dpop_nonce');
       if (typeof session === 'string') return record(session), refuse(res, session);
