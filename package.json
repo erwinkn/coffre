@@ -16,6 +16,7 @@
     "test:all": "pnpm test && pnpm test:sqlite",
     "test:properties": "node --conditions=coffre:source scripts/test-properties.mjs",
     "test:properties:server": "./scripts/server-properties.sh",
+    "test:properties:long": "pnpm test:properties --long && pnpm test:properties:server --long",
     "test:schema": "./scripts/test-schema.sh",
     "formal": "./scripts/formal.sh",
     "formal:lean": "./scripts/formal-lean.sh",
@@ -43,6 +44,7 @@
     "pg": "8.16.3"
   },
   "devDependencies": {
+    "@hegeldev/hegel": "0.4.7",
     "@typescript-eslint/parser": "8.65.0",
     "eslint": "10.8.0"
   }

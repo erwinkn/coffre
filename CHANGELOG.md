@@ -35,6 +35,37 @@
   those guard nothing. The runtime login still deletes no row itself: it
   calls `prune_consumed_tokens`, which migration 0016 adds and which
   deletes only those (Postgres; SQLite deletes them directly).
+- **Fixes found by property tests** (docs/property-tests.md):
+  - The credential proxy refuses a path with a dot segment hidden behind a
+    `;` parameter, `/use/market/dev/api/..;/admin`, which Tomcat and Spring
+    read as a step up past the credential's base path and its `paths`, and
+    one encoded twice (`%252e%252e`), which a server behind another decodes
+    twice.
+  - A host spelled with a trailing dot, `localhost.`, is private, as
+    `localhost` is: an upstream or a tunnel's database URL naming it needs
+    `insecureUpstreams`, as any other loopback address does.
+  - A restored version comes back no looser than it was, nor than its
+    value was made since: the plain version of a value made a secret or
+    sensitive in place comes back so, whatever was written after, and only
+    whoever reads it as such may restore it. A Contributor, who reads no
+    secret, could read one by restoring its plain version (R24). The vault
+    holds the same rule, and refuses an app's request to bring back a value
+    made sensitive as anything looser (R16).
+  - A value holding a lone UTF-16 surrogate is refused with 400, rather than
+    stored as U+FFFD, a value other than the one written.
+  - A fork's key with neither a value nor a reference, written around the
+    app, reads as no value rather than serve its parent's; a fork chain written
+    around the app past three parents counts the same keys whichever
+    environment is listed first.
+  - `GET /api/me`, which every page asks, reads only the projects its caller
+    reaches, rather than every environment and secret of the instance.
+  - A redirect to an upstream `Location` that does not parse is a 502, not a 500;
+    SASLprep judges right-to-left passwords as Postgres does; the listener
+    no longer leaves a tunnel half-closed for 30 seconds when the app
+    closes while the database still sends; a trust binding naming a
+    `__proto__` claim is refused, rather than stored without it; an
+    envelope claiming another version of its vault key, and a sealed
+    sign-in value spelled another way, no longer open.
 - **A workload uses what its binding does not list, and moves none of it**
   ([workload-access.md](docs/design/workload-access.md#61-the-rule), its
   PR 1c). Every vault call now says what kind of credential it came in on,

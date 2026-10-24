@@ -110,6 +110,16 @@ test('values with NUL bytes are rejected and nothing is written', async () => {
   assert.equal((await db.owner.select().from(secrets)).length, 0);
 });
 
+test('a value holding a lone surrogate is rejected, rather than stored as another, and nothing is written', async () => {
+  for (const value of ['a\uD800', '\uDC00b', { value: 'x\uD83D', plain: true as const }]) {
+    await assert.rejects(root.secrets.set('market/dev', { BAD: value }), { status: 400 });
+  }
+  assert.equal((await db.owner.select().from(secrets)).length, 0);
+  // A pair is one character, and comes back as written.
+  await root.secrets.set('market/dev', { EMOJI: 'key-\uD83D\uDD11' });
+  assert.equal((await root.secrets.reveal('market/dev/EMOJI')).values.EMOJI, 'key-\uD83D\uDD11');
+});
+
 test('one patch writes one version and one audit entry per key, together', async () => {
   const written = await root.secrets.set('market/dev', { A: '1', B: '2', C: '3' });
   assert.deepEqual(written.keys, { A: { version: 1, sensitivity: 'secret' }, B: { version: 1, sensitivity: 'secret' }, C: { version: 1, sensitivity: 'secret' } });

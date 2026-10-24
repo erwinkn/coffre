@@ -269,6 +269,11 @@ test("SASLprep maps as Postgres does, and falls back to the password as it is", 
   assert.equal(saslprep(`${arabicOne}${soft}a`), `${arabicOne}a`, 'a digit has no direction of a letter');
   const ideographic = `${String.fromCharCode(0x2ff0)}a${soft}`;
   assert.equal(saslprep(ideographic), ideographic, 'an ideographic description character (C.7): the password as it is');
+  // Right-to-left as RFC 3454's table D.1 has it: Hebrew's maqaf (U+05BE) is no letter, and right-to-left all the same.
+  const maqaf = `${String.fromCharCode(0x5be)}${space}`;
+  assert.equal(saslprep(maqaf), maqaf, 'ending on a space, not right-to-left: the password as it is');
+  const tatweel = String.fromCharCode(0x627, 0x640, 0xa0, 0x627);
+  assert.equal(saslprep(tatweel), String.fromCharCode(0x627, 0x640, 0x20, 0x627), "Arabic's tatweel (U+0640) is right-to-left, no left-to-right letter");
 });
 
 test('a database that ends SCRAM without its signature is no database the URL names: refused', postgresOnly, async () => {

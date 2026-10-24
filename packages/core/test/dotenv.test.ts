@@ -265,6 +265,10 @@ test('invalid keys are rejected', () => {
   rejected(`${'A'.repeat(200)}=x`, /key must match/);
 });
 
+test('a key one character too long is refused with the pattern that says its length', () => {
+  rejected(`${'A'.repeat(129)}=x`, /^key must match \^\[A-Za-z_\]\[A-Za-z0-9_\]\{0,127\}\$$/);
+});
+
 test('valid keys at the edges are accepted', () => {
   assert.deepEqual(values('_LEADING_UNDERSCORE=1'), { _LEADING_UNDERSCORE: '1' });
   assert.deepEqual(values('A=1'), { A: '1' });

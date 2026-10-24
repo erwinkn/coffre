@@ -55,3 +55,18 @@ test('another key, a tampered byte or a malformed string opens to null', () => {
   assert.equal(unseal(KEY, null), null);
   assert.equal(unseal(KEY, undefined), null);
 });
+
+test('a sealed value spelled another way does not open', () => {
+  // Node's base64url decoder skips characters outside the alphabet and
+  // padding, and ignores the last character's unused bits: each of these
+  // decodes to the sealed bytes, but none is the string seal wrote.
+  const sealed = seal(KEY, VALUE, 600);
+  const body = sealed.slice(3);
+  const last = body.at(-1)!;
+  const sameBits = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_'
+    .split('')
+    .find((char) => char !== last && Buffer.from(body.slice(0, -1) + char, 'base64url').equals(Buffer.from(body, 'base64url')));
+  for (const spelling of [`v1.${body}=`, `v1.!${body}`, `v1. ${body}`, `v1.${body.slice(0, 4)}\n${body.slice(4)}`, ...(sameBits ? [`v1.${body.slice(0, -1)}${sameBits}`] : [])]) {
+    assert.equal(unseal(KEY, spelling), null, JSON.stringify(spelling));
+  }
+});

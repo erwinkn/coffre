@@ -43,7 +43,7 @@ jobs:
       - name: Core properties
         if: matrix.engine == 'postgres'
         run: pnpm test:properties --long --seed=${{ steps.seed.outputs.seed }}
-      - name: Server operation sequences
+      - name: Server properties
         env:
           COFFRE_TEST_ENGINE: ${{ matrix.engine }}
         run: pnpm test:properties:server --long --seed=${{ steps.seed.outputs.seed }}

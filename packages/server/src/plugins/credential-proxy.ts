@@ -787,8 +787,16 @@ async function boundedText(request: Request, max: number): Promise<string | null
 
 /** One request through a credential: the handle checked, its values opened (or remembered), the request sent on with them. */
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
-  // Nothing the app writes leaves the credential's upstream: no dot segment, no slash or backslash smuggled in a segment.
-  if (rest.some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment))) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  // Nothing the app writes leaves the credential's upstream: no slash or backslash smuggled in a segment, and no dot
+  // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
+  // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
+  // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
+  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`).
+  const climbs = (segment: string): boolean => {
+    const read = bytesOf(segment);
+    return /[/\\\x00-\x1f\x7f\xc0\xc1]/.test(read) || /^\.{1,2}[ \t]*$/.test(read.split(';')[0]!) || (read !== segment && climbs(read));
+  };
+  if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
   const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
   const under = credential.base.pathname.replace(/\/$/, '');
@@ -895,8 +903,9 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const location = raw === null ? null : redact.whole(raw);
   let at: string | null = null;
   if (location !== null) {
-    const to = new URL(location, target);
-    const inside = to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
+    // A `Location` no URL reads, `//` say, is nowhere under the upstream.
+    const to = URL.canParse(location, target) ? new URL(location, target) : null;
+    const inside = to !== null && to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
       // The proxy's URL for it, and a query rule's parameter, kept or not, the app's placeholder, for it to follow and be let in.
       const moved = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);

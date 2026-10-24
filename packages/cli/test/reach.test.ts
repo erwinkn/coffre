@@ -83,7 +83,7 @@ test("import names a line it cannot parse by its number, its reason and its key,
   assert.equal(
     stderr,
     [
-      '  line 1: key must match ^[A-Za-z_][A-Za-z0-9_]*$',
+      '  line 1: key must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$',
       '  line 2: no "=" on this line',
       '  line 3: unterminated double quote (multi-line values are not supported) (TOKEN)',
       '  line 4: unexpected text after the closing quote (DATABASE_URL)',

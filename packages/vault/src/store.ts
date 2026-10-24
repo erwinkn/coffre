@@ -472,8 +472,10 @@ export async function natures(db: Queryable, secretIds: readonly string[]): Prom
 
 /**
  * For each version a rewrap would bring back into its secret, its nature
- * as stored when it is an old value, not the secret's current one; null
- * for the current one, which a mark wraps again with no value changing.
+ * when it is an old value, no looser than it was stored nor than its value
+ * was made since (the newest version of its very ciphertext), not the
+ * secret's current one; null for the current one, which a mark wraps again
+ * with no value changing.
  */
 export async function restoredNatures(
   db: Queryable,
@@ -483,7 +485,11 @@ export async function restoredNatures(
   const { secrets, secretVersions } = tablesOf(db);
   const [current, versions] = await Promise.all([
     db.select({ id: secrets.id, version: secrets.currentVersionId }).from(secrets).where(inArray(secrets.id, [...new Set(items.map((item) => item.secretId))])),
-    db.select({ id: secretVersions.id, sensitive: secretVersions.sensitive, plain: truth(isNotNull(secretVersions.plaintext)) }).from(secretVersions)
+    db.select({
+      id: secretVersions.id,
+      sensitive: sql<boolean | number>`(${secretVersions.sensitive} OR (${heldAs(secretVersions, sql`same.sensitive`)}))`,
+      plain: sql<boolean | number>`(${secretVersions.plaintext} IS NOT NULL AND (${heldAs(secretVersions, sql`same.plaintext IS NOT NULL`)}))`,
+    }).from(secretVersions)
       .where(inArray(secretVersions.id, [...new Set(items.map((item) => item.from))])),
   ]);
   const currentOf = new Map(current.map((row) => [row.id, row.version]));
@@ -666,6 +672,12 @@ export type SecretVersion = {
   current: boolean;
   /** Whether its secret's newest version is sensitive: what a rewrap of it may not loosen. */
   newestSensitive: boolean;
+  /**
+   * Whether its value was made sensitive since: the newest version of its
+   * secret with its very ciphertext, which a mark in place or a restore wraps
+   * again unchanged, is. What a rewrap of it may not loosen either.
+   */
+  heldSensitive: boolean;
 };
 
 export async function versions(db: Queryable, ids: readonly string[]): Promise<SecretVersion[]> {
@@ -691,6 +703,7 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       // The newest by the versions' own order: the app may write `current_version_id`, never a version.
       newest: sql<number | string>`(SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
       newestSensitive: sql<boolean | number>`(SELECT newest.sensitive FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId} ORDER BY newest.version DESC LIMIT 1)`,
+      heldSensitive: sql<boolean | number>`(${heldAs(secretVersions, sql`same.sensitive`)})`,
     })
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
@@ -717,5 +730,15 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
     current: row.currentVersionId === row.id && Number(row.newest) === row.version,
     // SQLite answers a subquery's boolean as a number.
     newestSensitive: Boolean(row.newestSensitive),
+    heldSensitive: Boolean(row.heldSensitive),
   }));
+}
+
+/**
+ * `column` of the newest version of a version's secret with its very ciphertext: its value, as it is held now. Known
+ * by its IV and tag, which under one data key name one ciphertext, and which, unlike the ciphertext, no erasure empties.
+ */
+function heldAs(secretVersions: ReturnType<typeof tablesOf>['secretVersions'], column: SQL): SQL {
+  return sql`SELECT ${column} FROM secret_versions same WHERE same.secret_id = ${secretVersions.secretId}
+    AND same.iv = ${secretVersions.iv} AND same.auth_tag = ${secretVersions.authTag} ORDER BY same.version DESC LIMIT 1`;
 }

@@ -28,7 +28,7 @@ import {
   projectFolderOf,
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { can, canAnywhere, lists, permissionsAt, placeOf, seesProject, type Caller } from './caller.ts';
+import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
 import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
@@ -140,7 +140,9 @@ const iso = (value: Date | null) => value?.toISOString() ?? null;
 export async function me(ctx: ApiContext): Promise<Me> {
   const { caller } = ctx;
   const reachable: Me['environments'] = [];
-  const [known, setting] = await Promise.all([places(ctx.db), serviceSettingFor(ctx.vault, caller)]);
+  // Only the projects the caller reaches: a page's every render asks, and the instance may hold many more.
+  const within = projectsReached(caller) ?? undefined;
+  const [known, setting] = await Promise.all([places(ctx.db, { within }), serviceSettingFor(ctx.vault, caller)]);
   for (const project of known) {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {

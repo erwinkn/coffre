@@ -79,9 +79,11 @@ export class LocalKekProvider implements KekProvider {
 
   async unwrap(wrapped: WrappedDek, ctx: SecretContext, operation?: KeyOperation): Promise<Buffer> {
     checkOperation(operation);
-    if (wrapped.kekProvider !== this.provider || wrapped.kekId !== this.keyId) {
+    // The version too: the wrap binds this key's, and a row claiming
+    // another would otherwise open, its claim never checked.
+    if (wrapped.kekProvider !== this.provider || wrapped.kekId !== this.keyId || wrapped.kekVersion !== this.keyVersion) {
       throw new KekBadClaimError(
-        `wrapped DEK is for ${wrapped.kekProvider}:${wrapped.kekId}, not ${this.provider}:${this.keyId}`,
+        `wrapped DEK is for ${wrapped.kekProvider}:${wrapped.kekId} version ${wrapped.kekVersion}, not ${this.provider}:${this.keyId} version ${this.keyVersion}`,
       );
     }
     if (wrapped.bytes.length !== IV_BYTES + TAG_BYTES + DEK_BYTES) {

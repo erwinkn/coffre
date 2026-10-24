@@ -93,6 +93,14 @@ test('tampering with the wrapped DEK is detected', async () => {
   await assert.rejects(() => open(envelope, dev, keks));
 });
 
+test('an envelope claiming another version of its vault key does not open', async () => {
+  const { dev, keks } = fixture();
+  const envelope = await seal(Buffer.from('v1 only', 'utf8'), dev, keks);
+  assert.equal(envelope.kekVersion, '1');
+
+  await assert.rejects(() => open({ ...envelope, kekVersion: '2' }, dev, keks), KekBadClaimError);
+});
+
 test('a wrapped DEK cannot be lifted onto another environment row', async () => {
   const { dev, prod, keks } = fixture();
 

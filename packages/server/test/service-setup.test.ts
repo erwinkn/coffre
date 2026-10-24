@@ -289,6 +289,16 @@ test('the setting keeps prod to Admins: a prod Developer sets up dev only, an Ad
   assert.equal((await root.audit.verify()).ok, true);
 });
 
+test('an Admin of the whole instance whose role holds nothing still sees the setting name every project it names', async () => {
+  // An Owner keeps Admins for people alone: the role reads no project, and its holders still run the instance.
+  await root.roles.set('admin', { name: 'Admin', description: 'People, not projects.', permissions: [], protected: [] }, { instance: true });
+  await root.members.add('user:hr@acme.example', { role: 'admin' });
+  await root.settings.set({ serviceAccounts: { projects: { except: ['billing'] } } });
+  const hr = await clientFor(deps, 'hr@acme.example').me();
+  assert.equal(hr.runsInstance, true);
+  assert.deepEqual(hr.serviceSetup, { projects: { except: ['billing'] }, environments: 'all' });
+});
+
 test("a person's list shows the accounts they manage, all they hold, and nobody else's", async () => {
   await ada.members.add(CI);
   await ada.access.set(CI, { 'market/dev': 'developer' });

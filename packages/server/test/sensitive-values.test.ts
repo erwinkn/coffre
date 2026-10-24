@@ -186,12 +186,13 @@ test('a rollback brings an old value back as it was held, and sensitive while th
   const [restored] = (await entries('secret.restore')).filter((entry) => entry.decision === 'allow');
   assert.deepEqual(restored!.metadata, { key: 'REGION', version: 4, from: 1, sensitive: true });
 
-  // Written again as a secret, the key takes back the plain value as plain, and the sensitive one as sensitive.
+  // Written again as a secret, the key takes back the plain version as that value was made last, sensitive, never plain:
+  // no person is shown a value once made sensitive (R16), and the sensitive version as sensitive.
   await root.secrets.set('market/dev', { REGION: { value: 'eu-west-1', sensitivity: 'secret' } });
   await root.secrets.restore('market/dev/REGION', 1);
-  assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, 'eu-west-3');
+  assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, null);
   await root.secrets.restore('market/dev/REGION', 3);
-  assert.deepEqual((await history('market/dev/REGION')).slice(0, 3), [[7, 'sensitive'], [6, 'plain'], [5, 'secret']]);
+  assert.deepEqual((await history('market/dev/REGION')).slice(0, 3), [[7, 'sensitive'], [6, 'sensitive'], [5, 'secret']]);
   assert.deepEqual((await ci.secrets.reveal('market/dev/REGION')).values, { REGION: 'eu-west-3' });
 });
 
@@ -475,6 +476,32 @@ test("a write's entry says what the key was as it commits: a reference's source 
   assert.equal((await levels('market/prod')).WEBHOOK, 'secret', 'said so');
   // The source's mark committed first: the newest is the write over the reference.
   assert.deepEqual((await writesOf('WEBHOOK')).at(-1), { key: 'WEBHOOK', version: 1, was: 'sensitive' });
+});
+
+test('the vault judges a rollback no looser than its version, nor than its value was made since in place; an Owner loosens the current value alone', async (t) => {
+  // HOOK: v1 a secret, v2 that value made sensitive in place, v3 another value, a secret.
+  await root.secrets.set('market/dev', { HOOK: 'whsec_first_0123456789' });
+  await root.secrets.set('market/dev', { HOOK: { sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { HOOK: { value: 'whsec_second_0123456789', sensitivity: 'secret' } });
+  await root.secrets.restore('market/dev/HOOK', 1);
+  assert.deepEqual((await history('market/dev/HOOK'))[0], [4, 'sensitive'], 'the app asks for it sensitive');
+  // An app that asked for it looser, a secret, is refused by the vault itself (R16): the vault is the backstop.
+  await root.secrets.set('market/dev', { HOOK: { value: 'whsec_third_0123456789', sensitivity: 'secret' } });
+  const rewrap = deps.vault.rewrap;
+  t.mock.method(deps.vault, 'rewrap', (input: Parameters<typeof rewrap>[0]) => rewrap({ ...input, items: input.items.map((item) => ({ ...item, secret: { ...item.secret, sensitive: false } })) }));
+  await assert.rejects(root.secrets.restore('market/dev/HOOK', 1), /only by writing it again/);
+  assert.deepEqual((await history('market/dev/HOOK'))[0], [5, 'secret'], 'nothing restored');
+  t.mock.restoreAll();
+
+  // TOKEN: v1 sensitive, v2 that value made a secret in place by an Owner (R30), v3 another value: v1 comes back
+  // sensitive, as it was, and v2 a secret, as it was; the loosening was the current value's then, not every version's.
+  await root.secrets.set('market/dev', { TOKEN: { value: 'tok_first_0123456789', sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { TOKEN: { sensitivity: 'secret' } });
+  await root.secrets.set('market/dev', { TOKEN: 'tok_second_0123456789' });
+  await root.secrets.restore('market/dev/TOKEN', 1);
+  assert.deepEqual((await history('market/dev/TOKEN'))[0], [4, 'sensitive']);
+  await root.secrets.restore('market/dev/TOKEN', 2);
+  assert.deepEqual((await history('market/dev/TOKEN'))[0], [5, 'sensitive'], 'its value was made sensitive since, by the restore of v1');
 });
 
 test("a rollback's entry says what the key was as it commits: a reference's source written again as a secret while it is rewrapped", async (t) => {
