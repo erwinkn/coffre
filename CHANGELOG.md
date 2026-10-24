@@ -27,6 +27,13 @@
   conformance and the Action sign services in with a key. A deployment
   needs a workload gate before any session is accepted; without one the
   routes answer 503. No database migration.
+- **A Cloudflare binding's call opens values** (the workload-access design,
+  section 9.2). A plugin's `use` for a caller from `bindingRoute` answered
+  500: the vault takes only a credential's ID, and the call has none. Its
+  vault entries now name no credential; its app entries name the binding,
+  `binding:<id>`, and the two join on the request's ID. A binding unbound
+  while its call was in flight releases nothing, as a revoked session's
+  read does not.
 - **Breaking: a tunnel with no `hosts` dials only an address.** Its URL is
   a secret's value, whose host anyone who writes the environment picks,
   and a name may resolve to a private address, which the lexical check

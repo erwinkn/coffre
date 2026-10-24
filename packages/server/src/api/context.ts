@@ -40,6 +40,8 @@ export type ApiContext = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
+  /** The Cloudflare service binding a call came through, which stands in for a credential (`AuthenticatedIdentity.bindingId`). */
+  bindingId?: string | null;
   /**
    * That credential, when a trust binding issued it for a CI run, or it is
    * a personal token: every entry the request writes names it, the vault's
@@ -226,7 +228,7 @@ export const POLICY_CHANGED = 'policy_changed';
  * came in must still stand (`credentialStill`).
  */
 export async function recorded<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
   work: (log: AuditEntry[], fence: () => void, at: (where: EntryFields) => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
@@ -250,8 +252,8 @@ export async function recorded<T>(
 
 /**
  * Refuse, 401, if the way the request came in has ended since it was
- * checked: its credential revoked, the MCP connection it came through
- * revoked, or its member removed, even if admitted again since, at a new
+ * checked: its credential revoked, the MCP connection or the Cloudflare
+ * binding it came through revoked or unbound, or its member removed, even if admitted again since, at a new
  * generation. The vault releases values on the member's standing and
  * grants, under their row and its head, and is told the credential only to
  * name it in its entries; the app checked the credential before asking it,
@@ -270,7 +272,7 @@ export async function recorded<T>(
  *   checked again: revoked                           401, not the values
  */
 export async function credentialStill(
-  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>,
+  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
   db: Queryable,
   action = 'secret.read',
   where: EntryFields = {},
@@ -279,6 +281,7 @@ export async function credentialStill(
     principal: formatMember(ctx.caller.principal),
     generation: ctx.caller.generation,
     credentialId: ctx.credentialId,
+    bindingId: ctx.bindingId ?? null,
     connectionId: ctx.via?.connectionId ?? null,
   });
   // Logged, so that a release the vault logged before this read shows withheld, not handed to an ended credential.
@@ -347,13 +350,23 @@ export function need(
   );
 }
 
+/**
+ * What the vault's entries name a request by: the credential or connection
+ * it came in on, an ID. A call through a Cloudflare binding came in on
+ * neither: its app entries name the binding, `binding:<id>`, and lead to
+ * the vault's through the request's ID.
+ */
+export function vaultCredential(ctx: { provenance?: string | null; bindingId?: string | null }): string | null {
+  return ctx.bindingId == null ? (ctx.provenance ?? null) : null;
+}
+
 /** The caller, as the vault knows them, for this request. */
-export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provenance?: string | null }, operationId: string | null = null): Asking {
+export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provenance?: string | null; bindingId?: string | null }, operationId: string | null = null): Asking {
   return {
     principal: formatMember(ctx.caller.principal),
     requestId: ctx.requestId,
     operationId,
-    credentialId: ctx.provenance ?? null,
+    credentialId: vaultCredential(ctx),
     ...through(ctx.caller),
   };
 }

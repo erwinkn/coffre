@@ -28,7 +28,7 @@ import { policyRevision, type PolicyChange } from '@coffre/core/vault';
 import { memberHoldings, places, roleHolders, type ResolvedPath } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { placeOf } from './caller.ts';
-import { type ApiContext, denied, POLICY_CHANGED, refuse, Refusal, through, withRefusals } from './context.ts';
+import { type ApiContext, denied, POLICY_CHANGED, refuse, Refusal, through, vaultCredential, withRefusals } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 
@@ -187,7 +187,7 @@ export async function changeRole(
       revision,
       requestId: ctx.requestId,
       operationId: randomUUID(),
-      credentialId: ctx.provenance,
+      credentialId: vaultCredential(ctx),
       ...through(ctx.caller),
     });
     if (!result.ok) throw policyRefused(result.refusal);
@@ -372,7 +372,7 @@ export async function protectIds(ctx: ApiContext, projectId: string, environment
     revision: revisionOf(ctx),
     requestId: ctx.requestId,
     operationId: randomUUID(),
-    credentialId: ctx.provenance,
+    credentialId: vaultCredential(ctx),
     ...through(ctx.caller),
   });
   if (!result.ok) throw policyRefused(result.refusal);

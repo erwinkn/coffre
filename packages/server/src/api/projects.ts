@@ -29,7 +29,7 @@ import {
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
-import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, withRefusals } from './context.ts';
+import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, vaultCredential, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
@@ -754,7 +754,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         principal,
         requestId: ctx.requestId,
         operationId,
-        credentialId: ctx.provenance,
+        credentialId: vaultCredential(ctx),
         ...through(ctx.caller),
         changes: grants.map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: null, expiresAt: null })),
       });

@@ -43,7 +43,7 @@ import {
 } from '../db/queries.ts';
 import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf } from './caller.ts';
-import { type ApiContext, audited, denied, Refusal, requireInstance, through, withRefusals } from './context.ts';
+import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
@@ -718,7 +718,7 @@ export async function putMember(
       ...(input.role === undefined ? {} : { role: input.role, scope }),
       requestId: ctx.requestId,
       operationId: randomUUID(),
-      credentialId: ctx.provenance,
+      credentialId: vaultCredential(ctx),
       ...through(ctx.caller),
     });
     if (!result.ok) throw vaultRefused(result.refusal);
@@ -770,7 +770,7 @@ export async function removeMember(
       principal,
       requestId: ctx.requestId,
       operationId: randomUUID(),
-      credentialId: ctx.provenance,
+      credentialId: vaultCredential(ctx),
       ...through(ctx.caller),
     });
     if (!result.ok) {

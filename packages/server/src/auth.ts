@@ -33,6 +33,13 @@ export type AuthenticatedIdentity = {
   via: McpVia | null;
   /** The workload's key-bound session the request came in on, its proof checked and its nonce the gate's; none for anything else. */
   workload?: StandingSession | null;
+  /**
+   * The Cloudflare service binding a call came through (docs/design/workload-access.md,
+   * section 9.2), which stands in for a credential: no credentials row, so
+   * `credentialId` is null, and `provenance` is `binding:<id>`. None for
+   * anything else.
+   */
+  bindingId?: string | null;
 };
 
 type AuthenticationRuntime = Pick<

@@ -370,7 +370,9 @@ async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sou
       caller: callerOf,
       requestId: crypto.randomUUID(),
       sourceIp,
-      credentialId: caller.credentialId,
+      // A binding's call has no credentials row: its entries name the binding, `binding:<id>`, and its fence checks the binding.
+      credentialId: standing.kind === 'session' ? caller.credentialId : null,
+      bindingId: standing.kind === 'binding' ? binding.id : null,
       credentialExpiresAt: row?.expiresAt.toISOString() ?? null,
       provenance: caller.credentialId,
       personalToken: null,
