@@ -118,6 +118,11 @@ const show = (value) => {
     }
     // Another model's entry: its kind, what it names, and the operation that wrote it.
     if ('kind' in value && 'id' in value) return `${value.kind}${named(value, ['kind', 'id'])} (${value.id[0]})`;
+    // Audit.tla's: its kind, and what is not as written, and what a beat or a checkpoint says.
+    if ('kind' in value && 'wver' in value) {
+      const said = named(value, ['kind', 'wver', 'ver', 'vver', 'atVer', 'lapVer', 'claimsVer']).replace(/ (verified|at|lap|lapEnd|edited|fEdit|fault|claims) 0\b/g, '');
+      return `${value.kind}${said}${value.ver === value.wver ? '' : ' rechained'}`;
+    }
     return `[${Object.entries(value).map(([k, v]) => `${k} ${show(v)}`).join(', ')}]`;
   }
   return String(value);
@@ -141,6 +146,10 @@ function change(name, before, after) {
   }
   if (Array.isArray(after) && Array.isArray(before) && after.length > before.length) {
     return after.slice(before.length).map((x) => `${name} +${show(x)}`);
+  }
+  // Rows changed in place: each one, as it is now.
+  if (Array.isArray(after) && Array.isArray(before) && after.length === before.length) {
+    return after.flatMap((x, i) => (same(x, before[i]) ? [] : [`${name}[${i + 1}] ${show(before[i])} -> ${show(x)}`]));
   }
   if (after !== null && typeof after === 'object' && !Array.isArray(after) && before !== null && typeof before === 'object') {
     return Object.keys(after)
@@ -186,7 +195,8 @@ for (const step of trace.slice(1)) {
     state[name] = value;
   }
   // The process that moved: its label, its locals or its operation changed.
-  const who = Object.keys(state.pc).find((p) => ['pc', 'l', 'op'].some((v) => !same(before[v][p], state[v][p]))) ?? '';
+  // A model without processes, as Tunnel.tla, has nobody to name.
+  const who = state.pc === undefined ? '' : Object.keys(state.pc).find((p) => ['pc', 'l', 'op'].some((v) => !same(before[v][p], state[v][p]))) ?? '';
   const doing = who === '' ? '' : describe(state.op[who]);
   const label = who === '' ? '' : state.pc[who];
   console.log(`${String(step.n).padStart(3)}. ${who.padEnd(9)} ${step.action.padEnd(17)} ${doing.padEnd(26)} -> ${label.padEnd(15)} ${lines.join('; ')}`.trimEnd());

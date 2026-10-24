@@ -628,8 +628,9 @@ the MACs still expose changes made without the keys.
 Every five minutes the Cron trigger runs a beat. The app first walks the
 chain from where the last beat's walk ended, every link and hash and its
 own entries by their MACs, then appends an `audit.heartbeat` entry that
-says how far it got (`verified`). Then it asks the vault to checkpoint the
-log. The vault reads the log itself: from its newest checkpoint, it
+says how far it got (`verified`); or, if the walk found the chain broken,
+where it began, and the entry it found. Then it asks the vault to
+checkpoint the log. The vault reads the log itself: from its newest checkpoint, it
 checks that the prefix that checkpoint signed is still there, its hash
 where it was and every entry of it, by one count of the log's index;
 recomputes the chain since, every hash from content and its own entries
@@ -688,8 +689,10 @@ warning in the app's log, unless such a refusal stands.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and the app's, by its MAC, its walk found the chain whole and
-could run (`broken` otherwise), and a
-checkpoint after it carries the vault's signature. A log that stops taking
+could run (`broken` otherwise), a
+checkpoint after it carries the vault's signature over a prefix still
+there, and the next beat's walk, run then, finds the chain whole to its
+head. A log that stops taking
 writes, a vault that stops signing, a cut in the log, an entry forged in
 the app's name or a wrong vault key all turn it red within one beat; an
 entry edited in place, within two laps. There is no heartbeat table.
@@ -719,6 +722,42 @@ without them: an entry forged in the app's name, linked to the chain as
 anyone can, is signed over. The beat's own walk finds it first, and leaves
 its `verified` before it, so every check starts before it too, and finds
 it, until someone acts.
+
+A beat's own row is the next beat's memory, and whoever writes the
+database can write it too: hide it, so that no read of beats finds it,
+edit what it says, and put it back. So a beat reads where to resume in
+the snapshot it walks in, and only from a beat its MAC vouches for, at a
+point before that beat's row. Every beat row past that point is then one
+the walk reads, and one hidden or edited there is an entry the walk finds
+changed. Two instances beating at once can commit out of order: beat A
+walks past entry 812, beat F finds 812 edited and commits, then A commits
+after it, saying the chain verified past 812. A's walk began before F
+committed, so F's row lies past where A verified to, and the next walk
+reads it: it resumes no further than where the walk of any broken beat it
+reads began (`resumePoint`), and finds 812 again. Once 812 is put back, a
+beat that walks over it clean clears F: each beat records where its walk
+began and the newest entry its snapshot held, so the next can tell that
+this walk went over 812, after F found it, and found it whole. The walks
+after it go on from where it ended, however far F's row lies past where
+F's walk began. Readiness runs that
+same walk, from the same point to the head, so it is red as soon as F
+commits, and red while F's row is hidden. Its cost is the entries since
+the newest beat's walk began, as a beat's own walk: one beat's worth of
+writes. Past 10,000 of them readiness is red, as the beat would be. On
+SQLite, kept for tests and local development, its snapshot is a
+transaction like any other there, which waits for and holds up writes for
+the length of that walk.
+
+One way round it stays open, for a beat interval: the app's walk checks
+the vault's rows by their hashes only, so F made one of the vault's rows,
+its hash recomputed, while only the vault's rows come after it, and those
+chained again, is no beat and no fault to the app. Readiness is green on
+the beat before F until the vault's next checkpoint finds F by its MAC
+and refuses; from then on no checkpoint covers a beat, and readiness is
+red for good, on that refusal ([formal.md](formal.md#the-audit-chain-and-the-tunnel),
+"A finder made one of the vault's rows"). The model of
+it, against someone who hides, edits and puts back any beat row at any
+step, is [formal.md](formal.md#the-audit-chain-and-the-tunnel).
 
 `coffre verify log`, and the audit page's "Verify whole log", walk the log
 from its first entry, as the tallies take on trust: a stretch a request,
@@ -1095,7 +1134,9 @@ Each limit is stated here once; the other documents link to it.
   app or vault process that ran across the rewind, which refuses to append
   behind the head it remembers, and, with AWS KMS, CloudTrail, whose Decrypts
   then have no entries. Restarting both processes after a restore is what
-  makes a deliberate rewind work ([restore.md](restore.md)).
+  makes a deliberate rewind work ([restore.md](restore.md)). A cut of the
+  newest entries can take a heartbeat that found the log broken, and its
+  finding, with it.
 - **A cut in the middle of the log is found at the next checkpoint, and an
   edit in place within a lap of the past, not at once.** Say Ada was
   removed at entry 812, and the database's owner deletes 812 and puts back

@@ -142,27 +142,116 @@ export async function walkChain(
   }
 }
 
-/** Heartbeats looked back over for the newest that says how far the app verified: an hour of them. */
+/** Heartbeats looked back over for the newest the app wrote, by its MAC: an hour of them. */
 const ATTESTATIONS_BACK = 12;
 
+/** Heartbeats read past where a walk would resume, at most: far more than ever commit while one walks. */
+const BEATS_SINCE = 1000;
+
 /**
- * How far the app has verified the chain, as its newest heartbeat says
- * (`verified`): every number, link and hash, and its own entries' MACs,
- * from the first entry through there, each beat's walk going on from the
- * one before (`writeAuditHeartbeat`). The heartbeat's own MAC is checked
- * here, since the check that trusts it may not reach it: one in the app's
- * name it did not write is passed over, and an earlier one's walk, which
- * goes past it, finds it. Before the first such beat, the first entry.
+ * Where the next walk of the chain resumes: what the newest heartbeat the
+ * app wrote says it verified (`verified`), a walk's end, or, if it found
+ * the chain broken, where it began; and no further than where the walk of
+ * any broken one after that point began, until a later walk clears it.
+ * Read in the snapshot the walk runs in (`writeAuditHeartbeat`,
+ * `auditReadiness`), so that every beat row past it is one the walk reads:
+ * one hidden, forged or deleted there is an entry it finds changed
+ * (formal/Audit.tla, `OneSnapshot`).
+ *
+ * A beat counts only by its MAC, and only for a point before its own row,
+ * which its MAC covers: anyone who writes rows can change one, never make
+ * one (`CursorByMac`). A broken one past that point found the chain
+ * broken in a walk the newest one's did not see: two beats at once, the one
+ * that walked first committing last. Its finding stands (`NoResumePastFinding`)
+ * until a clean beat cleared it: one that walked over the entry it found,
+ * from before it, in a snapshot that held the finder (`head`), so after the
+ * finder found it, and found it whole (`Clears`, `ClearsOverFault`).
+ * Without that, a finder whose row lies more than a walk past where its
+ * walk began would bring every walk back there once the entry is put
+ * back, and none would reach past it. One past the point that its MAC
+ * does not vouch for is read by the walk, and found changed. Before the
+ * first beat that walked, or past the hour of them, the first entry; past
+ * `BEATS_SINCE` since, the first entry too, and `closed`.
  */
-export async function attested(db: Queryable, chainKey: Buffer): Promise<ChainPoint> {
+export async function resumePoint(db: Queryable, chainKey: Buffer): Promise<ChainPoint> {
+  return (await resume(db, chainKey)).from;
+}
+
+/**
+ * `resumePoint`, with what a beat records of it: `seen`, the newest beat
+ * its MAC vouches for, whose row the snapshot holds, and so every row
+ * before it; and `closed`, whether it fell back to the first entry for too
+ * many beats past the point, which readiness answers red without walking.
+ */
+export async function resume(db: Queryable, chainKey: Buffer): Promise<{ from: ChainPoint; seen: bigint; closed: boolean }> {
   const key = appLogKey(chainKey);
+  let seen = -1n;
+  let base: Said | undefined;
   for (const beat of await newestHeartbeats(db, ATTESTATIONS_BACK)) {
-    if (!verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [key] }).ok) continue;
-    const { verified } = JSON.parse(beat.metadata) as { verified?: { seq?: unknown; hash?: unknown } };
-    const { seq, hash } = verified ?? {};
-    if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || BigInt(seq) >= beat.seq) continue;
-    if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) continue;
-    return { seq: BigInt(seq), hash: Buffer.from(hash, 'hex') };
+    base = said(beat, key);
+    if (base !== undefined) break;
   }
-  return CHAIN_START;
+  if (base === undefined) return { from: CHAIN_START, seen, closed: false };
+  seen = base.seq;
+  let from = base.point;
+  if (from.seq < 0n) return { from, seen, closed: false };
+  const since = await newestHeartbeats(db, BEATS_SINCE, from.seq);
+  if (since.length === BEATS_SINCE) return { from: CHAIN_START, seen, closed: true };
+  const beats = since.map((beat) => said(beat, key)).filter((beat) => beat !== undefined);
+  for (const finder of beats) {
+    if (finder.broken === null || finder.point.seq >= from.seq) continue;
+    if (!beats.some((beat) => clears(beat, finder))) from = finder.point;
+  }
+  return { from, seen, closed: false };
+}
+
+/** What a beat the app wrote says, by its MAC; undefined for one it did not write, or that ran no walk. */
+type Said = {
+  seq: bigint;
+  /** Where the next walk goes on from: where this one ended, or, if it found the chain broken, where it began. */
+  point: ChainPoint;
+  /** The entry it found broken, or null; NaN if it does not say which. */
+  broken: { seq: number } | null;
+  /** Where its walk began, and the newest entry its snapshot held as the app wrote it: null in a beat before 0.12. */
+  walk: { from: ChainPoint; head: bigint } | null;
+};
+
+function said(beat: Awaited<ReturnType<typeof newestHeartbeats>>[number], key: LogKey): Said | undefined {
+  if (!verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [key] }).ok) return undefined;
+  const { verified, broken, from, head } = JSON.parse(beat.metadata) as { verified?: unknown; broken?: { seq?: unknown }; from?: unknown; head?: unknown };
+  // One that ran no walk, its database out of reach, says nothing of where to resume: the walk from an older
+  // one's point reads its row.
+  if (verified === undefined && broken === undefined) return undefined;
+  const started = from === undefined ? CHAIN_START : pointIn(from, beat.seq);
+  return {
+    seq: beat.seq,
+    point: pointIn(verified, beat.seq) ?? CHAIN_START,
+    broken: broken === undefined ? null : { seq: typeof broken.seq === 'number' && Number.isSafeInteger(broken.seq) ? broken.seq : Number.NaN },
+    walk: typeof head === 'number' && Number.isSafeInteger(head) && BigInt(head) < beat.seq && started !== undefined ? { from: started, head: BigInt(head) } : null,
+  };
+}
+
+/** A point a beat names, before its own row: undefined if it names none it can. */
+function pointIn(value: unknown, before: bigint): ChainPoint | undefined {
+  const { seq, hash } = (value ?? {}) as { seq?: unknown; hash?: unknown };
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || BigInt(seq) >= before) return undefined;
+  if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return undefined;
+  return { seq: BigInt(seq), hash: Buffer.from(hash, 'hex') };
+}
+
+/**
+ * Whether `beat` cleared what `finder` found: a clean walk of its, in a
+ * snapshot that held the finder's row, so begun after the finder's, that
+ * went over the entry found from before it. A finder that found the entry
+ * it began from changed, its hash not the one it verified, is cleared only
+ * by a walk that began there and found that hash again. A beat before 0.12,
+ * which says neither, clears nothing.
+ */
+function clears(beat: Said, finder: Said): boolean {
+  if (beat.broken !== null || beat.walk === null || beat.walk.head < finder.seq) return false;
+  const found = finder.broken!.seq;
+  if (!Number.isSafeInteger(found)) return false;
+  const { from } = beat.walk;
+  if (BigInt(found) === finder.point.seq) return from.seq === finder.point.seq && from.hash.equals(finder.point.hash);
+  return from.seq < BigInt(found) && BigInt(found) <= beat.point.seq;
 }

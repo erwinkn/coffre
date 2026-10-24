@@ -2250,12 +2250,12 @@ function talliedCheckpoints(db: Queryable, where?: SQL) {
 }
 
 /** Up to `limit` of the app's newest heartbeats, whole, newest first, with the database's clock: what each says the app had verified. */
-export async function newestHeartbeats(db: Queryable, limit: number) {
+export async function newestHeartbeats(db: Queryable, limit: number, after: bigint | null = null) {
   const { auditLog } = tablesOf(db);
   const rows = await db
     .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash, now: clockMillis(db) })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'audit.heartbeat'), eq(auditLog.decision, 'allow')))
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'audit.heartbeat'), eq(auditLog.decision, 'allow'), after === null ? undefined : gt(auditLog.seq, after)))
     .orderBy(desc(auditLog.seq))
     .limit(limit);
   return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
@@ -2292,7 +2292,8 @@ export async function auditActionCounts(
 /**
  * What readiness reads: the newest heartbeat, with its age by the
  * database's clock, so a skewed application server cannot hide a stale
- * one; and the newest checkpoint the vault signed.
+ * one; and the newest checkpoint the vault signed. Read in one snapshot
+ * (`auditReadiness`), so that both are of the same instant.
  */
 export async function readiness(db: Queryable, appKey: LogKey): Promise<{
   beat: { seq: bigint; ageSeconds: number; metadata: string; authentic: boolean } | null;
