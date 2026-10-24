@@ -90,15 +90,14 @@ test('readLimitedJson refuses a top-level __proto__ key, as readJson does', asyn
   await assert.rejects(readLimitedJson(new Request('https://x/', { method: 'POST', body: '{"__proto__":1}' }), 1024), /__proto__/);
 });
 
-test('an object body names at most MAX_BODY_KEYS entries, refused before validation', async () => {
+test('a bulk write or dismissal names at most MAX_BULK_KEYS keys, refused before its values are validated', async () => {
   await root.projects.create('market');
   await root.environments.create('market/dev');
   const is400 = (error: unknown) => { assert.equal((error as { status: number }).status, 400); return true; };
-  // A bulk write over the cap.
-  await assert.rejects(root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, 'v']))), is400);
-  // A dismissal map over the cap, the same guard.
-  await assert.rejects(root.environments.dismiss('market/dev', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, true as const]))), is400);
-  // A write at the cap is accepted.
-  await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`K${i}`, 'v'])));
-  assert.equal((await root.secrets.list('market/dev')).keys.length, 1000);
+  // Over the cap (2000): refused by the key-and-count pass, before the value union is validated.
+  await assert.rejects(root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K${i}`, 'v']))), is400);
+  await assert.rejects(root.environments.dismiss('market/dev', Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K${i}`, true as const]))), is400);
+  // A normal write is accepted; a write may name more keys than the 1000-key bulk-read cap returns.
+  await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, 'v'])));
+  assert.equal((await root.secrets.list('market/dev')).keys.length, 1001);
 });

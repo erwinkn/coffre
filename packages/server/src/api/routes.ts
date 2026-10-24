@@ -180,11 +180,12 @@ const roleDefinition = z.object({
 /**
  * The most keys a bulk write or dismissal map names at once, and the most
  * places an access patch sets: each entry drives its own grant or secret
- * write, so the count is capped as a scope's places are (the body's total
- * value count is bounded before this, in `readJson`). Above any real
- * environment, and well within one request's budget (R27).
+ * write, so the count is capped (the body's total value count is bounded
+ * before this, in `readJson`). Above the vault's bulk-read cap (1000), so a
+ * write may name more keys than one read returns, as a large environment
+ * does; above any real one, and within one request's budget (R27).
  */
-const MAX_BULK_KEYS = MAX_SCOPE_PLACES;
+const MAX_BULK_KEYS = 2000;
 
 /**
  * A record keyed by name, held to `max` keys before its values are
