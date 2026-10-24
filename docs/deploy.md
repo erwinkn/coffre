@@ -1058,9 +1058,14 @@ What it changes, and what it keeps:
   with the old key after the first step is a finding; a row forged with
   it before `key.rotate` is signed again with the rest, as a rotation
   cannot tell it from the instance's own. When the old key leaked, review
-  each service's tokens and bindings after the rotation
-  (`coffre tokens <service>`, `coffre trust <service>`), and your own
-  (`coffre tokens`).
+  after the rotation everything that grants access without a session,
+  which signing everyone out does not end: each person's linked sign-in
+  accounts (`coffre identities`, which they unlink with `coffre
+  identities unlink`; one forged for an Owner signs its holder in as
+  them), their MCP clients (`coffre apps`) and personal tokens (`coffre
+  tokens`), and each service's tokens, bindings and enrollment codes
+  (`coffre tokens <service>`, `coffre trust <service>`, `coffre enroll
+  <service> --list`).
 - **A key replaced without a rotation**, as before this release, is
   rotated from once it is listed in `previousAuditChainKeys`, like any
   other: the rows it signed are signed again, so the tokens and bindings
