@@ -62,7 +62,7 @@ function appRuntime(auth: AuthConfig) {
     verifier: { verify: async () => root },
     vault: vaultKnowing({}),
     db: noPolicyChanges,
-    schema: { migrated: true },
+    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
     plugins: [],
   } as never;
 }

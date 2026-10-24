@@ -21,6 +21,8 @@ import { logged } from '../logged.ts';
  *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
+ *   503 rotating           the app is moving to its new key: nothing is served until it has (key-rotation.ts)
+ *   503 app_key            the log is under an app key this deployment does not hold, or has moved on from its own
  *   500 internal_error     a bug; the details are in the server log only
  *
  * The message is written for a person and is safe to show them.
@@ -41,6 +43,8 @@ export const ERROR_STATUS = {
   not_implemented: 501,
   unavailable: 503,
   migrating: 503,
+  rotating: 503,
+  app_key: 503,
   internal_error: 500,
 } as const;
 

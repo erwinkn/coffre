@@ -43,6 +43,7 @@ before(async () => {
     db: deps.db,
     vault,
     chainKey: deps.chainKey,
+    previousChainKeys: [],
 
     signin: service,
     workloads: null,
@@ -51,7 +52,7 @@ before(async () => {
     publicUrl: ORIGIN,
     verifier: service,
     waitUntil,
-    schema: { migrated: true },
+    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
     rotateAfterDays: 365,
     plugins: [],
   };

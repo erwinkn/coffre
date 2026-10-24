@@ -33,7 +33,7 @@ import type { Duplex } from 'node:stream';
 import { openDatabase } from '@coffre/db/connect';
 import { migrateDatabase } from '@coffre/db/migrate';
 
-import { runScheduled, walkAuditBacklog } from './app.ts';
+import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { processGates } from './gate.ts';
 import { logged } from './logged.ts';
@@ -84,8 +84,13 @@ const BACKLOG_MARGIN_MS = 30_000;
 export function createCoffre(config: NodeConfig): CoffreNode {
   const resolved = checkNodeConfig(config);
   let runtime: Promise<CoffreRuntime> | undefined;
+  // A rotation to a new app key goes to its end before the first request is served: a Worker's CPU limit is not Node's.
   const ready = () =>
-    (runtime ??= openDatabase(config.database).then((database) => createRuntime(resolved, database.db, config.vault, nodeTransport(), undefined, processGates())));
+    (runtime ??= openDatabase(config.database).then(async (database) => {
+      const rt = createRuntime(resolved, database.db, config.vault, nodeTransport(), undefined, processGates());
+      await settleKey(rt);
+      return rt;
+    }));
   let timer: NodeJS.Timeout | undefined;
   return {
     request(request) {

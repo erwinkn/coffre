@@ -484,16 +484,16 @@ test('readiness believes only an anchor the app wrote, and a beat leaves one it 
   assert.deepEqual(await anchor.read(), forged);
 });
 
-test('an anchor sealed under the app key before a change of APP_KEY is not the app\'s: red, named, and left alone', async () => {
+test('an anchor sealed under the app key before a change of APP_KEY without a rotation is not the app\'s: red, named, and left alone', async () => {
   await beat();
   const sealed = await anchored();
   assert.equal(sealed.keyId, appLogKey(chainKey).keyId);
-  // The deployment's auditChainKey changed, and nothing re-seals the anchor yet.
+  // The deployment's auditChainKey changed, with no rotation from the key it is sealed under.
   const changed = Buffer.alloc(32, 9);
   assert.equal((await auditReadiness(db.runtime, vault, changed, anchor)).anchored, false);
   const { said, log } = warned();
   assert.equal(await writeAuditHeartbeat(db.runtime, changed, vault, anchor, log), false);
-  assert.ok(said.includes(`the audit anchor is sealed under ${sealed.keyId}, not the app's key ${appLogKey(changed).keyId}: auditChainKey changed, and nothing re-seals it yet. Empty its store, and the next beat re-anchors`), said.join('\n'));
+  assert.ok(said.includes(`the audit anchor is sealed under ${sealed.keyId}, not the app's key ${appLogKey(changed).keyId}: auditChainKey changed without a rotation that moved from ${sealed.keyId} (previousAuditChainKeys). Empty its store, and the next beat re-anchors`), said.join('\n'));
   assert.deepEqual(await anchor.read(), sealed);
 });
 

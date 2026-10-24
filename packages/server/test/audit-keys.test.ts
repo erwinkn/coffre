@@ -20,7 +20,7 @@ after(async () => {
 
 test("an Owner reads the app key's id, the vault key now, and its check, which opens only under that key", async () => {
   const keys = await root.audit.keys();
-  assert.deepEqual(keys.app, { keyId: appLogKeyId(deps.chainKey) });
+  assert.deepEqual(keys.app, { keyId: appLogKeyId(deps.chainKey), previous: [] });
   assert.deepEqual(keys.vault.current, { vaultId: 'test-kek-1', provider: 'local' });
   assert.equal(keys.vault.checks.length, 1);
   const [check] = keys.vault.checks;

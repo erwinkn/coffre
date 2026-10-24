@@ -127,6 +127,13 @@
       "when": 1792835445795,
       "tag": "0017_capped_alerts",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792871149580,
+      "tag": "0018_rotate_app_key",
+      "breakpoints": true
     }
   ]
 }

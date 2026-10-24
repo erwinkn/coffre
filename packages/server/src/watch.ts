@@ -9,13 +9,12 @@
 // Only coffre's own plugins carry a `Watcher`: core takes one only if
 // coffre's own code made it (`watcher`), whatever a plugin object says, so
 // a third-party plugin keeps routes and the API as a caller (R9).
-import { verifyEntries } from '@coffre/core/audit';
 import type { Checkpoint, CheckpointKey, LogHead, Outcome, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { anchorIsOwn, anchorKeyId, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
-import { appendAudit, appLogKey, CHAIN_START, walkChain, type AuditEntry } from './db/audit.ts';
+import { appendAudit, appVerifier, CHAIN_START, verifyAppEntries, walkChain, type AuditEntry } from './db/audit.ts';
 import { auditHashAt, auditRange } from './db/queries.ts';
 
 /** The key a watcher's hooks hang from on its plugin. */
@@ -67,6 +66,13 @@ export type WatchContext = {
   seal(fields: AnchorFields): AuditAnchor;
   own(anchor: AuditAnchor): boolean;
   keyId: string;
+  /**
+   * Whether a record is the watcher's, sealed under the key the app last
+   * moved on from (key-rotation.ts), which it may seal again under its own:
+   * the one thing a key the app replaced still vouches for. False when the
+   * app holds no such key.
+   */
+  resealable(anchor: AuditAnchor): boolean;
 };
 
 /** What a watcher does, beside its plugin's routes. Each hook gets its own context, and its own store. */
@@ -89,6 +95,8 @@ export type Watcher = {
   walkOn(ctx: WatchContext, store?: AnchorStore): Promise<boolean>;
   /** An Owner's acceptance of lost entries, `actor`'s, in their request's context. A refusal throws a `Refusal`. */
   acceptLoss(ctx: WatchContext, range: { from: number; to: number }): Promise<{ resumes: number | null }>;
+  /** Once the app has moved to a new key: its record sealed again under it, if it is `resealable`. Whether it is the app's now. */
+  reseal(ctx: WatchContext): Promise<boolean>;
 };
 
 /** What a watcher refuses a request for, which the API answers 400 with: never anything else it throws. */
@@ -112,6 +120,10 @@ export function watcherOf(plugin: object): Watcher | undefined {
 export type WatchDeps = {
   db: Database;
   chainKey: Buffer;
+  /** The keys `chainKey` replaced, which verify the entries from before the app moved on from each. */
+  previousChainKeys?: readonly Buffer[];
+  /** The key the app last moved on from, if it holds it (`CoffreRuntime['appKey']`). */
+  movedFrom?: Buffer | null;
   vault: Pick<Vault, 'checkpoint' | 'about'>;
   alert?: (text: string) => void;
   warn?: (obj: unknown, msg: string) => void;
@@ -124,6 +136,7 @@ const SCHEDULER: WatchActor = { actorType: 'system', actorId: 'coffre-scheduler'
 /** A watch context over `deps`: one per scheduled run, request or alarm. */
 export function watchContext(deps: WatchDeps): WatchContext {
   const { db, chainKey, vault } = deps;
+  const keys = { chainKey, previousChainKeys: deps.previousChainKeys ?? [] };
   let signed: ReturnType<Vault['checkpoint']> | undefined;
   return {
     log: {
@@ -133,7 +146,7 @@ export function watchContext(deps: WatchDeps): WatchContext {
             if ((await auditHashAt(tx, BigInt(head.seq))) !== head.hash) return { ok: false as const, failedAtSeq: head.seq, reason: 'changed or cut since the anchor held it' };
           }
           const start = from === null ? CHAIN_START : { seq: BigInt(from.seq), hash: Buffer.from(from.hash, 'hex') };
-          const walked = await walkChain(tx, chainKey, start, { to: BigInt(to) });
+          const walked = await walkChain(tx, keys, start, { to: BigInt(to) });
           if (!walked.ok) return { ok: false as const, failedAtSeq: Number(walked.failedAtSeq), reason: walked.reason };
           const at = walked.at.seq < 0n ? null : { seq: Number(walked.at.seq), hash: walked.at.hash.toString('hex') };
           return { ok: true as const, at, done: walked.done };
@@ -144,7 +157,7 @@ export function watchContext(deps: WatchDeps): WatchContext {
         if (row === undefined || row.seq !== BigInt(seq)) return null;
         const before = link === 'own' ? row.prevHash.toString('hex') : seq === 0 ? CHAIN_START.hash.toString('hex') : await auditHashAt(db, BigInt(seq) - 1n);
         if (before === null) return { ok: false, hash: row.hash.toString('hex'), reason: `entry ${seq - 1}, before it, is not in the log` };
-        const alone = verifyEntries([row], { startSeq: row.seq, startPrevHash: Buffer.from(before, 'hex'), keys: [appLogKey(chainKey)], chainOnly: ['vault'] });
+        const alone = verifyAppEntries([row], { startSeq: row.seq, startPrevHash: Buffer.from(before, 'hex') }, await appVerifier(db, keys));
         return alone.ok ? { ok: true, hash: row.hash.toString('hex') } : { ok: false, hash: row.hash.toString('hex'), reason: alone.reason };
       },
       append: async (action, metadata) => {
@@ -161,5 +174,6 @@ export function watchContext(deps: WatchDeps): WatchContext {
     seal: (fields) => sealAnchor(chainKey, fields),
     own: (anchor) => anchorIsOwn(chainKey, anchor),
     keyId: anchorKeyId(chainKey),
+    resealable: (anchor) => deps.movedFrom != null && anchorIsOwn(deps.movedFrom, anchor),
   };
 }

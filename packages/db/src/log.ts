@@ -15,7 +15,8 @@ import { clockMillis, engineOf, forUpdate } from './dialect.ts';
  * from any process take their numbers in one order. It then reads the
  * database clock, after the lock, and the log's last entry, which the head
  * must name: a head that does not was moved, or entries were deleted behind
- * it, and the append refuses.
+ * it, and the append refuses. The same statement says whether the log has
+ * moved on from the key it appends under (`KeyRetired`).
  *
  * This is deliberately not a queue and not best-effort: the entries go in
  * the caller's transaction, so if the append fails, what it records does
@@ -69,6 +70,26 @@ export class LogRewound extends Error {
     this.name = 'LogRewound';
   }
 }
+
+/**
+ * An append under a key the log has moved on from: an entry of its
+ * author's, `key.reseal` or `key.rotate`, names it as the key it moves
+ * from (`MOVES_FROM`), and a key moved from writes no more.
+ */
+export class KeyRetired extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'KeyRetired';
+  }
+}
+
+/**
+ * The actions by which an author moves to a new key, each under the new one
+ * and naming the key it moves from as its subject: from the first, that key
+ * writes no more (`KeyRetired`). The app's key rotation writes them
+ * (packages/server/src/key-rotation.ts).
+ */
+export const MOVES_FROM = ['key.reseal', 'key.rotate'] as const;
 
 /**
  * The newest head each writer has written, under each of its keys, while
@@ -138,7 +159,12 @@ export async function appendEntries(
   const head = locked?.head ?? (await lockLogHead(tx));
   await check?.(tx);
   const now = locked?.at ?? (await clockNow(tx))[0]!.now;
-  const last = locked === undefined ? (await lastEntry(tx))[0] : locked.last ?? undefined;
+  const [read] = locked === undefined ? await lastEntry(tx, { author: key.author, keyId: key.keyId }) : [];
+  const last = locked === undefined ? read : locked.last ?? undefined;
+  // The log's own last row says whether the log has moved on from this key: one statement, under the lock.
+  if (read !== undefined && Boolean(read.retired)) {
+    throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
+  }
 
   const expected = last === undefined ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
   if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
@@ -208,7 +234,9 @@ const clockNow = prepared((db) => db.select({ now: clockMillis(db) }).from(table
 
 const lastEntry = prepared((db) => {
   const { auditLog } = tablesOf(db);
-  return db.select({ seq: auditLog.seq, hash: auditLog.hash }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+  const moved = sql.raw(MOVES_FROM.map((action) => `'${action}'`).join(', '));
+  const retired = sql<boolean | number>`EXISTS (SELECT 1 FROM audit_log moved WHERE moved.author = ${sql.placeholder('author')} AND moved.subject_principal = ${sql.placeholder('keyId')} AND moved.action IN (${moved}))`;
+  return db.select({ seq: auditLog.seq, hash: auditLog.hash, retired }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
 });
 
 // --- reading the vault's entries back ---------------------------------------------

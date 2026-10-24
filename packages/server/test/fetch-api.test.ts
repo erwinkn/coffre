@@ -38,6 +38,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
+    previousChainKeys: [],
 
     signin: null,
     workloads: null,
@@ -46,7 +47,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     publicUrl: ORIGIN,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
-    schema: { migrated: true },
+    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
     rotateAfterDays: 365,
     plugins: [],
   };

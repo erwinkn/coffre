@@ -67,6 +67,7 @@ beforeEach(async () => {
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
+    previousChainKeys: [],
     signin,
     workloads: null,
     mcp: null,
@@ -74,7 +75,7 @@ beforeEach(async () => {
     publicUrl: ORIGIN,
     verifier: signin,
     waitUntil,
-    schema: { migrated: true },
+    schema: { migrated: true }, appKey: { settled: true, movedFrom: null },
     rotateAfterDays: 365,
     plugins: [],
   } as CoffreRuntime;

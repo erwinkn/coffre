@@ -145,8 +145,8 @@ before(async () => {
   const signinService = new SigninService({ ...base, signin: auth.signin });
   const deps: FixtureDeps = { ...base, signin: signinService };
   const runtime: CoffreRuntime = {
-    db: deps.db, vault, chainKey: deps.chainKey, signin: signinService, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
-    verifier: signinService, waitUntil, schema: { migrated: true }, rotateAfterDays: 365, plugins: [],
+    db: deps.db, vault, chainKey: deps.chainKey, previousChainKeys: [], signin: signinService, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
+    verifier: signinService, waitUntil, schema: { migrated: true }, appKey: { settled: true, movedFrom: null }, rotateAfterDays: 365, plugins: [],
   };
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });

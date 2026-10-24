@@ -85,6 +85,9 @@ test('a vault that moved to a key service: the local key it replaced is named as
 test('the app key: the one the app signs with passes; another fails; neither key is in what is said', async () => {
   assert.equal(appKeyVerdict(b64(keys.app), material.app), 'the one the app signs with now');
   assert.equal(await refusal(() => appKeyVerdict(b64(keys.current), material.app)), "✗ not this instance's app key: the app signs with another");
+  // One the app replaced, kept to verify the log: said, and still not the one to escrow as current.
+  const replaced = { ...material.app, previous: [appLogKeyId(keys.current)] };
+  assert.equal(await refusal(() => appKeyVerdict(b64(keys.current), replaced)), `✗ this is a previous app key (${appLogKeyId(keys.current)}), not the current one: the app signs with ${material.app.keyId}`);
 });
 
 test('a malformed key is said to be one, without being shown; an empty answer skips the key', async () => {

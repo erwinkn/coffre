@@ -386,7 +386,7 @@ function callerOf({ policy, world }: Instance, asker: Who): Caller {
 function contextOf(caller: Caller): ApiContext {
   const refuse = () => { throw new Error('listAudit asks the vault nothing'); };
   return {
-    db: database.runtime, chainKey: CHAIN_KEY, vault: new Proxy({}, { get: refuse }) as never, waitUntil: refuse,
+    db: database.runtime, chainKey: CHAIN_KEY, previousChainKeys: [], vault: new Proxy({}, { get: refuse }) as never, waitUntil: refuse,
     signin: null, workloads: null, mcp: null, caller, requestId: randomUUID(), sourceIp: null, credentialId: null,
     provenance: null, via: null, personalToken: null, credentialExpiresAt: null, rotateAfterDays: null,
   };

@@ -38,6 +38,7 @@ export function auditWatch(options: AuditWatchOptions): CoffrePlugin {
     },
     walkOn: (ctx, store) => walkOn(ctx, store ?? anchor),
     acceptLoss: (ctx, range) => acceptLoss(ctx, anchor, range),
+    reseal: (ctx) => reseal(ctx, anchor),
   });
   return { name: 'audit-watch', [WATCH]: hooks } as CoffrePlugin;
 }
@@ -87,6 +88,8 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
   let unusable: string | null = null;
   try {
     prev = await anchors.read();
+    // Sealed under the key the app moved on from, which the rotation sealed again if it could: sealed again now.
+    if (prev !== null && !ctx.own(prev) && (await reseal(ctx, anchors))) prev = await anchors.read();
     if (prev !== null && !ctx.own(prev)) unusable = foreign(ctx, prev);
   } catch (error) {
     unusable = `the audit anchor could not be read: ${(error as Error).message}`;
@@ -145,8 +148,25 @@ const WRITES_LOST = 3;
 function foreign(ctx: WatchContext, anchor: AuditAnchor): string {
   const sealed = typeof anchor.keyId === 'string' ? anchor.keyId : null;
   return sealed !== null && sealed !== ctx.keyId
-    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed, and nothing re-seals it yet. Empty its store, and the next beat re-anchors`
+    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed without a rotation that moved from ${sealed} (previousAuditChainKeys). Empty its store, and the next beat re-anchors`
     : 'the audit anchor is not one the app wrote: once it is understood, empty its store, and the next beat re-anchors';
+}
+
+/**
+ * The anchor sealed again under the app's key, once the app has moved to
+ * it from the key the record is sealed under (key-rotation.ts): what the
+ * record says, as it says it. No record, or one under another key, is
+ * left as it is. Whether the record is the app's now.
+ */
+async function reseal(ctx: WatchContext, anchors: AnchorStore): Promise<boolean> {
+  for (let lost = 0; lost <= WRITES_LOST; lost++) {
+    const held = await anchors.read();
+    if (held === null || ctx.own(held)) return held !== null;
+    if (!ctx.resealable(held)) return false;
+    const { keyId: _sealedUnder, mac: _mac, ...fields } = held;
+    if (await anchors.write(held, ctx.seal(fields))) return true;
+  }
+  return false;
 }
 
 function samePoint(a: LogHead | null, b: LogHead | null): boolean {

@@ -132,7 +132,8 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
-rotateAfterDays? }` (the days a value may go unchanged before the UI and
+previousAuditChainKeys?, rotateAfterDays? }` (the app keys `auditChainKey`
+replaced, which verify the log from before each rotation; the days a value may go unchanged before the UI and
 `coffre list` flag it for rotation: 365 if left out, `null` for none)
 and, for the vault, `{ database, kek, previousKeks?, owners,
 signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
@@ -618,6 +619,22 @@ forward. A key it replaced counts for no entry, row or checkpoint after
 that, and a vault still running with it writes nothing more
 ([keys.md](keys.md#a-local-key)).
 
+The app's key rotates the same way, in steps where the vault's is one
+transaction, since it signs far more rows than the vault has members
+([deploy.md](deploy.md#rotating-the-app-key)). The first start under a new
+`auditChainKey`, with the old one in `previousAuditChainKeys`, signs every
+signed row (below) the old key signed again under the new one, a step of
+100 rows a transaction under the head, and signs people's sessions out.
+Each step appends a `key.reseal` entry under the new key, naming the old
+key as its subject and saying where the next step goes on; the last also
+appends `key.rotate`. Until then, the app serves nothing but health, 503
+`rotating`, each request taking it a step further, so no row is ever
+checked under the old key. From the first step, an append under a key an
+entry of its author's names so refuses (`KeyRetired`, in the statement that
+reads the log's last entry under the head), and a verification takes the
+old key's entries only before that step: a key the app replaced writes and
+vouches for nothing from then on.
+
 An append locks the head, reads the database clock, and refuses a head that
 does not name the last entry or is behind one the process remembers. A new
 head is remembered only after commit. Postgres forbids both runtime logins
@@ -782,7 +799,7 @@ as the vault's, and chained again, is the vault's checkpoint's to find by
 its MAC; behind the anchor, it changes the anchored hash. The model of
 it, against someone who edits any entry, heartbeat rows among them, and
 puts it back at any step, while beats run at once, is
-[formal.md](formal.md#the-audit-chain-and-the-tunnel).
+[formal.md](formal.md#the-audit-chain-the-app-key-and-the-tunnel).
 
 `coffre verify log`, and the audit page's "Verify whole log", walk the log
 from its first entry, as the tallies take on trust: a stretch a request,
@@ -887,8 +904,10 @@ denied device requests have no principal and use generation zero; an
 approval carries its member's generation. A credential's linked identity
 must belong to the same member and generation, enforced by a foreign key.
 
-Changing `auditChainKey` invalidates these rows too. A MAC proves a row
-genuine, not current: see [Limits](#limits).
+Changing `auditChainKey` invalidates these rows too, unless a rotation
+signs them again under the new key ([above](#one-log-two-authors)): it does
+so for every table here and `enrollments`, and signs out browser and CLI
+sessions. A MAC proves a row genuine, not current: see [Limits](#limits).
 
 ### Trust bindings
 

@@ -26,6 +26,8 @@ export type McpVia = { connectionId: string; clientId: string; clientName: strin
 export type ApiContext = {
   db: Database;
   chainKey: Buffer;
+  /** The app keys `chainKey` replaced, which only verify (`previousAuditChainKeys`). */
+  previousChainKeys: readonly Buffer[];
   /** Keys, grants, who is a member and their role: every decision the app cannot make alone. */
   vault: Vault;
   /** Background work that must outlive the response, that is explicitly scheduled. */

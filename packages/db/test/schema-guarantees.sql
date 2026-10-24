@@ -499,7 +499,8 @@ $$;
 
 -- 21. A workload's session keeps what binds it: its key, hard end,
 -- ancestors, limits and code. Renewal moves its expiry, an approval names
--- who; an enrollment code is only ever added.
+-- who; an enrollment code is only ever added, and signed again by the app
+-- key's rotation, which changes nothing it says.
 DO $$
 DECLARE
     statement text;
@@ -515,7 +516,6 @@ BEGIN
         'UPDATE enrollments SET scope = scope',
         'UPDATE enrollments SET expires_at = expires_at',
         'UPDATE enrollments SET code_hash = code_hash',
-        'UPDATE enrollments SET auth_mac = auth_mac',
         'DELETE FROM enrollments',
         'TRUNCATE enrollments'
     ] LOOP
@@ -527,6 +527,7 @@ BEGIN
         END;
     END LOOP;
     UPDATE credentials SET expires_at = expires_at, approved_at = approved_at, approved_by = approved_by, auth_mac = auth_mac;
+    UPDATE enrollments SET auth_mac = auth_mac;
     PERFORM count(*) FROM enrollments;
     RAISE NOTICE 'PASS: coffre_app renews and approves a session, and never rebinds one or changes a code';
 END
