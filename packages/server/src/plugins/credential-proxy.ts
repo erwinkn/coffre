@@ -40,10 +40,11 @@
  * (docs/design/credential-proxy.md, section 2).
  */
 import { CoffreError } from '@coffre/client';
-
+import { bodyDigest, UNSIGNED_BODY } from '@coffre/client/dpop';
+import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 
-import type { CoffrePlugin, Connect, PickKeys, PluginContext, SocketSession } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
@@ -155,7 +156,23 @@ export type Credential = {
    * and never falls back to it.
    */
   egress?: Egress;
+  /**
+   * How often a workload may use it (docs/design/workload-access.md, section
+   * 8.1): `{ perMinute: 120, perDay: 20_000 }`, counted per workload by its
+   * gate, in fixed windows on the clock; or, for a limit per workload, a
+   * function of the service, `token:<name>`. Past one, 429 with
+   * `Retry-After`, nothing sent, and one `workload.alert` per workload,
+   * credential and window. No limit unless set; a person's handle is not
+   * counted.
+   */
+  limit?: Limits;
 };
+
+/** How many uses of a credential or signer a workload makes, a minute and a day: each a whole number, at least 1, or no limit there. */
+export type Limit = { perMinute?: number; perDay?: number };
+
+/** A limit for every workload, or one per workload, a function of its service, `token:<name>` (undefined: none). */
+export type Limits = Limit | ((service: string) => Limit | undefined);
 
 /**
  * What a tunnel dials through, in place of the platform's TCP: a Workers
@@ -189,17 +206,18 @@ export function postgres(key: string, options: { hosts?: readonly string[]; conn
   return { kind: 'postgres', key, ...options };
 }
 
-/** A private key coffre signs with for the app, which never holds it: the key that holds it, a PKCS#8 PEM. */
-export type Signer = { kind: 'private-key'; key: string };
+/** A private key coffre signs with for the app, which never holds it: the key that holds it, a PKCS#8 PEM, and how often a workload may sign with it. */
+export type Signer = { kind: 'private-key'; key: string; limit?: Limits };
 
 /**
  * A private key the app signs with through coffre, `credential(name).sign(message)`:
  * `privateKey('DFNS_PRIVATE_KEY')`. The environment's value is a PKCS#8
  * PEM, Ed25519, P-256 or RSA; the app holds the handle where it was, and
- * each signature is one use in the log.
+ * each signature is one use in the log. `limit`, as a credential's, counts
+ * a workload's signatures: `privateKey('DFNS_PRIVATE_KEY', { limit: { perMinute: 10 } })`.
  */
-export function privateKey(key: string): Signer {
-  return { kind: 'private-key', key };
+export function privateKey(key: string, options: { limit?: Limits } = {}): Signer {
+  return { kind: 'private-key', key, ...options };
 }
 
 export type CredentialProxyOptions = {
@@ -209,7 +227,11 @@ export type CredentialProxyOptions = {
   tunnels?: Record<string, Tunnel>;
   /** Private keys, by name as credentials are, that coffre signs with for the app: `{ 'dfns-key': privateKey('DFNS_PRIVATE_KEY') }`. */
   signers?: Record<string, Signer>;
-  /** How often an open tunnel checks its handle still stands, ending when it does not: 60 seconds unless set. */
+  /**
+   * How often an open tunnel checks its handle still stands, ending when it
+   * does not: 60 seconds unless set. A workload's tunnel stops within 15
+   * seconds of a freeze or a revocation, or this if it is less.
+   */
   recheckSeconds?: number;
   /**
    * @deprecated Gone in 0.10, and refused: each key says who sees it now. A
@@ -312,15 +334,23 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   };
 }
 
-/** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timer. */
-type Group = { ends: Set<() => void>; stands: boolean; checking: boolean; timer: ReturnType<typeof setInterval>; expiry: ReturnType<typeof setTimeout> };
+/** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timers: its checks', the one its bytes stop by, and its end's. */
+type Group = {
+  ends: Set<() => void>;
+  stands: boolean;
+  timers: ReturnType<typeof setInterval>[];
+  watchdog: ReturnType<typeof setTimeout> | undefined;
+  expiry: ReturnType<typeof setTimeout> | undefined;
+};
 
-/** How long a group's check may take before it counts as a no: the vault has that long to answer. */
+/** How long a group's check of the vault may take before it counts as a no: the vault has that long to answer. */
 const RECHECK_DEADLINE_MS = 10_000;
+/** How long a workload's tunnel runs past a freeze or a revocation at most (section 8.2): its statement is asked again within it. */
+const WORKLOAD_RECHECK_MS = 15_000;
 
 type Proxy = {
   credentials: Map<string, Resolved>;
-  /** The open tunnel sessions, by handle, environment and tunnel, each group checked as one (`watch`). */
+  /** The open tunnel sessions, by handle or session, environment and tunnel, each group checked as one (`watch`). */
   groups: Map<string, Group>;
   tunnels: Map<string, Tunnel>;
   signers: Map<string, Signer>;
@@ -329,7 +359,7 @@ type Proxy = {
   generate: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
   cache: Map<string, Opened & { until: number }>;
-  /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). */
+  /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). A workload's are its statement's to say. */
   handles: Map<string, { paths: readonly (string | null)[] | null; until: number }>;
 };
 
@@ -342,7 +372,9 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   const raw = url.pathname.slice('/use'.length).split('/').slice(1);
   if (raw.length === 0 || (raw.length === 1 && raw[0] === '')) {
     // What `coffre run` asks first: whether this instance has the proxy. It holds no secret.
-    return request.method === 'GET' ? answer({ proxy: 'coffre', credentials: [...proxy.credentials.keys()] }) : failure(405, 'GET only');
+    if (request.method === 'GET') return answer({ proxy: 'coffre', credentials: [...proxy.credentials.keys()] });
+    // A workload that reaches one environment presigns and signs without naming it.
+    return request.method === 'POST' ? compute(request, coffre, proxy, null) : failure(405, 'GET only');
   }
   let place: string[];
   try {
@@ -350,9 +382,17 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   } catch {
     return failure(400, 'the path is not valid percent-encoding');
   }
+  const stable = proxy.credentials.get(place[0]!);
+  // A workload's: `/use/<credential>/<path>` whenever `<credential>` is one, for the one environment it reaches, and
+  // `/use/<project>/<env>/<credential>/<path>` otherwise. Nothing tells a session's environments by name before its
+  // one statement, so the URL alone decides; a handle's are below.
+  const named = stable === undefined && raw.length >= 3 ? proxy.credentials.get(place[2]!) : undefined;
+  if (stable !== undefined || named !== undefined) {
+    const used = await workloadForward(request, coffre, proxy, stable !== undefined ? null : `${place[0]}/${place[1]}`, (stable ?? named)!, raw.slice(stable !== undefined ? 1 : 3), url.search);
+    if (used !== null) return used;
+  }
   // `/use/<credential>/<path>`, the stable URL, for the environment the handle was made for; unless `<a>/<b>` is an
   // environment the handle was made for, which `/use/<project>/<env>/…` names below. Never a guess: the URL and the handle decide.
-  const stable = proxy.credentials.get(place[0]!);
   if (stable !== undefined) {
     const named = place[2] === undefined ? undefined : proxy.credentials.get(place[2]);
     const handle = handleIn(request, stable, url) ?? (named === undefined ? null : handleIn(request, named, url)) ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? null;
@@ -410,6 +450,10 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
  * `left`, for `coffre run` to say.
  */
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
+  // A workload's proof signs the request's content as every request under /use does: here, no body.
+  const caller = await refused(coffre.workload(request, { place: path, credential: null, body: await bodyDigest(new Uint8Array(0)) }));
+  if (caller instanceof Response) return caller;
+  if (caller !== null) return answering(caller, () => workloadPlan(coffre, proxy, caller, caller.path ?? path));
   const handle = bearer(request);
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // The credentials the environment holds every key of: their keys are placeholders, whoever may read them.
@@ -499,6 +543,28 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
 }
 
 /**
+ * What a workload's environment holds for it (docs/design/workload-access.md,
+ * section 6.2): the values it reads, plain ones and those its binding lists
+ * in `reads`; the names of the credentials and signers it uses through
+ * coffre, and its tunnels, each with the key whose URL the local listener
+ * stands in for, as a handle's plan has them; and every key it holds but
+ * does not read, `useOnly`. No placeholder: its requests carry its proof,
+ * never a value in a slot.
+ */
+async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<Response> {
+  const held = await coffre.use(caller, { path, purpose: 'expose', logged: { plan: true }, keys: (_, rows) => rows.filter((row) => row.plain || row.reads).map((row) => row.key) });
+  const holds = (keys: readonly string[]) => keys.every((key) => held.keys.includes(key));
+  return answer({
+    environment: held.environment.path,
+    values: { ...held.values },
+    credentials: [...[...proxy.credentials.values()].filter((credential) => holds(credential.keys)).map((credential) => credential.name), ...[...proxy.signers].filter(([, signer]) => holds([signer.key])).map(([name]) => name)],
+    tunnels: Object.fromEntries([...proxy.tunnels].filter(([, tunnel]) => holds([tunnel.key])).map(([name, tunnel]) => [name, { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` }])),
+    useOnly: held.keys.filter((key) => !Object.hasOwn(held.values, key)),
+    mints: [],
+  });
+}
+
+/**
  * A credential's placeholder in the shape its client checks: the handle behind
  * a prefix, or a JWT of the real token's named claims, which are opened for
  * it as a use of the credential, logged, and go no further than those.
@@ -535,16 +601,17 @@ function base64url(bytes: Uint8Array): string {
  * environment while they have none, where the deployment generates values
  * for it; the environment itself anywhere else.
  */
-function readOf(proxy: Proxy, path: string): string {
-  return proxy.generate.has(path) ? `${path}@me` : path;
+function readOf(proxy: Proxy, path: string, user: User = ''): string {
+  return typeof user === 'string' && proxy.generate.has(path) ? `${path}@me` : path;
 }
 
 /**
  * A tunnel asked for, `/use/<project>/<env>/<name>` as a WebSocket, by
- * `coffre run`'s listener with the handle as its bearer token: the
- * database's URL opened (or remembered) as a credential's values are,
- * checked against the tunnel's hosts, and the session that logs in with it.
- * Each connection asks again: a cancel request comes on one of its own.
+ * `coffre run`'s listener with the handle as its bearer token, or by a
+ * workload with its session and a proof (`htm` GET, `htu` the URL's https
+ * form): the database's URL opened (or remembered) as a credential's values
+ * are, checked against the tunnel's hosts, and the session that logs in with
+ * it. Each connection asks again: a cancel request comes on one of its own.
  */
 async function open(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response | SocketSession> {
   const raw = new URL(request.url).pathname.slice('/use/'.length).split('/');
@@ -555,147 +622,236 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   } catch {
     return failure(400, 'the path is not valid percent-encoding');
   }
-  const tunnel = proxy.tunnels.get(place[2]!);
-  if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
+  const name = place[2]!;
+  const tunnel = proxy.tunnels.get(name);
+  if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
+  const path = `${place[0]}/${place[1]}`;
+  const caller = await refused(coffre.workload(request, { place: path, credential: name }));
+  if (caller instanceof Response) return caller;
+  if (caller !== null) return workloadTunnel(request, coffre, proxy, caller, name, tunnel);
   const handle = bearer(request);
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  const path = `${place[0]}/${place[1]}`;
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
   const { expiresAt } = await coffre.handle(handle);
   let fresh = false;
-  const { values } = await valuesFor(coffre, proxy, handle, path, { name: place[2]!, keys: [tunnel.key] }, null, () => (fresh = true));
+  const { values } = await valuesFor(coffre, proxy, handle, path, { name, keys: [tunnel.key] }, null, () => (fresh = true));
+  const db = dialled(proxy, path, name, tunnel, values[tunnel.key]!);
+  if (db instanceof Response) return db;
+  const key = cacheKey(handle, path, name);
+  const deadline = Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS);
+  // Every `recheckSeconds`, the database's URL opened again for the handle's sessions, as the vault decides it (a revoked handle, a lost grant), logged as a use.
+  const check: Check = {
+    every: proxy.recheckMs,
+    deadline,
+    arms: true,
+    now: !fresh,
+    run: () => coffre.use(handle, { path: readOf(proxy, path, handle), keys: [tunnel.key], purpose: 'use', logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
+  };
+  return session(tunnel, {
+    handle,
+    group: key,
+    database: db,
+    // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.
+    stands: async () => (await coffre.handle(handle).then(() => true, () => false)) && (proxy.groups.get(key)?.stands ?? true),
+    watch: (end) => watch(proxy, key, { checks: [check], bound: proxy.recheckMs + deadline, until: Date.parse(expiresAt) }, end),
+  });
+}
+
+/**
+ * A workload's tunnel (docs/design/workload-access.md, section 7.1): its
+ * Durable Object named by its session (`forwardSocket`), the database's URL
+ * opened for the session as a credential's values are, and the app's login
+ * asked for no password: the signed upgrade authenticated it (section 9.3).
+ * It carries bytes while its last good check is less than `recheckSeconds`
+ * old, 15 at most (section 8.2): every two thirds of that, section 5.3's
+ * statement again, revocation and every freeze included, with a third of it
+ * to answer; so a freeze or a revocation ends it within one. Every
+ * `recheckSeconds`, the vault's decision afresh too, which a lost grant
+ * changes.
+ */
+async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, name: string, tunnel: Tunnel): Promise<Response | SocketSession> {
+  if (sessionToken(request) === null || caller.path === null) return nonced(failure(403, 'a tunnel is a session\'s, which names its environment'), caller);
+  const path = caller.path;
+  if (!constraintsAllow(caller.constraints, { place: path, credential: name })) return nonced(failure(403, `this narrowed session may not open ${name}`, 'narrowed'), caller);
+  let fresh = false;
+  let opened: Opened;
+  try {
+    opened = await valuesFor(coffre, proxy, caller, path, { name, keys: [tunnel.key] }, null, () => (fresh = true));
+  } catch (error) {
+    if (!(error instanceof CoffreError)) throw error;
+    return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
+  }
+  const db = dialled(proxy, path, name, tunnel, opened.values[tunnel.key]!);
+  if (db instanceof Response) return nonced(db, caller);
+  const key = cacheKey(caller, path, name);
+  const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
+  const checks: Check[] = [
+    { every: (bound * 2) / 3, deadline: bound / 3, arms: true, now: false, run: () => coffre.recheck(caller) },
+    {
+      every: proxy.recheckMs,
+      deadline: Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS),
+      arms: false,
+      now: !fresh,
+      run: () => coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
+    },
+  ];
+  return session(tunnel, {
+    handle: null,
+    group: key,
+    database: db,
+    stands: async () => (await coffre.recheck(caller)) && (proxy.groups.get(key)?.stands ?? true),
+    watch: (end) => watch(proxy, key, { checks, bound, until: null }, end),
+  });
+}
+
+/** The database a tunnel's URL names, as it is dialled, or why it is not: its hosts, TLS and private addresses as the tunnel allows. */
+function dialled(proxy: Proxy, path: string, name: string, tunnel: Tunnel, url: string): Database | Response {
   let db: Database;
   try {
-    db = database(values[tunnel.key]!);
+    db = database(url);
   } catch {
     // The value is a secret: what is wrong with it is said, never what it is.
     return failure(409, `${path}'s ${tunnel.key} is no postgres:// URL`);
   }
-  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(canonicalHost(db.host))) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${place[2]} does not reach`);
+  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(canonicalHost(db.host))) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${name} does not reach`);
   if (tunnel.connect !== undefined) {
     // Inside the binding's private network, plaintext: TLS through it is no option yet.
-    if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${place[2]}'s network binding does not carry: sslmode=disable, for a database inside that network`);
+    if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${name}'s network binding does not carry: sslmode=disable, for a database inside that network`);
   } else if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
     return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, or the tunnel's network binding (connect), allows`);
   } else if (!proxy.insecure && tunnel.hosts === undefined && !address(db.host)) {
     // Whoever writes the value picks the name, and a name may resolve to a private address: only the deployment's are dialled by name.
-    return failure(403, `${path}'s ${tunnel.key} names its host by name, which the tunnel ${place[2]} dials only when its hosts list it: a name may resolve to a private address`);
+    return failure(403, `${path}'s ${tunnel.key} names its host by name, which the tunnel ${name} dials only when its hosts list it: a name may resolve to a private address`);
   }
-  const key = `${handle}\u0000${path}\u0000${place[2]!}`;
+  return db;
+}
+
+/** The session a tunnel's connection runs: through its network binding, if it has one, or the platform's TCP. */
+function session(tunnel: Tunnel, given: Omit<Parameters<typeof tunnelPostgres>[1], 'connect'>): SocketSession {
   const network = tunnel.connect;
-  return (client, connect) =>
-    tunnelPostgres(client, {
-      handle,
-      group: key,
-      database: db,
-      connect: network === undefined ? connect : through(network),
-      // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.
-      stands: async () => (await coffre.handle(handle).then(() => true, () => false)) && (proxy.groups.get(key)?.stands ?? true),
-      watch: (end) => watch(coffre, proxy, key, { path, handle, name: place[2]!, key: tunnel.key, expiresAt, fresh }, end),
-    });
+  return (client, connect) => tunnelPostgres(client, { ...given, connect: network === undefined ? connect : through(network) });
 }
 
 /**
- * A tunnel's sessions of one handle, environment and tunnel, as one: one
- * timer, which every `recheckSeconds` opens the database's URL again for
- * all of them, as the vault decides it (a revoked handle, a lost grant),
- * logged as a use; and the first answer that is no ends every one of them
- * at once. It lives as long as its sessions, and goes with the last.
+ * One check of a tunnel group's: how often it runs, how long it may take
+ * before it counts as a no, whether its yes keeps the group's bytes flowing
+ * (`arms`), whether it runs at once, and what it asks.
  */
-function watch(
-  coffre: PluginContext,
-  proxy: Proxy,
-  key: string,
-  /** `fresh`: the session was let in on the vault's answer just now, not the cache's. */
-  tunnel: { path: string; handle: string; name: string; key: string; expiresAt: string; fresh: boolean },
-  end: () => void,
-): () => void {
+type Check = { every: number; deadline: number; arms: boolean; now: boolean; run: () => Promise<boolean> };
+
+/**
+ * A tunnel's sessions of one caller, environment and tunnel, as one: each
+ * of its checks on its own timer, and the first answer that is no ends
+ * every session at once, as does `until`, the handle's end. The group's
+ * bytes flow only while its last good arming check is under `bound` old,
+ * even if no check ran since (formal/Workload.tla, `TunnelByte`): a
+ * check that never comes back keeps nothing open. It lives as long as its
+ * sessions, and goes with the last.
+ */
+function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bound: number; until: number | null }, end: () => void): () => void {
   let group = proxy.groups.get(key);
   if (group === undefined) {
-    const made: Group = {
-      ends: new Set(),
-      stands: true,
-      checking: false,
-      timer: setInterval(() => void recheck(made), proxy.recheckMs),
-      // The handle's end, whatever any check is doing: the sessions end with it.
-      expiry: setTimeout(() => close(made), Math.max(0, Date.parse(tunnel.expiresAt) - Date.now())),
-    };
+    const made: Group = { ends: new Set(), stands: true, timers: [], watchdog: undefined, expiry: undefined };
     /** The sessions end, and the URL the values' cache holds goes with them, so no new one is let in on it. */
-    const close = (closing: Group) => {
-      closing.stands = false;
+    const close = () => {
+      made.stands = false;
       proxy.cache.delete(key);
-      for (const ending of [...closing.ends]) ending();
+      for (const ending of [...made.ends]) ending();
     };
-    const recheck = async (checked: Group) => {
-      // One check at a time for the group, however many sessions it holds; one that has not answered in time is a no.
-      if (checked.checking) return;
-      checked.checking = true;
-      let late: ReturnType<typeof setTimeout> | undefined;
-      const stands = await Promise.race([
-        coffre.use(tunnel.handle, { path: readOf(proxy, tunnel.path), keys: [tunnel.key], purpose: 'use', logged: { credential: tunnel.name, tunnel: true, recheck: true } }).then(
-          (used) => Object.hasOwn(used.values, tunnel.key),
-          () => false,
-        ),
-        new Promise<boolean>((resolve) => (late = setTimeout(() => resolve(false), Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS)))),
-      ]);
-      clearTimeout(late);
-      checked.checking = false;
-      checked.stands = stands;
-      if (!stands) close(checked);
+    const arm = (from: number) => {
+      clearTimeout(made.watchdog);
+      made.watchdog = setTimeout(close, Math.max(0, from + tunnel.bound - Date.now()));
     };
+    for (const check of tunnel.checks) {
+      // One at a time for the group, however many sessions it holds; one that has not answered in time is a no.
+      let checking = false;
+      const recheck = async () => {
+        if (checking || !made.stands) return;
+        checking = true;
+        const started = Date.now();
+        let late: ReturnType<typeof setTimeout> | undefined;
+        const stands = await Promise.race([check.run().catch(() => false), new Promise<boolean>((resolve) => (late = setTimeout(() => resolve(false), check.deadline)))]);
+        clearTimeout(late);
+        checking = false;
+        if (!made.stands) return;
+        if (!stands) return close();
+        if (check.arms) arm(started);
+      };
+      made.timers.push(setInterval(() => void recheck(), check.every));
+      // A new group let in on the cache's values decides now: its first interval starts from an answer of its own.
+      if (check.now) void recheck();
+    }
+    // Let in just now, on a check of the admission's own.
+    arm(Date.now());
+    if (tunnel.until !== null) made.expiry = setTimeout(close, Math.max(0, tunnel.until - Date.now()));
     group = made;
     proxy.groups.set(key, group);
-    // A new group let in on the cache's URL decides now, through the vault: its first interval starts from an answer of its own.
-    if (!tunnel.fresh) void recheck(made);
   }
   const mine = group;
   mine.ends.add(end);
   return () => {
     mine.ends.delete(end);
     if (mine.ends.size > 0) return;
-    clearInterval(mine.timer);
+    for (const timer of mine.timers) clearInterval(timer);
+    clearTimeout(mine.watchdog);
     clearTimeout(mine.expiry);
     if (proxy.groups.get(key) === mine) proxy.groups.delete(key);
   };
 }
 
 /**
- * What a handle asks coffre to make with an environment's values, which it
- * never hands back: `POST /use/<project>/<env>`, the handle as a bearer
- * token, with `{ presign: {…} }` for a presigned URL, or `{ sign: {…} }`
- * for a signature.
+ * What a caller asks coffre to make with an environment's values, which it
+ * never hands back: `POST /use/<project>/<env>`, or `POST /use` for a
+ * workload that reaches one environment, with `{ presign: {…} }` for a
+ * presigned URL, or `{ sign: {…} }` for a signature. A handle's holder
+ * sends it as a bearer token; a workload's proof signs the body, so nobody
+ * on the way can change what is signed. PR 7 adds `verify` and `mint`
+ * beside them, each naming the credential it uses, as these do.
  */
-async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
-  const handle = bearer(request);
-  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  const raw = await boundedText(request, 65_536);
-  let asked: { presign?: Record<string, unknown>; sign?: Record<string, unknown> } | null;
+async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
+  const raw = await boundedBody(request, 65_536);
+  type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown> };
+  let asked: Asked | null = null;
   try {
-    asked = JSON.parse(raw ?? '') as typeof asked;
+    const parsed: unknown = raw === null ? null : JSON.parse(new TextDecoder().decode(raw ?? new Uint8Array(0)));
+    if (typeof parsed === 'object' && parsed !== null) asked = parsed as Asked;
   } catch {
     asked = null;
   }
-  if (asked?.presign !== undefined) return presign(coffre, proxy, path, handle, asked.presign ?? {});
-  if (asked?.sign !== undefined) return sign(coffre, proxy, path, handle, asked.sign ?? {});
-  return failure(400, 'send { presign: { credential, path, method, expiresIn } } or { sign: { credential, message } } as JSON, 64 KiB at most');
+  // What it asks for, and the credential or signer it uses, which a workload's `credential:` freeze and limits name.
+  const operation = asked?.presign !== undefined ? 'presign' : asked?.sign !== undefined ? 'sign' : null;
+  if (asked === null || operation === null) return failure(400, 'send { presign: { credential, path, method, expiresIn } } or { sign: { credential, message } } as JSON, 64 KiB at most');
+  const given = asked[operation] ?? {};
+  const name = typeof given.credential === 'string' ? given.credential : '';
+  const signer = operation === 'sign' ? proxy.signers.get(name) : undefined;
+  const credential = operation === 'presign' ? proxy.credentials.get(name) : undefined;
+  if (operation === 'sign' && signer === undefined) return failure(404, 'sign names a signer of this instance\'s: its deployment\'s credentialProxy names them, signers: { … }');
+  if (operation === 'presign' && credential?.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
+  const caller = await refused(coffre.workload(request, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? credential!).limit) }));
+  if (caller instanceof Response) return caller;
+  const run = (who: User, at: string) => (operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : presign(coffre, proxy, at, who, credential!, given));
+  if (caller !== null) return answering(caller, async () => (caller.path === null ? failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone') : run(caller, caller.path)));
+  if (path === null) return failure(405, 'GET only: a handle names its environment, POST /use/<project>/<environment>');
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  return run(handle, path);
 }
 
 /**
  * A signature by a signer's private key, for the app that holds the
- * handle: `{ sign: { credential, message } }`, the message base64url. coffre
- * opens the key, signs as Node's `crypto.sign(undefined, message, key)`
- * does (`signWith`), and answers `{ signature }`, base64url. The key never
- * leaves coffre. Each signature is one use in the log, naming the message
- * by its SHA-256, never served from the cache.
+ * handle, or the workload: `{ sign: { credential, message } }`, the message
+ * base64url. coffre opens the key, signs as Node's `crypto.sign(undefined,
+ * message, key)` does (`signWith`), and answers `{ signature }`, base64url.
+ * The key never leaves coffre. Each signature is one use in the log, naming
+ * the message by its SHA-256, never served from the cache.
  */
-async function sign(coffre: PluginContext, proxy: Proxy, path: string, handle: string, asked: { credential?: unknown; message?: unknown }): Promise<Response> {
-  const name = typeof asked.credential === 'string' ? asked.credential : '';
-  const signer = proxy.signers.get(name);
-  if (signer === undefined) return failure(404, 'sign names a signer of this instance\'s: its deployment\'s credentialProxy names them, signers: { … }');
+async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, signer: Signer, asked: { message?: unknown }): Promise<Response> {
   if (typeof asked.message !== 'string' || !/^[A-Za-z0-9_-]*$/.test(asked.message) || asked.message.length % 4 === 1) return failure(400, 'sign a message given as base64url');
+  // A narrowed session's signers are named, and one limited to methods or paths signs nothing: no request to check them on.
+  if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
   const message = Uint8Array.from(atob(asked.message.replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0));
   const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
-  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: [signer.key], purpose: 'use', logged: { credential: name, sign: { sha256 } } });
+  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: [signer.key], purpose: 'use', logged: { credential: name, sign: { sha256 } } });
   const pem = used.values[signer.key];
   if (pem === undefined) return failure(409, `${used.environment.path} holds no ${signer.key}, which ${name} signs with`);
   try {
@@ -707,20 +863,18 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, handle: s
 }
 
 /**
- * A presigned URL, for an AWS-signed credential: `POST /use/<project>/<env>`
- * with `{ presign: { credential, path, method?, query?, expiresIn? } }`, the
- * handle as a bearer token. coffre signs a GET (or HEAD) of `path` under
- * the credential's upstream with the real key pair, for at most an hour and
- * never past the handle, and answers `{ url, expiresAt }`: a URL of the
- * upstream's, which whoever holds it may use until then, and which holds
- * the access key's id and a signature, never the secret. Each is one use in
- * the log, naming the path and how long it lasts, never served from the
- * cache.
+ * A presigned URL, for an AWS-signed credential: `{ presign: { credential,
+ * path, method?, query?, expiresIn? } }`. coffre signs a GET (or HEAD) of
+ * `path` under the credential's upstream with the real key pair, for at most
+ * an hour and never past the handle or session, and answers `{ url,
+ * expiresAt }`: a URL of the upstream's, which whoever holds it may use
+ * until then, and which holds the access key's id and a signature, never
+ * the secret. Each is one use in the log, naming the path and how long it
+ * lasts, never served from the cache. A narrowed session's methods and
+ * paths are held to the presigned request's.
  */
-async function presign(coffre: PluginContext, proxy: Proxy, path: string, handle: string, asked: { credential?: unknown; path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown }): Promise<Response> {
-  const credential = typeof asked.credential === 'string' ? proxy.credentials.get(asked.credential) : undefined;
-  if (credential === undefined || credential.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
-  const inject = credential.inject;
+async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, credential: Resolved, asked: { path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown }): Promise<Response> {
+  const inject = credential.inject as { kind: 'sigv4' } & SigV4;
   const method = asked.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
   if (credential.methods !== undefined && !credential.methods.includes(method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
@@ -748,12 +902,15 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, handle
   }
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
+  if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: credential.name, request: { method, url: target } })) {
+    return failure(403, `this narrowed session may not presign ${method} ${relative} through ${credential.name}`, 'narrowed');
+  }
   // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
-  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
+  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
   if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
-  // Never past the handle's own end.
+  // Never past the handle's or the session's own end.
   const lasts = Math.min(expiresIn, Math.floor((Date.parse(used.expiresAt) - Date.now()) / 1000));
-  if (lasts < 1) return failure(401, 'the handle ends now: run the app with `coffre run` again');
+  if (lasts < 1) return failure(401, typeof who === 'string' ? 'the handle ends now: run the app with `coffre run` again' : 'the session ends now: renew it');
   let url: URL;
   try {
     url = await presignV4(method, target, {
@@ -767,26 +924,15 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, handle
   return answer({ url: url.href, expiresAt: new Date(Date.now() + lasts * 1000).toISOString() });
 }
 
-/** A small body, as text, read no further than `max` bytes: null past it. */
-async function boundedText(request: Request, max: number): Promise<string | null> {
-  if (request.body === null) return '';
-  const reader = request.body.getReader();
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  for (let part = await reader.read(); !part.done; part = await reader.read()) {
-    size += part.value.length;
-    if (size > max) {
-      await reader.cancel();
-      return null;
-    }
-    parts.push(part.value);
-  }
-  const decoder = new TextDecoder();
-  return parts.map((part) => decoder.decode(part, { stream: true })).join('') + decoder.decode();
-}
+/** Where a request through a credential goes, under its upstream, once its path is checked: the URL, the upstream's own path, and the request's within it. */
+type Aim = { target: URL; under: string; relative: string };
 
-/** One request through a credential: the handle checked, its values opened (or remembered), the request sent on with them. */
-async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
+/**
+ * The upstream URL a request through `credential` goes to, or the refusal:
+ * nothing the app writes leaves the credential's upstream, and its methods
+ * and paths hold. Whoever sends it, a handle's holder or a workload.
+ */
+function aim(request: Request, credential: Resolved, rest: string[], search: string): Aim | Response {
   // Nothing the app writes leaves the credential's upstream: no slash or backslash smuggled in a segment, and no dot
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
   // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
@@ -804,14 +950,10 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     return failure(400, `${credential.name} reaches ${credential.base.href} only`);
   }
   const relative = target.pathname.slice(under.length) || '/';
-  // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
-  // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
-  const proxied = `${coffre.publicUrl}/use/${path}/${credential.name}`;
   if (credential.methods !== undefined && !credential.methods.includes(request.method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
   }
-
   if (credential.inject.kind === 'sigv4') {
     if (target.searchParams.has('X-Amz-Signature') || target.searchParams.has('X-Amz-Credential')) return failure(400, `a presigned URL signs with the real key: ${credential.name} takes requests the SDK signs in their headers`);
     const hash = request.headers.get('x-amz-content-sha256') ?? '';
@@ -820,6 +962,31 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     }
     if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
   }
+  return { target, under, relative };
+}
+
+/**
+ * What a request through a credential carries: a body read whole, up to
+ * 16 MiB, or, for an AWS-signed upload that says its payload's hash and
+ * length, the length it streams with, never held whole (an S3 object may be
+ * gigabytes, and its signature needs no byte of it); or the refusal.
+ */
+type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string };
+
+async function carried(request: Request, credential: Resolved): Promise<Carried | Response> {
+  const declared = request.headers.get('content-length') ?? '';
+  const streamed = credential.inject.kind === 'sigv4' && request.body !== null && request.headers.has('x-amz-content-sha256') && /^\d+$/.test(declared);
+  if (streamed && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
+  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
+  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB, unless it is AWS-signed with its payload's hash and length, which streams`);
+  return { body, streamed, declared };
+}
+
+/** One request through a credential, a handle's: the handle checked, its values opened (or remembered), the request sent on with them. */
+async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
+  const aimed = aim(request, credential, rest, search);
+  if (aimed instanceof Response) return aimed;
+  const { target } = aimed;
   const inject = credential.inject;
   const handle = handleIn(request, credential, target);
   if (handle === null) return failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`);
@@ -829,20 +996,130 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const given = inject.kind === 'query' ? target.searchParams.get(inject.name) : null;
   const back = inject.kind !== 'query' ? null : given !== null && handleOf(credential, given) === handle ? given
     : credential.placeholder === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.placeholder.kind === 'prefix' ? `${credential.placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
-  // An AWS-signed upload that says its payload's hash and length streams through, never held whole: an S3 object may be
-  // gigabytes, and its signature needs no byte of it. Anything else is read whole first, however long it takes to come,
-  // so the handle is checked, and the values opened, as the request goes out.
-  const declared = request.headers.get('content-length') ?? '';
-  const streamed = inject.kind === 'sigv4' && request.body !== null && request.headers.has('x-amz-content-sha256') && /^\d+$/.test(declared);
-  if (streamed && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
-  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
-  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB, unless it is AWS-signed with its payload's hash and length, which streams`);
-  const { values, plain } = await valuesFor(coffre, proxy, handle, path, credential, target.host);
-
+  // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
+  const content = await carried(request, credential);
+  if (content instanceof Response) return content;
+  const opened = await valuesFor(coffre, proxy, handle, path, credential, target.host);
   const headers = new Headers();
-  for (const [name, value] of request.headers) {
-    if (!DROPPED.has(name) && !name.startsWith('cf-') && !name.startsWith('x-forwarded-')) headers.set(name, value);
+  for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
+  // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
+  // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
+  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${path}/${credential.name}`, back, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
+}
+
+/** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */
+const sent = (name: string) => !DROPPED.has(name) && !name.startsWith('cf-') && !name.startsWith('x-forwarded-');
+
+/** The session token a workload's request carries (`Authorization: DPoP <token>`), which goes no further than coffre; null for none, a Cloudflare call's. */
+function sessionToken(request: Request): string | null {
+  return DPOP.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
+}
+
+const DPOP = /^DPoP\s+(\S+)$/i;
+
+/** The request's answer with the gate's newest nonce on it, which the workload signs its next proof with (`DPoP-Nonce`); as it is for any other caller. */
+function nonced(response: Response, caller: WorkloadUse | null): Response {
+  if (caller === null || caller.nonce === null) return response;
+  const headers = new Headers(response.headers);
+  headers.set('dpop-nonce', caller.nonce);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+/** A workload's refusal (`WorkloadRefused`) is its answer, as coffre made it; anything else goes on. */
+async function refused<T>(asking: Promise<T>): Promise<T | Response> {
+  try {
+    return await asking;
+  } catch (error) {
+    if (error instanceof WorkloadRefused) return error.response;
+    throw error;
   }
+}
+
+/**
+ * One request through a credential, a workload's (docs/design/workload-access.md,
+ * section 7.1), or null when it is no workload's, which a handle's path
+ * then takes, its body unread. The workload is its key-bound session, sent
+ * as `Authorization: DPoP` with a proof, or a Cloudflare service binding's
+ * caller. A session's proof signs the request whole (`req`): its path and
+ * query, the headers it names (`hdr`), which alone go on, and its body, read
+ * whole and hashed, or, through a sigv4 credential, bound by the payload
+ * hash it declares, which coffre signs again and the upstream checks
+ * against the bytes, so an upload streams; `UNSIGNED-PAYLOAD` there binds
+ * nothing, and only a binding that says `unsignedUploads` takes it. Then a
+ * `narrow` child's constraints, on the URL about to be sent; the
+ * credential's `limit`, counted by the gate in the same call; and the
+ * values, opened for the session, or remembered for `cacheSeconds`: the
+ * session itself is checked on every request, so a
+ * revocation or a freeze stops the next one, warm or not.
+ */
+async function workloadForward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null, credential: Resolved, rest: string[], search: string): Promise<Response | null> {
+  const token = sessionToken(request);
+  const at = { place: path, credential: credential.name, ...countsOf(credential.name, credential.limit) };
+  // No session: a Cloudflare call's caller, or no workload at all, which costs nothing to learn and leaves the body unread.
+  let caller = token === null ? await refused(coffre.workload(request, at)) : null;
+  if (caller instanceof Response) return caller;
+  if (token === null && caller === null) return null;
+  const aimed = aim(request, credential, rest, search);
+  if (aimed instanceof Response) return nonced(aimed, caller);
+  const content = await carried(request, credential);
+  if (content instanceof Response) return nonced(content, caller);
+  if (token !== null) {
+    // The body's line in `req`: through a sigv4 credential, the hash a body's `x-amz-content-sha256` declares, which coffre
+    // signs again and the upstream checks against the bytes, streamed or not (any other value binds nothing); else the
+    // bytes' own, an empty body's included.
+    const declared = request.headers.get('x-amz-content-sha256');
+    const body = credential.inject.kind === 'sigv4' && declared !== null && request.body !== null
+      ? (/^[0-9a-f]{64}$/.test(declared) ? declared : UNSIGNED_BODY)
+      : await bodyDigest(content.body ?? new Uint8Array(0));
+    caller = await refused(coffre.workload(request, { ...at, body }));
+    if (caller instanceof Response) return caller;
+  }
+  const workload = caller!;
+  return answering(workload, async () => {
+    if (workload.path === null) return failure(409, 'the environment this session reaches is gone');
+    if (!constraintsAllow(workload.constraints, { place: workload.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
+      return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
+    }
+    const opened = await valuesFor(coffre, proxy, workload, workload.path, credential, aimed.target.host);
+    // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
+    const headers = new Headers();
+    for (const [name, value] of request.headers) if ((workload.hdr === null || workload.hdr.includes(name)) && sent(name)) headers.set(name, value);
+    const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
+    const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
+    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: null, secret });
+  });
+}
+
+/** What a workload's request answers, a refusal of coffre's included, with the gate's newest nonce on it. */
+async function answering(caller: WorkloadUse, work: () => Promise<Response>): Promise<Response> {
+  try {
+    return nonced(await work(), caller);
+  } catch (error) {
+    if (!(error instanceof CoffreError)) throw error;
+    return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
+  }
+}
+
+/** What `send` takes: where to, what is carried, the values, the headers going on, and what must not leak. */
+type Sending = Aim & Carried & {
+  opened: Opened;
+  headers: Headers;
+  /** The proxy's URL for the credential, which a redirect under the upstream is made into. */
+  proxied: string;
+  /** A query rule's parameter, the app's placeholder, put back on a redirect to the proxy. */
+  back: string | null;
+  /** What authenticated the request to coffre and goes no further: the handle, a workload's session token; null for a Cloudflare call. */
+  secret: { pattern: RegExp; length: number; what: string } | null;
+};
+
+/**
+ * The request as it goes out, with the values injected, then the
+ * upstream's answer, redacted: a redirect stays on the proxy, and what
+ * authenticated the request to coffre goes nowhere upstream.
+ */
+async function send(request: Request, credential: Resolved, out: Sending): Promise<Response> {
+  const { target, under, body, streamed, declared, headers, opened: { values, plain }, secret } = out;
+  const inject = credential.inject;
   // A streamed body says its length itself, which S3 requires of a PutObject.
   if (streamed) headers.set('content-length', declared);
   try {
@@ -852,8 +1129,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     if (inject.kind === 'sigv4') {
       // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
       for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
-      const given = request.headers.get('x-amz-content-sha256');
-      // The client's own hash, or the body's, an empty one's included, as SigV4 has it when no header says otherwise.
+      // The client's own hash, as a streamed upload declared it, or as sent on; or the body's, an empty one's included, as SigV4 has it when no header says otherwise.
+      const given = streamed ? request.headers.get('x-amz-content-sha256') : headers.get('x-amz-content-sha256');
       const payload = given ?? hex(await crypto.subtle.digest('SHA-256', body ?? new Uint8Array(0)));
       await signV4(request.method, target, headers, payload, {
         accessKeyId: render(inject.accessKeyId, values),
@@ -865,11 +1142,13 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     // The platform's error quotes the value it refused: neither it nor its message goes anywhere, a log included.
     return failure(409, `${credential.name}'s value is no valid ${inject.kind === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
   }
-  // The handle goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
-  const leaked = [...headers].find(([, value]) => carries(value)) ?? (carries(bytesOf(target.href)) ? ['URL'] : undefined)
-    ?? (body !== undefined && HANDLE.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);
-  if (leaked !== undefined) {
-    return failure(400, `the handle is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
+  // What authenticated the request goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
+  if (secret !== null) {
+    const leaked = [...headers].find(([, value]) => carries(value, secret.pattern)) ?? (carries(bytesOf(target.href), secret.pattern) ? ['URL'] : undefined)
+      ?? (body !== undefined && secret.pattern.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);
+    if (leaked !== undefined) {
+      return failure(400, `${secret.what} is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
+    }
   }
 
   // What the request carried: each secret value, and what the rule made of them, Basic's base64, as stored and as they went
@@ -887,7 +1166,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     upstream = await (credential.egress ?? globalThis).fetch(target, {
       method: request.method,
       headers,
-      body: streamed ? scanned(request.body!, Number(declared)) : body,
+      body: streamed ? scanned(request.body!, Number(declared), secret) : body,
       redirect: 'manual',
       ...(streamed ? { duplex: 'half' } : {}),
     } as RequestInit);
@@ -908,8 +1187,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const inside = to !== null && to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
       // The proxy's URL for it, and a query rule's parameter, kept or not, the app's placeholder, for it to follow and be let in.
-      const moved = new URL(`${proxied}${to.pathname.slice(under.length)}${to.search}`);
-      if (inject.kind === 'query' && back !== null) moved.searchParams.set(inject.name, back);
+      const moved = new URL(`${out.proxied}${to.pathname.slice(under.length)}${to.search}`);
+      if (inject.kind === 'query' && out.back !== null) moved.searchParams.set(inject.name, out.back);
       at = moved.href;
     } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
@@ -962,8 +1241,8 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byt
  * its declared length goes with it (`FixedLengthStream`); Node's fetch
  * sends the header as given.
  */
-function scanned(body: ReadableStream<Uint8Array>, length: number): ReadableStream<Uint8Array> {
-  // The last bytes seen, held back: what a handle could still be the start of, and the end, sent only once it is the length declared.
+function scanned(body: ReadableStream<Uint8Array>, length: number, secret: Sending['secret']): ReadableStream<Uint8Array> {
+  // The last bytes seen, held back: what a handle (or session token) could still be the start of, and the end, sent only once it is the length declared.
   let held = new Uint8Array(0);
   let seen = 0;
   const checked = body.pipeThrough(
@@ -974,8 +1253,8 @@ function scanned(body: ReadableStream<Uint8Array>, length: number): ReadableStre
         const window = new Uint8Array(held.length + chunk.length);
         window.set(held);
         window.set(chunk, held.length);
-        if (HANDLE.test(binary(window))) throw new Error('the handle is in the upload');
-        const keep = Math.min(window.length, HANDLE_LENGTH - 1);
+        if (secret?.pattern.test(binary(window))) throw new Error(`${secret.what} is in the upload`);
+        const keep = Math.min(window.length, (secret?.length ?? 1) - 1);
         if (window.length > keep) out.enqueue(window.slice(0, window.length - keep));
         held = window.slice(window.length - keep);
       },
@@ -989,13 +1268,13 @@ function scanned(body: ReadableStream<Uint8Array>, length: number): ReadableStre
   return Fixed === undefined ? checked : checked.pipeThrough(new Fixed(length));
 }
 
-/** Whether a header's value carries a handle: as it is, or inside Basic authentication's base64. */
-function carries(value: string): boolean {
-  if (HANDLE.test(value)) return true;
+/** Whether a header's value carries what `pattern` finds, a handle say: as it is, or inside Basic authentication's base64. */
+function carries(value: string, pattern: RegExp = HANDLE): boolean {
+  if (pattern.test(value)) return true;
   const basic = /^Basic\s+(\S+)$/i.exec(value);
   if (basic === null) return false;
   try {
-    return HANDLE.test(atob(basic[1]!));
+    return pattern.test(atob(basic[1]!));
   } catch {
     return false;
   }
@@ -1010,22 +1289,35 @@ function bytesOf(text: string): string {
   return text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 }
 
-/** The credential's values for the handle: remembered for `cacheSeconds`, or opened now, logged as one use. */
+/**
+ * Who uses a credential: a handle, or a workload `workload` authenticated
+ * for this request. A workload's values are kept per session, environment
+ * and credential, its session checked on every request before they are.
+ */
+type User = string | WorkloadUse;
+
+/** What a caller's values are kept under, and its tunnel group: the handle, or the session (a Cloudflare call's binding), with the environment and credential. */
+function cacheKey(user: User, path: string, name: string): string {
+  if (typeof user === 'string') return `${user}\u0000${path}\u0000${name}`;
+  return `\u0001${user.profile === 'cloudflare' ? `binding:${user.bindingId}` : user.credentialId}\u0000${user.place}\u0000${name}`;
+}
+
+/** The credential's values for the handle or workload: remembered for `cacheSeconds`, or opened now, logged as one use. */
 async function valuesFor(
   coffre: PluginContext,
   proxy: Proxy,
-  handle: string,
+  user: User,
   path: string,
   credential: { name: string; keys: readonly string[]; egress?: Egress },
   host: string | null,
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
 ): Promise<Opened> {
-  const key = `${handle}\u0000${path}\u0000${credential.name}`;
+  const key = cacheKey(user, path, credential.name);
   const now = Date.now();
   const kept = proxy.cache.get(key);
   if (kept !== undefined && kept.until > now) return kept;
-  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }), ...(credential.egress === undefined ? {} : { egress: true }) } });
+  const used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }), ...(credential.egress === undefined ? {} : { egress: true }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
   decided?.();
@@ -1078,9 +1370,9 @@ function bearer(request: Request): string | null {
   return /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
 }
 
-/** The body, read whole up to the limit, and no further: null past it, the rest left unread. */
-async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | undefined | null> {
-  if (Number(request.headers.get('content-length') ?? '0') > MAX_BODY_BYTES) return null;
+/** The body, read whole up to `max` bytes, and no further: null past it, the rest left unread. */
+async function boundedBody(request: Request, max = MAX_BODY_BYTES): Promise<Uint8Array<ArrayBuffer> | undefined | null> {
+  if (Number(request.headers.get('content-length') ?? '0') > max) return null;
   if (request.body === null) return undefined;
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -1089,7 +1381,7 @@ async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | 
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_BODY_BYTES) {
+    if (size > max) {
       await reader.cancel();
       return null;
     }
@@ -1228,6 +1520,7 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
   const shape = credential.placeholder === undefined ? undefined : placeholderShape(name, credential.placeholder, inject);
+  limited(name, credential.limit);
   return { ...credential, ...(methods === undefined ? {} : { methods }), ...(shape === undefined ? {} : { shape }), name, base, keys };
 }
 
@@ -1286,6 +1579,7 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
   if (credentials.has(name) || tunnels.has(name)) throw new Error(`credentialProxy: ${name} names a ${credentials.has(name) ? 'credential' : 'tunnel'} and a signer`);
   if (signer.kind !== 'private-key') throw new Error(`credentialProxy: signer ${name} is privateKey(…), the only kind there is`);
   if (!KEY.test(signer.key)) throw new Error(`credentialProxy: signer ${name} names the key that holds its private key, DFNS_PRIVATE_KEY`);
+  limited(name, signer.limit);
   // The app holds one value for a key, and a signer's is the handle as it is.
   const shaped = [...credentials.values()].find((credential) => credential.placeholder !== undefined && credential.keys.includes(signer.key));
   if (shaped !== undefined) throw new Error(`credentialProxy: ${shaped.name} and ${name} read ${signer.key} with different placeholders, and the app holds one value for it`);
@@ -1349,4 +1643,36 @@ function failure(status: number, message: string, reason?: string): Response {
     status,
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'coffre-proxy': 'refused' },
   });
+}
+
+/**
+ * A credential's or signer's limit as the gate counts it, per workload
+ * (section 8.1): `stripe per minute` and `stripe per day`, made for the
+ * service once authentication says which, when the limit is a function.
+ */
+function countsOf(name: string, limit: Limits | undefined): Pick<WorkloadAt, 'counts'> {
+  if (limit === undefined) return {};
+  const counts = (given: Limit | undefined) => {
+    const checked = checkLimit(name, given);
+    return [
+      ...(checked.perMinute === undefined ? [] : [{ key: `${name} per minute`, windowMs: 60_000, most: checked.perMinute }]),
+      ...(checked.perDay === undefined ? [] : [{ key: `${name} per day`, windowMs: 86_400_000, most: checked.perDay }]),
+    ];
+  };
+  return { counts: typeof limit === 'function' ? (service: string) => counts(limit(service)) : counts(limit) };
+}
+
+/** A limit as configured, or as its function gave it for a service: whole numbers of uses, at least 1, or none. */
+function checkLimit(name: string, limit: Limit | undefined): Limit {
+  if (limit === undefined) return {};
+  const whole = (value: unknown) => value === undefined || (typeof value === 'number' && Number.isInteger(value) && value >= 1);
+  if (typeof limit !== 'object' || limit === null || Object.keys(limit).some((key) => key !== 'perMinute' && key !== 'perDay') || !whole(limit.perMinute) || !whole(limit.perDay)) {
+    throw new Error(`credentialProxy: ${name}'s limit is { perMinute?, perDay? }, each a whole number of uses, at least 1`);
+  }
+  return limit;
+}
+
+/** A limit as configured: one checked now, or a function, whose answers are checked as it gives them. */
+function limited(name: string, limit: Limits | undefined): void {
+  if (typeof limit !== 'function') checkLimit(name, limit);
 }

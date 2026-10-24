@@ -31,6 +31,7 @@ function coffre(values: Record<string, string>, plain: readonly string[] = []): 
     signOut: unused,
     // A handle's request is no workload's.
     workload: async () => null,
+    recheck: unused,
     handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
     use: async (_handle: string | WorkloadUse, asked: UseAsked) => {
       const keys = Array.isArray(asked.keys) ? asked.keys : Object.keys(values);

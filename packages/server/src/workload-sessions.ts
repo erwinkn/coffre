@@ -16,6 +16,7 @@
 //
 // The API (`authenticateRequest`), renewal, logout and the credential
 // proxy (`PluginContext.workload`) all come through here.
+import { UNSIGNED_BODY } from '@coffre/client/dpop';
 import { scopeWithReads, type CredentialScope } from '@coffre/core/access';
 import {
   addressWithin,
@@ -32,6 +33,7 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 
+import { limitAlert, raiseAlert } from './alerts.ts';
 import { checkAuthRow } from './auth-rows.ts';
 import { ApiError } from './api/errors.ts';
 import { readScope } from './api/services.ts';
@@ -66,20 +68,30 @@ export type StandingSession = {
   nonce: string;
   /** The database's clock as the statement read it, in milliseconds. */
   now: number;
-  /** The environments the session was made for, by ID; and the one this request uses, named or the only one, null when it names none. */
+  /** The environments the session was made for, by ID; and the one this request uses, named or the only one, null when it names none, by ID and by path. */
   places: readonly string[];
   place: string | null;
+  path: string | null;
 };
 
 /** What a request asks of a session beyond standing: the credential it uses, its content, its counts, and whether a `narrow` child may ask it. */
 export type SessionAsk = {
-  /** The environment it uses, by ID, and the credential there by name, for the `credential:` freeze; null for neither. */
+  /**
+   * The environment it uses, by ID or by path (`market/prod`), and the
+   * credential there by name, for the `credential:` freeze; null for
+   * neither. A path that names no environment is refused, once the proof
+   * holds.
+   */
   place: string | null;
   credential: string | null;
-  /** The body line `req` signs, for a request coffre forwards (`bodyDigest`, a declared digest, or `UNSIGNED_BODY`); left out for one that signs no content. */
+  /**
+   * The body line `req` signs, for a request coffre forwards (`bodyDigest`,
+   * a declared digest, or `UNSIGNED_BODY`, which only a binding that says
+   * `unsignedUploads` takes); left out for one that signs no content.
+   */
   body?: string;
-  /** Counts the gate takes in the same call (section 8.1). */
-  counts?: readonly GateCount[];
+  /** Counts the gate takes in the same call (section 8.1), or how to make them for the service, `token:<name>`, which a limit per workload needs. */
+  counts?: GateCounts;
   /** Whether a `narrow` child may ask it: only `/use`, narrow and logout. */
   children?: boolean;
   /**
@@ -96,6 +108,16 @@ export type SessionAsk = {
    */
   ending?: boolean;
 };
+
+/** A request's counts, as they are or for the service that turns out to send it (`token:<name>`). */
+export type GateCounts = readonly GateCount[] | ((service: string) => readonly GateCount[]);
+
+/** A place as a request names it: an environment's ID, or its path's two slugs; null for neither, a string that is neither. */
+export function namedPlace(place: string): string | { project: string; environment: string } | null {
+  if (UUID.test(place)) return place;
+  const path = /^([a-z0-9][a-z0-9-]{0,62})\/([a-z0-9][a-z0-9-]{0,62})$/.exec(place);
+  return path === null ? null : { project: path[1]!, environment: path[2]! };
+}
 
 /** Why a session was refused, as the workload's SDK reads it: the status, a reason, and the headers RFC 9449 asks for. */
 export class SessionRefused extends Error {
@@ -201,30 +223,10 @@ export async function standingSession(
   if (header === null) throw proofRefused('dpop', 'a DPoP proof, signed by the session\'s key, comes with every request');
   const parsed = parseProof(header);
   if (!parsed.ok) throw proofRefused(parsed.reason, parsed.message);
-  if ((ask.place !== null && !UUID.test(ask.place)) || (ask.credential !== null && !CREDENTIAL_NAME.test(ask.credential))) {
-    throw refusal(new ApiError('bad_request', 'an environment is named by its ID, and a credential by its name in the configuration'));
-  }
 
   const tokenHash = hashToken(token);
-  let rows: Awaited<ReturnType<typeof workloadSession>>;
-  try {
-    rows = await workloadSession(runtime.db, tokenHash, { place: ask.place, credential: ask.credential });
-  } catch (error) {
-    console.error('checking a workload session failed', logged(error));
-    throw refusal(new ApiError('unavailable', 'coffre cannot check who you are right now'));
-  }
-  const own = rows.find((candidate) => candidate.credential.tokenHash.equals(tokenHash));
-  if (own === undefined) throw unknown();
+  const { own, rows } = await sessionRowsFor(runtime, tokenHash, ask);
   const { credential: row, binding, now } = own;
-  // The row, its member and its binding: each a clause of the one statement, each refused as an unknown credential.
-  if (!checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
-  if (own.memberStatus !== 'active' || own.memberGeneration !== row.generation) throw unknown();
-  if (
-    binding === null || own.bindingTombstoned || binding.revokedAt !== null || binding.policy === null
-    || binding.principal !== row.principal || binding.generation !== row.generation || !checkAuthRow(runtime.chainKey, 'service_bindings', binding)
-  ) {
-    throw unknown();
-  }
   // The proof next, before anything that tells a live session apart: a token without its key learns nothing more.
   const verified = await verifyProof(parsed, {
     method: request.method,
@@ -234,48 +236,15 @@ export async function standingSession(
     content: ask.body === undefined ? undefined : { headers: request.headers, body: ask.body },
   });
   if (!verified.ok) throw proofRefused(verified.reason, verified.message);
-  const policy = JSON.parse(binding.policy) as BindingPolicy;
-  // The environment it uses: the one named, or the one the session was made for (`/use/<credential>`).
-  const places = placesOf(row.places);
-  const place = ask.place ?? (places.length === 1 ? places[0]! : null);
-  if (ask.credential !== null && place === null) {
-    throw refusal(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this session reaches none, or several'));
-  }
-  const ending = ask.ending === true;
-  if (policy.approve === true && row.approvedAt === null && !ending) {
-    throw refusal(new ApiError('unauthenticated', 'this session waits for a manager of its service to approve it', 'pending'));
-  }
-  // Its ancestors, a `narrow` child's, each live, the service's own, its MAC good, and unfrozen.
-  const ancestors = ancestorsOf(row.ancestors);
-  if (ancestors === null) throw unknown();
-  const lineage = ancestors.map((id) => rows.find((candidate) => candidate.credential.id === id));
-  for (const ancestor of lineage) {
-    if (ancestor === undefined || ancestor.credential.principal !== row.principal || !checkAuthRow(runtime.chainKey, 'credentials', ancestor.credential) || !live(ancestor.credential, now)) {
-      throw unknown();
-    }
-  }
-  if (ancestors.length > 0 && ask.children !== true) {
-    throw refusal(new ApiError('forbidden', 'a narrowed session reaches only /use, narrow and logout', 'narrowed'));
-  }
-  if (workloads.noReads && policy.reads !== undefined && !ending) {
-    throw refusal(new ApiError('forbidden', 'this instance lets no binding list reads (noReads): bind the workload again without them', 'no_reads'));
-  }
-
-
-  if (policy.sources !== undefined && !ending && (sourceIp === null || !addressWithin(sourceIp, policy.sources))) {
-    throw refusal(new ApiError('unauthenticated', sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${sourceIp} is outside the binding's sources`, 'source'));
-  }
-  const frozen = own.frozen;
-  if (ask.freezes !== false && !ending && (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session))) {
-    throw refusal(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
-  }
+  const { policy, places, place, path } = clauses(runtime, workloads, own, rows, ask, sourceIp);
 
   // The gate: the nonce it gave, the `jti` once, and the counts, in one call.
   const gate = gateOf(runtime, row.principal);
+  const counts = typeof ask.counts === 'function' ? ask.counts(row.principal) : ask.counts;
   let nonce: string;
   try {
     if (verified.nonce === null) throw useNonce(await gate.nonce());
-    const admitted = await gate.admit({ replay: { session: row.id, jti: verified.jti, nonce: verified.nonce }, ...(ask.counts === undefined ? {} : { counts: ask.counts }) });
+    const admitted = await gate.admit({ replay: { session: row.id, jti: verified.jti, nonce: verified.nonce }, ...(counts === undefined ? {} : { counts }) });
     if (!admitted.ok) {
       switch (admitted.reason) {
         case 'use_dpop_nonce':
@@ -285,6 +254,10 @@ export async function standingSession(
         case 'overloaded':
           throw refusal(new ApiError('too_many_requests', 'this workload sends more requests than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
         case 'limit':
+          // Its window's first refusal alerts, once (section 8.1); the rest are refused as quietly.
+          if (admitted.first) {
+            await raiseAlert(runtime, limitAlert({ principal: row.principal, bindingId: binding.id, session: row.id, sourceIp }, admitted), { credential: ask.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place);
+          }
           throw new SessionRefused(
             errorResponse(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) }),
             { key: admitted.key, retryAfterMs: admitted.retryAfterMs, first: admitted.first },
@@ -310,6 +283,7 @@ export async function standingSession(
     nonce,
     places,
     place,
+    path,
     caller: {
       kind: 'workload',
       principal: row.principal,
@@ -321,6 +295,109 @@ export async function standingSession(
       sourceIp,
     },
   };
+}
+
+/**
+ * Whether a session that stood for a request still does, as section 5.3's
+ * statement says now, every clause but the proof and the gate: what an
+ * open tunnel's rechecks ask, the socket being authenticated already
+ * (section 7.1). `ask` is the request's, its place by ID as it resolved.
+ */
+export async function sessionStands(
+  runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'auth'>,
+  session: StandingSession,
+  ask: Pick<SessionAsk, 'place' | 'credential' | 'children'>,
+): Promise<boolean> {
+  const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
+  if (workloads === null) return false;
+  try {
+    const { own, rows } = await sessionRowsFor(runtime, session.row.tokenHash, ask);
+    // The same session, on the same binding: a row written over it is no longer the one the socket proved.
+    if (own.credential.id !== session.row.id || own.binding?.id !== session.binding.id) return false;
+    clauses(runtime, workloads, own, rows, ask, session.caller.sourceIp);
+    return true;
+  } catch (error) {
+    if (error instanceof SessionRefused) return false;
+    throw error;
+  }
+}
+
+/** The one statement for a token's session, and its row, member and binding held to their clauses, each refused as an unknown credential. */
+async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, tokenHash: Buffer, ask: Pick<SessionAsk, 'place' | 'credential'>) {
+  const place = ask.place === null ? null : namedPlace(ask.place);
+  if ((ask.place !== null && place === null) || (ask.credential !== null && !CREDENTIAL_NAME.test(ask.credential))) {
+    throw refusal(new ApiError('bad_request', 'an environment is named by its ID or its path, and a credential by its name in the configuration'));
+  }
+  let rows: Awaited<ReturnType<typeof workloadSession>>;
+  try {
+    rows = await workloadSession(runtime.db, tokenHash, { place, credential: ask.credential });
+  } catch (error) {
+    console.error('checking a workload session failed', logged(error));
+    throw refusal(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+  }
+  const own = rows.find((candidate) => candidate.credential.tokenHash.equals(tokenHash));
+  if (own === undefined) throw unknown();
+  const { credential: row, binding, now } = own;
+  if (!checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
+  if (own.memberStatus !== 'active' || own.memberGeneration !== row.generation) throw unknown();
+  if (
+    binding === null || own.bindingTombstoned || binding.revokedAt !== null || binding.policy === null
+    || binding.principal !== row.principal || binding.generation !== row.generation || !checkAuthRow(runtime.chainKey, 'service_bindings', binding)
+  ) {
+    throw unknown();
+  }
+  return { own: { ...own, binding }, rows };
+}
+
+/** Every clause past the row's own, once the proof holds (or, for a recheck, held): its place, approval, ancestors, `noReads`, `sources`, the freezes and an unsigned body. */
+function clauses(
+  runtime: Pick<CoffreRuntime, 'chainKey'>,
+  workloads: { noReads: boolean },
+  own: Awaited<ReturnType<typeof sessionRowsFor>>['own'],
+  rows: Awaited<ReturnType<typeof workloadSession>>,
+  ask: Omit<SessionAsk, 'counts'>,
+  sourceIp: string | null,
+) {
+  const { credential: row, binding, now } = own;
+  const policy = JSON.parse(binding.policy!) as BindingPolicy;
+  // The environment it uses: the one named, or the one the session was made for (`/use/<credential>`), as the statement found it.
+  const places = placesOf(row.places);
+  if (ask.place !== null && own.place === null) throw refusal(new ApiError('not_found', `${ask.place} names no environment`));
+  const place = own.place;
+  if (ask.credential !== null && place === null) {
+    throw refusal(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this session reaches none, or several'));
+  }
+  const ending = ask.ending === true;
+  if (policy.approve === true && row.approvedAt === null && !ending) {
+    throw refusal(new ApiError('unauthenticated', 'this session waits for a manager of its service to approve it', 'pending'));
+  }
+  // Its ancestors, a `narrow` child's, each live, the service's own, its MAC good, and unfrozen.
+  const ancestors = ancestorsOf(row.ancestors);
+  if (ancestors === null) throw unknown();
+  const lineage = ancestors.map((id) => rows.find((candidate) => candidate.credential.id === id));
+  for (const ancestor of lineage) {
+    if (ancestor === undefined || ancestor.credential.principal !== row.principal || !checkAuthRow(runtime.chainKey, 'credentials', ancestor.credential) || !live(ancestor.credential, now)) {
+      throw unknown();
+    }
+  }
+  if (ancestors.length > 0 && ask.children !== true) {
+    throw refusal(new ApiError('forbidden', 'a narrowed session reaches only /use, narrow and logout', 'narrowed'));
+  }
+  if (workloads.noReads && policy.reads !== undefined && !ending) {
+    throw refusal(new ApiError('forbidden', 'this instance lets no binding list reads (noReads): bind the workload again without them', 'no_reads'));
+  }
+  if (policy.sources !== undefined && !ending && (sourceIp === null || !addressWithin(sourceIp, policy.sources))) {
+    throw refusal(new ApiError('unauthenticated', sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${sourceIp} is outside the binding's sources`, 'source'));
+  }
+  const frozen = own.frozen;
+  if (ask.freezes !== false && !ending && (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session))) {
+    throw refusal(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
+  }
+  // An upload no digest binds: column B is use for it, which only a binding that says so takes (section 5.1).
+  if (ask.body === UNSIGNED_BODY && policy.unsignedUploads !== true) {
+    throw refusal(new ApiError('forbidden', "an unsigned upload (UNSIGNED-PAYLOAD) binds no body to its proof, and this workload's binding does not say unsignedUploads: send x-amz-content-sha256 as the body's SHA-256", 'unsigned_upload'));
+  }
+  return { policy, places, place, path: own.placePath };
 }
 
 /**

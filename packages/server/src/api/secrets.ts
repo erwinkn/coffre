@@ -1674,7 +1674,7 @@ export async function reveal(
    * left out, not refused: the proxy says which it needs.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
+): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence, at) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1697,7 +1697,7 @@ export async function reveal(
       metadata: path.key === undefined ? {} : { key: path.key },
     });
     const read = await readableValues(ctx.db, place, environment, path.key);
-    const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
+    const named = { id: environment.environmentId, path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
     // else, its key is a key like any other.

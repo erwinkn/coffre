@@ -414,6 +414,16 @@ environment's own values. A person's `coffre run` gets the plan wherever the ins
 has the proxy: placeholders for the credentials' keys, whatever their
 level, and the values they may read as they are.
 
+Workloads use the same proxy, signing in with a key-bound session in place
+of a handle ([workload-access.md](workload-access.md), section 7.1, and
+"As PR 1d built it" in its section 12). For them a credential or a signer
+may say how often it is used, counted per workload:
+
+```ts
+credentials: { stripe: { upstream: 'https://api.stripe.com', inject: header('authorization', 'Bearer {STRIPE_SECRET_KEY}'), limit: { perMinute: 120, perDay: 20_000 } } },
+signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY', { limit: { perMinute: 10 } }) },
+```
+
 ## 4. The proxy, request by request
 
 `GET /use` says the instance has a proxy, and names its credentials.

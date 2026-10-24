@@ -87,6 +87,8 @@ export const CoffreSockets = socketsObject<Env>((env) => {
   const replica = `postgres://${real.username}:${real.password}@${REPLICA}:5432${real.pathname}?sslmode=disable`;
   const coffre = {
     publicUrl: 'https://secrets.acme.example',
+    // A handle's request is no workload's.
+    workload: async () => null,
     // As coffre's, a database read away: admissions in a burst overlap, as on Cloudflare.
     handle: async (handle: string) => {
       await new Promise((resolve) => setTimeout(resolve, handle === LOADED ? 20_000 : 20));
