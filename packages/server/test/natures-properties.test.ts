@@ -771,11 +771,12 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const held = STRICTNESS[since] > STRICTNESS[target.nature] ? since : target.nature;
         const nature = now === 'sensitive' || row.versions.at(-1)!.nature === 'sensitive' ? 'sensitive' : held;
         const done = await attempt(() => clientOf(actor).secrets.restore(`${writePath(env)}/${key}`, version)) !== null;
-        // A restore writes, and brings back a value as it is held: refused to whoever cannot read it so (R24), plain taking
-        // write alone; never refused the instance's Owner.
+        // A restore writes, and brings back an old value as it is held: refused to whoever cannot read it so (R24), plain
+        // taking write alone, as does the current version, which makes no value live; never refused the instance's Owner.
         if (env.owner === null) {
           const holding = holds(sessionReader(actor), env);
-          if (!holding.has(WRITE) || (held !== 'plain' && !holding.has(held === 'secret' ? READ : USE))) assert.equal(done, false, `${actor} restored ${pathOf(env)}/${key} v${version}, held ${held}, holding ${[...holding].join(', ')}`);
+          const makesLive = row.current !== version - 1 && held !== 'plain';
+          if (!holding.has(WRITE) || (makesLive && !holding.has(held === 'secret' ? READ : USE))) assert.equal(done, false, `${actor} restored ${pathOf(env)}/${key} v${version}, held ${held}, holding ${[...holding].join(', ')}`);
           if (actor === ROOT) assert.equal(done, true, `the instance's Owner could not restore ${pathOf(env)}/${key} v${version}`);
         }
         if (!done) return null;
@@ -1074,5 +1075,21 @@ test("a value's old version comes back no looser than it was, nor than it was ma
     { ...CHANGE, kind: 'mark', actor: actorOf(ROOT), nature: 'sensitive', target: { env: 'dev', key: 'HOOK' } },
     { ...CHANGE, kind: 'write', actor: actorOf(ROOT), target: { env: 'dev', key: 'HOOK' } },
     { ...CHANGE, kind: 'restore', actor: actorOf(ROOT), index: 0, target: { env: 'dev', key: 'HOOK' } },
+  ]);
+});
+
+test('a writer who reads no secret restores its current version, which makes no value live, and no old one', async () => {
+  const world: World = {
+    projects: [{ id: 'market', slug: 'market', environments: [{ id: 'dev', projectId: 'market', slug: 'dev', parentId: null, owner: null }] }],
+    secrets: [{ id: 's1', environmentId: 'dev', key: 'PROBE', nature: 'secret', reference: null, archived: false }],
+    dismissals: [],
+    people: [nobody(ADA), { ...nobody(BO), grants: [{ projectId: 'market', environmentId: 'dev', role: 'contributor' }] }, nobody(CY)],
+    services: [nobody(CI), nobody(DEPLOY)],
+    credentials: [],
+  };
+  await scenario(world, asShipped(), [
+    { ...CHANGE, kind: 'restore', actor: actorOf(BO), index: 0, target: { env: 'dev', key: 'PROBE' } },
+    { ...CHANGE, kind: 'write', actor: actorOf(ROOT), target: { env: 'dev', key: 'PROBE' } },
+    { ...CHANGE, kind: 'restore', actor: actorOf(BO), index: 0, target: { env: 'dev', key: 'PROBE' } },
   ]);
 });

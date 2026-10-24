@@ -16,8 +16,8 @@
     sensitive in place comes back so, whatever was written after, and only
     whoever reads it as such may restore it. A Contributor, who reads no
     secret, could read one by restoring its plain version (R24). The vault
-    holds the same rule, so no app brings back a value made sensitive as
-    anything looser (R16).
+    holds the same rule, and refuses an app's request to bring back a value
+    made sensitive as anything looser (R16).
   - A value holding a lone UTF-16 surrogate is refused with 400, rather than
     stored as U+FFFD, a value other than the one written.
   - A fork's key with neither a value nor a reference, written around the

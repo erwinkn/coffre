@@ -734,8 +734,11 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
   }));
 }
 
-/** `column` of the newest version of a version's secret with its very ciphertext: its value, as it is held now. */
+/**
+ * `column` of the newest version of a version's secret with its very ciphertext: its value, as it is held now. Known
+ * by its IV and tag, which under one data key name one ciphertext, and which, unlike the ciphertext, no erasure empties.
+ */
 function heldAs(secretVersions: ReturnType<typeof tablesOf>['secretVersions'], column: SQL): SQL {
   return sql`SELECT ${column} FROM secret_versions same WHERE same.secret_id = ${secretVersions.secretId}
-    AND same.iv = ${secretVersions.iv} AND same.ciphertext = ${secretVersions.ciphertext} ORDER BY same.version DESC LIMIT 1`;
+    AND same.iv = ${secretVersions.iv} AND same.auth_tag = ${secretVersions.authTag} ORDER BY same.version DESC LIMIT 1`;
 }
