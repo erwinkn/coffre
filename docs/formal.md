@@ -361,13 +361,16 @@ sealed yet.
   1. the row;
   2. the vault's answer about its issuer;
   3. under the head, the issuer again, then the row, only as read.
-- **Changing access, in the vault:** demoting Olga, removing the account.
+- **Changing access, in the vault:** demoting Olga, removing her and
+  admitting her again, an Owner again, at a new generation, removing the
+  account.
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
 | The issuer is weighed from the vault's answer, read after the newest entry about their access, and committed only while that entry is still the newest (`issuerNow`, `issuerStill`) | a token reading sensitive values issued by someone demoted before it committed (`SensitiveOnlyFromOwners`) | this model, fixed with it |
 | Issuing reads the account's standing again under the head (`#stillMember`) | a token at a generation a removal had moved past (`TokensAtCurrentGeneration`) | |
 | A seal updates the row only as it read it (`updateAuth`, matched on its scope) | the older token sealed twice (`SealedOnce`) | |
+| The vault's answer about the issuer counts only at the generation the request came in at (`issuerNow`), and under the head the request's credential and member still stand at it (`credentialStill`): each covers for the other | a token issued by a membership the request did not come in as, Olga removed and admitted again meanwhile, with what she holds now (`IssuedAsAuthenticated`) | #292's review |
 
 The race it found, with the fence off. Olga's request is weighed as an
 Owner's (steps 3 and 4), Omar demotes her (9), and her token commits
@@ -395,6 +398,9 @@ those it would release (`snapshot.postgres.ts`).
   counts, right after the row.
 - **With a key service**, it counts under the row, opens the keys, then
   counts again in the statement that takes the head.
+- **Either way**, that last count is the decision, at its statement's
+  clock, which stamps the entries; the commit, and the keys handed over,
+  come after it, while the clock runs on.
 
 | Protection, in the code | Turned off, TLC finds |
 |---|---|
@@ -403,7 +409,12 @@ those it would release (`snapshot.postgres.ts`).
 | The count is the principal's, all their credentials' together | two credentials of one principal each up to the limit (`CapHolds`) |
 | The entries are stamped with the clock of the statement that counted last | keys released later than their entries say, which leave the window early (`CapHolds`) |
 
-`CapHolds` reads when each key was released, not what its entry says.
+`CapHolds` reads when each decision was, not what its entries say: so a
+stamp older than the decision is caught. It holds of decisions. A key
+reaches its caller at the commit after its decision, a transaction later,
+so a window of releases rather than decisions may hold one more read's
+keys at its edge, by that transaction's length: milliseconds, against a
+window of fifteen minutes. #292's review.
 
 ### Their invariants
 
@@ -412,12 +423,13 @@ those it would release (`snapshot.postgres.ts`).
 | `SingleUse` | An ID token buys one credential, however many runs present it at once |
 | `NoExchangeAfterUnbind` | No exchange through a binding follows its `token.unbind` in the log |
 | `ExchangedAtCurrentGeneration`, `TokensAtCurrentGeneration` | A credential is issued to an active account, at its generation when it commits |
+| `IssuedAsAuthenticated` | And by the membership its request came in as |
 | `RateHeld` | A binding issues no more than its rate |
 | `NoReleaseAfterEnd` | No value reaches a caller through a credential whose release, the vault's `secret.read`, follows the entry that ended it: its `token.revoke`, its binding's `token.unbind`, or a removal past its generation |
 | `UnboundStayUnusable` | A credential an untrusted or replaced binding issued never verifies again |
 | `SensitiveOnlyFromOwners` | A scope reads a project's sensitive values only if whoever issued it is an Owner of the project when it commits |
 | `SealedOnce` | The older release's token is sealed once, however many first uses race |
-| `CapHolds` | At most the limit's keys released to the principal in any window |
+| `CapHolds` | At most the limit's keys decided for the principal in any window |
 
 ### Their scenarios
 
@@ -425,7 +437,7 @@ those it would release (`snapshot.postgres.ts`).
 |---|---|---|
 | `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
 | `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 83 thousand |
-| `Issuing` | Olga issues the account a token, twice, while Omar demotes her or removes the account, and two first uses seal the older token at once | 11 thousand |
+| `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 
 ### What they abstract
@@ -459,7 +471,11 @@ those it would release (`snapshot.postgres.ts`).
 
 - **A write in flight.** A request writes with a credential checked before
   it was revoked, as a read did before the fence. Writes release nothing,
-  and the fence is on reads.
+  and the fence is on reads, and on issuing a service account a credential.
+- **What a read tells without the vault.** A dry run's comparison of a
+  value, and a listing that shows plain values, do not go through
+  `recorded`: a credential revoked while one is under way still gets its
+  answer, an equality or a plain value.
 - **The credential proxy's caches and tunnels.** A revoked handle keeps
   working for `cacheSeconds` from the cache, and a tunnel until its next
   check, as docs/design/credential-proxy.md says: by design, and not

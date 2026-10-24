@@ -126,7 +126,9 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
  * which `issuerStill` does, both under the head. The request was
  * authenticated earlier, on an answer that only the policy fences: a person
  * demoted since would hand a service account what they can no longer give
- * it (formal/Issuing.tla, `IssuerFence`).
+ * it (formal/Issuing.tla, `IssuerFence`). Given the generation the request
+ * came in at, an answer at another one refuses, 401: removed and admitted
+ * again, the person holds what the request's credential never did.
  *
  *   Olga, an Owner of market, asks for a token on market   her answer: Owner, entry 41
  *   Omar demotes her                                       member.role, entry 57
@@ -135,12 +137,17 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
 export async function issuerNow(
   deps: { db: Queryable; vault: Vault },
   principal: PrincipalRef,
-  credentialScope: CredentialScope | null = null,
+  { credentialScope = null, generation }: { credentialScope?: CredentialScope | null; generation?: number } = {},
 ): Promise<{ caller: Caller; accessSeq: bigint | null }> {
   const member = formatMember(principal);
   const policySeq = await newestPolicySeq(deps.db);
   const accessSeq = await newestAccessSeq(deps.db, member);
-  return { caller: callerFrom(principal, await deps.vault.access(member), policySeq, credentialScope), accessSeq };
+  const access = await deps.vault.access(member);
+  // The membership the request came in as, or none: removed and admitted again since, they are someone the request is not.
+  if (generation !== undefined && (access.status !== 'active' || access.generation !== generation)) {
+    throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
+  }
+  return { caller: callerFrom(principal, access, policySeq, credentialScope), accessSeq };
 }
 
 /** Refuse, 409, if the vault changed the issuer's access since `issuerNow` asked: under the head, so no change commits between. */

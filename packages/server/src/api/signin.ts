@@ -41,7 +41,7 @@ import {
   updateAuth,
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
@@ -886,11 +886,12 @@ export class SigninService {
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
       // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, ctx.caller.credentialScope);
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { credentialScope: ctx.caller.credentialScope, generation: ctx.caller.generation });
       const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
+        await credentialStill(ctx, tx);
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           generation: standing.generation,

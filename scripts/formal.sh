@@ -49,6 +49,7 @@ REMOVALS=(
   "Issuing IssuerFence SensitiveOnlyFromOwners"
   "Issuing ServiceRecheckInIssue TokensAtCurrentGeneration"
   "Issuing SealCompareAndSet SealedOnce"
+  "Issuing IssuerGenerationKept+IssuerStandsUnderHead IssuedAsAuthenticated"
   "Bulk ReaderRowLocked+BulkRecountUnderHead CapHolds"
   "Bulk CountsTheRequest CapHolds"
   "Bulk PerPrincipal CapHolds"

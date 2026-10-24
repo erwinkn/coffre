@@ -16,7 +16,8 @@
   on the vault's answer about their issuer, asked again when issuing
   starts, and committed only while it is still theirs; demoted meanwhile,
   the request answers 409 `access_changed`, and asked again it is weighed
-  as they are now. Before, a token was weighed on the answer the request's
+  as they are now; removed and admitted again since the request came in,
+  401. Before, a token was weighed on the answer the request's
   authentication got, which nothing fenced: a demotion is no change to
   the policy. Found by `formal/Issuing.tla`.
 - **`pnpm formal` checks three more protocols**: a CI run's ID token

@@ -54,10 +54,10 @@ VARIABLES
     rowLock,        \* the process holding the reader's row, or None
     head,           \* the process holding the log's head, or None
     pc, op, l, left,
-    released        \* history: each key released, and when it was
+    decided         \* history: each key the vault decided to release, and when
 
 procs == <<pc, op, l, left>>
-vars == <<now, log, rowLock, head, procs, released>>
+vars == <<now, log, rowLock, head, procs, decided>>
 
 -----------------------------------------------------------------------------
 
@@ -82,15 +82,7 @@ Release(p) ==
 Refuse(p) ==
     /\ Release(p)
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<now, log, op, l, left, released>>
-
-\* Append an entry per key, stamped `stamp`, commit, and hand the keys over.
-Commit(p, stamp) ==
-    /\ log' = log \cup {[key |-> k, cred |-> op[p].cred, stamp |-> stamp] : k \in op[p].keys}
-    /\ released' = released \cup {[key |-> k, at |-> now] : k \in op[p].keys}
-    /\ Release(p)
-    /\ Goto(p, "idle")
-    /\ UNCHANGED <<now, op, l, left>>
+    /\ UNCHANGED <<now, log, op, l, left, decided>>
 
 Begin(p) ==
     /\ pc[p] = "idle"
@@ -100,7 +92,7 @@ Begin(p) ==
          /\ l' = [l EXCEPT ![p] = L0]
          /\ Goto(p, IF ReaderRowLocked THEN "read.lock" ELSE IF o.remote THEN "read.check" ELSE "read.head")
     /\ left' = [left EXCEPT ![p] = @ - 1]
-    /\ UNCHANGED <<now, log, rowLock, head, released>>
+    /\ UNCHANGED <<now, log, rowLock, head, decided>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -117,7 +109,7 @@ ReadLock(p) ==
     /\ rowLock \in {None, p}
     /\ rowLock' = p
     /\ Goto(p, IF op[p].remote THEN "read.check" ELSE "read.head")
-    /\ UNCHANGED <<now, log, head, op, l, left, released>>
+    /\ UNCHANGED <<now, log, head, op, l, left, decided>>
 
 \* With a key service: the count under the row, without the head; then the
 \* key service, while the clock may run.
@@ -127,7 +119,7 @@ ReadCheck(p) ==
          THEN Refuse(p)
          ELSE /\ l' = [l EXCEPT ![p] = [stamp |-> now, over |-> FALSE]]
               /\ Goto(p, "read.head")
-              /\ UNCHANGED <<now, log, rowLock, head, op, left, released>>
+              /\ UNCHANGED <<now, log, rowLock, head, op, left, decided>>
 
 \* The statement that takes the head waits for it (SKIP LOCKED, then a
 \* statement of its own) and reads again once it holds it.
@@ -135,16 +127,29 @@ ReadHead(p) ==
     /\ pc[p] = "read.head"
     /\ head \in {None, p}
     /\ head' = p
-    /\ Goto(p, "read.commit")
-    /\ UNCHANGED <<now, log, rowLock, op, l, left, released>>
+    /\ Goto(p, "read.count")
+    /\ UNCHANGED <<now, log, rowLock, op, l, left, decided>>
 
-\* Under the head: the count (again, with a key service), the entries, the
-\* commit, the keys released.
-ReadCommit(p) ==
-    /\ pc[p] = "read.commit"
+\* Under the head, in the statement that takes it: the count (again, with
+\* a key service), and the clock the entries are stamped with. This is the
+\* decision, at that clock.
+ReadCount(p) ==
+    /\ pc[p] = "read.count"
     /\ IF (~op[p].remote \/ BulkRecountUnderHead) /\ Over(now, op[p])
          THEN Refuse(p)
-         ELSE Commit(p, IF op[p].remote /\ ~StampedWhenCounted THEN l[p].stamp ELSE now)
+         ELSE /\ l' = [l EXCEPT ![p].stamp = IF op[p].remote /\ ~StampedWhenCounted THEN @ ELSE now]
+              /\ decided' = decided \cup {[key |-> k, at |-> now] : k \in op[p].keys}
+              /\ Goto(p, "read.commit")
+              /\ UNCHANGED <<now, log, rowLock, head, op, left>>
+
+\* The keys opened, the entries appended with that stamp, the commit, the
+\* keys handed over; the clock may have moved since the count.
+ReadCommit(p) ==
+    /\ pc[p] = "read.commit"
+    /\ log' = log \cup {[key |-> k, cred |-> op[p].cred, stamp |-> l[p].stamp] : k \in op[p].keys}
+    /\ Release(p)
+    /\ Goto(p, "idle")
+    /\ UNCHANGED <<now, op, l, left, decided>>
 
 -----------------------------------------------------------------------------
 
@@ -152,7 +157,7 @@ ReadCommit(p) ==
 Tick ==
     /\ now < MaxTime
     /\ now' = now + 1
-    /\ UNCHANGED <<log, rowLock, head, procs, released>>
+    /\ UNCHANGED <<log, rowLock, head, procs, decided>>
 
 Init ==
     /\ now = 0
@@ -163,9 +168,9 @@ Init ==
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
     /\ left = Budget
-    /\ released = {}
+    /\ decided = {}
 
-Step(p) == Begin(p) \/ ReadLock(p) \/ ReadCheck(p) \/ ReadHead(p) \/ ReadCommit(p)
+Step(p) == Begin(p) \/ ReadLock(p) \/ ReadCheck(p) \/ ReadHead(p) \/ ReadCount(p) \/ ReadCommit(p)
 
 Finished == \A p \in Procs : pc[p] = "idle" /\ left[p] = 0
 
@@ -181,8 +186,11 @@ TypeOK ==
     /\ head \in Procs \cup {None}
 
 \* However its reads interleave, and whichever credentials they come in on,
-\* the principal is released at most Cap distinct keys in any window: the
-\* keys released, by when they were, not by what their entries say.
-CapHolds == Cardinality({r.key : r \in {r \in released : r.at + Window > now}}) <= Cap
+\* the vault decides to release at most Cap distinct keys to the principal
+\* in any window: by when each decision was, the clock of the statement
+\* that counted, not by what its entries say. A key reaches its caller at
+\* the commit after, a transaction later: a window of releases, rather than
+\* decisions, may hold one more read's keys at its edge (docs/formal.md).
+CapHolds == Cardinality({d.key : d \in {d \in decided : d.at + Window > now}}) <= Cap
 
 =============================================================================

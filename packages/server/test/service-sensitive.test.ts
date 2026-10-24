@@ -202,21 +202,22 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   ]);
 });
 
-/** Run `meanwhile` once, as the vault is next asked about `principal`, before it answers. */
-function beforeNextAccess(principal: string, meanwhile: () => Promise<unknown>): void {
+/** Run `meanwhile` once, as the vault is next asked about `principal`: before it answers, or with `after`, once it has. */
+function onNextAccess(principal: string, meanwhile: () => Promise<unknown>, { after = false } = {}): void {
   const access = deps.vault.access;
   deps.vault.access = async (asked, ...rest) => {
-    if (asked === principal) {
-      deps.vault.access = access;
-      await meanwhile();
-    }
-    return access(asked, ...rest);
+    if (asked !== principal) return access(asked, ...rest);
+    deps.vault.access = access;
+    if (!after) await meanwhile();
+    const answer = await access(asked, ...rest);
+    if (after) await meanwhile();
+    return answer;
   };
 }
 
 test('an Owner demoted while issuing a token gives it no sensitive value: weighed as the vault answered, committed only while still so (formal/Issuing.tla)', async () => {
   // Owen is an Owner of backend as his request is checked, and as the vault answers for his token; demoted before it commits.
-  beforeNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
+  onNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
   await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 409, reason: 'access_changed' });
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
   // Asked again, he is weighed as he is now: a Developer's token, which reads none.
@@ -225,8 +226,19 @@ test('an Owner demoted while issuing a token gives it no sensitive value: weighe
   assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
 });
 
+test('an issuer removed and admitted again while issuing issues nothing: the request came in as a membership that ended', async () => {
+  // Owen's request is checked, and then, before issuing asks the vault about him again, he is removed and admitted again.
+  onNextAccess(`user:${OWEN}`, async () => {
+    await root.members.remove(`user:${OWEN}`);
+    await root.members.add(`user:${OWEN}`);
+    await root.access.set(`user:${OWEN}`, { backend: 'owner' });
+  }, { after: true });
+  await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 401 });
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+});
+
 test('a trust binding is weighed the same: an Owner demoted while binding a workload binds nothing', async () => {
-  beforeNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
+  onNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
   await assert.rejects(owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } }), { status: 409, reason: 'access_changed' });
   assert.deepEqual(await db.owner.select().from(serviceBindings), []);
   const theirs = await owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } });

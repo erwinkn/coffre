@@ -256,14 +256,15 @@ export async function recorded<T>(
  * unlocked. So a read checks it again after the vault has released: under
  * the head when it commits entries of its own, otherwise with no lock. A
  * revocation committed before this read is seen; one after came after the
- * release (formal/Credentials.tla, `CredentialFence`).
+ * release (formal/Credentials.tla, `CredentialFence`). Issuing a service
+ * account a credential checks it too, under the head (`issuerNow`).
  *
  *   Ada's token checked, her export asks the vault
  *   Ada revokes the token                            token.revoke
  *   the vault releases the values                    secret.read
  *   checked again: revoked                           401, not the values
  */
-export async function credentialStill(ctx: Pick<ApiContext, 'caller' | 'credentialId' | 'via'>, db: Queryable): Promise<void> {
+export async function credentialStill(ctx: Pick<ApiContext, 'caller' | 'credentialId'> & Partial<Pick<ApiContext, 'via'>>, db: Queryable): Promise<void> {
   const stands = await wayInStands(db, {
     principal: formatMember(ctx.caller.principal),
     generation: ctx.caller.generation,

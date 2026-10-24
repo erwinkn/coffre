@@ -599,20 +599,24 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
  * or membership, by its seq, as their row names it (`access_seq`); null for
  * no row. Read before the vault is asked about them, and again under the
  * head, it says whether its answer is still theirs (`issuerStill`): the
- * vault writes the row with each such entry, under the same head.
+ * vault writes the row with each such entry, under the same head. With the
+ * database clock, as `findCredential` reads, so that Hyperdrive never
+ * answers it from its cache.
  */
 export async function newestAccessSeq(db: Queryable, principal: string): Promise<bigint | null> {
   const { vaultMembers } = tablesOf(db);
-  const [row] = await db.select({ seq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const [row] = await db.select({ seq: vaultMembers.accessSeq, now: clock(db) }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
   return row?.seq ?? null;
 }
 
 /**
  * Whether a request's way in still stands: its member active at the
  * generation it was checked at, the credential it came in on not revoked,
- * and the MCP connection it came through neither; one statement. Rows read
- * only to refuse, so no MAC to check: a row changed around the app can only
- * turn a request away (`credentialStill`).
+ * and the MCP connection it came through neither; one statement, with the
+ * database clock, so that Hyperdrive never answers it from its cache: a
+ * cached yes from an earlier request would let a revoked one through. Rows
+ * read only to refuse, so no MAC to check: a row changed around the app can
+ * only turn a request away (`credentialStill`).
  */
 export async function wayInStands(
   db: Queryable,
@@ -624,7 +628,7 @@ export async function wayInStands(
   const connection = way.connectionId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${mcpConnections} WHERE ${mcpConnections.id} = ${way.connectionId}
     AND ${mcpConnections.revokedAt} IS NULL AND ${mcpConnections.generation} = ${way.generation})`;
   const [row] = await db
-    .select({ status: vaultMembers.status, generation: vaultMembers.generation, stands: truth(sql`${credential} AND ${connection}`) })
+    .select({ status: vaultMembers.status, generation: vaultMembers.generation, stands: truth(sql`${credential} AND ${connection}`), now: clock(db) })
     .from(vaultMembers)
     .where(eq(vaultMembers.principal, way.principal));
   return row !== undefined && row.status === 'active' && row.generation === way.generation && row.stands;

@@ -55,7 +55,7 @@ import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { newestPolicySeq } from './caller.ts';
 import type { Asker, SigninService } from './signin.ts';
-import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, credentialStill, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
   inheritedScope,
   issuedScope,
@@ -303,7 +303,7 @@ export class WorkloadService {
     if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
       // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, ctx.caller.credentialScope);
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { credentialScope: ctx.caller.credentialScope, generation: ctx.caller.generation });
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
       const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
@@ -352,6 +352,7 @@ export class WorkloadService {
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
+        await credentialStill(ctx, tx);
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
@@ -424,7 +425,7 @@ export class WorkloadService {
     const jwksUri = `${UPLOADED}${uploaded.digest}`;
     return withRefusals(this.#deps, async () => {
       // The issuer as the vault answers now, held to under the head (`issuerStill`), as in `bind`.
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, ctx.caller.credentialScope);
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { credentialScope: ctx.caller.credentialScope, generation: ctx.caller.generation });
       const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
@@ -457,6 +458,7 @@ export class WorkloadService {
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
+        await credentialStill(ctx, tx);
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const live = replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation));
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);

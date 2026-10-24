@@ -12,7 +12,8 @@
 (* in principal order, which a vault decision takes first, and the log's   *)
 (* head, which every app transaction takes first.                          *)
 (*                                                                         *)
-(* Olga is an Owner of the project, and so is Omar, who may demote her.    *)
+(* Olga is an Owner of the project, and so is Omar, who may demote her,    *)
+(* or remove her and admit her again, an Owner again, at a new generation. *)
 (* The service account "svc" holds a grant there. A token an older release *)
 (* issued it, by Olga, is not sealed yet: whether it reads the sensitive   *)
 (* values there is decided at its first use.                               *)
@@ -36,7 +37,13 @@ CONSTANTS
     ServiceRecheckInIssue,
     \* A seal updates the row only as it read it, unsealed (server
     \* api/services.ts, sealCredentials, updateAuth's match on its scope).
-    SealCompareAndSet
+    SealCompareAndSet,
+    \* The vault's answer about the issuer counts only at the generation the
+    \* request came in at (services.ts, issuerNow, `generation`).
+    IssuerGenerationKept,
+    \* And under the head, the request's credential and its member still
+    \* stand, at that generation (server api/context.ts, credentialStill).
+    IssuerStandsUnderHead
 
 None == "none"
 People == {"olga", "omar"}
@@ -47,6 +54,8 @@ Rank == [m \in Members |-> CASE m = "olga" -> 1 [] m = "omar" -> 2 [] m = "svc" 
 VARIABLES
     \* vault rows
     owners,         \* the people who are Owners of the project
+    olgaStatus,     \* Olga's membership: "active" or "removed"
+    olgaGen,        \* and its generation
     svcStatus,      \* the service account's status
     svcGen,         \* and generation
     \* app rows
@@ -61,7 +70,7 @@ VARIABLES
     \* history, for the invariants
     given           \* a record per scope committed: whether it reads sensitive values, and whether its issuer is an Owner then
 
-rows == <<owners, svcStatus, svcGen, legacy>>
+rows == <<owners, olgaStatus, olgaGen, svcStatus, svcGen, legacy>>
 locks == <<rowLock, head>>
 procs == <<pc, op, l, left>>
 vars == <<rows, log, locks, procs, given>>
@@ -71,7 +80,7 @@ vars == <<rows, log, locks, procs, given>>
 
 \* The vault's entries that change someone's access: their role, grants or
 \* membership (core vault.ts, ACCESS_ACTIONS).
-AccessKinds == {"member.role", "access.revoke", "access.grant", "member.remove"}
+AccessKinds == {"member.role", "access.revoke", "access.grant", "member.remove", "member.add"}
 
 \* The newest entry about m's access, by its place in the log; 0 for none
 \* (server db/queries.ts, newestAccessSeq).
@@ -80,8 +89,11 @@ NewestAbout(m) ==
     IF about = {} THEN 0 ELSE CHOOSE i \in about : \A j \in about : j <= i
 
 \* Whether the vault answers that m is an Owner of the project
-\* (core access.ts, ownsProject).
-Owns(m) == m \in owners
+\* (core access.ts, ownsProject): only while a member.
+Owns(m) == m \in owners /\ (m = "olga" => olgaStatus = "active")
+
+\* Olga, as the request she issues on came in: active, at that generation.
+AsAuthenticated(gen) == olgaStatus = "active" /\ olgaGen = gen
 
 -----------------------------------------------------------------------------
 (* Processes *)
@@ -92,6 +104,7 @@ L0 == [id |-> <<None, 0>>,
        seq |-> 0,             \* the newest entry about the issuer's access, as read before the vault was asked
        owner |-> FALSE,       \* whether the vault answered that the issuer is an Owner
        gen |-> 0,             \* the service account's generation, as the vault answered
+       auth |-> 0,            \* the issuer's generation, as the request authenticated
        sealed |-> FALSE,      \* whether the seal read the row sealed already
        toLock |-> <<>>]
 
@@ -130,10 +143,11 @@ Refuse(p) ==
 Entry(kind, p) == [kind |-> kind, id |-> l[p].id, who |-> op[p].who, sensitive |-> FALSE]
 
 FirstLabel(kind) ==
-    CASE kind = "issue"  -> "issue.load"
+    CASE kind = "issue"  -> "issue.auth"
       [] kind = "seal"   -> "seal.read"
       [] kind = "demote" -> "demote.lock"
       [] kind = "remove" -> "remove.lock"
+      [] kind = "readmit" -> "readmit.lock"
 
 Begin(p) ==
     /\ pc[p] = "idle"
@@ -141,7 +155,7 @@ Begin(p) ==
     /\ \E o \in Ops[p] :
          /\ op' = [op EXCEPT ![p] = o]
          /\ l' = [l EXCEPT ![p] = [L0 EXCEPT !.id = <<p, left[p]>>,
-                                             !.toLock = CASE o.kind = "demote" -> Sorted({o.actor, o.who})
+                                             !.toLock = CASE o.kind \in {"demote", "readmit"} -> Sorted({o.actor, o.who})
                                                            [] o.kind = "remove" -> <<o.who>>
                                                            [] OTHER -> <<>>]]
          /\ Goto(p, FirstLabel(o.kind))
@@ -156,6 +170,14 @@ Begin(p) ==
 (* so only the token is modelled.                                          *)
 (***************************************************************************)
 
+\* The request comes in: its credential checked, Olga at her generation
+\* then (server auth.ts, authenticateRequest).
+IssueAuth(p) ==
+    /\ pc[p] = "issue.auth"
+    /\ IF olgaStatus = "active"
+         THEN Read(p, "issue.load", [l[p] EXCEPT !.auth = olgaGen])
+         ELSE Refuse(p)
+
 \* The newest entry about the issuer's access, before the vault is asked.
 IssueLoad(p) ==
     /\ pc[p] = "issue.load"
@@ -166,7 +188,7 @@ IssueLoad(p) ==
 \* values; and the account's standing (managedAccount).
 IssueAccess(p) ==
     /\ pc[p] = "issue.access"
-    /\ IF svcStatus = "active"
+    /\ IF svcStatus = "active" /\ (IssuerGenerationKept => AsAuthenticated(l[p].auth))
          THEN Read(p, "issue.head", [l[p] EXCEPT !.owner = Owns(op[p].actor), !.gen = svcGen])
          ELSE Refuse(p)
 
@@ -178,10 +200,12 @@ IssueCommit(p) ==
     /\ pc[p] = "issue.commit"
     /\ IF \/ ServiceRecheckInIssue /\ ~(svcStatus = "active" /\ svcGen = l[p].gen)
           \/ IssuerFence /\ NewestAbout(op[p].actor) # l[p].seq
+          \/ IssuerStandsUnderHead /\ ~AsAuthenticated(l[p].auth)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("token.create", p) EXCEPT !.who = op[p].actor, !.sensitive = l[p].owner])
               /\ given' = given \cup {[id |-> l[p].id, sensitive |-> l[p].owner, owner |-> Owns(op[p].actor),
-                                       current |-> svcStatus = "active" /\ svcGen = l[p].gen]}
+                                       current |-> svcStatus = "active" /\ svcGen = l[p].gen,
+                                       authenticated |-> AsAuthenticated(l[p].auth)]}
               /\ Release(p)
               /\ Goto(p, "idle")
               /\ UNCHANGED <<rows, op, l, left>>
@@ -217,10 +241,11 @@ SealCommit(p) ==
            THEN Refuse(p)
            ELSE /\ legacy' = IF l[p].owner THEN "sensitive" ELSE "secret"
                 /\ log' = Append(log, [Entry("token.seal", p) EXCEPT !.sensitive = l[p].owner])
-                /\ given' = given \cup {[id |-> l[p].id, sensitive |-> l[p].owner, owner |-> Owns(op[p].who), current |-> TRUE]}
+                /\ given' = given \cup {[id |-> l[p].id, sensitive |-> l[p].owner, owner |-> Owns(op[p].who), current |-> TRUE,
+                                         authenticated |-> TRUE]}
                 /\ Release(p)
                 /\ Goto(p, "idle")
-                /\ UNCHANGED <<owners, svcStatus, svcGen, op, l, left>>
+                /\ UNCHANGED <<owners, olgaStatus, olgaGen, svcStatus, svcGen, op, l, left>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -241,7 +266,7 @@ DemoteCommit(p) ==
               /\ log' = Append(log, Entry("member.role", p))
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<svcStatus, svcGen, legacy, op, l, left, given>>
+              /\ UNCHANGED <<olgaStatus, olgaGen, svcStatus, svcGen, legacy, op, l, left, given>>
 
 \* Removing the service account: its row, the head, its generation on.
 RemoveLock(p) == pc[p] = "remove.lock" /\ LockNext(p, "remove.head")
@@ -257,12 +282,32 @@ RemoveCommit(p) ==
               /\ log' = Append(log, Entry("member.remove", p))
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<owners, legacy, op, l, left, given>>
+              /\ UNCHANGED <<owners, olgaStatus, olgaGen, legacy, op, l, left, given>>
+
+\* Removing Olga and admitting her again, an Owner again: her row and the
+\* actor's, the head, her generation on, `member.remove` and `member.add`.
+\* One decision here, two in the code: nothing in between decides more.
+ReadmitLock(p) == pc[p] = "readmit.lock" /\ LockNext(p, "readmit.head")
+
+ReadmitHead(p) == pc[p] = "readmit.head" /\ TakeHead(p, "readmit.commit")
+
+ReadmitCommit(p) ==
+    /\ pc[p] = "readmit.commit"
+    /\ IF olgaStatus # "active"
+         THEN Refuse(p)
+         ELSE /\ olgaGen' = olgaGen + 1
+              /\ owners' = owners \cup {"olga"}
+              /\ log' = log \o <<Entry("member.remove", p), Entry("member.add", p)>>
+              /\ Release(p)
+              /\ Goto(p, "idle")
+              /\ UNCHANGED <<olgaStatus, svcStatus, svcGen, legacy, op, l, left, given>>
 
 -----------------------------------------------------------------------------
 
 Init ==
     /\ owners = People
+    /\ olgaStatus = "active"
+    /\ olgaGen = 0
     /\ svcStatus = "active"
     /\ svcGen = 0
     /\ legacy = "unsealed"
@@ -277,10 +322,11 @@ Init ==
 
 Step(p) ==
     \/ Begin(p)
-    \/ IssueLoad(p) \/ IssueAccess(p) \/ IssueHead(p) \/ IssueCommit(p)
+    \/ IssueAuth(p) \/ IssueLoad(p) \/ IssueAccess(p) \/ IssueHead(p) \/ IssueCommit(p)
     \/ SealRead(p) \/ SealAccess(p) \/ SealHead(p) \/ SealCommit(p)
     \/ DemoteLock(p) \/ DemoteHead(p) \/ DemoteCommit(p)
     \/ RemoveLock(p) \/ RemoveHead(p) \/ RemoveCommit(p)
+    \/ ReadmitLock(p) \/ ReadmitHead(p) \/ ReadmitCommit(p)
 
 Finished == \A p \in Procs : pc[p] = "idle" /\ left[p] = 0
 
@@ -310,5 +356,9 @@ SealedOnce == Cardinality({i \in 1..Len(log) : log[i].kind = "token.seal"}) <= 1
 \* A token is issued to an active account, at its generation as it is when
 \* the token commits.
 TokensAtCurrentGeneration == \A g \in given : g.current
+
+\* And by the membership its request came in as: removed and admitted
+\* again, the issuer holds what that request's credential never did.
+IssuedAsAuthenticated == \A g \in given : g.authenticated
 
 =============================================================================
