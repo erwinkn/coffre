@@ -77,8 +77,8 @@
   <service> --issuer … --replace-keys --jwks-file … --apply`). Anyone may
   send such a token, so a service alerts once an hour at most, whatever
   the `kid`: one conditional write on the new `capped_alerts` table decides,
-  across isolates and processes, and a refusal capped out opens no
-  transaction and never takes the audit log's head. Only a service with a
+  across isolates and processes, and a refusal capped out costs one read,
+  opens no transaction and never takes the audit log's head. Only a service with a
   binding on the token's issuer gets that far; any other refusal stays a
   line in the process log, which now names the issuer and `kid` of an
   unknown key too. `/api/auth/oidc` alerts the same for a bearer binding

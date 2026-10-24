@@ -312,18 +312,22 @@ export async function keyNames(db: Queryable, ids: readonly string[]): Promise<M
 /**
  * Whether this caller raises `service`'s `kind` alert now: the first to
  * ask since `everyMs` before `now`, as one conditional write decides, so
- * that two isolates or processes at once raise it once. A statement of its
- * own, outside any transaction, so one capped out never waits for, or
+ * that two isolates or processes at once raise it once. A read first, so
+ * that one capped out, as nearly all are, writes and locks nothing; each
+ * a statement of its own, outside any transaction, so none waits for, or
  * holds, the log's head.
  */
 export async function claimAlert(db: Queryable, service: string, kind: string, now: Date, everyMs: number): Promise<boolean> {
   const { cappedAlerts } = tablesOf(db);
+  const since = new Date(now.getTime() - everyMs);
+  const [last] = await db.select({ raisedAt: cappedAlerts.raisedAt }).from(cappedAlerts).where(and(eq(cappedAlerts.service, service), eq(cappedAlerts.kind, kind)));
+  if (last !== undefined && last.raisedAt >= since) return false;
   const claimed = await db.insert(cappedAlerts)
     .values({ service, kind, raisedAt: now })
     .onConflictDoUpdate({
       target: [cappedAlerts.service, cappedAlerts.kind],
       set: { raisedAt: now },
-      setWhere: lt(cappedAlerts.raisedAt, new Date(now.getTime() - everyMs)),
+      setWhere: lt(cappedAlerts.raisedAt, since),
     });
   return changedRows(claimed) === 1;
 }

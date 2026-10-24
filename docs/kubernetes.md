@@ -111,9 +111,9 @@ coffre tells you when that happens: the first such refusal raises a
 deployment's `workloads.alert` (a Slack webhook, a pager), naming the
 service, the issuer and the key the token names, with the commands below.
 A token's header is anyone's to write, so a service alerts at most once an
-hour, whatever key its tokens name; the refusals in between are a line
-each in the process log, `workload_exchange_refused`, which names the
-issuer and the key too.
+hour, whatever key its tokens name; the refusals in between are a
+sampled line in the process log (at most one a minute),
+`workload_exchange_refused`, which names the issuer and the key too.
 
 Upload the cluster's keys again as soon as the new one is served, while the
 set holds both:

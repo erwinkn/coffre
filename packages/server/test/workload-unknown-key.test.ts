@@ -14,6 +14,7 @@ import type { Database } from '@coffre/db';
 import { eq, sql } from 'drizzle-orm';
 
 import { UNKNOWN_KEY_ALERT_MS } from '../src/alerts.ts';
+import { claimAlert } from '../src/db/workloads.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -187,6 +188,19 @@ test('the cap is per service, whatever the key, two requests at once included, a
   assert.equal((await signIn(podToken('forged-g'))).reason, 'unknown_key');
   assert.deepEqual((await logged()).map(({ kid }) => kid).slice(2), ['forged-g']);
   assert.equal((await delivered()).length, 3);
+});
+
+test('two connections claiming at once raise one alert, first and after the hour alike', async () => {
+  const claim = (on: Database, now: Date) => claimAlert(on, `token:${SERVICE}`, 'unknown_key', now, UNKNOWN_KEY_ALERT_MS);
+  const now = new Date();
+  for (let round = 0; round < 5; round++) {
+    await db.owner.delete(cappedAlerts);
+    assert.deepEqual((await Promise.all([claim(db.runtime, now), claim(db.owner, now)])).sort(), [false, true], 'the first');
+  }
+  // An hour on: both find the row old, and the upsert's condition decides.
+  const later = new Date(now.getTime() + UNKNOWN_KEY_ALERT_MS + 1);
+  assert.deepEqual((await Promise.all([claim(db.runtime, later), claim(db.owner, later)])).sort(), [false, true], 'after the hour');
+  assert.equal(await claim(db.runtime, new Date(later.getTime() + 1000)), false, 'within the next hour');
 });
 
 test('a refusal capped out opens no transaction: the one that alerts opens its own', async () => {

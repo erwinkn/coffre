@@ -1329,10 +1329,10 @@ can send, each naming a `kid` of their own. So its alert is capped per
 service, never per `kid`, and the cap holds across isolates: one
 conditional write on `capped_alerts` (`claimAlert`: insert the service's
 row, or move its time on only if it is an hour old) decides, outside any
-transaction. A refusal capped out costs that one statement and never takes
-the log's head, which unauthenticated traffic must not contend (R35); the
-one that wins appends its entry in a transaction of its own, as every
-alert does. The `kid` is shown in at most 64 characters, each a JWK's kid
+transaction, after a read that finds most refusals capped out. One capped
+out costs that read, writes and locks nothing, and never takes the log's
+head, which unauthenticated traffic must not contend (R35); the one that
+wins appends its entry in a transaction of its own, as every alert does. The `kid` is shown in at most 64 characters, each a JWK's kid
 uses or a `?`. Only a request that a binding of the service on the
 token's issuer takes as far as its keys counts; any other refusal stays a
 sampled line in the process log.
