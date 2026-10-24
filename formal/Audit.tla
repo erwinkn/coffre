@@ -62,7 +62,11 @@ CONSTANTS
     ReadinessChecksHeld,
     \* A beat writes the anchor only over the record it read before its
     \* checkpoint (anchor.ts, AnchorStore.write, `admits`).
-    AnchorCas
+    AnchorCas,
+    \* A beat that loses the compare-and-set to a walk between beats toward
+    \* the same checkpoint walks again from that walk's record (audit-watch.ts,
+    \* beat, `WRITES_LOST`). Not a protection: what must hold with it on.
+    BeatRetries
 
 None == "none"
 AppKinds == {"app", "beat"}
@@ -182,7 +186,8 @@ Begin(p) ==
          /\ l' = [l EXCEPT ![p] = L0]
          /\ Goto(p, CASE o.kind = "app" -> "append.head"
                       [] o.kind = "vault" -> "append.head"
-                      [] o.kind = "beat" -> "beat.head"
+                      [] o.kind = "beat" -> "beat.read"
+                      [] o.kind = "walk" -> "walk.read"
                       [] o.kind = "probe" -> "probe.anchor"
                       [] o.kind \in {"rewrite", "edit", "revert"} -> "tamper")
     /\ left' = [left EXCEPT ![p] = @ - 1]
@@ -233,10 +238,14 @@ Tamper(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* A heartbeat (server plugins/audit-watch.ts, beat): the beat, the        *)
-(* anchor read, the vault's checkpoint, the walk from the anchor to the    *)
-(* prefix it signed, then the anchor written over the record it read.      *)
+(* A heartbeat (server plugins/audit-watch.ts, beat): the anchor read, the *)
+(* beat, the vault's checkpoint, the walk from the anchor to the prefix it *)
+(* signed, then the anchor written over the record it read.                *)
 (***************************************************************************)
+
+\* Before the vault signs: a beat beside it that anchors a later checkpoint
+\* first wins the compare-and-set.
+BeatRead(p) == pc[p] = "beat.read" /\ Read(p, "beat.head", [l[p] EXCEPT !.prev = anchor])
 
 BeatHead(p) == pc[p] = "beat.head" /\ TakeHead(p, "beat.commit")
 
@@ -246,12 +255,8 @@ BeatCommit(p) ==
     /\ Add(E("beat"))
     /\ l' = [l EXCEPT ![p].beat = Len(log) + 1]
     /\ head' = None
-    /\ Goto(p, "beat.read")
+    /\ Goto(p, "ckpt.snapshot")
     /\ UNCHANGED <<tampered, anchor, op, left, history>>
-
-\* Before the vault signs: a beat beside it that anchors a later checkpoint
-\* first wins the compare-and-set.
-BeatRead(p) == pc[p] = "beat.read" /\ Read(p, "ckpt.snapshot", [l[p] EXCEPT !.prev = anchor])
 
 \* In one snapshot: the anchor's prefix still there, then the walk from
 \* where the app verified to, toward the prefix the vault just signed. A
@@ -279,17 +284,63 @@ BeatWalk(p) ==
     /\ Goto(p, "beat.cas")
     /\ UNCHANGED <<log, head, tampered, anchor, op, left>>
 
-\* The store: the new record only over the one the beat read, unless the
-\* write is blind. One that moves a point back is the model's to see.
+\* The store: the new record only over the one read, unless the write is
+\* blind. One that moves a point back is the model's to see. What it
+\* found, once it is the anchor's: the edit, as it was then.
+Written(p) ==
+    LET next == [l[p].next EXCEPT !.rev = anchor.rev + 1]
+    IN /\ anchor' = next
+       /\ history' = [history EXCEPT !.back = @ \/ (anchor.exists /\ (next.at < anchor.at \/ next.verified < anchor.verified)),
+                                     !.found = @ \cup (IF l[p].fEdit # 0 THEN {<<next.found, l[p].fEdit>>} ELSE {})]
+
+\* Lost to a walk between beats toward the same checkpoint, the beat reads
+\* that record and walks again from it (`WRITES_LOST`); lost to anything
+\* else, it writes nothing.
 BeatCas(p) ==
     /\ pc[p] = "beat.cas"
-    /\ LET next == [l[p].next EXCEPT !.rev = anchor.rev + 1]
-       IN IF ~AnchorCas \/ anchor.rev = l[p].prev.rev
-            THEN /\ anchor' = next
-                 \* What it found, once it is the anchor's: the edit, as it was then.
-                 /\ history' = [history EXCEPT !.back = @ \/ (anchor.exists /\ (next.at < anchor.at \/ next.verified < anchor.verified)),
-                                               !.found = @ \cup (IF l[p].fEdit # 0 THEN {<<next.found, l[p].fEdit>>} ELSE {})]
-            ELSE UNCHANGED <<anchor, history>>
+    /\ IF ~AnchorCas \/ anchor.rev = l[p].prev.rev
+         THEN Written(p) /\ Goto(p, "idle") /\ UNCHANGED l
+         ELSE /\ UNCHANGED <<anchor, history>>
+              /\ IF BeatRetries /\ anchor.exists /\ l[p].prev.exists /\ anchor.at = l[p].prev.at /\ anchor.ver = l[p].prev.ver
+                   THEN Goto(p, "beat.walk") /\ l' = [l EXCEPT ![p].prev = anchor]
+                   ELSE Goto(p, "idle") /\ UNCHANGED l
+    /\ UNCHANGED <<log, head, tampered, op, left>>
+
+-----------------------------------------------------------------------------
+(***************************************************************************)
+(* A walk between beats (server plugins/audit-watch.ts, walkOn; the        *)
+(* Durable Object's alarm, Node's job): an anchor with a backlog, walked   *)
+(* on toward its own checkpoint, and written over the record it read. Its  *)
+(* beat stays the one that wrote the record.                               *)
+(***************************************************************************)
+
+Walking(a) == a.exists /\ a.at > 0 /\ a.found = 0 /\ ~a.vfound /\ a.verified # a.at
+
+WalkRead(p) ==
+    /\ pc[p] = "walk.read"
+    /\ Read(p, IF Walking(anchor) THEN "walk.walk" ELSE "idle", [l[p] EXCEPT !.prev = anchor])
+
+\* In one snapshot, as a beat's walk: the anchor's prefix still there, then
+\* from where the app verified toward it, ending at its hash.
+WalkWalk(p) ==
+    /\ pc[p] = "walk.walk"
+    /\ LET a == l[p].prev
+           held == ~AnchorHeld \/ Carries(a.at, a.ver)
+           w == WalkTo([at |-> a.verified, ver |-> a.vver], a.at)
+           ends == ~w.done \/ Carries(a.at, a.ver)
+           Found(e) == [a EXCEPT !.found = e]
+           next == CASE ~held -> Found(a.at)
+                     [] ~w.ok -> Found(w.fault)
+                     [] ~ends -> Found(a.at)
+                     [] OTHER -> [a EXCEPT !.verified = w.to, !.vver = IF w.to = 0 THEN 0 ELSE log[w.to].ver]
+       IN l' = [l EXCEPT ![p].next = next,
+                         ![p].fEdit = IF next.found > 0 /\ next.found <= Len(log) THEN log[next.found].edited ELSE 0]
+    /\ Goto(p, "walk.cas")
+    /\ UNCHANGED <<log, head, tampered, anchor, op, left, history>>
+
+WalkCas(p) ==
+    /\ pc[p] = "walk.cas"
+    /\ IF ~AnchorCas \/ anchor.rev = l[p].prev.rev THEN Written(p) ELSE UNCHANGED <<anchor, history>>
     /\ Goto(p, "idle")
     /\ UNCHANGED <<log, head, tampered, op, l, left>>
 
@@ -414,6 +465,7 @@ Step(p) ==
     \/ Begin(p) \/ AppendHead(p) \/ AppendCommit(p) \/ Tamper(p)
     \/ BeatHead(p) \/ BeatCommit(p) \/ BeatRead(p) \/ BeatWalk(p) \/ BeatCas(p)
     \/ CkptSnapshot(p) \/ CkptScrub(p) \/ CkptHead(p) \/ CkptCommit(p) \/ CkptDenyHead(p) \/ CkptDenied(p)
+    \/ WalkRead(p) \/ WalkWalk(p) \/ WalkCas(p)
     \/ ProbeAnchor(p) \/ ProbeLog(p)
 
 \* A beat past the log's bound ends the run there.

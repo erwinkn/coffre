@@ -296,6 +296,54 @@ test('a tail cut with no backup stands red until an Owner accepts the loss; tamp
   assert.equal((await anchored()).finding?.seq, Number(x.seq));
 });
 
+test('an acceptance a beat overtakes goes over the same finding sealed again, and says so in the log when the finding changed', async () => {
+  await beat();
+  for (let i = 0; i < 3; i++) await append();
+  await beat();
+  const { checkpoint } = await anchored();
+  await truncate(2n);
+  const restarted = Buffer.from(chainKey);
+  const again = testVault([], {}, { kek: vault.kek }, { scrub: 1 });
+  const after = () => writeAuditHeartbeat(db.runtime, restarted, again, anchor, warned().log);
+  assert.equal(await after(), false);
+  const owner = { actorType: 'user' as const, actorId: 'root@acme.example' };
+  const range = { from: 2, to: checkpoint!.seq };
+  // A store whose next write first lets `meanwhile` write, as a beat that runs between the acceptance's read and its write.
+  const racing = (meanwhile: () => Promise<unknown>): AnchorStore => {
+    let raced = false;
+    return {
+      read: () => anchor.read(),
+      write: async (prev, next) => {
+        if (!raced) {
+          raced = true;
+          await meanwhile();
+        }
+        return anchor.write(prev, next);
+      },
+    };
+  };
+  const actions = async () => (await entries()).filter((row) => row.action.startsWith('audit.loss_')).map((row) => row.action);
+
+  // The finding changed meanwhile: nothing moves, and the log says the acceptance was not applied.
+  const standing = await anchored();
+  const changed = (): Promise<unknown> =>
+    anchor.write(standing, sealAnchor(restarted, { ...standing, finding: { ...standing.finding!, reason: 'something else' }, at: Date.now() }));
+  await assert.rejects(acceptLoss(db.runtime, restarted, again, racing(changed), owner, range), /the acceptance was not applied/);
+  const moved = await anchored();
+  assert.deepEqual([moved.finding!.reason, moved.epoch], ['something else', standing.epoch]);
+  assert.deepEqual(await actions(), ['audit.loss_accepted', 'audit.loss_unapplied']);
+  const [unapplied] = (await entries()).filter((row) => row.action === 'audit.loss_unapplied');
+  assert.equal(unapplied!.actor, 'user:root@acme.example');
+  assert.match(JSON.parse(unapplied!.metadata).reason, /changed while the loss was accepted/);
+
+  // A beat that seals the same finding again, with its own time: the acceptance goes over it.
+  await acceptLoss(db.runtime, restarted, again, racing(after), owner, range);
+  const accepted = await anchored();
+  assert.deepEqual([accepted.finding, accepted.epoch], [null, standing.epoch + 1]);
+  assert.deepEqual(await actions(), ['audit.loss_accepted', 'audit.loss_unapplied', 'audit.loss_accepted']);
+  assert.equal(await after(), true);
+});
+
 test('the first beat on a log walks it whole, as far as the vault signed, and logs its re-anchoring', async () => {
   await backlog();
   // The vault signs as far as one walk of its own goes, and the app verifies that far: the beat is past it.
@@ -390,7 +438,8 @@ test('a store that cannot be reached fails the beat and readiness closed', async
   const { said, log } = warned();
   assert.equal(await beat(vault, log), false);
   assert.deepEqual(said, ['the audit anchor could not be read: the Durable Object is unavailable']);
-  assert.equal((await ready()).ok, false);
+  // Told apart from no anchor at all, and the cause in the process's log, not the answer.
+  assert.deepEqual(await ready(), { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false, anchored: false, error: 'the audit anchor, the log or the vault could not be read' });
   // The vault went on signing: its checkpoint covers the beat all the same.
   assert.equal((await entries()).at(-1)!.action, 'audit.checkpoint');
 });

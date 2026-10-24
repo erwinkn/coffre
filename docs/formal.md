@@ -841,14 +841,14 @@ recomputing it finds the edit. Each walk runs in a snapshot of its own,
 so it is one step.
 
 The anchor (`anchor.ts`) is out of their reach: one variable, which a
-beat writes by compare-and-set, a step. It holds the newest checkpoint a
+beat, or a walk between beats, writes by compare-and-set, a step. It holds the newest checkpoint a
 beat saw, where its prefix ends and its hash; how far the app verified;
 the entry a walk found, or that the vault refused; and the beat that
 wrote it.
 
 - **A heartbeat** (`plugins/audit-watch.ts`, `beat`):
-  1. the beat's row, under the head;
-  2. the anchor, read;
+  1. the anchor, read;
+  2. the beat's row, under the head;
   3. the vault's checkpoint, below, which returns the prefix it signed, or
      the newest one, or a refusal;
   4. in one snapshot, the anchor's prefix still there, by its hash, and
@@ -857,11 +857,15 @@ wrote it.
      `CHAIN_WALK` entries, each link and hash and the app's MACs, ending
      at the hash the vault signed; a finding of the app's that stands is
      checked alone instead, its entry, until it verifies again;
-  5. the anchor written, over the record read in step 2 (`AnchorCas`). If
-     a walk between beats (`walkOn`) wrote it first, toward the same
-     checkpoint, the beat reads that record and goes again from step 4,
-     as it would had it read that record in step 2; any other record
+  5. the anchor written, over the record read in step 1 (`AnchorCas`). If
+     a walk between beats wrote it first, toward the same checkpoint, the
+     beat reads that record and goes again from step 4, as it would had
+     it read that record in step 1 (`BeatRetries`); any other record
      written first, and it writes nothing.
+- **A walk between beats** (`plugins/audit-watch.ts`, `walkOn`; the
+  Durable Object's alarm, Node's job): an anchor with a backlog read, the
+  walk of step 4 toward its own checkpoint, and the anchor written over
+  that record, its beat and age unchanged.
 - **A checkpoint** (`vault.ts`, `checkpoint`), as before the anchor:
   1. the walk from the newest one, in a snapshot, at most
      `walks.checkpoint` entries, each link and hash, and the vault's MACs;
@@ -877,13 +881,15 @@ wrote it.
 
 Why that is enough. Readiness vouches for the prefix the anchor's
 checkpoint signed, and only once the app verified through it: every
-entry of it was walked by one beat or another, each from where the one
-before ended, which the anchor keeps and nobody else can move. A rewrite
-inside it changes the hash at its end, which readiness reads. A finding
+entry of it was walked by one beat or walk or another, each from where
+the one before ended, which the anchor keeps and nobody else can move. A
+rewrite inside it, the chain after it hashed again, changes the hash at
+its end, which readiness reads. A finding
 leaves the anchor where it was, and stands in it until the entry it names
 verifies again; then the walk goes on from where the anchor was, over that
 entry and on. Two beats at once: the one that writes second named a record
-no longer stored, and writes nothing. What is past the anchor is the next
+no longer stored, and writes nothing; one that a walk between beats
+overtook walks again from that walk's record, which holds its checkpoint. What is past the anchor is the next
 beat's: readiness says nothing of it.
 
 | Protection, in the code | Turned off, TLC finds | Found by |
@@ -893,7 +899,7 @@ beat's: readiness says nothing of it.
 | Under the head, a call that another overtook signs nothing, and a refusal since the last checkpoint stands (`seen`, `#standingRefusal`) | a checkpoint signed after a refusal for a tamper the vault can find (`StaysUnsignedOnceFound`) | |
 | The scrub recomputes the signed prefix's hashes (`#scrub`, `relink`) | an entry edited in place, signed over again and again (`EditFoundByNextScrub`) | |
 | Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
-| A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`) | this model |
+| A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`); a walk between beats writes how far it got over a beat's later checkpoint (`AnchorNeverBack`, in `Walking`) | this model |
 
 Two protections the code keeps are not needed in the model: the beat's
 walk checking that the anchor's prefix is still there, and that the entry
@@ -920,6 +926,12 @@ What it does not claim, as the code does not:
   the anchor, and the scrub finds the edit again within two laps. The
   anchor clears a refusal once the vault signs, so readiness is green over
   that edit until then, if the edit is to an entry behind the app's walk.
+- **A rewrite that stops short of the anchor's checkpoint.** The model's
+  rewrite hashes the chain again to the head. One of entries 400 to 499,
+  each hashed again, under a checkpoint at 500, leaves 500's hash, which
+  readiness reads, and breaks 500's link to 499, which no beat walks
+  again: the scrub, which links each entry to the one before, finds it
+  within two laps, as it does an edit in place.
 - **An edit made between a checkpoint's walk and its signature is signed
   over.** The scrub finds it: here, with a scrub of the whole prefix a
   call, at the next checkpoint; in the code, with `walks.scrub` entries a
@@ -997,10 +1009,11 @@ availability edge, not a bound, which `StandingStaysOpen` does not see.
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 5.4 million |
-| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 215 thousand |
-| `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 1.8 million |
-| `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 1.2 million |
+| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 5.2 million |
+| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 178 thousand |
+| `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 1.7 million |
+| `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 1.1 million |
+| `Walking` | From a checkpoint past a backlog of four entries: walks between beats go on with it, two entries a walk, while two beats run at once, someone edits an entry in the backlog, and a monitor asks | 1.3 million |
 | `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 731 |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |

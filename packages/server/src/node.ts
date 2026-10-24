@@ -113,7 +113,8 @@ export function createCoffre(config: NodeConfig): CoffreNode {
         ready()
           .then(async (rt) => {
             const ran = await runScheduled(rt).then(() => null, (error: unknown) => error);
-            await walkAuditBacklog(rt, BACKLOG_WALKS);
+            // Each failure its own line: the walk's never hides the run's.
+            await walkAuditBacklog(rt, BACKLOG_WALKS).catch((error: unknown) => console.error('the audit backlog could not be walked', logged(error)));
             if (ran !== null) throw ran;
           })
           .catch((error: unknown) => console.error('scheduled job failed', logged(error)));

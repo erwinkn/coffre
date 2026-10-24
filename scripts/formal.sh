@@ -98,6 +98,7 @@ REMOVALS=(
   "Tampering ReadinessChecksHeld GreenIsReal"
   "Tampering AnchorCas AnchorNeverBack"
   "Overtaking AnchorCas FoundEditStaysRed"
+  "Walking AnchorCas AnchorNeverBack"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
 )

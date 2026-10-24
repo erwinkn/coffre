@@ -20,6 +20,7 @@ import {
   type AuditFilter,
   type Signed,
 } from '../db/queries.ts';
+import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -393,8 +394,8 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
 
   // Where the app last verified to, the audit watch's anchor's, outside the database and read before its
   // transaction. Without a watch nobody walked the app's MACs since the checkpoints: the check goes on from the
-  // newest, and only the walk from the first entry reads what came before.
-  const watched = query.from === undefined && ctx.watch ? await ctx.watch.hooks.verified(ctx.watch.context()) : undefined;
+  // newest, and only the walk from the first entry reads what came before; so too with a store that cannot be read.
+  const watched = query.from === undefined && ctx.watch ? await ctx.watch.hooks.verified(ctx.watch.context()).catch(() => undefined) : undefined;
   const own: ChainPoint | null =
     watched === undefined ? null : watched === null ? CHAIN_START : { seq: BigInt(watched.seq), hash: Buffer.from(watched.hash, 'hex') };
   const chain = await ctx.db.transaction(
@@ -528,7 +529,7 @@ export async function acceptAuditLoss(ctx: ApiContext, range: { from: number; to
   try {
     return await ctx.watch.hooks.acceptLoss(ctx.watch.context(true), range);
   } catch (error) {
-    if (error instanceof RangeError) throw badRequest(error.message);
+    if (error instanceof Refusal) throw badRequest(error.message);
     throw error;
   }
 }

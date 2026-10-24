@@ -177,6 +177,15 @@ async function reads(entries: number): Promise<void> {
   }))));
 }
 
+test('with the watch but no anchor of the app\'s yet, the page goes on from the newest checkpoint, as without one', async () => {
+  await write(30);
+  assert.ok((await deps.vault.checkpoint()).ok);
+  await write(3);
+  assert.equal(await deps.anchor.read(), null);
+  const page = await root.audit.verify();
+  assert.ok(page.ok && page.from > 30, JSON.stringify(page));
+});
+
 test('the page checks what was written since the last beat, and only the walk from the first entry reads what came before', async () => {
   assert.equal((await root.me()).instanceRole, 'owner');
   await write(300);

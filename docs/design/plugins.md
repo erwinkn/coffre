@@ -331,7 +331,7 @@ capabilities, each narrow:
 | `log.walk({ held, from, to })` | in one read-only snapshot, each held point still at its hash, then the chain walked from `from` toward `to`, at most 10,000 entries, every link, hash and app MAC (`walkChain`) |
 | `log.hashAt(seq)` | one entry's hash, for readiness and a finding's recheck |
 | `log.check(seq, link)` | one entry checked alone, its hash, number and MAC |
-| `log.append(action, metadata)` | one entry of the watcher's kinds only (`audit.heartbeat`, `audit.finding`, `audit.finding_cleared`, `audit.reanchor`, `audit.loss_accepted`), in the scheduler's name, or the Owner's whose request it answers |
+| `log.append(action, metadata)` | one entry of the watcher's kinds only (`audit.heartbeat`, `audit.finding`, `audit.finding_cleared`, `audit.reanchor`, `audit.loss_accepted`, `audit.loss_unapplied`), in the scheduler's name, or the Owner's whose request it answers |
 | `vault.checkpoint()`, `vault.checkpointKeys()` | the vault's checkpoint, asked once a run however many ask, and the public keys checkpoints verify under |
 | `alert(text)` | the deployment's alert channel, a workload's alerts' |
 | `seal(fields)`, `own(record)` | a record MACed under a key core derives from `auditChainKey`, which the watcher never sees |

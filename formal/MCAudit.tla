@@ -61,6 +61,22 @@ ReadinessOps == [p \in ReadinessProcs |->
 ReadinessBudget == [p \in ReadinessProcs |-> IF p = "request" THEN 2 ELSE 1]
 
 -----------------------------------------------------------------------------
+(* Walking: a checkpoint past a backlog the app has not verified through,
+   which walks between beats go on with, while two beats run at once,
+   someone edits an entry in the backlog, and a monitor asks. A beat that
+   loses the compare-and-set to such a walk walks again from its record. *)
+
+WalkingLog == StartLog \o <<E("app"), E("app"), E("app"), E("app"), [E("ckpt") EXCEPT !.at = 8]>>
+WalkingAnchor == [StartAnchor EXCEPT !.at = 8]
+WalkingProcs == {"attacker", "w", "a", "b", "monitor"}
+WalkingOps == [p \in WalkingProcs |->
+    CASE p = "attacker" -> {Edit(5), Edit(7)}
+      [] p = "w" -> {Op("walk")}
+      [] p \in {"a", "b"} -> {Op("beat")}
+      [] p = "monitor" -> {Op("probe")}]
+WalkingBudget == [p \in WalkingProcs |-> IF p = "w" THEN 2 ELSE 1]
+
+-----------------------------------------------------------------------------
 (* Repairing: entry 5 edited, and the anchor's finding of it, its walk
    having begun at entry 3; requests since, more than a walk; someone puts
    the entry back when they like, while beats, one after another, check it

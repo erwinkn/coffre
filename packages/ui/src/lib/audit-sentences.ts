@@ -534,6 +534,11 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'accept as lost',
     what: ({ entry }) => [`entries ${number(entry.metadata.from) ?? '?'} to ${number(entry.metadata.to) ?? '?'}`],
   },
+  'audit.loss_unapplied': {
+    did: 'could not apply the acceptance of',
+    tried: 'apply the acceptance of',
+    what: ({ entry }) => [`entries ${number(entry.metadata.from) ?? '?'} to ${number(entry.metadata.to) ?? '?'} as lost`],
+  },
   'audit.checkpoint': {
     did: 'signed the log',
     tried: 'sign the log',

@@ -17,7 +17,7 @@ import { preferencesIn, type Preferences } from '@coffre/core/pages';
 import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
-import { pruneSpentTokens } from './db/queries.ts';
+import { auditHead, pruneSpentTokens } from './db/queries.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
@@ -214,8 +214,13 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   const pruned = await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).then(() => null, (error: Error) => error);
   if (!watched) throw new Error('scheduled audit heartbeat failed');
   // An empty log has nothing to sign: no failure without a watch, whose beat is an entry.
-  if (signed !== null && watch === null && signed !== 'the log is empty') throw new Error(`the vault did not checkpoint the audit log: ${signed}`);
+  if (signed !== null && watch === null && !(await logIsEmpty(runtime))) throw new Error(`the vault did not checkpoint the audit log: ${signed}`);
   if (pruned !== null) throw new Error(`spent tokens could not be pruned: ${pruned.message}`);
+}
+
+/** Whether the log holds no entry yet; a database that cannot say, no. */
+async function logIsEmpty(runtime: CoffreRuntime): Promise<boolean> {
+  return auditHead(runtime.db).then((head) => (head?.nextSeq ?? 0n) === 0n, () => false);
 }
 
 /**

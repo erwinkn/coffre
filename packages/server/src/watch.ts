@@ -22,7 +22,7 @@ import { auditHashAt, auditRange } from './db/queries.ts';
 export const WATCH: unique symbol = Symbol('coffre.watch');
 
 /** The entries a watcher may append, each the system's or, for an Owner's action, theirs. */
-export type WatchAction = 'audit.heartbeat' | 'audit.finding' | 'audit.finding_cleared' | 'audit.reanchor' | 'audit.loss_accepted';
+export type WatchAction = 'audit.heartbeat' | 'audit.finding' | 'audit.finding_cleared' | 'audit.reanchor' | 'audit.loss_accepted' | 'audit.loss_unapplied';
 
 /** Who an entry a watcher appends is in the name of: the scheduler's, or the Owner whose request it answers. */
 export type WatchActor = Pick<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp'>;
@@ -75,17 +75,24 @@ export type Watcher = {
   scheduled(ctx: WatchContext): Promise<boolean>;
   /** What `/readyz` says of it: `ok` joins the answer's, and the rest is shown beside it. */
   readiness(ctx: WatchContext): Promise<{ ok: boolean } & Record<string, unknown>>;
-  /** Where the app last verified the log through, for the audit page's check to start from: null, the start. */
-  verified(ctx: WatchContext): Promise<LogHead | null>;
+  /**
+   * Where the app last verified the log through, for the audit page's check
+   * to start from: null, the start; undefined, nowhere it vouches for, and
+   * the check starts from the newest checkpoint, as without a watch.
+   */
+  verified(ctx: WatchContext): Promise<LogHead | null | undefined>;
   /**
    * More of a backlog walked, between scheduled runs, over `store` when
    * given (a Durable Object's own storage, in its alarm): whether there is
    * more to walk.
    */
   walkOn(ctx: WatchContext, store?: AnchorStore): Promise<boolean>;
-  /** An Owner's acceptance of lost entries, `actor`'s, in their request's context. A refusal throws a `RangeError`. */
+  /** An Owner's acceptance of lost entries, `actor`'s, in their request's context. A refusal throws a `Refusal`. */
   acceptLoss(ctx: WatchContext, range: { from: number; to: number }): Promise<{ resumes: number | null }>;
 };
+
+/** What a watcher refuses a request for, which the API answers 400 with: never anything else it throws. */
+export class Refusal extends Error {}
 
 const made = new WeakSet<Watcher>();
 

@@ -15,7 +15,7 @@ import { verifyCheckpoint, type Checkpoint, type LogHead } from '@coffre/core/va
 
 import type { AnchorFields, AnchorFinding, AnchorStore, AuditAnchor } from '../anchor.ts';
 import type { CoffrePlugin } from '../plugins.ts';
-import { watcher, WATCH, type WatchContext } from '../watch.ts';
+import { Refusal, watcher, WATCH, type WatchContext } from '../watch.ts';
 
 export type AuditWatchOptions = {
   /** Where the anchor lives: `durableAnchor(env.ANCHOR)` on Workers, `fileAnchor(path)` on one Node process, or any `AnchorStore`. */
@@ -31,9 +31,10 @@ export function auditWatch(options: AuditWatchOptions): CoffrePlugin {
   const hooks = watcher({
     scheduled: (ctx) => beat(ctx, anchor),
     readiness: (ctx) => readiness(ctx, anchor),
+    // Nothing an anchor vouches for while there is none of the app's, or while it walks the log whole to re-anchor.
     verified: async (ctx) => {
       const held = await anchor.read();
-      return held !== null && ctx.own(held) ? held.verified : null;
+      return held !== null && ctx.own(held) && held.reanchor === null ? held.verified : undefined;
     },
     walkOn: (ctx, store) => walkOn(ctx, store ?? anchor),
     acceptLoss: (ctx, range) => acceptLoss(ctx, anchor, range),
@@ -274,6 +275,8 @@ export type Readiness = {
   broken: boolean;
   /** Whether there is an anchor the app wrote: none before the first beat, or until the next once its store emptied. */
   anchored: boolean;
+  /** Set when the anchor's store, the log or the vault could not be read, which the process's log says more of. */
+  error?: string;
 };
 
 /**
@@ -307,8 +310,9 @@ export async function readiness(ctx: WatchContext, anchors: AnchorStore): Promis
     const broken = finding !== null || !holds;
     const fresh = Number.isFinite(heartbeatAgeSeconds) && heartbeatAgeSeconds <= HEARTBEAT_STALE_AFTER_SECONDS;
     return { ok: fresh && checkpointed && !broken, heartbeatAgeSeconds, checkpointed, broken, anchored: true };
-  } catch {
-    return unready;
+  } catch (error) {
+    ctx.warn({ err: (error as Error).message }, 'readiness could not read the audit anchor, the log or the vault');
+    return { ...unready, error: 'the audit anchor, the log or the vault could not be read' };
   }
 }
 
@@ -321,26 +325,42 @@ export async function readiness(ctx: WatchContext, anchors: AnchorStore): Promis
  * past the range, in a new epoch, and an alert. The next beat walks on
  * from the entry after the range, checked alone, or, with none, from the
  * one before it; whatever the range holds now is never walked. Tampering
- * anywhere else is found as before. A refusal throws a `RangeError`.
+ * anywhere else is found as before. A refusal throws a `Refusal`. Should
+ * the anchor change meanwhile to anything but the same finding sealed
+ * again, an `audit.loss_unapplied` entry says the acceptance did not take.
  */
 export async function acceptLoss(ctx: WatchContext, anchors: AnchorStore, range: { from: number; to: number }): Promise<{ resumes: number | null }> {
   const { from, to } = range;
-  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) throw new RangeError('a range is two entries, the first no later than the last');
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) throw new Refusal('a range is two entries, the first no later than the last');
   const prev = await anchors.read();
-  if (prev === null || !ctx.own(prev)) throw new RangeError("there is no anchor of the app's to move: the next beat re-anchors");
+  if (prev === null || !ctx.own(prev)) throw new Refusal("there is no anchor of the app's to move: the next beat re-anchors");
   const { finding } = prev;
-  if (finding === null || finding.by !== 'app' || finding.seq === null) throw new RangeError('no finding of entries stands: there is nothing to accept');
-  if (finding.seq < from || finding.seq > to) throw new RangeError(`entries ${from} to ${to} do not hold entry ${finding.seq}, which the finding names`);
+  if (finding === null || finding.by !== 'app' || finding.seq === null) throw new Refusal('no finding of entries stands: there is nothing to accept');
+  if (finding.seq < from || finding.seq > to) throw new Refusal(`entries ${from} to ${to} do not hold entry ${finding.seq}, which the finding names`);
   const resumes = await pastRange(ctx, from, to);
-  await ctx.log.append('audit.loss_accepted', {
+  const accepted = await ctx.log.append('audit.loss_accepted', {
     from,
     to,
     finding,
     anchor: { checkpoint: prev.checkpoint?.seq ?? null, verified: prev.verified?.seq ?? null },
     resumes: resumes?.seq ?? null,
   });
-  const next = ctx.seal({ checkpoint: null, verified: resumes, finding: null, beat: prev.beat, reanchor: null, epoch: prev.epoch + 1, at: prev.at });
-  if (!(await anchors.write(prev, next))) throw new Error('the audit anchor changed while the loss was accepted: try again');
+  // A beat meanwhile seals the same finding again, with its own time: the acceptance goes over its record, as long
+  // as that is the finding accepted, in the same epoch. Anything else, and the log says it was not applied.
+  let stored = prev;
+  for (let lost = 0; ; lost++) {
+    const next = ctx.seal({ checkpoint: null, verified: resumes, finding: null, beat: stored.beat, reanchor: null, epoch: prev.epoch + 1, at: stored.at });
+    const written = await anchors.write(stored, next).catch((error: Error) => error);
+    if (written === true) break;
+    const now = written === false ? await anchors.read().catch(() => null) : null;
+    if (lost < WRITES_LOST && now !== null && ctx.own(now) && now.epoch === prev.epoch && JSON.stringify(now.finding) === JSON.stringify(finding)) {
+      stored = now;
+      continue;
+    }
+    const why = written === false ? 'the audit anchor changed while the loss was accepted' : `the audit anchor could not be written: ${written.message}`;
+    await ctx.log.append('audit.loss_unapplied', { accepted, from, to, reason: why }).catch((error: Error) => ctx.warn({ err: error.message }, 'an acceptance not applied could not be logged'));
+    throw new Error(`${why}, and the acceptance was not applied: look at the anchor's finding again, and accept again if it still stands`);
+  }
   ctx.alert(`an Owner accepted the loss of audit entries ${from} to ${to}: ${finding.reason} (entry ${finding.seq}). The anchor goes on past them.`);
   return { resumes: resumes?.seq ?? null };
 }
@@ -353,11 +373,11 @@ export async function acceptLoss(ctx: WatchContext, anchors: AnchorStore, range:
 async function pastRange(ctx: WatchContext, from: number, to: number): Promise<LogHead | null> {
   const after = await ctx.log.check(to + 1, 'own');
   if (after !== null) {
-    if (!after.ok) throw new RangeError(`entry ${to + 1}, after the range, does not verify: ${after.reason}`);
+    if (!after.ok) throw new Refusal(`entry ${to + 1}, after the range, does not verify: ${after.reason}`);
     return { seq: to + 1, hash: after.hash };
   }
   if (from === 0) return null;
   const hash = await ctx.log.hashAt(from - 1);
-  if (hash === null) throw new RangeError(`entry ${from - 1}, before the range, is not in the log either: accept a range that starts at the first entry missing`);
+  if (hash === null) throw new Refusal(`entry ${from - 1}, before the range, is not in the log either: accept a range that starts at the first entry missing`);
   return { seq: from - 1, hash };
 }
