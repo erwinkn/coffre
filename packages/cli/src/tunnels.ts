@@ -66,7 +66,8 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
     ws.on('pong', () => (answered = true));
     const keepalive = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      if (!answered) return ws.terminate();
+      // A WebSocket paused for its app reads no pong: its silence says nothing of the network.
+      if (!answered && !ws.isPaused) return ws.terminate();
       answered = false;
       ws.ping();
       count();
@@ -118,7 +119,9 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
         taken += data.length;
         if (taken >= COUNT_EVERY) count();
       });
-      if (!flushed) ws.pause();
+      // Paced, coffre sends no more than a window the app has not taken: the WebSocket need not wait for the app, and goes
+      // on reading pongs and counts while it reads nothing (a psql in its pager). A coffre that does not pace (Node) waits.
+      if (!flushed && pacing === false) ws.pause();
     });
     socket.on('drain', () => ws.resume());
     ws.on('close', () => {

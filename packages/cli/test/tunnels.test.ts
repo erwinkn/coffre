@@ -139,6 +139,41 @@ test('an idle connection says it is there each interval (30 seconds), a message 
   close();
 });
 
+test('an app that stops reading for a while keeps its connection: the listener still hears the pongs', async () => {
+  const stand = await coffre(true);
+  const { url, close } = await listen({ key: 'DATABASE_URL', url: stand.url }, HANDLE, { keepaliveMs: 200 });
+  const socket = await app(url);
+  const { ws } = await stand.next();
+  // coffre as it paces: never more than a window the listener has not counted.
+  const total = 32 * WINDOW;
+  let sent = 0;
+  let uncounted = 0;
+  const send = () => {
+    while (sent < total && uncounted < WINDOW) {
+      ws.send(Buffer.alloc(64 * 1024));
+      sent += 64 * 1024;
+      uncounted += 64 * 1024;
+    }
+  };
+  ws.on('message', (data: Buffer, binary: boolean) => {
+    if (binary) return;
+    uncounted -= Number(data.toString());
+    send();
+  });
+  send();
+  // A psql in its pager, or a slow consumer: the app reads nothing for five intervals.
+  socket.pause();
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(socket.destroyed, false, 'the listener ended a connection whose app stopped reading');
+  let read = 0;
+  socket.on('data', (chunk: Buffer) => (read += chunk.length));
+  socket.resume();
+  for (let tries = 0; read < total && tries < 50; tries += 1) await settle();
+  assert.equal(read, total);
+  socket.destroy();
+  close();
+});
+
 test('a connection whose ping goes unanswered until the next is gone: the app sees it close', async () => {
   const stand = await coffre(true, { deaf: true });
   const { url, close } = await listen({ key: 'DATABASE_URL', url: stand.url }, HANDLE, { keepaliveMs: 200 });
