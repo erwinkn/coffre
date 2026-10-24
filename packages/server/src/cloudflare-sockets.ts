@@ -52,8 +52,8 @@ const MOST_HELD = 2 * WINDOW;
 const MOST_SESSIONS = 32;
 /**
  * The longest a refused connection holds its slot while its admission
- * goes on: past the 45 s that refuse it, a database or vault that never
- * answers would otherwise keep it forever. An admission holds no window.
+ * goes on, past its refusal: a database or vault that never answers would
+ * otherwise keep it forever. An admission holds no window.
  */
 const MOST_DECIDING_MS = 60_000;
 /** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
@@ -67,7 +67,11 @@ const COUNT_EVERY = 128 * 1024;
  * into their time to decide together.
  */
 const ADMITTING = 4;
-/** The longest a connection waits for its turn before it goes ahead anyway: an admission that never ends holds up no other for good. */
+/**
+ * How long a connection waits for the first admission before the object
+ * stops waiting for it to fill the cache, and admits a few at once all the
+ * same: an admission that never ends holds up no other for good.
+ */
 const MOST_WAITING_MS = 15_000;
 
 /**
@@ -124,10 +128,11 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
     #admit: Admit | undefined;
     /** The sessions open in the object, which it holds to `MOST_SESSIONS`. */
     #open = 0;
-    /** Admissions under way, those waiting their turn, and whether one has let a connection in yet. */
+    /** Admissions under way, those waiting their turn, and whether one has let a connection in yet, or waited `MOST_WAITING_MS` for it. */
     #admitting = 0;
     readonly #waiting: (() => void)[] = [];
     #warm = false;
+    #stalled = false;
     constructor(state: ObjectState, env: Env) {
       this.#state = state;
       this.#env = env;
@@ -181,9 +186,13 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
         }
       }
     }
-    /** A turn to admit: at once while fewer than the object allows are under way, else when one ends, or `MOST_WAITING_MS` at most. */
+    /** How many admissions the object runs at once: one, until a connection is in or the first has taken too long. */
+    #allowed(): number {
+      return this.#warm || this.#stalled ? ADMITTING : 1;
+    }
+    /** A turn to admit: at once while fewer than the object allows are under way, else in the order they came. */
     async #turn(): Promise<void> {
-      if (this.#admitting < (this.#warm ? ADMITTING : 1)) {
+      if (this.#admitting < this.#allowed()) {
         this.#admitting += 1;
         return;
       }
@@ -191,18 +200,22 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       let given!: () => void;
       const turn = new Promise<void>((resolve) => (given = resolve));
       this.#waiting.push(given);
-      await Promise.race([turn, new Promise<void>((resolve) => (late = setTimeout(resolve, MOST_WAITING_MS)))]);
+      const waited = await Promise.race([turn.then(() => false), new Promise<boolean>((resolve) => (late = setTimeout(() => resolve(true), MOST_WAITING_MS)))]);
       clearTimeout(late);
-      // Given its turn, it was counted then; gone ahead without it, it no longer waits, and is counted now.
-      const waiting = this.#waiting.indexOf(given);
-      if (waiting === -1) return;
-      this.#waiting.splice(waiting, 1);
-      this.#admitting += 1;
+      if (!waited) return;
+      // The first admission is taking long: a few go at once from here, in order, each turn counted as it is given.
+      this.#stalled = true;
+      this.#give();
+      await turn;
     }
-    /** An admission done: its turn to the next in line, as many as the object now allows. */
+    /** An admission done: its turn to the next in line. */
     #next(): void {
       this.#admitting -= 1;
-      while (this.#waiting.length > 0 && this.#admitting < (this.#warm ? ADMITTING : 1)) {
+      this.#give();
+    }
+    /** Turns to those waiting, in order, as many as the object now allows. */
+    #give(): void {
+      while (this.#waiting.length > 0 && this.#admitting < this.#allowed()) {
         this.#admitting += 1;
         this.#waiting.shift()!();
       }

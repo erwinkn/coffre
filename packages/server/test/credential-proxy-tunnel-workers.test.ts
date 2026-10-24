@@ -172,6 +172,13 @@ test("a pool's 32 connections opened at once are all let in, though each admissi
   const burst = await Promise.all(Array.from({ length: 32 }, open));
   assert.deepEqual(burst.map(({ event, status }) => status ?? event).filter((outcome) => outcome !== 'open'), []);
   for (const { ws } of burst) ws.close();
+  // In turn, in fact: one until the first was in, then four at most.
+  const asked = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer coffre_use_${'g'.repeat(43)}`, 'coffre-tunnel-flow': 'credit' } });
+  asked.on('error', () => undefined);
+  const [, response] = (await once(asked, 'unexpected-response')) as [unknown, NodeJS.ReadableStream];
+  let body = '';
+  for await (const chunk of response) body += String(chunk);
+  assert.deepEqual(JSON.parse(body), { cold: 1, warm: 4 });
 });
 
 test('an admission that takes 20 s, as under a burst of runs at once, is let in', { skip, timeout: 60_000 }, async () => {

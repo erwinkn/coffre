@@ -27,11 +27,22 @@ const SLOW = `coffre_use_${'s'.repeat(43)}`;
 /** The handle whose URL each admission reads in turn, half a second each, as on the object's one database client. */
 const TURNS = `coffre_use_${'t'.repeat(43)}`;
 
+/** Not a handle: the suite's question to the stand-in, how many admissions of `TURNS` read at once (refused, with the answer). */
+const TOGETHER = `coffre_use_${'g'.repeat(43)}`;
+
 /** The handle the stand-in takes 20 s to check, as an instance under a burst of runs does, then lets in. */
 const LOADED = `coffre_use_${'l'.repeat(43)}`;
 
 /** The private address the replica's URL names, and the binding's stand-in. */
 const REPLICA = '10.9.8.7';
+
+/**
+ * How many admissions of `TURNS` the object ran at once, at most, before one was in and after: the isolate's, since
+ * `TOGETHER`, another bearer, reaches another object.
+ */
+let together = 0;
+let warm = false;
+const most = { cold: 0, warm: 0 };
 
 export const CoffreSockets = socketsObject<Env>((env) => {
   const port = Number(new URL(env.DATABASE_URL).port);
@@ -97,12 +108,19 @@ export const CoffreSockets = socketsObject<Env>((env) => {
     },
   } as unknown as PluginContext;
   return (request, _, hold) => {
+    // What the suite asks of the stand-in itself: how many admissions of `TURNS` read at once.
+    if (request.headers.get('authorization') === `Bearer ${TOGETHER}`) return Promise.resolve(new Response(JSON.stringify(most), { status: 409 }));
     if (request.headers.get('authorization') === `Bearer ${SLOW}`) {
       hold(new Promise((resolve) => setTimeout(resolve, 1000)));
       return Promise.resolve(new Response('coffre took too long to decide', { status: 503 }));
     }
     // In the time coffre gives an admission, as `admitSocket` gives it.
-    return inTime(proxy.routes!.socket!(request, coffre), hold);
+    if (request.headers.get('authorization') !== `Bearer ${TURNS}`) return inTime(proxy.routes!.socket!(request, coffre), hold);
+    const when = warm ? 'warm' : 'cold';
+    most[when] = Math.max(most[when], (together += 1));
+    return inTime(proxy.routes!.socket!(request, coffre), hold)
+      .then((answer) => ((warm ||= !(answer instanceof Response)), answer))
+      .finally(() => (together -= 1));
   };
 });
 

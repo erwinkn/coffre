@@ -1307,16 +1307,19 @@ async function run(args: string[]): Promise<void> {
   const passOn = (signal: NodeJS.Signals) => () => void child.kill(signal);
   const handlers = { SIGINT: () => undefined, SIGTERM: passOn('SIGTERM'), SIGHUP: passOn('SIGHUP') } as const;
   for (const [signal, handler] of Object.entries(handlers)) process.on(signal, handler);
-  child.on('error', (error) => fail(`failed to run ${command[0]}: ${error.message}`));
-  child.on('exit', (code, signal) => {
+  /** Its handle revoked, a few seconds at most, and then `then`: offline, the handle ends by itself, at `expiresAt`. */
+  const ended = (then: () => void) => {
     for (const [name, handler] of Object.entries(handlers)) process.off(name, handler);
-    // Its handle revoked, a few seconds at most: offline, it ends by itself, at `expiresAt`.
     const revoked = placed === null ? Promise.resolve() : Promise.race([placed.revoke().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
-    void revoked.then(() => {
+    void revoked.then(then);
+  };
+  child.on('error', (error) => ended(() => fail(`failed to run ${command[0]}: ${error.message}`)));
+  child.on('exit', (code, signal) =>
+    ended(() => {
       if (signal) process.kill(process.pid, signal);
       process.exit(code ?? 0);
-    });
-  });
+    }),
+  );
 }
 
 /**

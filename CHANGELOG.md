@@ -86,7 +86,9 @@
   together. A long result no longer fills the object: some 4.7 GB from the
   database outgrew its 128 MB. `coffre run` leaves a terminal's Ctrl-C to
   its command and keeps its tunnels for it, where it ended with them,
-  passes a SIGTERM on, and revokes its handle when its command ends.
+  passes a SIGTERM on, and revokes its handle when its command ends. A
+  SIGINT sent to the run alone, with no terminal, is left to the command
+  too: stop a run with SIGTERM.
 
 - **Only an Owner hands a service account sensitive values** (R32).
   Anyone may set up a service account where the instance lets them, and
