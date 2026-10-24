@@ -478,7 +478,7 @@ test("a write's entry says what the key was as it commits: a reference's source 
   assert.deepEqual((await writesOf('WEBHOOK')).at(-1), { key: 'WEBHOOK', version: 1, was: 'sensitive' });
 });
 
-test('the vault judges a rollback by its value as held now: made sensitive in place since, never back looser; loosened by an Owner since, back a secret', async (t) => {
+test('the vault judges a rollback no looser than its version, nor than its value was made since in place; an Owner loosens the current value alone', async (t) => {
   // HOOK: v1 a secret, v2 that value made sensitive in place, v3 another value, a secret.
   await root.secrets.set('market/dev', { HOOK: 'whsec_first_0123456789' });
   await root.secrets.set('market/dev', { HOOK: { sensitivity: 'sensitive' } });
@@ -493,13 +493,15 @@ test('the vault judges a rollback by its value as held now: made sensitive in pl
   assert.deepEqual((await history('market/dev/HOOK'))[0], [5, 'secret'], 'nothing restored');
   t.mock.restoreAll();
 
-  // TOKEN: v1 sensitive, v2 that value made a secret in place by an Owner (R30), v3 another value: v1 comes back a secret.
+  // TOKEN: v1 sensitive, v2 that value made a secret in place by an Owner (R30), v3 another value: v1 comes back
+  // sensitive, as it was, and v2 a secret, as it was; the loosening was the current value's then, not every version's.
   await root.secrets.set('market/dev', { TOKEN: { value: 'tok_first_0123456789', sensitivity: 'sensitive' } });
   await root.secrets.set('market/dev', { TOKEN: { sensitivity: 'secret' } });
   await root.secrets.set('market/dev', { TOKEN: 'tok_second_0123456789' });
   await root.secrets.restore('market/dev/TOKEN', 1);
-  assert.deepEqual((await history('market/dev/TOKEN'))[0], [4, 'secret']);
-  assert.deepEqual((await ci.secrets.reveal('market/dev/TOKEN')).values, { TOKEN: 'tok_first_0123456789' });
+  assert.deepEqual((await history('market/dev/TOKEN'))[0], [4, 'sensitive']);
+  await root.secrets.restore('market/dev/TOKEN', 2);
+  assert.deepEqual((await history('market/dev/TOKEN'))[0], [5, 'sensitive'], 'its value was made sensitive since, by the restore of v1');
 });
 
 test("a rollback's entry says what the key was as it commits: a reference's source written again as a secret while it is rewrapped", async (t) => {

@@ -471,11 +471,11 @@ export async function natures(db: Queryable, secretIds: readonly string[]): Prom
 }
 
 /**
- * For each version a rewrap would bring back into its secret, its value's
- * nature when it is an old value, as the newest version of its very
- * ciphertext holds it (a mark in place or an Owner's loosening since
- * included), not the secret's current one; null for the current one, which
- * a mark wraps again with no value changing.
+ * For each version a rewrap would bring back into its secret, its nature
+ * when it is an old value, no looser than it was stored nor than its value
+ * was made since (the newest version of its very ciphertext), not the
+ * secret's current one; null for the current one, which a mark wraps again
+ * with no value changing.
  */
 export async function restoredNatures(
   db: Queryable,
@@ -487,8 +487,8 @@ export async function restoredNatures(
     db.select({ id: secrets.id, version: secrets.currentVersionId }).from(secrets).where(inArray(secrets.id, [...new Set(items.map((item) => item.secretId))])),
     db.select({
       id: secretVersions.id,
-      sensitive: sql<boolean | number>`(${heldAs(secretVersions, sql`same.sensitive`)})`,
-      plain: sql<boolean | number>`(${heldAs(secretVersions, sql`same.plaintext IS NOT NULL`)})`,
+      sensitive: sql<boolean | number>`(${secretVersions.sensitive} OR (${heldAs(secretVersions, sql`same.sensitive`)}))`,
+      plain: sql<boolean | number>`(${secretVersions.plaintext} IS NOT NULL AND (${heldAs(secretVersions, sql`same.plaintext IS NOT NULL`)}))`,
     }).from(secretVersions)
       .where(inArray(secretVersions.id, [...new Set(items.map((item) => item.from))])),
   ]);
@@ -673,9 +673,9 @@ export type SecretVersion = {
   /** Whether its secret's newest version is sensitive: what a rewrap of it may not loosen. */
   newestSensitive: boolean;
   /**
-   * Whether its value is held sensitive now: the newest version of its secret
-   * with its very ciphertext, which a mark in place, an Owner's loosening, or a
-   * restore wraps again unchanged. What a rewrap of it may not loosen either.
+   * Whether its value was made sensitive since: the newest version of its
+   * secret with its very ciphertext, which a mark in place or a restore wraps
+   * again unchanged, is. What a rewrap of it may not loosen either.
    */
   heldSensitive: boolean;
 };

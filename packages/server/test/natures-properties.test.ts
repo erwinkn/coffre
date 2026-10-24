@@ -764,10 +764,11 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const { env, key, row } = at;
         const version = op.index % row.versions.length + 1;
         const target = row.versions[version - 1]!;
-        // It comes back as the newest version of that very value holds it, a mark in place or an Owner's loosening since
-        // included (R24, R30), and sensitive while the key is, or its newest version (credential-proxy.md).
+        // It comes back no looser than it was, nor than that very value was made since, in place (R24); an Owner's loosening
+        // is the current value's alone (R30); and sensitive while the key is, or its newest version (credential-proxy.md).
         const now = resolve(env, key)?.nature;
-        const held = row.versions.findLast((later) => later.text === target.text)!.nature;
+        const since = row.versions.findLast((later) => later.text === target.text)!.nature;
+        const held = STRICTNESS[since] > STRICTNESS[target.nature] ? since : target.nature;
         const nature = now === 'sensitive' || row.versions.at(-1)!.nature === 'sensitive' ? 'sensitive' : held;
         const done = await attempt(() => clientOf(actor).secrets.restore(`${writePath(env)}/${key}`, version)) !== null;
         // A restore writes, and brings back a value as it is held: refused to whoever cannot read it so (R24), plain taking
@@ -1054,7 +1055,7 @@ test('a value made a secret in place stays one: a writer who never read it bring
   ]);
 });
 
-test("a value as it was made last: an Owner's loosening comes back a secret, a value made sensitive since never back looser", async () => {
+test("a value's old version comes back no looser than it was, nor than it was made since: sensitive past an Owner's loosening, and after a mark", async () => {
   const world: World = {
     projects: [{ id: 'market', slug: 'market', environments: [{ id: 'dev', projectId: 'market', slug: 'dev', parentId: null, owner: null }] }],
     secrets: [

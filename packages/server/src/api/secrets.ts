@@ -1573,11 +1573,13 @@ export async function restoreVersion(
     };
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
-    // A value is held as the newest version of its very ciphertext holds it: one made a secret, or sensitive, in place
-    // since, or loosened by an Owner (R30), comes back as it was made last, whatever was written after. Its plain version
-    // brings back no secret: making a secret plain takes reading it, which a restore does not (R24). A value written
-    // meanwhile makes this attempt prepare again, so `versions` is the history the restore commits on.
-    const held = sensitivityOf(versions.find((each) => each.envelope.iv.equals(target.envelope.iv) && each.envelope.ciphertext.equals(target.envelope.ciphertext))!);
+    // An old version comes back no looser than it was, nor than its value was made since: the newest version of its very
+    // ciphertext, a mark in place, whatever was written after. Its plain version brings back no secret: making a secret
+    // plain takes reading it, which a restore does not (R24). An Owner's loosening in place is the current value's alone
+    // (R30): its sensitive version comes back sensitive. A value written meanwhile makes this attempt prepare again, so
+    // `versions` is the history the restore commits on.
+    const since = sensitivityOf(versions.find((each) => each.envelope.iv.equals(target.envelope.iv) && each.envelope.ciphertext.equals(target.envelope.ciphertext))!);
+    const held = stricter(since, sensitivityOf(target)) ? since : sensitivityOf(target);
     const level = foundSensitive ? 'sensitive' : held;
     // An old value is made live only by whoever could read it as it is held (`madeLive`), as the vault decides again.
     if (target.id !== prepared.currentVersionId) madeLive(ctx, place, held, 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
