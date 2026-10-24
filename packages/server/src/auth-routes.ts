@@ -210,6 +210,8 @@ const EXCHANGE_SKEW_SECONDS = 60;
 export async function exchangeWorkloadSession(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   const workloads = runtime.workloads;
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
+  // No gate, no session that could be used: nothing is spent for one.
+  if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {
@@ -249,7 +251,8 @@ export async function renewWorkloadSession(request: Request, runtime: CoffreRunt
   const token = dpopToken(request);
   if (workloads === null || token === null) return errorResponse(new ApiError('unauthenticated', "this takes a workload's session, Authorization: DPoP coffre_wl_…, with its key's proof"));
   try {
-    const session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null });
+    // A frozen session renews: the freeze stops its use, and lifting it restores the session (section 8.2).
+    const session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null, freezes: false });
     return jsonResponse(await workloads.renew(session, { requestId: crypto.randomUUID(), sourceIp }), 200, { 'dpop-nonce': session.nonce });
   } catch (error) {
     if (error instanceof SessionRefused) return error.response;
@@ -267,7 +270,7 @@ export async function logout(request: Request, runtime: CoffreRuntime, sourceIp:
   const session = dpopToken(request);
   if (session !== null) {
     try {
-      await standingSession(request, runtime, session, sourceIp, { place: null, credential: null, children: true });
+      await standingSession(request, runtime, session, sourceIp, { place: null, credential: null, children: true, freezes: false });
       if (runtime.signin !== null) await runtime.signin.signOut(session, { requestId: crypto.randomUUID(), sourceIp });
       return jsonResponse({ signedOut: true });
     } catch (error) {

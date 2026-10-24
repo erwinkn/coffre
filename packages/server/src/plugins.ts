@@ -22,7 +22,7 @@ import { fetchApi } from './fetch-api.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
-import { dpopToken, gateOf, SessionRefused, sessionScope, standingSession, type StandingSession } from './workload-sessions.ts';
+import { dpopToken, gateOf, SessionRefused, sessionScope, standingSession, UUID, type StandingSession } from './workload-sessions.ts';
 
 export type { PickKeys };
 
@@ -160,11 +160,13 @@ export class WorkloadRefused extends CoffreError {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/** What a workload caller stands on, kept beside it: only those coffre made are taken back by `use`. */
+/**
+ * What a workload caller stands on, kept beside it by the context of the
+ * request it was made for: `use` takes back only those, so one kept from
+ * an earlier request, checked before a revocation or a freeze, is no one.
+ */
 type Standing = { kind: 'session'; session: StandingSession } | { kind: 'binding'; binding: BindingRow; policy: BindingPolicy; policySeq: bigint | null };
-const standings = new WeakMap<WorkloadUse, Standing>();
+type Standings = WeakMap<WorkloadUse, Standing>;
 
 /**
  * What a plugin opens values for (`PluginContext.use`): `keys` by name, or
@@ -246,7 +248,11 @@ export function bindingRoute(request: Request, runtime: CoffreRuntime, principal
  * `credentialId` `binding:<id>`, so the proxy sees one kind of caller.
  * Throws `WorkloadRefused`.
  */
-export async function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAt): Promise<WorkloadUse> {
+export function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAt): Promise<WorkloadUse> {
+  return bindingWorkload(runtime, principal, at, new WeakMap());
+}
+
+async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: WorkloadAt, standings: Standings): Promise<WorkloadUse> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
   const unbound = () => refusedWith(new ApiError('unauthenticated', `no live cloudflare binding of ${principal} takes this call`));
   if (workloads === null || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw await unbound();
@@ -317,7 +323,7 @@ export async function workloadFromBinding(runtime: CoffreRuntime, principal: str
 }
 
 /** A workload's session for a plugin's request (`PluginContext.workload`), as `standingSession` checks it. */
-async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAt): Promise<WorkloadUse | null> {
+async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAt, standings: Standings): Promise<WorkloadUse | null> {
   const token = dpopToken(request);
   if (token === null) return null;
   let session: StandingSession;
@@ -338,7 +344,7 @@ async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceI
  * grant with its binding's `reads` (`sessionScope`). Null for a caller
  * coffre did not make.
  */
-async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sourceIp: string | null): Promise<{ identity: AuthenticatedIdentity; expiresAt: string } | null> {
+async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sourceIp: string | null, standings: Standings): Promise<{ identity: AuthenticatedIdentity; expiresAt: string } | null> {
   const standing = standings.get(caller);
   if (standing === undefined) return null;
   const { row, binding, policy, policySeq } = standing.kind === 'session' ? standing.session : { ...standing, row: null };
@@ -400,9 +406,11 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     return identity as AuthenticatedIdentity;
   };
   const noCredential = () => new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
+  // The workload callers this request's context made: the only ones its `use` takes.
+  const standings: Standings = new WeakMap();
   return {
     publicUrl: runtime.publicUrl,
-    workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at) : workloadFromBinding(runtime, binding, at)),
+    workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
     handle: async (handle) => {
       const { credentialExpiresAt, handlePlaces: places } = await proxyHandle(handle);
       if (places === null) return { expiresAt: credentialExpiresAt!, paths: null };
@@ -428,7 +436,9 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
           expiresAt = caller.credentialExpiresAt!;
         } else {
           // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
-          const made = await workloadIdentity(runtime, handle, sourceIp);
+          // A `narrow` child never reads (section 8.4): it uses, and is handed nothing back.
+          if (handle.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
+          const made = await workloadIdentity(runtime, handle, sourceIp, standings);
           if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
           ({ identity: caller, expiresAt } = made);
         }

@@ -7,7 +7,7 @@ import type * as schema from '@coffre/db/schema';
 import { and, asc, eq, inArray, isNotNull, isNull, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow } from '../auth-rows.ts';
-import { insert, type BindingRow } from './queries.ts';
+import { hasTombstone, insert, type BindingRow } from './queries.ts';
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
 // 5): the one statement every request runs, the bindings an exchange reads,
@@ -43,14 +43,9 @@ function frozen(db: Queryable, target: SQL | string): SQL<boolean> {
   return truth(sql`COALESCE(${newest} = 'workload.freeze', ${dialect.engineOf(db) === 'postgres' ? sql`false` : sql`0`})`);
 }
 
-/** Whether binding `id` (a column) has a tombstone: an allowed app `token.unbind` naming it (`hasTombstone` in queries.ts). */
+/** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */
 function tombstoned(db: Queryable, id: SQL): SQL<boolean> {
-  const { auditLog } = tablesOf(db);
-  const named = dialect.engineOf(db) === 'postgres'
-    ? sql`((${auditLog.metadata})::jsonb ->> 'bindingId')`
-    : sql`json_extract(${auditLog.metadata}, '$.bindingId')`;
-  return truth(sql`EXISTS (SELECT 1 FROM ${auditLog} WHERE ${auditLog.author} = 'app' AND ${auditLog.action} = 'token.unbind'
-    AND ${auditLog.decision} = 'allow' AND ${named} = ${id})`);
+  return truth(hasTombstone(db, id));
 }
 
 /** A binding's ID as text, to compare with what an entry or a target names. */
@@ -90,7 +85,10 @@ export async function workloadSession(db: Queryable, tokenHash: Buffer, uses: { 
   }));
 }
 
-const sessionRows = prepared((db) => {
+const sessionRows = prepared((db) => sessionStatement(db));
+
+/** Section 5.3's statement as built, before it is prepared: for a test that holds its plan to its indexes. */
+export function sessionStatement(db: Queryable) {
   const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
   const postgres = dialect.engineOf(db) === 'postgres';
   const tokenHash = sql.placeholder('tokenHash');
@@ -98,9 +96,9 @@ const sessionRows = prepared((db) => {
   const bindingId = postgres
     ? sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN CAST(substr(${credentials.createdBy}, 9) AS uuid) END`
     : sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN substr(${credentials.createdBy}, 9) END`;
-  // The session's ancestors, by the IDs its row lists (under its MAC).
+  // The session's ancestors, by the IDs its row lists (under its MAC): the IDs as uuids, an array, so each is a primary-key lookup.
   const ancestors = postgres
-    ? sql`${credentials.id}::text IN (SELECT jsonb_array_elements_text(${sql.identifier('own')}.${sql.identifier('ancestors')}::jsonb) FROM ${credentials} AS ${sql.identifier('own')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash})`
+    ? sql`${credentials.id} = ANY(ARRAY(SELECT CAST(jsonb_array_elements_text(${sql.identifier('own')}.${sql.identifier('ancestors')}::jsonb) AS uuid) FROM ${credentials} AS ${sql.identifier('own')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash}))`
     : sql`${credentials.id} IN (SELECT ${sql.identifier('listed')}.${sql.identifier('value')} FROM ${credentials} AS ${sql.identifier('own')}, json_each(${sql.identifier('own')}.${sql.identifier('ancestors')}) AS ${sql.identifier('listed')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash})`;
   // The credential it uses, in the environment named or else the row's one place: null when it names none, or the row several.
   const name = sql`CAST(${sql.placeholder('credential')} AS text)`;
@@ -129,7 +127,7 @@ const sessionRows = prepared((db) => {
     .leftJoin(vaultMembers, eq(vaultMembers.principal, credentials.principal))
     .leftJoin(serviceBindings, sql`${serviceBindings.id} = ${bindingId}`)
     .where(or(eq(credentials.tokenHash, tokenHash), ancestors));
-});
+}
 
 /**
  * A Cloudflare call's binding (section 9.2), in one statement: the

@@ -1811,8 +1811,11 @@ line of registration after the owner has merged:
   each environment `reads` lists a grant of its own, its project grant's
   share there; each request copies the list onto that grant
   (`sessionScope`).
-- **Renewal and logout ask no vault.** They run the one statement, the
-  proof and the gate, which already see a removed member.
+- **Renewal and logout ask no vault, and no freeze stops them.** They run
+  the one statement, the proof and the gate, which already see a removed
+  member. A freeze stops a session's use and keeps it (8.2): a renewal it
+  refused would end the session, and lifting the freeze would restore
+  nothing (PR 8's model).
 - **Every API answer to a session carries the gate's nonce** (`DPoP-Nonce`),
   so the SDK always holds the newest.
 - **A repeating token's age is its own `exp`.** `verifyWorkloadToken`

@@ -241,11 +241,10 @@ async function authenticateWorkload(
   requestId: string,
   token: string,
   sourceIp: string | null,
-  children = false,
 ): Promise<AuthenticatedIdentity | Response> {
   let session: StandingSession;
   try {
-    session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null, children });
+    session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null });
   } catch (error) {
     if (error instanceof SessionRefused) return error.response;
     console.error('checking a workload session failed', { requestId, error: logged(error) });
@@ -276,22 +275,4 @@ async function authenticateWorkload(
     console.error('checking who called failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
-}
-
-/**
- * A workload's own sign-in routes (renew, narrow, logout): its session at
- * the API, a `narrow` child's included where the route takes one, or the
- * response that turns it away.
- */
-export function authenticateSession(
-  request: Request,
-  runtime: AuthenticationRuntime,
-  sourceIp: string | null,
-  options: { children: boolean },
-): Promise<AuthenticatedIdentity | Response> {
-  const token = dpopToken(request);
-  if (token === null || tokenKind(token) !== 'workload') {
-    return Promise.resolve(errorResponse(new ApiError('unauthenticated', "this takes a workload's session, Authorization: DPoP coffre_wl_…, with its key's proof")));
-  }
-  return authenticateWorkload(request, runtime, crypto.randomUUID(), token, sourceIp, options.children);
 }

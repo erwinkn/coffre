@@ -11,12 +11,12 @@ import { bodyDigest, createProof, generateProofKey, thumbprint, type ProofKey } 
 import { github, hashToken, signin, type Gate, type GateAdmission, type RateLimiter } from '@coffre/core/identity';
 import { isCredentialScope, type ScopeGrant } from '@coffre/core/access';
 import type { Database } from '@coffre/db';
-import { eq } from 'drizzle-orm';
+import { eq, Placeholder, sql } from 'drizzle-orm';
 
 import { allowed, audited } from '../src/api/context.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
-import { insertSession } from '../src/db/workloads.ts';
+import { insertSession, sessionStatement } from '../src/db/workloads.ts';
 import { checkPlugins, pluginRoute, bindingRoute, WorkloadRefused, type PluginContext, type WorkloadUse } from '../src/plugins.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
@@ -24,6 +24,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, secrets, serviceBindings } from './db/tables.ts';
+import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -412,6 +413,11 @@ test("each proof is accepted once, with the gate's nonce: a replay is refused, a
   // A deployment without a gate takes no session at all: nothing would stop a replay.
   const gateless = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits } }), auditChainKey: deps.chainKey.toString('base64') }), deps.db, deps.vault, transport);
   assert.equal((await me(held, { to: gateless })).status, 503);
+  // Nor does it make one, or spend the proof it would be made with.
+  await bindPod();
+  const pod = podToken();
+  assert.equal((await signIn({ oidc: pod }, await generateProofKey(), { to: gateless })).status, 503);
+  assert.equal((await signIn({ oidc: pod }, await generateProofKey())).status, 200, 'not spent');
 });
 
 test('a session reaches the routes a service token does, and none only a person reaches', async () => {
@@ -488,6 +494,40 @@ test('revocation, freezes and removal of the member each end a session at its ne
   // The member removed: every session of theirs, at once.
   await clientFor(deps, ROOT).members.remove(MEMBER);
   assert.equal((await me(other)).status, 401);
+});
+
+test('a frozen session still renews: lifting the freeze restores it, with nothing to sign in again', async () => {
+  await bindGithub();
+  const held = await githubSession();
+  await freeze(MEMBER);
+  assert.equal((await me(held)).body.reason, 'frozen');
+  const renewed = await call(held, 'POST', '/api/auth/workload/renew');
+  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
+  assert.equal((await me(held)).body.reason, 'frozen', 'still stopped from use');
+  await freeze(MEMBER, 'workload.unfreeze');
+  assert.equal((await me(held)).status, 200);
+});
+
+test("the per-request statement reads its rows through their indexes, however many credentials there are", postgresOnly('reads the plan Postgres makes'), async () => {
+  const { sql: text, params } = sessionStatement(db.owner).toSQL();
+  const values: Record<string, unknown> = { tokenHash: Buffer.alloc(32, 1), place: null, credential: 'stripe' };
+  const literal = (value: unknown): string => {
+    const named = value instanceof Placeholder ? values[value.name] : value;
+    if (named === null || named === undefined) return 'NULL';
+    if (Buffer.isBuffer(named)) return `'\\x${named.toString('hex')}'::bytea`;
+    return `'${String(named).replaceAll("'", "''")}'`;
+  };
+  const inlined = text.replace(/\$(\d+)/g, (_, n: string) => literal(params[Number(n) - 1]));
+  // Sequential scans priced out, so the plan shows which lookups the statement can use at all.
+  const plan = await db.owner.transaction(async (tx) => {
+    await tx.execute(sql.raw('SET LOCAL enable_seqscan = off'));
+    return tx.execute(sql.raw(`EXPLAIN ${inlined}`));
+  });
+  const lines = (plan as unknown as { rows: { 'QUERY PLAN': string }[] }).rows.map((row) => row['QUERY PLAN']).join('\n');
+  // The session by its token's hash and its ancestors by their IDs, each a lookup: never a scan of every credential, which no prune ever shrinks.
+  assert.doesNotMatch(lines, /Seq Scan on credentials/, lines);
+  assert.match(lines, /Bitmap Index Scan on credentials_token_hash_key/, lines);
+  assert.match(lines, /Bitmap Index Scan on credentials_pkey/, lines);
 });
 
 test('a session whose binding is removed, or whose row is changed around the app, is no session', async () => {
@@ -650,6 +690,18 @@ test("a binding's reads name keys by path and name, are stored by ID, and list a
   await assert.rejects(bindPod({ reads: { 'market/prod': '*' } }), /does not reach/);
 });
 
+test("a binding's keys replaced, its reads stay and are shown by name, never by ID", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'prod' });
+  await root.secrets.set('market/prod', { STRIPE_WEBHOOK_SECRET: 'whsec_1' });
+  await root.access.set(MEMBER, { 'market/prod': 'viewer' });
+  await bindPod({ reads: { 'market/prod': ['STRIPE_WEBHOOK_SECRET'] } });
+  const rekeyed = await runtime.workloads!.replaceKeys(await contextFor(deps, ROOT), SERVICE, { issuer: CLUSTER, jwks: { keys: [signer.jwk] } as never }, { dryRun: false });
+  assert.ok('bindings' in rekeyed);
+  assert.deepEqual(rekeyed.bindings.map((binding) => binding.policy), [{ reads: { 'market/prod': ['STRIPE_WEBHOOK_SECRET'] } }]);
+});
+
 test("a binding of a proof that is no ID token names its URN, and coffre asks no issuer for keys", async () => {
   const fetched: string[] = [];
   const counting: WorkloadTransport = { json: async (url) => (fetched.push(url.href), transport.json(url)) };
@@ -730,15 +782,19 @@ test("PluginContext.workload: the caller of a forwarded request, its content sig
   await freeze(`credential:${place}/stripe`);
   assert.equal((await forward(`/use/-/stripe/v1/charges`, { body: '{}' })).body.reason, 'frozen');
   assert.equal((await forward(`/use/-/openai/v1/chat`, { body: '{}' })).status, 200);
-  // `use` takes the caller coffre made, and no lookalike a plugin built.
-  await assert.rejects(seen.context!.use({ ...seen.caller! }, { path: 'api-prod-reads/dev', keys: [], purpose: 'use', logged: {} }), { status: 401 });
+  // `use` takes the caller coffre made for this request, and no lookalike a plugin built, nor one an earlier request's context made.
+  const earlier = { caller: seen.caller!, context: seen.context! };
+  await assert.rejects(earlier.context.use({ ...earlier.caller }, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: {} }), { status: 401 });
+  assert.equal((await earlier.context.use(earlier.caller, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: {} })).values.STRIPE_SECRET_KEY, 'sk_live_1');
+  assert.equal((await forward(`/use/-/openai/v1/chat`, { body: '{}' })).status, 200);
+  await assert.rejects(seen.context!.use(earlier.caller, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: {} }), { status: 401 });
   // The member removed by the vault, before the app's sweep revokes anything: the statement's member clause alone refuses the next request.
   assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
   assert.equal((await forward(`/use/-/openai/v1/chat`, { body: '{}' })).status, 401);
 });
 
 test("a narrowed session's row stands only while every ancestor does, and reaches no API route", async () => {
-  const seen: { caller?: WorkloadUse } = {};
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   await marketProd();
   await bindGithub();
@@ -760,6 +816,8 @@ test("a narrowed session's row stands only while every ancestor does, and reache
   const used = await use();
   assert.equal(used.status, 200, JSON.stringify(used.body));
   assert.deepEqual((used.body.caller as Record<string, unknown>).constraints, { credentials: ['stripe'] });
+  // It uses values, and is handed none back.
+  await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'expose', logged: {} }), { reason: 'narrowed' });
   const api = await me(child);
   assert.deepEqual([api.status, api.body.reason], [403, 'narrowed']);
   assert.equal((await call(child, 'POST', '/api/auth/workload/renew')).body.reason, 'narrowed');

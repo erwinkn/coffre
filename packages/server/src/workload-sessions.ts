@@ -82,6 +82,13 @@ export type SessionAsk = {
   counts?: readonly GateCount[];
   /** Whether a `narrow` child may ask it: only `/use`, narrow and logout. */
   children?: boolean;
+  /**
+   * Whether a freeze refuses it: every use, but renewal and logout. A
+   * freeze stops use at the next request and keeps the session, so lifting
+   * it restores service (section 8.2); a renewal it refused would end the
+   * session, and the lift would restore nothing.
+   */
+  freezes?: boolean;
 };
 
 /** Why a session was refused, as the workload's SDK reads it: the status, a reason, and the headers RFC 9449 asks for. */
@@ -154,7 +161,8 @@ function ancestorsOf(stored: string | null): string[] | null {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** An ID as the database spells it. */
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The environments a session was made for, by ID, as its row lists them (under its MAC); none for one that lists none. */
 export function placesOf(stored: string | null): string[] {
@@ -256,7 +264,7 @@ export async function standingSession(
     throw refusal(new ApiError('unauthenticated', sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${sourceIp} is outside the binding's sources`, 'source'));
   }
   const frozen = own.frozen;
-  if (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session)) {
+  if (ask.freezes !== false && (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session))) {
     throw refusal(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
   }
 

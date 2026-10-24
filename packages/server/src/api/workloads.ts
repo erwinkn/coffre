@@ -514,10 +514,15 @@ export class WorkloadService {
     const standing = await memberStanding(this.#deps.db, member);
     if (standing === null) throw notFound('unknown service');
     const [live, known] = await Promise.all([liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation), places(this.#deps.db)]);
-    // Their reads by path and name, as they are named now (section 6.1).
-    const listed = live.flatMap((row) => Object.values((row.policy === null ? {} : (JSON.parse(row.policy) as BindingPolicy)).reads ?? {}));
-    const named = await keyNames(this.#deps.db, listed.flatMap(({ keys }) => (Array.isArray(keys) ? keys : [])));
-    return live.map((row) => ({ ...view(row, scopeByPath(readScope(row.scope), known)), policy: row.policy === null ? null : namedPolicy(JSON.parse(row.policy) as BindingPolicy, known, named) }));
+    const shown = await this.#shownPolicies(live, known);
+    return live.map((row) => view(row, scopeByPath(readScope(row.scope), known), shown(row.policy)));
+  }
+
+  /** How these bindings' policies are shown: their reads by path and name, as they are named now (section 6.1, D16). */
+  async #shownPolicies(rows: readonly BindingRow[], known?: readonly PlaceRow[]): Promise<(policy: string | null) => PolicyView | null> {
+    const listed = rows.flatMap((row) => Object.values((row.policy === null ? {} : (JSON.parse(row.policy) as BindingPolicy)).reads ?? {}));
+    const [placed, named] = await Promise.all([known ?? places(this.#deps.db), keyNames(this.#deps.db, listed.flatMap(({ keys }) => (Array.isArray(keys) ? keys : [])))]);
+    return (policy) => (policy === null ? null : namedPolicy(JSON.parse(policy) as BindingPolicy, placed, named));
   }
 
   /**
@@ -678,7 +683,7 @@ export class WorkloadService {
           },
         }));
         return {
-          binding: { ...view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath), policy: planned.policy },
+          binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath, planned.policy),
           replaced: planned.replaces.map((replaced) => replaced.id),
         };
       });
@@ -736,6 +741,8 @@ export class WorkloadService {
       const withheld = [...new Set([...scopes.values()].flatMap((issued) => issued.withheld))].sort();
       const plan: KeysPlan = { issuer: input.issuer, jwksUri, keys: uploaded.keys, replaces: replaced.map((row) => row.id), withheld };
       if (options.dryRun) return plan;
+      // Each new binding's policy, its old one's, shown by path and name.
+      const shown = await this.#shownPolicies(replaced);
 
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
@@ -784,7 +791,7 @@ export class WorkloadService {
               replaces: [old.id],
             },
           }));
-          bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath));
+          bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath, shown(old.policy)));
         }
         return { bindings, replaced: plan.replaces };
       });
@@ -1402,7 +1409,8 @@ export function environmentsOf(scope: CredentialScope, known: readonly PlaceRow[
   return [...reached].map(([id, path]) => ({ id, path })).sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
-function view(row: BindingRow, scope: ScopeByPath | null): BindingView {
+/** A binding as an owner sees it: its policy shown as the caller names it (`namedPolicy`, `shownPolicy`). */
+function view(row: BindingRow, scope: ScopeByPath | null, policy: PolicyView | null): BindingView {
   return {
     id: row.id,
     profile: row.profile as WorkloadProfile,
@@ -1411,7 +1419,7 @@ function view(row: BindingRow, scope: ScopeByPath | null): BindingView {
     keys: row.jwks === null ? null : keySummaries(row.jwks),
     claims: JSON.parse(row.claims) as BindingClaims,
     scope,
-    policy: row.policy === null ? null : (JSON.parse(row.policy) as PolicyView),
+    policy,
     label: row.label,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,
