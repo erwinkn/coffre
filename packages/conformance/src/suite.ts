@@ -18,6 +18,7 @@ import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrup
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { pagesInBrowser, pastedValues, signinErrorOnce } from './checks/pages.ts';
 import { browserBundle, headers, health } from './checks/surface.ts';
+import { bindingsRefused } from './checks/cloudflare.ts';
 import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
 /** The names of the checks that failed. */
@@ -88,6 +89,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('run unbound', { admin, binding, credential }, ({ admin, binding, credential }) => runUnbound(deployment, admin, binding, credential));
   await report.check('exchanges limited', { binding }, () => exchangesLimited(deployment));
   await report.check('tokens unlogged', { binding }, () => tokensUnlogged(deployment));
+  await report.check('bindings refused', {}, () => bindingsRefused(deployment));
 
   await report.check('checkpoints', { people }, ({ people }) => checkpoints(deployment, people));
   await report.check('keys behind writes', { people }, ({ people }) => writesAgree(deployment));

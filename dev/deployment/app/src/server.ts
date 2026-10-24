@@ -13,3 +13,10 @@ export default {
 /** The Durable Objects `SOCKETS` and `GATES` bind (wrangler.jsonc). */
 export const CoffreSockets = coffre.Sockets;
 export const CoffreGates = coffre.Gates;
+
+/**
+ * What another Worker of the account binds to use coffre with nothing to
+ * prove, its service named by the binding's props (docs/design/workload-access.md, section 9.2):
+ * "services": [{ "binding": "COFFRE", "service": "coffre", "entrypoint": "CoffreWorkload", "props": { "service": "edge-api" } }]
+ */
+export const CoffreWorkload = coffre.Workload;

@@ -27,6 +27,16 @@
   conformance and the Action sign services in with a key. A deployment
   needs a workload gate before any session is accepted; without one the
   routes answer 503. No database migration.
+- **Workers of the same account use coffre with nothing to prove** (the
+  workload-access design, section 9.2). coffre's app Worker exports
+  `CoffreWorkload` (`export const CoffreWorkload = coffre.Workload`, which
+  `coffre init` writes). Another Worker binds it with props naming its
+  service, `{ "service": "edge-api" }`, and an owner trusts that service
+  with `coffre trust edge-api --cloudflare`. Its `fetch` is the credential
+  proxy; `sign`, `verify` and `presign` are RPC methods. Props of any other
+  shape, or none, get nothing, and the binding reaches `/use` only.
+  Preview versions keep production's props (checked live), so a Worker that
+  binds coffre turns off preview URLs and branch builds (docs/deploy.md).
 - **A Cloudflare binding's call opens values** (the workload-access design,
   section 9.2). A plugin's `use` for a caller from `bindingRoute` answered
   500: the vault takes only a credential's ID, and the call has none. Its
