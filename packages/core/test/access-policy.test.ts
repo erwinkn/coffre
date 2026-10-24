@@ -32,4 +32,3 @@ test('a name a plain object holds already names no role and no project of the po
     assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), true);
   }
 });
-

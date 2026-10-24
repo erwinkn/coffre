@@ -481,8 +481,8 @@ theorem readsSensitive_iff {h : Holdings} {proj : String} :
 a credential with a grant in that project whose issuer (`issuerOf`, who made
 it by `serviceGrant`) owns the project: no person, and no Owner of another
 project, handed it them. A credential from before 0.11 reads them once sealed
-(`sealCredentials` in `services.ts`), as its sealer owns the project then,
-which this does not model.
+(`sealCredentials` in `services.ts`), if its own issuer owns the project
+then, which this does not model.
 -/
 theorem owner_issued_only {h : Holdings} {proj : String} {s : List ScopeGrant} (issuerOf : ScopeGrant → Holdings)
     (hcred : h.cred = some s)

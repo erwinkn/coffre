@@ -336,7 +336,7 @@ the code.
 | `personal_token_within_issuer` | A personal token issued by 0.10 or later holds nothing its issuer did not hold when they made it, at the place as it was named then, whatever happened since: roles widened, environments protected or unprotected or renamed, grants added. At a protected environment, it is held to what the issuer held there protected. |
 | `role_edits_never_widen_credentials` | What a credential's scope leaves to its holder is the same under any edit of any role. |
 | `protected_never_widens` | Under valid roles (`definitionProblem`), a person holds no more in an environment once it is protected. |
-| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). One from before 0.11 is sealed as its sealer owns the project then (`sealCredentials`), which the model leaves out. |
+| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). One from before 0.11 reads them if its own issuer owns the project when it is sealed (`sealCredentials`), which the model leaves out. |
 | `no_person_reads_sensitive` | No person, Owner or not, on a session or any token of theirs, is handed back a sensitive value: directly, through a reference, in a fork or in a personal config. |
 | `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the value's own project, the source's for a reference, whose issuer owned that project. |
 | `copy_keeps_sensitive` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive. |
@@ -449,8 +449,8 @@ the store builds, one row an id.
   environment rows the vault builds, or the locking (TLA+ above).
   `serviceGrant`, how `issuedScope` keeps a service's grant, is modelled and
   proved but not compared: `narrowest` is private to the server. Nor is
-  `sealCredentials`, which reads a credential of before 0.11 as its sealer
-  holds.
+  `sealCredentials`, which reads a credential of before 0.11 as its issuer
+  holds when it is sealed.
 - **The cryptography itself**, as assumed above, and KMS's encryption
   context, which the model does not encode (only the local KEK's AAD).
 - **Freshness.** Rolling back the log and all its checkpoints together needs
