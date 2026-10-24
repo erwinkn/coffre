@@ -975,16 +975,19 @@ for the vault key ([keys.md](keys.md#a-local-key)).
    `openssl rand -base64 32`. Keep it in your password manager beside the
    old one.
 3. **List the old key, then give the new one.** First, keep the key in use
-   as `OLD_APP_KEY` too, and deploy the code that lists it; while both name
-   the same key, it counts once, and nothing changes:
+   under a secret of its own too, and deploy the code that lists it; while
+   it is also `APP_KEY`, it counts once, and nothing changes. A rotation
+   adds to the list, and never replaces an entry: each key replaced stays
+   listed, under its own secret.
 
    ```ts
-   auditChainKey: env.APP_KEY,                       // the key in use, then the new one
-   previousAuditChainKeys: [env.OLD_APP_KEY],        // the key in use, kept as the one replaced
+   auditChainKey: env.APP_KEY,                                // the key in use, then the new one
+   previousAuditChainKeys: [env.APP_KEY_2026_10],             // each key replaced, the one in use added now
+   // a second rotation: [env.APP_KEY_2026_10, env.APP_KEY_2027_04]
    ```
 
-   On Workers, `wrangler secret put OLD_APP_KEY -c app/wrangler.jsonc` with
-   the key in use, then `pnpm run deploy`; on Node, `OLD_APP_KEY` in
+   On Workers, `wrangler secret put APP_KEY_2026_10 -c app/wrangler.jsonc`
+   with the key in use, then `pnpm run deploy`; on Node, the same in
    `.env`, then a restart. Previous keys can be listed in any order.
 4. **Give the new key, then wait for readiness.** Set `APP_KEY` to the
    new key: `wrangler secret put APP_KEY -c app/wrangler.jsonc`, which

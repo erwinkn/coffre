@@ -12,6 +12,7 @@
 import type { Checkpoint, CheckpointKey, LogHead, Outcome, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
+import { KeyRetired } from '@coffre/db/log';
 
 import { anchorIsOwn, anchorKeyId, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
 import { appendAudit, appVerifier, CHAIN_START, verifyAppEntries, walkChain, type AuditEntry } from './db/audit.ts';
@@ -46,7 +47,7 @@ export type WatchContext = {
      * (`link: 'log'`) or to the hash it names (`'own'`). Null for none.
      */
     check(seq: number, link: 'log' | 'own'): Promise<{ ok: boolean; hash: string; reason?: string } | null>;
-    /** One entry of the watcher's, in a transaction of its own: its seq. */
+    /** One entry of the watcher's, in a transaction of its own: its seq. Throws `Superseded` under a key the log moved on from. */
     append(action: WatchAction, metadata: Record<string, unknown>): Promise<number>;
   };
   vault: {
@@ -98,6 +99,13 @@ export type Watcher = {
 
 /** What a watcher refuses a request for, which the API answers 400 with: never anything else it throws. */
 export class Refusal extends Error {}
+
+/**
+ * An append refused because the log moved on from the app's key: this
+ * instance runs under a key a newer deployment replaced (key-rotation.ts),
+ * and what it would record of the log is no longer its to record.
+ */
+export class Superseded extends Error {}
 
 const made = new WeakSet<Watcher>();
 
@@ -156,7 +164,11 @@ export function watchContext(deps: WatchDeps): WatchContext {
         return alone.ok ? { ok: true, hash: row.hash.toString('hex') } : { ok: false, hash: row.hash.toString('hex'), reason: alone.reason };
       },
       append: async (action, metadata) => {
-        const appended = await db.transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata }]));
+        const appended = await db
+          .transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata }]))
+          .catch((error: unknown) => {
+            throw error instanceof KeyRetired ? new Superseded(error.message) : error;
+          });
         return Number(appended.seqStart);
       },
     },

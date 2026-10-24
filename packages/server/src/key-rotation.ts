@@ -59,7 +59,8 @@ const START: Cursor = { table: SIGNED_TABLES[0]!, after: null };
  */
 export type KeyState =
   | { kind: 'settled' }
-  | { kind: 'rotating'; from: Buffer; next: Cursor }
+  /** `others`: the keys held as replaced that are still to move from, whose rows a step leaves for their own rotation. */
+  | { kind: 'rotating'; from: Buffer; next: Cursor; others: readonly Buffer[] }
   | { kind: 'sealing'; from: Buffer }
   | { kind: 'refused'; reason: string }
   /** A step that found the head taken, and left the step to whoever holds it. */
@@ -83,6 +84,7 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
   const previous = keys.previousChainKeys.map((key) => ({ id: appLogKey(key).keyId, key }));
   const held = new Map([[current, keys.chainKey], ...previous.map(({ id, key }) => [id, key] as const)]);
   const moved = await movedFrom(db, [...held.keys()]);
+  const due = (from: Buffer) => previous.filter(({ id, key }) => !moved.has(id) && !key.equals(from)).map(({ key }) => key);
   if (moved.has(current)) {
     return refused(`the log moved on from ${current}, this app's key: a key the app moved on from writes no more, and comes back only as a new key's rotation`);
   }
@@ -101,14 +103,14 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
       }
       const next = nextOf(move);
       if (next === undefined) return refused(`entry ${move.seq}, the rotation's last step, does not say where it goes on`);
-      return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next };
+      return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others: due(from) };
     }
     // The log is under the key its newest rotation moved to, a key this app replaced: it moves on from that one in turn.
-    if (move.keyId !== current) return { kind: 'rotating', from: under, next: START };
+    if (move.keyId !== current) return { kind: 'rotating', from: under, next: START, others: due(under) };
   }
   for (const { id, key } of previous) {
     if (moved.has(id)) continue;
-    if (await wroteUnder(db, id)) return { kind: 'rotating', from: key, next: START };
+    if (await wroteUnder(db, id)) return { kind: 'rotating', from: key, next: START, others: due(key) };
     unused(id);
   }
   if (move === undefined) {
@@ -159,8 +161,8 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
     const { from } = standing;
     let next: Cursor | null = standing.next;
     let [left, resealed, signedOut, later] = [rows, 0, 0, 0];
-    // Keys listed beside the one moved from: a row one of them signed is its own rotation's to sign, next.
-    const others = keys.previousChainKeys.filter((key) => !key.equals(from));
+    // Keys listed beside the one moved from and still to move from: a row one of them signed is its own rotation's to sign, next.
+    const { others } = standing;
     const now = new Date();
     while (next !== null && left > 0) {
       const { table, after }: Cursor = next as Cursor;
@@ -195,7 +197,7 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
       subject: fromId,
       metadata: { from: fromId, resealed, signedOut, later, unsigned: unsigned.slice(0, NAMED), unsignedCount: unsigned.length, next },
     }]);
-    return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next };
+    return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others };
   });
   if (unsigned.length > 0) {
     console.error({ event: 'auth_row_unsigned', rows: unsigned.slice(0, NAMED), count: unsigned.length }, 'rows neither app key signed are left as they are, and fail as before');

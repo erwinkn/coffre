@@ -15,7 +15,7 @@ import { verifyCheckpoint, type Checkpoint, type LogHead } from '@coffre/core/va
 
 import { walking, type AnchorFields, type AnchorFinding, type AnchorStore, type AuditAnchor } from '../anchor.ts';
 import type { CoffrePlugin } from '../plugins.ts';
-import { Refusal, watcher, WATCH, type WatchContext } from '../watch.ts';
+import { Refusal, Superseded, watcher, WATCH, type WatchContext } from '../watch.ts';
 
 export type AuditWatchOptions = {
   /** Where the anchor lives: `durableAnchor(env.ANCHOR)` on Workers, `fileAnchor(path)` on one Node process, or any `AnchorStore`. */
@@ -97,6 +97,12 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
   try {
     beat = await ctx.log.append('audit.heartbeat', { source: 'scheduled' });
   } catch (error) {
+    // Replaced by a deployment under a newer app key, as for the moments a rotation's deploy takes: the anchor is the
+    // new key's to write now, and this beat leaves it as it is.
+    if (error instanceof Superseded) {
+      ctx.warn({ err: error.message }, 'audit heartbeat refused: this instance runs under an app key the log moved on from, and leaves the anchor to the one that replaced it');
+      return false;
+    }
     // A heartbeat that cannot write is itself the signal.
     unwritten = (error as Error).message;
     ctx.warn({ err: unwritten }, 'audit heartbeat failed to write');

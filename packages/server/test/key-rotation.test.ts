@@ -137,7 +137,7 @@ test('the first start under a new key signs every row again under it, signs peop
   const before = await signedUnder(A);
   assert.ok(Object.values(before).every((rows) => rows.length > 0 && rows.every(Boolean)), JSON.stringify(before));
   const next = startUnder(B, [A]);
-  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null } });
+  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null }, others: [] });
   assert.equal(await keyReady(next), null);
   assert.deepEqual(next.appKey, { settled: true });
 
@@ -318,7 +318,7 @@ test('a key the log refuses: one the log moved on from, or not the one a rotatio
 test('a second rotation moves from the first one\'s key, and each old key verifies only its own stretch', async () => {
   await settleKey(startUnder(B, [A]));
   const second = startUnder(C, [B, A]);
-  assert.deepEqual(await keyState(deps.db, second), { kind: 'rotating', from: B, next: { table: 'identities', after: null } });
+  assert.deepEqual(await keyState(deps.db, second), { kind: 'rotating', from: B, next: { table: 'identities', after: null }, others: [] });
   await settleKey(second);
   assert.ok(Object.values(await signedUnder(C)).every((rows) => rows.every(Boolean)));
   assert.equal(await verifies(held.service, second), true);
@@ -381,7 +381,7 @@ test('a start under the new key alone, before the old one is listed, loses nothi
   await alone.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'meanwhile', action: 'audit.heartbeat', decision: 'allow' }]));
   // The deploy that lists A rotates from it all the same.
   const next = startUnder(B, [A]);
-  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null } });
+  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null }, others: [] });
   await settleKey(next);
   assert.equal(next.appKey.settled, true);
   assert.equal(await verifies(held.service, next), true);
@@ -453,7 +453,7 @@ test('the door reads where the key stands in one snapshot: a step committed betw
     return { first, then: await keyState(tx, keys) };
   }, SNAPSHOT);
   assert.equal(seen.first, undefined);
-  assert.deepEqual(seen.then, { kind: 'rotating', from: A, next: { table: 'identities', after: null } }, 'the whole verdict is from before the step');
+  assert.deepEqual(seen.then, { kind: 'rotating', from: A, next: { table: 'identities', after: null }, others: [] }, 'the whole verdict is from before the step');
   // Read now, it is the step's: still rotating, never settled halfway.
   assert.equal((await keyStateNow(deps.db, keys)).kind, 'rotating');
 });
@@ -497,4 +497,20 @@ test('an anchor store that cannot be used holds the rotation back before key.rot
   broken = false;
   assert.equal(await keyReady(next), null);
   assert.equal((await anchor.read())!.keyId, appLogKey(B).keyId);
+});
+
+test('a beat of an instance still under the old key, during the rotation, leaves the anchor as it was: no false finding carried over', async () => {
+  const anchor = testAnchor();
+  const old = startUnder(A, [], [auditWatch({ anchor })]);
+  await runScheduled(old);
+  const sealed = (await anchor.read())!;
+  assert.equal(sealed.finding, null);
+  // The old instance has served, its key known settled; the new one's first step retires A.
+  const next = startUnder(B, [A], [auditWatch({ anchor })]);
+  assert.equal((await rotateStep(deps.db, next, { rows: 2 })).kind, 'rotating');
+  await assert.rejects(runScheduled(old), /heartbeat failed/);
+  assert.deepEqual(await anchor.read(), sealed, 'the replaced instance wrote nothing');
+  assert.equal(await keyReady(next), null);
+  const resealed = (await anchor.read())!;
+  assert.deepEqual([resealed.keyId, resealed.finding], [appLogKey(B).keyId, null]);
 });
