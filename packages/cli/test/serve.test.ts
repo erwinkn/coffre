@@ -251,7 +251,8 @@ test("a service's run refuses a credential two of its environments name, and a r
   const slow = await fakeCoffre({ planDelayMs: 10_000 });
   t.after(() => slow.close());
   const run = cli(t, ['--url', slow.url, '--service', 'api-prod', 'run', '--proof', 'enrollment', '--', process.execPath, '-e', '']);
-  for (let i = 0; i < 100 && !slow.log.includes('POST /api/auth/workload 200'); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+  // Stopped while its plan is being asked for: the session exists, the command does not yet.
+  for (let i = 0; i < 200 && !slow.log.some((line) => line.endsWith(' waiting')); i++) await new Promise((resolve) => setTimeout(resolve, 50));
   run.child.kill('SIGTERM');
   const [exit, signal] = await once(run.child, 'exit');
   assert.deepEqual([exit, signal], [null, 'SIGTERM']);
