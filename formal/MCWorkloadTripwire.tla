@@ -10,13 +10,13 @@ Kinds == {"crash", "down", "restart", "redeploy", "narrow", "enroll", "leave"}
 At(most) == [k \in Kinds |-> IF k \in DOMAIN most THEN most[k] ELSE 0]
 
 -----------------------------------------------------------------------------
-(* Deploys: one replica crashes and restarts once, redeploys twice on the
-   same code and narrows twice, and nobody else holds the code. *)
+(* Deploys: one replica crashes once and restarts, trying twice, redeploys
+   twice on the same code and narrows once, and nobody else holds the code. *)
 
 DeploysProcs == {"dep"}
 DeploysOps == [p \in DeploysProcs |-> {Ev(k) : k \in {"crash", "restart", "redeploy", "narrow"}}]
 DeploysBudget == [p \in DeploysProcs |-> 6]
-DeploysMost == At([crash |-> 1, restart |-> 1, redeploy |-> 2, narrow |-> 2])
+DeploysMost == At([crash |-> 1, restart |-> 2, redeploy |-> 2, narrow |-> 1])
 
 -----------------------------------------------------------------------------
 (* Thief: beside one replica, which may crash, a thief enrolls up to five

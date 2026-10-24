@@ -43,7 +43,7 @@ Reads == [e \in Envs |-> IF e = "dev" THEN [all |-> TRUE, keys |-> {}] ELSE [all
 ReadsByName == [e \in Envs |-> IF e = "dev" THEN [all |-> TRUE, keys |-> {}] ELSE [all |-> FALSE, keys |-> {"W"}]]
 
 VARIABLES
-    keys,           \* keys[id]: [made, env, name, ref, laundered]
+    keys,           \* keys[id]: [made, gone, env, name, ref, laundered]; a gone ID is never reused
     pc, op, l, left,  \* l is unused, kept for scripts/formal-trace.mjs
     read            \* history: what each read the vault allowed handed back
 
@@ -52,7 +52,8 @@ vars == <<keys, procs, read>>
 
 -----------------------------------------------------------------------------
 
-Live(id) == keys[id].made
+Live(id) == keys[id].made /\ ~keys[id].gone
+Unused == {id \in Ids : ~keys[id].made}
 Named(e, n) == {id \in Ids : Live(id) /\ keys[id].env = e /\ keys[id].name = n}
 \* The value a row stands for: its own, or its reference's source.
 Held(id) == IF keys[id].ref = None THEN id ELSE keys[id].ref
@@ -102,7 +103,7 @@ Read(p) ==
 Into(p, copy) ==
     /\ pc[p] = IF copy THEN "copy" ELSE "reference"
     /\ LET srcs == Named(op[p].env, op[p].name)
-           free == {id \in Ids : ~Live(id)}
+           free == Unused
            workload == p = "wl"
        IN IF srcs = {} \/ free = {} \/ Named("dev", op[p].to) # {}
             THEN UNCHANGED keys
@@ -112,7 +113,7 @@ Into(p, copy) ==
                       THEN UNCHANGED keys
                       ELSE keys' = [keys EXCEPT ![new] =
                              [made |-> TRUE, env |-> "dev", name |-> op[p].to,
-                              ref |-> IF copy THEN None ELSE Held(src),
+                              gone |-> FALSE, ref |-> IF copy THEN None ELSE Held(src),
                               laundered |-> copy /\ (keys[Held(src)].laundered \/ (workload /\ ~Listed(Held(src))))]]
     /\ Done(p)
     /\ UNCHANGED read
@@ -133,21 +134,22 @@ Rename(p) ==
 \* Deleting a key and making one of the same name: a new ID.
 Recreate(p) ==
     /\ pc[p] = "recreate"
-    /\ keys' = IF Named(op[p].env, op[p].name) = {} \/ \A id \in Ids : Live(id)
+    /\ keys' = IF Named(op[p].env, op[p].name) = {} \/ Unused = {}
                  THEN keys
                  ELSE LET old == CHOOSE id \in Named(op[p].env, op[p].name) : TRUE
-                          new == CHOOSE id \in Ids : ~Live(id)
-                      IN [keys EXCEPT ![old].made = FALSE,
-                                      ![new] = [made |-> TRUE, env |-> op[p].env, name |-> op[p].name, ref |-> None, laundered |-> FALSE]]
+                          new == CHOOSE id \in Unused : TRUE
+                      IN [keys EXCEPT ![old].gone = TRUE,
+                                      ![new] = [made |-> TRUE, gone |-> FALSE, env |-> op[p].env, name |-> op[p].name,
+                                                ref |-> None, laundered |-> FALSE]]
     /\ Done(p)
     /\ UNCHANGED read
 
 Init ==
     /\ keys = [id \in Ids |->
-                 CASE id = "k1" -> [made |-> TRUE, env |-> "prod", name |-> "S", ref |-> None, laundered |-> FALSE]
-                   [] id = "k2" -> [made |-> TRUE, env |-> "prod", name |-> "W", ref |-> None, laundered |-> FALSE]
-                   [] id = "k3" -> [made |-> TRUE, env |-> "dev", name |-> "S", ref |-> "k1", laundered |-> FALSE]
-                   [] OTHER     -> [made |-> FALSE, env |-> "prod", name |-> "X", ref |-> None, laundered |-> FALSE]]
+                 CASE id = "k1" -> [made |-> TRUE, gone |-> FALSE, env |-> "prod", name |-> "S", ref |-> None, laundered |-> FALSE]
+                   [] id = "k2" -> [made |-> TRUE, gone |-> FALSE, env |-> "prod", name |-> "W", ref |-> None, laundered |-> FALSE]
+                   [] id = "k3" -> [made |-> TRUE, gone |-> FALSE, env |-> "dev", name |-> "S", ref |-> "k1", laundered |-> FALSE]
+                   [] OTHER     -> [made |-> FALSE, gone |-> FALSE, env |-> "prod", name |-> "X", ref |-> None, laundered |-> FALSE]]
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> [id |-> <<None, 0>>]]

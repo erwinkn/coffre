@@ -61,6 +61,11 @@ CONSTANTS
     \* A child's paths are matched on the resolved upstream URL, after dot
     \* segments, never the path as received (`constraintsAllow`, 8.4).
     TargetResolvedBeforeConstraints,
+    \* A child's request is refused if its path holds an encoded `.`, `/` or
+    \* `\`, a `%25` or a `;`, so the upstream cannot read a segment
+    \* otherwise (8.4). With the resolved match, each covers for the other
+    \* on an encoded dot segment; only this one on `..;`.
+    EncodedSegmentsRefused,
     \* A child reaches only `/use`, narrow and logout: no read, no renewal
     \* (WORKLOAD_ROUTES, 6.1).
     ChildOpsRefused,
@@ -70,18 +75,24 @@ CONSTANTS
 None == "none"
 Workloads == {"A", "B"}
 Sessions == {"sA", "sB", "c"}
-\* The upstream paths a request may name, as sent: "dotdot" is
+\* The upstream paths a request may name, as sent. "dotdot" is
 \* /v1/refunds/%2e%2e/charges, which starts with the refunds prefix as
-\* received and resolves to /v1/charges.
+\* received, and which the WHATWG parser resolves to /v1/charges. "semi" is
+\* /v1/refunds/..;/charges, which the parser leaves under /v1/refunds, and
+\* an upstream such as Tomcat reads as /v1/charges.
 Targets == {"refunds", "charges"}
-Paths == {"refunds", "charges", "dotdot"}
+Paths == {"refunds", "charges", "dotdot", "semi"}
 Bodies == {"b1", "b2"}
 
-Resolved(path) == IF path = "dotdot" THEN "charges" ELSE path
+\* The path as Coffre resolves it, and as the upstream acts on it.
+Resolved(path) == CASE path = "dotdot" -> "charges" [] path = "semi" -> "refunds" [] OTHER -> path
+Upstream(path) == IF path \in {"dotdot", "semi"} THEN "charges" ELSE path
+Encoded(path) == path \in {"dotdot", "semi"}
 \* constraintsAllow on the path as received, by its prefix.
-AsReceived(path, allowed) == path \in allowed \/ (path = "dotdot" /\ "refunds" \in allowed)
+AsReceived(path, allowed) == path \in allowed \/ (Encoded(path) /\ "refunds" \in allowed)
 PathAllowed(path, allowed) ==
-    IF TargetResolvedBeforeConstraints THEN Resolved(path) \in allowed ELSE AsReceived(path, allowed)
+    /\ ~(EncodedSegmentsRefused /\ Encoded(path))
+    /\ IF TargetResolvedBeforeConstraints THEN Resolved(path) \in allowed ELSE AsReceived(path, allowed)
 
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -118,7 +129,11 @@ FreezeTargets(s, kind) ==
     {"instance", "token:" \o sessions[s].principal, "binding:" \o sessions[s].principal, "session:" \o s}
       \cup (IF kind = "use" THEN {"credential"} ELSE {})
 
-Frozen(targets) == \E i \in 1..Len(log) : log[i].kind = "workload.freeze" /\ log[i].target \in targets
+\* A target is frozen when its newest `workload.freeze` or
+\* `workload.unfreeze` entry is a freeze (8.2): that entry's index, or 0.
+Newest(t) == LET is == {i \in 1..Len(log) : log[i].kind \in {"workload.freeze", "workload.unfreeze"} /\ log[i].target = t}
+             IN IF is = {} THEN 0 ELSE CHOOSE i \in is : \A j \in is : j <= i
+Frozen(targets) == \E t \in targets : Newest(t) > 0 /\ log[Newest(t)].kind = "workload.freeze"
 
 \* Whether entry e ends session s: its `token.revoke`, its binding's
 \* `token.unbind`, or a removal past its generation.
@@ -130,7 +145,7 @@ Ends(e, s) ==
 \* Ended, or frozen, by an entry at least `by` ticks old.
 EndedBy(s, by) == \E i \in 1..Len(log) : Ends(log[i], s) /\ log[i].time + by <= now
 FrozenBy(targets, by) ==
-    \E i \in 1..Len(log) : log[i].kind = "workload.freeze" /\ log[i].target \in targets /\ log[i].time + by <= now
+    \E t \in targets : Newest(t) > 0 /\ log[Newest(t)].kind = "workload.freeze" /\ log[Newest(t)].time + by <= now
 
 \* What the statement finds of one row, freezes aside (5.3).
 RowStands(s) ==
@@ -171,6 +186,7 @@ FirstLabel(kind) ==
       [] kind = "byte"     -> "tunnel.byte"
       [] kind = "recheck"  -> "tunnel.recheck"
       [] kind = "freeze"   -> "freeze"
+      [] kind = "unfreeze" -> "unfreeze"
       [] kind = "revoke"   -> "revoke"
       [] kind = "unbind"   -> "unbind"
       [] kind = "remove"   -> "remove.vault"
@@ -236,8 +252,8 @@ Serve(m) ==
                    ended |-> ~TrulyLive(s),
                    subset |-> r.parent = None \/
                                 (/\ m.kind = "use"
-                                 /\ Resolved(m.path) \in r.constraints
-                                 /\ \A a \in Ancestors(s) : Resolved(m.path) \in sessions[a].constraints /\ TrulyLive(a)
+                                 /\ Upstream(m.path) \in r.constraints
+                                 /\ \A a \in Ancestors(s) : Upstream(m.path) \in sessions[a].constraints /\ TrulyLive(a)
                                  /\ ~Frozen(UNION {FreezeTargets(a, "use") : a \in Ancestors(s)})),
                    late |-> now >= r.notAfter]
     IN IF r.made /\ live /\ keyOk /\ digestOk /\ rightOk /\ fresh
@@ -377,6 +393,13 @@ Freeze(p) ==
     /\ Done(p)
     /\ UNCHANGED <<now, rows, gate, epochs, seen, cache, tunnel, accepted>>
 
+\* Lifting one: `workload.unfreeze`.
+Unfreeze(p) ==
+    /\ pc[p] = "unfreeze"
+    /\ log' = Append(log, [Entry("workload.unfreeze", p) EXCEPT !.target = op[p].target])
+    /\ Done(p)
+    /\ UNCHANGED <<now, rows, gate, epochs, seen, cache, tunnel, accepted>>
+
 \* Revoking a session, as logout or `token.revoke` does.
 Revoke(p) ==
     /\ pc[p] = "revoke"
@@ -452,7 +475,7 @@ Step(p) ==
     \/ GateRestart(p) \/ GateRotate(p)
     \/ Narrow(p)
     \/ TunnelOpen(p) \/ TunnelByte(p) \/ TunnelRecheck(p)
-    \/ Freeze(p) \/ Revoke(p) \/ Unbind(p) \/ RemoveVault(p) \/ RemoveSweep(p)
+    \/ Freeze(p) \/ Unfreeze(p) \/ Revoke(p) \/ Unbind(p) \/ RemoveVault(p) \/ RemoveSweep(p)
 
 Finished == \A p \in Procs : pc[p] = "idle" /\ left[p] = 0
 

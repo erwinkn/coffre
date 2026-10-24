@@ -33,6 +33,18 @@ EndingOps == [p \in EndingProcs |->
 EndingBudget == [p \in EndingProcs |-> CASE p = "a" -> 2 [] p = "tun" -> 3 [] p = "omar" -> 1]
 
 -----------------------------------------------------------------------------
+(* Freezing: A uses its session and reads through it, while Omar freezes
+   it, its instance or its credential and Olga lifts either, in any order. *)
+
+FreezingProcs == {"a", "omar", "olga"}
+FreezingTargets == {"instance", "session:sA", "credential"}
+FreezingOps == [p \in FreezingProcs |->
+    CASE p = "a"    -> {Req("use", "sA", "kA", "charges"), Req("read", "sA", "kA", None)}
+      [] p = "omar" -> {Act("freeze", t) : t \in FreezingTargets}
+      [] p = "olga" -> {Act("unfreeze", t) : t \in FreezingTargets}]
+FreezingBudget == [p \in FreezingProcs |-> IF p = "a" THEN 3 ELSE 1]
+
+-----------------------------------------------------------------------------
 (* Narrowing: A narrows its session to refunds for an agent, which uses
    every path, reads and renews, while Omar revokes or freezes the parent. *)
 
