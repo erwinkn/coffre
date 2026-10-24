@@ -877,9 +877,12 @@ test("the configuration is checked: HTTPS upstreams, no private address, rules t
   assert.throws(make({ a: { upstream: 'https://[::1]', inject: header('x', '{K}') } }), /private address/);
   assert.throws(make({ a: { upstream: 'https://localhost', inject: header('x', '{K}') } }), /private address/);
   // However it is written: a trailing dot, any case, IPv4 inside IPv6.
-  for (const host of ['localhost.', 'LOCALHOST', 'api.localhost.', '127.0.0.1.', '[::ffff:10.0.0.8]', '[::7f00:1]', '[fe80::1]', '[fec0::1]', '[64:ff9b::a00:8]', '198.18.0.1']) {
+  for (const host of ['localhost.', 'LOCALHOST', 'api.localhost.', '127.0.0.1.', '[::ffff:10.0.0.8]', '[::7f00:1]', '[fe80::1]', '[fec0::1]', '[64:ff9b::a00:8]', '198.18.0.1', '[2002:a00:8::1]', '[2002:7f00:1::]', '[2002::]']) {
     assert.throws(make({ a: { upstream: `https://${host}/v1`, inject: header('x', '{K}') } }), /private address/, host);
   }
+  // A 6to4 address of a public IPv4 is public.
+  assert.doesNotThrow(make({ a: { upstream: 'https://[2002:808:808::1]/v1', inject: header('x', '{K}') } }));
+
   assert.throws(make({ a: { upstream: 'https://api.example.com', inject: header('x', 'static') } }), /names no key/);
   assert.throws(make({ A: { upstream: 'https://api.example.com', inject: header('x', '{K}') } }), /lowercase/);
   // `expose` and a credential's `identifiers` are gone in 0.10: refused at typecheck and at startup, saying what to do instead.

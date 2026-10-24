@@ -17,8 +17,11 @@ type Entries = Iterable<readonly [key: string, value: string]>;
  * index is authenticated) is no part of this,
  * nor what only names a directory to read files from (HOME, CARGO_HOME),
  * nor what only an interactive shell reads (ENV, PROMPT_COMMAND), nor a
- * credential (NPM_CONFIG_OTP, CARGO_REGISTRIES_*_TOKEN). A denylist is
- * never complete: these are the one-variable hijacks of common tools.
+ * credential (NPM_CONFIG_OTP, CARGO_REGISTRIES_*_TOKEN).
+ *
+ * A tripwire, not a boundary: it blocks the common one-variable hijacks and
+ * is not exhaustive. Anyone who may write keys to an environment the Action
+ * exports is trusted with code execution in that job.
  */
 export const RUNS_CODE: readonly string[] = [
   // The shell and the dynamic loader.

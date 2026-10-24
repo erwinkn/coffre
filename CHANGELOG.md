@@ -12,7 +12,8 @@
   `insecureUpstreams` lifts this, as it lifts the rest. Private addresses
   are now refused however they are written: `localhost.`, `LOCALHOST`,
   `127.0.0.1.`, `[::ffff:a00:1]`, `[::7f00:1]`, `[64:ff9b::a00:1]`; and
-  so are site-local `fec0::/10` and `198.18.0.0/15`.
+  so are site-local `fec0::/10`, `198.18.0.0/15`, and a 6to4 address
+  (`2002::/16`) of a private IPv4.
 - **`coffre export --format github` refuses keys a later step would take
   code from**: `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`,
   `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `NODE_PATH`, npm's and pnpm's
@@ -23,8 +24,10 @@
   case, with an error that names the key and nothing written. Before,
   only `NODE_OPTIONS`. Credentials beside them (`NPM_CONFIG_OTP`,
   `CARGO_REGISTRIES_*_TOKEN`, LaunchDarkly's `LD_SDK_KEY`) and `ENV`, which
-  only an interactive shell reads, still export. The list is the common
-  tools' one-variable hijacks, not every one there is.
+  only an interactive shell reads, still export. The list is a tripwire,
+  not a boundary: it blocks the common tools' one-variable hijacks, not
+  every one there is, and anyone who may write keys to an environment the
+  Action exports is trusted with code execution in that job.
 - **Spent ID tokens are forgotten two hours after.** `consumed_tokens`,
   which refuses a CI run's token sent twice, only grew. The scheduled
   beat now removes up to 5,000 records a beat of tokens spent over two

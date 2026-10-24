@@ -345,8 +345,11 @@ export with it, naming the key: `PATH`, `BASH_ENV`, `LD_PRELOAD`,
 `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `PYTHONPATH`, `JAVA_TOOL_OPTIONS` and the
 rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`). Set through
 `GITHUB_ENV`, one such secret would run code in every later step of the
-job. GitHub's default metadata variables cannot be overridden. Other names
-such as `GITHUB_TOKEN` work.
+job. The list blocks the common one-variable hijacks; it is not
+exhaustive, and it is a tripwire, not a boundary: anyone who may write
+keys to an environment the Action exports is trusted with code execution
+in that job. GitHub's default metadata variables cannot be overridden.
+Other names such as `GITHUB_TOKEN` work.
 [GitHub documents these runner rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-environment-variable).
 
 The inputs are `url`, `environment`, one of `token` or `service`, and

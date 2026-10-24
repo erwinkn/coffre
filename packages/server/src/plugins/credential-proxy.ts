@@ -1315,9 +1315,19 @@ function privateHost(host: string): boolean {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
     return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19));
   }
+  if (!name.includes(':')) return false;
+  // 6to4 carries an IPv4 address in its next 32 bits: 2002:a00:1:: is 10.0.0.1's.
+  const [first, high, low] = hextets(name);
+  if (first === 0x2002) return privateHost(`${high! >> 8}.${high! & 255}.${low! >> 8}.${low! & 255}`);
   // ::/16 holds loopback, the unspecified address and IPv4 written as IPv6 (::ffff:a00:1, ::7f00:1); 64:ff9b:: is NAT64's; fe80::/10 is link-local, fec0::/10 site-local.
-  if (name.includes(':')) return /^(?:::|0:)/.test(name) || /^f[cd]/.test(name) || /^fe[89a-f]/.test(name) || name.startsWith('64:ff9b:');
-  return false;
+  return /^(?:::|0:)/.test(name) || /^f[cd]/.test(name) || /^fe[89a-f]/.test(name) || name.startsWith('64:ff9b:');
+}
+
+/** An IPv6 address as a URL writes it (hex groups, `::` once at most), as its eight groups. */
+function hextets(address: string): number[] {
+  const [head, tail] = address.split('::').map((part) => (part === '' ? [] : part.split(':')));
+  const groups = tail === undefined ? head! : [...head!, ...Array<string>(8 - head!.length - tail.length).fill('0'), ...tail];
+  return groups.map((group) => parseInt(group, 16));
 }
 
 function answer(body: unknown): Response {
