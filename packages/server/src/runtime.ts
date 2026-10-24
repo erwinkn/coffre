@@ -7,6 +7,7 @@ import { SigninService } from './api/signin.ts';
 import { WorkloadService } from './api/workloads.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
+import type { Gates } from './gate.ts';
 import { logged } from './logged.ts';
 import { McpService } from './mcp/service.ts';
 import type { WorkloadTransport } from './workloads/transport.ts';
@@ -33,6 +34,12 @@ export type CoffreRuntime = {
   plugins: ResolvedConfig['plugins'];
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
+  /**
+   * Each workload's gate (gate.ts): the process's on Node, the `GATES`
+   * Durable Objects on Workers. Absent on Workers without that binding,
+   * where no key-bound session is taken.
+   */
+  gates?: Gates;
 };
 
 /**
@@ -57,6 +64,7 @@ export function createRuntime(
   waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
     promise.catch((error: unknown) => console.error('background task failed', logged(error)));
   },
+  gates?: Gates,
 ): CoffreRuntime {
   let signin: SigninService | null = null;
   let workloads: WorkloadService | null = null;
@@ -97,6 +105,7 @@ export function createRuntime(
     schema,
     rotateAfterDays: config.rotateAfterDays,
     plugins: config.plugins,
+    gates,
   };
 }
 

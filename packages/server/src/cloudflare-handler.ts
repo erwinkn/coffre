@@ -4,9 +4,10 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
-import { CoffreGates } from './cloudflare-gates.ts';
+import { CoffreGates, workersGates, type GatesNamespace } from './cloudflare-gates.ts';
 import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
 import { CoffreWorkload } from './cloudflare-workload.ts';
+import type { Gates } from './gate.ts';
 import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
@@ -19,11 +20,14 @@ export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
  * What the app Worker's `createCoffre(env => …)` returns. `sockets`, the
  * Durable Object binding whose class is `coffre.Sockets`, hosts plugins'
  * WebSockets, the credential proxy's database tunnel: without it, they are
- * refused.
+ * refused. `gates`, the one whose class is `coffre.Gates`, holds each
+ * workload's gate (docs/design/workload-access.md, section 5.2): without
+ * it, no key-bound session is taken, since nothing else on Workers can
+ * hold a proof to one use.
  */
-export type WorkersConfig = CoffreConfig & { database: PostgresDatabase; sockets?: SocketsNamespace };
+export type WorkersConfig = CoffreConfig & { database: PostgresDatabase; sockets?: SocketsNamespace; gates?: GatesNamespace };
 
-export type { SocketsNamespace };
+export type { GatesNamespace, SocketsNamespace };
 
 /** The part of the Workers `ExecutionContext` coffre uses. */
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };
@@ -59,13 +63,13 @@ export type CoffreWorker<Env> = {
  * the request and the work it left to finish are done.
  */
 export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): CoffreWorker<Env> {
-  const configs = new WeakMap<object, { config: WorkersConfig; resolved: ResolvedConfig }>();
+  const configs = new WeakMap<object, { config: WorkersConfig; resolved: ResolvedConfig; gates: Gates | undefined }>();
 
   function configured(env: Env) {
     let entry = configs.get(env as object);
     if (entry === undefined) {
       const config = configure(env);
-      entry = { config, resolved: resolveConfig(config) };
+      entry = { config, resolved: resolveConfig(config), gates: config.gates && workersGates(config.gates) };
       configs.set(env as object, entry);
     }
     return entry;
@@ -78,7 +82,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport(), (promise) => {
       left.push(promise);
       ctx.waitUntil(promise);
-    });
+    }, entry.gates);
     let closing: Promise<void> | undefined;
     /**
      * Close the client once `work`, and whatever the invocation left to
@@ -116,9 +120,9 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     },
     // The object's coffre lasts as long as it does: its database client opens with a query and closes once idle.
     Sockets: socketsObject<Env>((env, state) => {
-      const { config, resolved } = configured(env);
+      const { config, resolved, gates } = configured(env);
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
-      const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise));
+      const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise), gates);
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,

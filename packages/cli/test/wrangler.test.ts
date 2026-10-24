@@ -34,8 +34,8 @@ function deployment(t: { after: (fn: () => void) => void }): string {
   writeFileSync(join(dir, 'node_modules', '.bin', 'wrangler'), `#!/bin/sh\nexec '${process.execPath}' '${realWrangler()}' "$@"\n`);
   chmodSync(join(dir, 'node_modules', '.bin', 'wrangler'), 0o755);
   mkdirSync(join(dir, 'empty'));
-  // A Worker in place of the build, with the Durable Object class the app's config binds.
-  writeFileSync(join(dir, 'stub.js'), 'export default { fetch: () => new Response("ok") };\nexport class CoffreSockets {}\n');
+  // A Worker in place of the build, with the Durable Object classes the app's config binds.
+  writeFileSync(join(dir, 'stub.js'), 'export default { fetch: () => new Response("ok") };\nexport class CoffreSockets {}\nexport class CoffreGates {}\n');
   return dir;
 }
 

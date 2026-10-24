@@ -791,6 +791,50 @@ workloads", or with `coffre trust`. A GitHub App of the deployment's own,
 installed on, private ones too, rather than have their IDs typed; the
 same app can sign people in ([github-app.md](github-app.md)).
 
+### Key-bound sessions and their gate
+
+A workload's key-bound session sends a fresh proof with each request
+([design](design/workload-access.md#52-the-gate-replay-nonces-live-counters)),
+and each workload's gate takes each proof once and counts its limits. A
+deployment `coffre init` writes has it, and `workloads: { useOnly: true }`,
+which leaves services nothing but those sessions
+([section 6.3](design/workload-access.md#63-the-strict-instance-and-the-path-from-today)).
+
+On Workers, the gates are a Durable Object, one per workload, made where
+its first request comes from. An older deployment adds, in
+`app/wrangler.jsonc`, a binding beside `SOCKETS` and a migration after
+its own:
+
+```jsonc
+"durable_objects": {
+  "bindings": [
+    { "name": "SOCKETS", "class_name": "CoffreSockets" },
+    { "name": "GATES", "class_name": "CoffreGates" }
+  ]
+},
+"migrations": [
+  { "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] },
+  { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] }
+],
+```
+
+`gates: env.GATES` in `app/src/coffre.ts`, and in `app/src/server.ts`:
+
+```ts
+export const CoffreGates = coffre.Gates;
+```
+
+Without the binding, Workers takes no key-bound session: nothing else
+there can hold a proof to one use.
+
+On Node, the gates live in the server's process, which needs nothing in
+the configuration. Run one server process. Several, coffre on Kubernetes
+with more than one replica included, would each hold gates of their own,
+with nonces of their own: a client sent to each in turn would be asked
+for a new nonce at every turn. That fails loudly, never unsafely. The
+gate's counts also start over when the process does, a day's limit
+included.
+
 ## MCP clients
 
 Claude and other MCP clients connect at `<PUBLIC_URL>/mcp` as the people

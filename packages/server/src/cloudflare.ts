@@ -34,6 +34,7 @@ export {
   createCoffre,
   postgres,
   type CoffreWorker,
+  type GatesNamespace,
   type PostgresDatabase,
   type SocketsNamespace,
   type WaitUntil,

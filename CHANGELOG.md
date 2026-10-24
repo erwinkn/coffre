@@ -76,6 +76,22 @@
   service account sensitive values, and the vault's bulk limit, each
   failing as it must without each of the code's protections
   ([formal.md](docs/formal.md#credentials-issuing-and-the-bulk-limit)).
+- **Each workload's gate**
+  ([workload-access.md](docs/design/workload-access.md#52-the-gate-replay-nonces-live-counters),
+  its PR 1b): what holds a key-bound session's proofs to one use and
+  counts its limits. Its nonces are epochs of 2 minutes, a proof is taken
+  under the current or the previous one and only once, and a gate that
+  restarts starts a new epoch, so no proof it took passes again. Past
+  1,000 requests a second it answers `overloaded`; past a limit, when to
+  retry, and whether this is the window's first refusal. On Node the
+  gates live in the server's process; on Workers, in a Durable Object per
+  workload, whose counts over a day outlive an eviction. `coffre init`
+  writes the `GATES` binding and its migration, `gates: env.GATES` and
+  `export const CoffreGates = coffre.Gates`, and `workloads: { useOnly:
+  true }`; an older Workers deployment adds them by hand
+  ([deploy.md](docs/deploy.md#key-bound-sessions-and-their-gate)). Nothing
+  asks a gate yet: the sessions that do come with that design's PR 1a. No
+  database migration.
 - **Workload access's foundation**
   ([workload-access.md](docs/design/workload-access.md), its PR 0). A
   database migration, `0015_workload_access`, which only adds: a

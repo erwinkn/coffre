@@ -33,10 +33,14 @@ export const coffre = createCoffre({
   // vault: await localVault({ database: env('DATABASE_URL'), kek: …, owners: […] }),
   auth: signin({
     providers: [app ? github({ app }) : github(client)],
-    // CI runs may sign in as services with their platform's ID token, through
-    // the trust bindings owners make (docs/design/oidc.md). Each exchange
-    // passes these first; they count in this process.
+    // CI runs and apps may sign in as services with their platform's proof,
+    // through the trust bindings owners make (docs/design/oidc.md), into
+    // key-bound sessions only: no service token is issued or taken
+    // (docs/design/workload-access.md, section 6.3). Each exchange passes
+    // these limits first, and each session's requests its gate; both are
+    // this process's, so run one.
     workloads: {
+      useOnly: true,
       limits: processLimits({ perSource: 30, total: 300 }),
       // Set by conformance only: a binding's issuer may then be plain HTTP on
       // loopback. Refused unless PUBLIC_URL is loopback too.

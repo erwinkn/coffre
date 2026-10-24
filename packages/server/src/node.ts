@@ -34,6 +34,7 @@ import { migrateDatabase } from '@coffre/db/migrate';
 
 import { runScheduled } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
+import { processGates } from './gate.ts';
 import { logged } from './logged.ts';
 import { upgrade } from './node-sockets.ts';
 import { createRuntime, type CoffreRuntime } from './runtime.ts';
@@ -75,7 +76,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
   const resolved = checkNodeConfig(config);
   let runtime: Promise<CoffreRuntime> | undefined;
   const ready = () =>
-    (runtime ??= openDatabase(config.database).then((database) => createRuntime(resolved, database.db, config.vault, nodeTransport())));
+    (runtime ??= openDatabase(config.database).then((database) => createRuntime(resolved, database.db, config.vault, nodeTransport(), undefined, processGates())));
   let timer: NodeJS.Timeout | undefined;
   return {
     request(request) {
