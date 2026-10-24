@@ -17,7 +17,7 @@ import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
-import { exchange, idToken } from './workload.ts';
+import { exchange, idToken, keyBound, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
@@ -1270,17 +1270,26 @@ async function run(args: string[]): Promise<void> {
 
   const { values: flags, positionals } = parseArgs({
     args: args.slice(0, separator),
-    options: { 'keep-existing': { type: 'boolean', default: false } },
+    options: { 'keep-existing': { type: 'boolean', default: false }, proof: { type: 'string' } },
     allowPositionals: true,
     strict: true,
   });
-  const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
+  // A service, key-bound where the instance has it: the session's environments unless named, and nothing but its key in memory.
+  const to = target();
+  if (flags.proof !== undefined && to.credential.kind !== 'workload') fail('--proof is how a service proves itself: coffre --service <name> run --proof …');
+  const bound =
+    to.credential.kind === 'workload'
+      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`)).catch(
+          (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
+        )
+      : null;
+  const paths = bound?.places ?? environmentPaths(positionals);
   // A person's app gets placeholders, where the instance has the proxy; a service account, the values.
-  const placed = await placeholders(paths);
-  if (placed !== null) sayPlaceholders(placed, paths, target());
-  const values = placed?.env ?? Object.fromEntries(await readOrEnd(paths));
+  const placed = bound === null ? await placeholders(paths) : null;
+  if (placed !== null) sayPlaceholders(placed, paths, to);
+  const values = bound?.env ?? placed?.env ?? Object.fromEntries(await readOrEnd(paths));
   // Each database the app reaches through a tunnel: a listener of this run's, for as long as its command runs.
   for (const tunnel of placed?.tunnels ?? []) {
     const { url } = await listen(tunnel, placed!.handle).catch((error: unknown) => fail((error as Error).message));
@@ -1307,10 +1316,11 @@ async function run(args: string[]): Promise<void> {
   const passOn = (signal: NodeJS.Signals) => () => void child.kill(signal);
   const handlers = { SIGINT: () => undefined, SIGTERM: passOn('SIGTERM'), SIGHUP: passOn('SIGHUP') } as const;
   for (const [signal, handler] of Object.entries(handlers)) process.on(signal, handler);
-  /** Its handle revoked, a few seconds at most, and then `then`: offline, the handle ends by itself, at `expiresAt`. */
+  /** Its handle revoked, or its key-bound session logged out, a few seconds at most, and then `then`: offline, either ends by itself, at its expiry. */
   const ended = (then: () => void) => {
     for (const [name, handler] of Object.entries(handlers)) process.off(name, handler);
-    const revoked = placed === null ? Promise.resolve() : Promise.race([placed.revoke().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
+    const ending = placed?.revoke() ?? bound?.close();
+    const revoked = ending === undefined ? Promise.resolve() : Promise.race([ending.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
     void revoked.then(then);
   };
   child.on('error', (error) => ended(() => fail(`failed to run ${command[0]}: ${error.message}`)));
@@ -1967,7 +1977,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   approve,
   freeze,
   unfreeze,
-  serve,
+  serve: (args) => serve(args, sessionFlags.url),
   audit,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),

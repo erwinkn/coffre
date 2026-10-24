@@ -163,7 +163,7 @@ export const SECTIONS = [
       },
       {
         command: 'run',
-        usage: [`run       [--keep-existing] ${P}... -- <command>`],
+        usage: [`run       [--keep-existing] [--proof <proof>] ${P}... -- <command>`],
         about: [
           'several environments: their keys together, and a key in two',
           'of them stops it before anything is read; --keep-existing lets',
@@ -171,7 +171,10 @@ export const SECTIONS = [
           "over coffre's value for it; <environment>@me reads your",
           'personal config of it, or it while you have none; where the',
           'deployment generates, your own value of each key a recipe made,',
-          'made once, in your personal config',
+          'made once, in your personal config; as a --service, key-bound',
+          'where the instance has it: --proof says how it proves itself (none:',
+          "a GitHub Actions job's ID token), the environments are the session's",
+          'unless named, and credentials go through a local listener',
         ],
       },
       {
@@ -391,10 +394,14 @@ export const SECTIONS = [
       { command: 'unfreeze', usage: ['unfreeze <target>'], about: ['lifts it'] },
       {
         command: 'serve',
-        usage: ['serve --service <name> --proof <proof> [--listen <address>]'],
+        usage: ['serve --url <url> --service <name> --proof <proof> [--place <project>/<env>]', '      [--listen <address>] [--tunnel <name>=<address>]...'],
         about: [
           "a workload's sidecar: it holds the session and its key,",
-          'and forwards what the app sends it, signed',
+          'and forwards what the app sends it, signed; --listen, 127.0.0.1:7300',
+          'unless given, or unix:<path>; each --tunnel a Postgres listener;',
+          '--proof kubernetes[:<file>], aws, gcp, azure:<audience>, fly,',
+          'vercel, github, enrollment or oidc (those two read stdin); --place',
+          "which of the session's environments its tunnels are in",
         ],
       },
     ],

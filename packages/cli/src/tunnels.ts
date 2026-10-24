@@ -3,9 +3,13 @@
 // on 127.0.0.1 for the app `coffre run` starts, which carries each of its
 // connections over a WebSocket to coffre, with the run's handle. It holds no
 // value and reads no byte: coffre logs in to the database, and the app's
-// password, the handle, is checked there.
+// password, the handle, is checked there. For a workload, `coffre serve`'s
+// or `coffre run --service`'s (docs/design/workload-access.md, section 9.3),
+// each upgrade is signed by the session's key instead, DPoP, and the app's
+// password is empty: the sidecar's boundary is the pod.
 import { createServer, type Socket } from 'node:net';
 
+import { upgradeHeaders, upgradeRefused, type Workload } from '@coffre/client/workload';
 import { WebSocket } from 'ws';
 
 /** A tunnel the plan names: the key the app reads its database's URL from, and coffre's end of it. */
@@ -45,17 +49,28 @@ const KEEPALIVE_MS = 30_000;
  */
 const HANDSHAKE_MS = 70_000;
 
-/** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. `keepaliveMs` and `handshakeMs` are for tests. */
-export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEEPALIVE_MS, handshakeMs = HANDSHAKE_MS } = {}): Promise<{ url: string; close: () => void }> {
+/**
+ * A listener, on a port of its own (or at `address`, a sidecar's), for as
+ * long as the run lasts; and the URL the app connects with. Its connections
+ * are a person's run's, by `handle`, or a workload's, signed by its session.
+ * `keepaliveMs` and `handshakeMs` are for tests.
+ */
+export async function listen(
+  tunnel: Tunnel,
+  as: string | Workload,
+  { keepaliveMs = KEEPALIVE_MS, handshakeMs = HANDSHAKE_MS, address = { host: '127.0.0.1', port: 0 } } = {},
+): Promise<{ url: string; close: () => void }> {
   const sockets = new Set<Socket>();
   /** The refusals said already, by status and reason: once each for the run, however many connections a pool retries. */
   const said = new Set<string>();
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: handshakeMs });
+    const ws = new WebSocket(tunnel.url, { headers: { ...(typeof as === 'string' ? { authorization: `Bearer ${as}` } : {}), [FLOW]: 'credit' }, handshakeTimeout: handshakeMs, finishRequest: signed(as, tunnel.url) });
     carry(socket, ws, keepaliveMs);
     ws.on('unexpected-response', (request, response) => {
+      // A workload's refusal may be for its nonce: the next connection asks for the gate's newest first.
+      if (typeof as !== 'string') upgradeRefused(as);
       // coffre's refusal, said once for each reason: the app sees its connection close, and a driver may retry it at once.
       let body = '';
       response.setEncoding('utf8');
@@ -77,14 +92,14 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
+    server.listen(address.port, address.host, () => resolve());
   });
   // A listener keeps no run alive: the run ends with its command.
   server.unref();
   const { port } = server.address() as { port: number };
   return {
     // The database's user and name are coffre's to set, from the real URL; the app's, `app`, are filler.
-    url: `postgres://app:${encodeURIComponent(handle)}@127.0.0.1:${port}/app?sslmode=disable`,
+    url: `postgres://app${typeof as === 'string' ? `:${encodeURIComponent(as)}` : ''}@${address.host.includes(':') ? `[${address.host}]` : address.host}:${port}/app?sslmode=disable`,
     close: () => {
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -173,4 +188,22 @@ export function carry(socket: Socket, ws: WebSocket, keepaliveMs: number): void 
     ws.close();
   });
   socket.on('error', () => ws.terminate());
+}
+
+/**
+ * How a workload's upgrade is sent: its session and a proof, signed as the
+ * request goes, since a proof is made fresh for each. A handle's needs
+ * nothing more than its header.
+ */
+function signed(as: string | Workload, url: string): ((request: import('node:http').ClientRequest) => void) | undefined {
+  if (typeof as === 'string') return undefined;
+  return (request) => {
+    upgradeHeaders(as, url).then(
+      (headers) => {
+        for (const [name, value] of Object.entries(headers)) request.setHeader(name, value);
+        request.end();
+      },
+      (error: unknown) => request.destroy(error as Error),
+    );
+  };
 }

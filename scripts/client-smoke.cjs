@@ -62,6 +62,28 @@ async function main() {
     assert.ok(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, dpop.fromBase64url(signature), new TextEncoder().encode(`${head}.${payload}`)));
     assert.equal((await dpop.thumbprint(key.jwk)).length, 43);
 
+    // A workload's SDK loads with no dependency, and signs in: its exchange carries a proof the key signed, which never exports.
+    const workloads = await import('@coffre/client/workload');
+    const made = [];
+    const coffre = await workloads.workload({
+      url,
+      service: 'api-prod',
+      proof: workloads.oidc('id-token'),
+      fetch: async (input, init) => {
+        made.push({ url: String(input), headers: new Headers(init.headers), body: init.body });
+        if (String(input).endsWith('/api/auth/workload')) {
+          return Response.json({ token: 'coffre_wl_x', tokenType: 'DPoP', expiresAt: new Date(Date.now() + 3600e3).toISOString(), notAfter: new Date(Date.now() + 86400e3).toISOString(), places: ['market/prod'] }, { headers: { 'dpop-nonce': 'g1.n' } });
+        }
+        return new Response('{}');
+      },
+    });
+    await coffre.fetch(`${coffre.url('openai')}/models`);
+    assert.deepEqual(JSON.parse(made[0].body).proof, { oidc: 'id-token' });
+    assert.equal(made[1].headers.get('authorization'), 'DPoP coffre_wl_x');
+    assert.match(made[1].headers.get('dpop'), /^[\w-]+\.[\w-]+\.[\w-]+$/);
+    await coffre.close();
+    assert.equal(typeof (await import('@coffre/client/workload/postgres')).connect, 'function');
+
     assert.ok(seen.includes('GET /api/auth yes'), seen.join('\n'));
   } finally {
     server.close();

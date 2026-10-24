@@ -230,6 +230,9 @@ importers:
       libsodium-wrappers:
         specifier: 0.8.4
         version: 0.8.4
+      openai:
+        specifier: 7.36.0
+        version: 7.36.0(@aws-sdk/credential-provider-node@3.972.85)(@smithy/signature-v4@5.7.4)(undici@7.29.0)(ws@8.21.3)(zod@4.4.3)
       pg:
         specifier: 8.16.3
         version: 8.16.3
@@ -2949,6 +2952,30 @@ packages:
     resolution: {integrity: sha512-5vvB5+W7ePv+p3uqxi+RcW1XAzLW0/hxt3/4X4Lc4qHudzOhmBiBwOY6DRob4WnanAEGvNcLjF+KNOufrUoEQw==}
     engines: {node: '>=12.20.0'}
 
+  openai@7.36.0:
+    resolution: {integrity: sha512-IiTbJojXJ8h24yjcibcD2kHCEMLjLOCyq6WuPe165xCgj4HphVCk/fb1I1jPZBDyFCR5O444Zl9Pyk1ajE8VkA==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
+      '@smithy/hash-node': '>=4.3.0 <5'
+      '@smithy/signature-v4': '>=5.4.0 <6'
+      undici: '>=5 <9'
+      ws: ^8.21.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      '@aws-sdk/credential-provider-node':
+        optional: true
+      '@smithy/hash-node':
+        optional: true
+      '@smithy/signature-v4':
+        optional: true
+      undici:
+        optional: true
+      ws:
+        optional: true
+      zod:
+        optional: true
+
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
     engines: {node: '>= 0.8.0'}
@@ -5534,6 +5561,14 @@ snapshots:
   obug@2.2.1: {}
 
   obug@3.0.0: {}
+
+  openai@7.36.0(@aws-sdk/credential-provider-node@3.972.85)(@smithy/signature-v4@5.7.4)(undici@7.29.0)(ws@8.21.3)(zod@4.4.3):
+    optionalDependencies:
+      '@aws-sdk/credential-provider-node': 3.972.85
+      '@smithy/signature-v4': 5.7.4
+      undici: 7.29.0
+      ws: 8.21.3
+      zod: 4.4.3
 
   optionator@0.9.4:
     dependencies:
