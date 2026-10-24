@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Upgrading to 0.13.0, in short.** No migration: the database, the
+  settings and the API are as in 0.12.1, so `coffre migrate` has nothing to
+  apply, and there is nothing to roll back beyond what 0.12 already was.
+  Audit watching is now a plugin, `auditWatch`, and a deployment that
+  upgrades without adding it keeps working, but `/readyz` answers
+  `{ok, watched: false}` and tampering is only found when someone verifies
+  the log. To add it: on Workers, an `ANCHOR` Durable Object binding, an
+  `anchor` migration in `app/wrangler.jsonc` and the `CoffreAnchor` export;
+  on Node, `fileAnchor` on a persistent volume. Expect one re-anchor alert
+  on the first beat. Changing `APP_KEY` leaves `/readyz` red until the
+  anchor's store is emptied (details below).
+
 - **The audit watch: what the heartbeat verified is kept outside the
   database.** Whoever can write the database, without any key, could
   change the heartbeat rows that said how far the log was verified, and
