@@ -39,7 +39,10 @@
   only while the next beat read where to resume, and send every walk
   after it past the tamper. Now a beat reads where to resume in the
   snapshot it walks in, only from a beat its MAC vouches for, and no
-  further than where the walk of any broken beat after that began; so
+  further than where the walk of any broken beat after that began, until
+  a clean beat walked over the entry it found, after it found it, and
+  found it whole (each beat records where its walk began and the newest
+  entry its snapshot held); so
   every beat row past that point is one the walk reads, and one hidden or
   changed there is found. Readiness runs that same walk, to the head: it
   is red as soon as a finding stands, while the finder is hidden, and

@@ -3,7 +3,7 @@ import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
-import { appendAudit, appLogKey, CHAIN_START, resumePoint, walkChain, type ChainPoint } from './db/audit.ts';
+import { appendAudit, appLogKey, CHAIN_START, resume, walkChain, type ChainPoint } from './db/audit.ts';
 import { auditHashAt, readiness } from './db/queries.ts';
 
 export type HeartbeatLogger = {
@@ -44,14 +44,18 @@ export async function writeAuditHeartbeat(
   // What the walk found, or why it could not run: either keeps readiness red until a walk passes.
   let broken: { seq: number; reason: string } | null = null;
   let unverified: string | null = null;
+  // Where the walk began, and the newest entry its snapshot held as the app wrote it: what a later beat reads to
+  // tell whether this one cleared a finding (db audit.ts, `clears`).
+  let walk: { from: ChainPoint; head: bigint } | null = null;
   try {
     // Where to resume, and the walk from there, in one snapshot: every beat row past that point is one the walk
     // reads, so a finder's row hidden while this reads where to resume, and put back before it walks, is not
     // passed over (formal/Audit.tla, `OneSnapshot`).
     verified = await db.transaction(async (tx) => {
-      const from = await resumePoint(tx, chainKey);
+      const { from, seen } = await resume(tx, chainKey);
       verified = from;
       const walked = await walkChain(tx, chainKey, from);
+      walk = { from, head: walked.ok && walked.at.seq > seen ? walked.at.seq : seen };
       // Short of the head, it says how far it got, and is no verdict on the rest: the next beat goes on.
       if (walked.ok && !walked.done) unverified = `verified through entry ${walked.at.seq}, a walk a beat: the rest goes on next time`;
       if (walked.ok) return walked.at;
@@ -75,6 +79,10 @@ export async function writeAuditHeartbeat(
           metadata: {
             source: 'scheduled',
             ...(verified.seq < 0n ? {} : { verified: { seq: Number(verified.seq), hash: verified.hash.toString('hex') } }),
+            ...(walk === null ? {} : {
+              ...(walk.from.seq < 0n ? {} : { from: { seq: Number(walk.from.seq), hash: walk.from.hash.toString('hex') } }),
+              ...(walk.head < 0n ? {} : { head: Number(walk.head) }),
+            }),
             // What the walk found, which readiness shows: the vault's checkpoint signs over the app's entries without their MACs.
             ...(broken === null ? {} : { broken }),
             ...(unverified === null ? {} : { unverified }),
@@ -147,7 +155,10 @@ export async function auditReadiness(db: Database, vault: Vault, chainKey: Buffe
       const rows = await readiness(tx, appLogKey(chainKey));
       const said = rows.beat === null ? null : (JSON.parse(rows.beat.metadata) as { broken?: unknown; unverified?: unknown } | null);
       const clean = rows.beat !== null && rows.beat.authentic && said?.broken === undefined && said?.unverified === undefined;
-      const walk = clean ? await walkChain(tx, chainKey, await resumePoint(tx, chainKey)) : null;
+      // Too many beats past where it would resume, it would walk from the first entry, which a probe cannot afford:
+      // the next beat does that, and readiness is red until then.
+      const from = clean ? await resume(tx, chainKey) : null;
+      const walk = from !== null && !from.closed ? await walkChain(tx, chainKey, from.from) : null;
       // The prefix the checkpoint signed still there as it signed it, as a verification holds it (`verifyAudit`):
       // the vault's rows after it are the vault's to check, and a row made one of them since, and chained again,
       // changes the hash it signed.

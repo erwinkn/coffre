@@ -734,11 +734,19 @@ walks past entry 812, beat F finds 812 edited and commits, then A commits
 after it, saying the chain verified past 812. A's walk began before F
 committed, so F's row lies past where A verified to, and the next walk
 reads it: it resumes no further than where the walk of any broken beat it
-reads began (`resumePoint`), and finds 812 again. Readiness runs that
+reads began (`resumePoint`), and finds 812 again. Once 812 is put back, a
+beat that walks over it clean clears F: each beat records where its walk
+began and the newest entry its snapshot held, so the next can tell that
+this walk went over 812, after F found it, and found it whole. The walks
+after it go on from where it ended, however far F's row lies past where
+F's walk began. Readiness runs that
 same walk, from the same point to the head, so it is red as soon as F
 commits, and red while F's row is hidden. Its cost is the entries since
 the newest beat's walk began, as a beat's own walk: one beat's worth of
-writes. Past 10,000 of them readiness is red, as the beat would be.
+writes. Past 10,000 of them readiness is red, as the beat would be. On
+SQLite, kept for tests and local development, its snapshot is a
+transaction like any other there, which waits for and holds up writes for
+the length of that walk.
 
 One way round it stays open, for a beat interval: the app's walk checks
 the vault's rows by their hashes only, so F made one of the vault's rows,

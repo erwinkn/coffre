@@ -74,7 +74,16 @@ CONSTANTS
     NoResumePastFinding,
     \* Readiness runs the next beat's walk, from where it would resume to
     \* the head, in its snapshot (server heartbeat.ts, auditReadiness).
-    ReadinessWalks
+    ReadinessWalks,
+    \* A broken beat past the point lowers it no more once a clean beat
+    \* cleared it (resumePoint, `clears`): without it, a finder whose row
+    \* lies more than a walk past where its walk began brings every walk
+    \* back there, once the entry is put back, and none gets past it.
+    Clears,
+    \* Cleared only by a walk that went over the entry found, from before
+    \* it, in a snapshot that held the finder (`head`); without it, by any
+    \* clean beat whose snapshot held the finder, as #296's review proposed.
+    ClearsOverFault
 
 None == "none"
 AppKinds == {"app", "beat"}
@@ -96,7 +105,7 @@ vars == <<log, head, tampered, procs, history>>
 E(kind) == [kind |-> kind, wver |-> 0, ver |-> 0, forged |-> FALSE, edited |-> 0, fEdit |-> 0,
             verified |-> 0, vver |-> 0, broken |-> FALSE, short |-> FALSE, walked |-> FALSE,
             at |-> 0, atVer |-> 0, lap |-> 0, lapEnd |-> 0, lapVer |-> 0, fault |-> 0,
-            hidden |-> FALSE, claims |-> 0, claimsVer |-> 0]
+            hidden |-> FALSE, claims |-> 0, claimsVer |-> 0, bfrom |-> 0, bfromVer |-> 0, head |-> 0, calm |-> FALSE]
 
 Ver == IF log = <<>> THEN 0 ELSE log[Len(log)].ver
 
@@ -156,11 +165,30 @@ First == [at |-> 0, ver |-> 0]
 \* and no further than where the walk of any broken one after that began.
 \* A beat before the newest is not read again: the newest walked past it,
 \* or began where a broken one did.
+\* Beat b cleared what beat j found: a clean walk, in a snapshot that held
+\* j's row, over the entry j found, from before it; or, j having found the
+\* entry its walk began from changed, from there, its hash found again.
+ClearedBy(b, j) ==
+    /\ ~log[b].broken /\ log[b].head >= j
+    /\ ClearsOverFault =>
+         IF log[j].fault = log[j].verified
+           THEN log[b].bfrom = log[j].verified /\ log[b].bfromVer = log[j].vver
+           ELSE log[b].bfrom < log[j].fault /\ log[j].fault <= log[b].verified
+
+\* No entry edited in place: the model's, for `Repair`'s progress, which
+\* marks a beat that walked so (`calm`).
+Calm == \A i \in 1..Len(log) : log[i].edited = 0
+
+Own == {i \in 1..Len(log) : IsBeat(i) /\ (CursorByMac => MacOk(i) /\ Point(i).at < i)}
+
+\* The newest beat that is the app's, 0 for none.
+NewestOwn == IF Own = {} THEN 0 ELSE CHOOSE i \in Own : \A j \in Own : j <= i
+
 Resume ==
-    LET own == {i \in 1..Len(log) : IsBeat(i) /\ (CursorByMac => MacOk(i) /\ Point(i).at < i)}
-        b == IF own = {} THEN 0 ELSE CHOOSE i \in own : \A j \in own : j <= i
+    LET own == Own
+        b == NewestOwn
         c == IF b = 0 THEN First ELSE Point(b)
-        finders == IF NoResumePastFinding THEN {j \in own : j > c.at /\ SaysBroken(j)} ELSE {}
+        finders == IF NoResumePastFinding THEN {j \in own : j > c.at /\ SaysBroken(j) /\ ~(Clears /\ \E k \in own : ClearedBy(k, j))} ELSE {}
         lowest == {Point(j) : j \in finders} \cup {c}
     IN CHOOSE r \in lowest : \A q \in lowest : r.at <= q.at
 
@@ -190,7 +218,7 @@ ReadyNow == ReadyWith(NewestBeat, Signed) /\ DryRunOk
 (* Processes *)
 
 NoOp == [kind |-> "none", at |-> 0]
-L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0,
+L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0, bhead |-> 0, calm |-> FALSE,
        sfrom |-> 0, slap |-> 0, slapEnd |-> 0, slapVer |-> 0, sok |-> TRUE, beat |-> 0, ready |-> FALSE,
        done |-> TRUE, after |-> FALSE, fault |-> 0, fEdit |-> 0]
 
@@ -272,15 +300,17 @@ BeatAttest(p) ==
            w == WalkFrom(r)
        IN IF OneSnapshot
             THEN Read(p, "beat.head", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver, !.ok = w.ok, !.fault = w.fault,
+                                                    !.bhead = IF w.ok /\ w.to > NewestOwn THEN w.to ELSE NewestOwn, !.calm = Calm,
                                                     !.fEdit = IF w.fault = 0 THEN 0 ELSE log[w.fault].edited,
                                                     !.to = w.to, !.toVer = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.done = w.done,
                                                     !.after = tampered.kind = "rewrite"])
-            ELSE Read(p, "beat.walk", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver])
+            ELSE Read(p, "beat.walk", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver, !.bhead = NewestOwn])
 
 BeatWalk(p) ==
     /\ pc[p] = "beat.walk"
     /\ LET w == WalkFrom([at |-> l[p].from, ver |-> l[p].fromVer])
        IN Read(p, "beat.head", [l[p] EXCEPT !.ok = w.ok, !.fault = w.fault, !.fEdit = IF w.fault = 0 THEN 0 ELSE log[w.fault].edited,
+                                             !.bhead = IF w.ok /\ w.to > l[p].bhead THEN w.to ELSE l[p].bhead, !.calm = Calm,
                                              !.to = w.to, !.toVer = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.done = w.done,
                                              !.after = tampered.kind = "rewrite"])
 
@@ -298,7 +328,8 @@ BeatCommit(p) ==
     /\ Add([E("beat") EXCEPT !.verified = IF l[p].ok THEN l[p].to ELSE l[p].from,
                              !.vver = IF l[p].ok THEN l[p].toVer ELSE l[p].fromVer,
                              !.fault = IF l[p].ok THEN 0 ELSE l[p].fault, !.fEdit = IF l[p].ok THEN 0 ELSE l[p].fEdit,
-                             !.broken = ~l[p].ok, !.short = l[p].ok /\ ~l[p].done, !.walked = l[p].after])
+                             !.broken = ~l[p].ok, !.short = l[p].ok /\ ~l[p].done, !.walked = l[p].after,
+                             !.bfrom = l[p].from, !.bfromVer = l[p].fromVer, !.head = l[p].bhead, !.calm = l[p].calm])
     /\ history' = [history EXCEPT !.found = @ \cup (IF ~l[p].ok /\ l[p].fEdit # 0 THEN {<<l[p].fault, l[p].fEdit>>} ELSE {})]
     /\ head' = None
     /\ Goto(p, IF op[p].kind = "beatonly" THEN "idle" ELSE "ckpt.snapshot")
@@ -418,7 +449,9 @@ Init ==
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
     /\ left = Budget
-    /\ history = [signedBad |-> FALSE, signedAfterDeny |-> FALSE, signedAfterEdit |-> 0, greens |-> {}, found |-> {}]
+    /\ history = [signedBad |-> FALSE, signedAfterDeny |-> FALSE, signedAfterEdit |-> 0, greens |-> {},
+                   \* What the beats the log starts with found, and still holds.
+                   found |-> {<<InitLog[i].fault, InitLog[i].fEdit>> : i \in {j \in 1..Len(InitLog) : InitLog[j].kind = "beat" /\ InitLog[j].broken /\ InitLog[j].fEdit # 0}}]
 
 Step(p) ==
     \/ Begin(p) \/ AppendHead(p) \/ AppendCommit(p) \/ Tamper(p)

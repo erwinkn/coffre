@@ -856,7 +856,18 @@ row finds it.
   3. then the vault's checkpoint.
 - **Where to resume** (`audit.ts`, `resumePoint`): what the newest beat
   whose MAC verifies says it verified, at a point before its own row, and
-  no further than where the walk of any broken beat past that point began.
+  no further than where the walk of any broken beat past that point began,
+  until a clean beat has cleared it (`clears`). Each beat records where its
+  walk began (`from`) and the newest entry its snapshot held that the
+  app's key vouches for (`head`): its walk's end, or the newest beat whose
+  MAC verifies. A beat B clears what F found if B's walk was clean, B's
+  snapshot held F's row (`B.head >= F.seq`), and B's walk began before the
+  entry F found and went over it (`B.from < F.broken <= B.verified`); or,
+  F having found the entry its walk began from with another hash, B began
+  there and found the hash F expected. Rows are appended under the log's
+  head and so committed in seq order: a snapshot holding F's row began
+  after F committed, so B found the entry whole after F found it changed.
+  A beat from before 0.12, which records neither, clears nothing.
 - **A checkpoint** (`vault.ts`, `checkpoint`):
   1. the walk from the newest one, in a snapshot, at most `walks.checkpoint`
      entries, each link and hash, and the vault's MACs;
@@ -880,7 +891,9 @@ edited, its walk having begun at point s, before e. Take any later beat X
 that resumes from point r, the cursor of a beat B its MAC vouches for.
 - If F's row lies past r, X's walk reads it. Hidden or forged there, it
   is an entry changed, and X finds it. As written, F is a broken beat
-  past r, so X resumes no further than s, and walks over e.
+  past r, so X resumes no further than s, and walks over e; unless a clean
+  beat cleared F, whose walk went over e after F found it, and found e
+  whole: put back since F found it.
 - If F's row lies before r, B's cursor is past F's row. A beat's cursor
   is never past the head as its walk began, so F had committed before B
   walked, and the same holds of B: B walked over e after F found it, or
@@ -905,14 +918,19 @@ gap below.
 | A beat counts as where to resume only by its MAC, and only for a point before its own row (`resumePoint`, `CursorByMac`) | the finder's row forged to say it verified to the head: the next walk resumes there, past the edit (`FoundEditStaysRed`, in `Rows`) | this model |
 | No further than where the walk of any broken beat past that point began (`resumePoint`, `NoResumePastFinding`) | two heartbeats at once: the one that walked before an edit commits after the one that found it, and the next walks on from its cursor, past the edit (`FoundStaysRed`, in `Overtaking`; `FoundEditStaysRed`, in `Hiding`, `Reverting`, `Rows`) | this model, fixed with it |
 | Readiness runs the next beat's walk, to the head (`auditReadiness`, `ReadinessWalks`) | the same two beats, readiness green on the second until the next beat (`FoundStaysRed`, in `Tampering`); or the finder hidden, and readiness green on the beat before it (`FoundEditStaysRed`, in `Hiding` and `Rows`) | this model, fixed with it |
+| Until a clean beat cleared it (`clears`, `Clears`) | a finder whose row lies more than a walk past where its walk began, its entry put back: every beat after brings the walk back there, none reaches past the finder's row, and readiness stays red on a whole chain (`RepairGoesGreen`, in `Repair`) | #296's Fable review |
+| Cleared only by a walk that went over the entry found, from before it, in a snapshot that held the finder (`clears`, `ClearsOverFault`) | cleared by any clean beat whose snapshot held the finder, as that review proposed: the finder hidden while a beat walks from an overtaker's cursor, ending short of the finder's row, and put back; the next beat goes on past the edit (`FoundEditStaysRed`, in `Overtaken`) | this model |
 | Readiness reads the newest beat and the newest checkpoint in one snapshot (`readiness`) | green on a beat and a checkpoint that were never the newest together (`GreenIsReal`) | this model, fixed with it |
 
 `FoundEditStaysRed` is stated over what the beats found, kept by the
 model as they commit, not over their rows as they are now: so a finder
 hidden or forged since still counts. `Rows` gives the attacker two
 changes of any beat rows at any step, with three beats running and one
-edit behind every cursor, 2.7 million states; with three changes it
-holds too, about 30 million states, which `pnpm formal` does not run.
+edit behind every cursor, 3.7 million states; with three changes it
+holds too, which `pnpm formal` does not run. `RepairGoesGreen` is
+progress, checked as an invariant of `Repair`'s runs: once the edit is put
+back and four beats have walked with no edit in place, readiness is
+green.
 
 This replaces #296's first fix, rounds 1 to 4 of its first review: a beat read,
 under the head before it appended, the beats committed since its walk
@@ -1068,14 +1086,16 @@ availability edge, not a bound, which `StandingStaysOpen` does not see.
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Tampering` | From an entry of each author, a beat and a checkpoint: a request appends, two heartbeats run at once with their checkpoints, and someone edits an entry in place or rewrites the chain from one | 640 thousand |
-| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run with their checkpoints, which sign behind the head, and a monitor asks for readiness | 110 thousand |
-| `Overtaking` | Four heartbeats at once, one with its checkpoint, while someone edits the entry the newest checkpoint signed, behind every cursor, with a scrub of one entry a call | 100 thousand |
-| `Hiding` | Someone edits the entry the newest checkpoint signed, a beat finds it, and they hide its row while one that walked before commits, then put it back | 10 thousand |
-| `Reverting` | From a beat past the newest checkpoint, someone edits an entry behind its cursor and one ahead; beats find each, and they revert the one ahead while a third walks | 250 thousand |
-| `Reedit` | Someone edits an entry, reverts it once a beat found it, and edits it again, while beats walk one after another | 24 thousand |
-| `Masking` | A beat walks past an entry before it is edited; another, begun before it, finds the edit and commits after; the finder's row is hidden while a third reads where to resume, and put back before it walks | 110 thousand |
-| `Rows` | Someone edits the entry the newest checkpoint signed, and hides, forges or puts back any beat row, twice, at any step, while three beats run, one with its checkpoint | 2.7 million |
+| `Tampering` | From an entry of each author, a beat and a checkpoint: a request appends, two heartbeats run at once with their checkpoints, and someone edits an entry in place or rewrites the chain from one | 800 thousand |
+| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run with their checkpoints, which sign behind the head, and a monitor asks for readiness | 120 thousand |
+| `Overtaking` | Four heartbeats at once, one with its checkpoint, while someone edits the entry the newest checkpoint signed, behind every cursor, with a scrub of one entry a call | 180 thousand |
+| `Hiding` | Someone edits the entry the newest checkpoint signed, a beat finds it, and they hide its row while one that walked before commits, then put it back | 11 thousand |
+| `Reverting` | From a beat past the newest checkpoint, someone edits an entry behind its cursor and one ahead; beats find each, and they revert the one ahead while a third walks | 440 thousand |
+| `Reedit` | Someone edits an entry, reverts it once a beat found it, and edits it again, while beats walk one after another | 31 thousand |
+| `Masking` | A beat walks past an entry before it is edited; another, begun before it, finds the edit and commits after; the finder's row is hidden while a third reads where to resume, and put back before it walks | 150 thousand |
+| `Rows` | Someone edits the entry the newest checkpoint signed, and hides, forges or puts back any beat row, twice, at any step, while three beats run, one with its checkpoint | 3.7 million |
+| `Repair` | From a finder whose row lies more than a walk past where its walk began, its entry edited: someone puts it back when they like, while six beats run one after another | 489 |
+| `Overtaken` | From a finder, and an overtaker that walked past its entry before the edit and committed after it: someone hides and puts back beat rows while two beats run | 19 thousand |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
 

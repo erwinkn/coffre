@@ -118,4 +118,44 @@ RowsOps == [p \in RowsProcs |->
       [] p = "c" -> {Op("beat")}]
 RowsBudget == [p \in RowsProcs |-> IF p = "y" THEN 2 ELSE 1]
 
+-----------------------------------------------------------------------------
+(* Repairing: entry 5 edited, a beat that found it, from where it began at
+   entry 2, its row more than a walk past there; someone puts the entry back
+   when they like, and six beats, one after another, each with its
+   checkpoint, catch up with the head. *)
+
+Finder == [E("beat") EXCEPT !.verified = 2, !.broken = TRUE, !.fault = 5, !.fEdit = 1, !.bfrom = 2, !.head = 3]
+RepairLog == StartLog \o <<[E("app") EXCEPT !.edited = 1], E("app"), E("app"), E("app"), Finder>>
+RepairProcs == {"x", "z"}
+RepairOps == [p \in RepairProcs |->
+    CASE p = "x" -> {Revert(5)}
+      [] p = "z" -> {Op("beat")}]
+RepairBudget == [p \in RepairProcs |-> IF p = "x" THEN 1 ELSE 6]
+
+\* Once the edit is put back, four beats that walked with no edit in place,
+\* after the last that walked with one, catch up: readiness green.
+RepairGoesGreen ==
+    LET beats == {i \in 1..Len(log) : log[i].kind = "beat"}
+        edgy == {i \in beats : ~log[i].calm}
+        after == {i \in beats : \A j \in edgy : j < i}
+    IN (Finished /\ Calm /\ Cardinality(after) >= 4) => ReadyNow
+
+-----------------------------------------------------------------------------
+(* Overtaken: entry 5 edited, behind the newest checkpoint's prefix; a
+   beat that found it, from entry 2, its row more than a walk past where
+   the next began; and, committed after it, a beat that walked past entry 5
+   before the edit. Someone hides and puts back beat rows, while one beat
+   walks from the second's cursor and another after it. A walk that began
+   after the finder committed, but never went over the entry it found,
+   clears nothing (`ClearsOverFault`); #296's review proposed it would. *)
+
+Overtaker == [E("beat") EXCEPT !.verified = 5, !.bfrom = 2, !.head = 5]
+OvertakenLog == StartLog \o <<[E("app") EXCEPT !.edited = 1], E("app"), E("app"), E("app"), [E("ckpt") EXCEPT !.at = 8], Finder, Overtaker>>
+OvertakenProcs == {"y", "b", "c"}
+OvertakenOps == [p \in OvertakenProcs |->
+    CASE p = "y" -> {Op("hide"), Op("revert")}
+      [] p = "b" -> {Op("beatonly")}
+      [] p = "c" -> {Op("beat")}]
+OvertakenBudget == [p \in OvertakenProcs |-> IF p = "y" THEN 2 ELSE 1]
+
 =============================================================================

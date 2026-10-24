@@ -106,6 +106,8 @@ REMOVALS=(
   "Rows CursorByMac FoundEditStaysRed"
   "Rows NoResumePastFinding FoundEditStaysRed"
   "Rows ReadinessWalks FoundEditStaysRed"
+  "Repair Clears RepairGoesGreen"
+  "Overtaken ClearsOverFault FoundEditStaysRed"
   "Readiness ReadinessInOneSnapshot GreenIsReal"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
