@@ -17,6 +17,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
 import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
+import { appendEntries } from '@coffre/db/log';
 import { localVault } from '@coffre/vault/node';
 import type pg from 'pg';
 
@@ -25,6 +26,7 @@ import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
+import { appLogKey, CHAIN_WALK } from '../src/db/audit.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -92,6 +94,8 @@ let bound: () => Promise<void>;
 /** The scheduled beat, and `/readyz`'s check, on the counted connections. */
 let beat: () => Promise<boolean>;
 let ready: () => Promise<{ ok: boolean }>;
+/** `count` entries of the app's appended at once, as many requests would write them. */
+let append: (count: number) => Promise<void>;
 
 /** A client that calls the API as a CLI or a CI run does, its token checked on each request. */
 function bearer(runtime: CoffreRuntime, token: string): CoffreClient {
@@ -124,6 +128,12 @@ before(async () => {
   const base: FixtureDeps = { db: createDatabase(app), vault, chainKey: randomBytes(32) };
   beat = () => writeAuditHeartbeat(base.db, base.chainKey, vault, { warn: () => assert.fail('the beat warned') });
   ready = () => auditReadiness(base.db, vault, base.chainKey);
+  append = async (count) => {
+    for (let left = count; left > 0; left -= 1000) {
+      const entries = Array.from({ length: Math.min(1000, left) }, () => ({ actor: 'system:load', action: 'secret.read', decision: 'allow' as const, metadata: '{}' }));
+      await db.owner.transaction((tx) => appendEntries(tx, appLogKey(base.chainKey), entries));
+    }
+  };
   const signinService = new SigninService({ ...base, signin: auth.signin });
   const deps: FixtureDeps = { ...base, signin: signinService };
   const runtime: CoffreRuntime = {
@@ -381,4 +391,13 @@ test("readiness reads the entries since the newest beat's walk began, however lo
   await beat();
   assert.equal((await ready()).ok, true);
   assert.deepEqual(await cost(ready), small, 'readiness ran more statements or read more rows once the log grew');
+});
+
+test('readiness reads no more than one walk of entries since the newest beat, and is red past it', POSTGRES, async () => {
+  await beat();
+  // Twice a walk's worth of writes since the newest beat, as a beat far behind a busy log would find.
+  await append(2 * CHAIN_WALK);
+  const spent = await cost(async () => assert.equal((await ready()).ok, false));
+  // Each entry walked is two rows: its size, then itself (`withinBytes`, `auditRange`).
+  assert.ok(spent.app.rows <= 2 * CHAIN_WALK + 100, `readiness read ${spent.app.rows} rows`);
 });

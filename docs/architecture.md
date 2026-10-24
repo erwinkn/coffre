@@ -690,8 +690,8 @@ warning in the app's log, unless such a refusal stands.
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and the app's, by its MAC, its walk found the chain whole and
 could run (`broken` otherwise), a
-checkpoint after it carries the vault's signature, and the next beat's
-walk, run then, finds the chain whole to its head. A log that stops taking
+checkpoint after it carries the vault's signature, and the log verifies
+then, from where the next beat would resume to its head, by both authors. A log that stops taking
 writes, a vault that stops signing, a cut in the log, an entry forged in
 the app's name or a wrong vault key all turn it red within one beat; an
 entry edited in place, within two laps. There is no heartbeat table.
@@ -735,9 +735,12 @@ committed, so F's row lies past where A verified to, and the next walk
 reads it: it resumes no further than where the walk of any broken beat it
 reads began (`resumePoint`), and finds 812 again. Readiness runs that
 same walk, from the same point to the head, so it is red as soon as F
-commits, and red while F's row is hidden. Its cost is the entries since
-the newest beat's walk began, as a beat's own walk: one beat's worth of
-writes. Past 10,000 of them readiness is red, as the beat would be. The model of
+commits, and red while F's row is hidden; then asks the vault of its own
+entries over the same stretch, as the audit page's check does, since a
+row made one of the vault's is one the app cannot check. Its cost is the
+entries since the newest beat's walk began, as a beat's own walk: one
+beat's worth of writes. Past 10,000 of them readiness is red, as the beat
+would be. The model of
 it, against someone who hides, edits and puts back any beat row at any
 step, is [formal.md](formal.md#the-audit-chain-and-the-tunnel).
 
@@ -1118,8 +1121,7 @@ Each limit is stated here once; the other documents link to it.
   then have no entries. Restarting both processes after a restore is what
   makes a deliberate rewind work ([restore.md](restore.md)). A cut of the
   newest entries can take a heartbeat that found the log broken, and its
-  finding, with it; rewriting them instead does no more, and the vault
-  refuses its next checkpoint over them.
+  finding, with it.
 - **A cut in the middle of the log is found at the next checkpoint, and an
   edit in place within a lap of the past, not at once.** Say Ada was
   removed at entry 812, and the database's owner deletes 812 and puts back

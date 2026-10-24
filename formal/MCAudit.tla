@@ -118,4 +118,18 @@ RowsOps == [p \in RowsProcs |->
       [] p = "c" -> {Op("beat")}]
 RowsBudget == [p \in RowsProcs |-> IF p = "y" THEN 2 ELSE 1]
 
+-----------------------------------------------------------------------------
+(* Relabelling: someone edits the entry the newest checkpoint signed, and,
+   once, at any step, makes one of the vault's rows of any beat, chaining
+   everything after it again, the head row too, while two beats walk and
+   commit at once, the second with its checkpoint, and a third follows. *)
+
+RelabelProcs == {"x", "y", "a", "b", "c"}
+RelabelOps == [p \in RelabelProcs |->
+    CASE p = "x" -> {Edit(3)}
+      [] p = "y" -> {Op("relabel")}
+      [] p = "a" -> {Op("beatonly")}
+      [] p \in {"b", "c"} -> {Op("beat")}]
+RelabelBudget == [p \in RelabelProcs |-> 1]
+
 =============================================================================

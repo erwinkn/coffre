@@ -24,7 +24,9 @@
 (* hide it (change it so no read of beats finds it), forge it (make it     *)
 (* claim a clean walk to the head), and put it back, at any step, as often *)
 (* as their budget allows. Either change leaves the row's stored hash, so  *)
-(* a walk over it finds it, as it finds any edit in place.                 *)
+(* a walk over it finds it, as it finds any edit in place. Or, once, make  *)
+(* one of the vault's rows of it and chain everything after it again: the  *)
+(* app's walk checks the vault's rows only for their place in the chain.   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -72,9 +74,14 @@ CONSTANTS
     \* before, and committed after the finder, never moves past its finding
     \* (resumePoint).
     NoResumePastFinding,
-    \* Readiness runs the next beat's walk, from where it would resume to
-    \* the head, in its snapshot (server heartbeat.ts, auditReadiness).
-    ReadinessWalks
+    \* Readiness runs the next beat's walk, from where it would resume, or
+    \* the newest checkpoint's prefix if that is further back, to the head,
+    \* in its snapshot (server heartbeat.ts, walkToHead); without it, from
+    \* the newest checkpoint's prefix only, as a verification would.
+    ReadinessWalks,
+    \* And asks the vault of its own entries over the same stretch, by its
+    \* MACs: the prefix still there, and no refusal since (vault verifyLog).
+    ReadinessAsksVault
 
 None == "none"
 AppKinds == {"app", "beat"}
@@ -83,7 +90,7 @@ VaultKinds == {"vault", "ckpt", "deny"}
 VARIABLES
     log,            \* the entries, in seq order
     head,           \* the process holding the log's head, or None
-    tampered,       \* what was done to the log, once: [kind, at], kind "none" before
+    tampered,       \* the newest change to the log: [kind, at, n], kind "none" before; rw, once rewritten
     pc, op, l, left,
     history         \* [signedBad, greens]: what the invariants read
 
@@ -183,7 +190,18 @@ ReadyWith(b, c) ==
     /\ b > 0 /\ c > 0
     /\ MacOk(b) /\ ~log[b].broken /\ ~log[b].short
     /\ log[c].at >= b
-DryRunOk == ReadinessWalks => LET w == WalkFrom(Resume) IN w.ok /\ w.done
+\* Where the newest checkpoint's prefix ends, and the hash it signed.
+SignedPoint == IF Signed = 0 THEN First ELSE [at |-> log[Signed].at, ver |-> log[Signed].atVer]
+
+DryRunOk ==
+    LET r == Resume
+        p == SignedPoint
+        w == WalkFrom(IF ReadinessWalks /\ r.at <= p.at THEN r ELSE p)
+    IN /\ w.ok /\ w.done
+       /\ ReadinessAsksVault =>
+            /\ Carries(p.at, p.ver)
+            /\ \A i \in Seqs(p.at, Len(log)) : log[i].kind \in VaultKinds => MacOk(i)
+            /\ ~(Newest({"deny"}) > Signed /\ MacOk(Newest({"deny"})))
 ReadyNow == ReadyWith(NewestBeat, Signed) /\ DryRunOk
 
 -----------------------------------------------------------------------------
@@ -208,7 +226,7 @@ Begin(p) ==
                       [] o.kind = "vault" -> "append.head"
                       [] o.kind \in {"beat", "beatonly"} -> "beat.attest"
                       [] o.kind = "probe" -> "probe.beat"
-                      [] o.kind \in {"rewrite", "edit", "hide", "forge", "revert"} -> "tamper")
+                      [] o.kind \in {"rewrite", "relabel", "edit", "hide", "forge", "revert"} -> "tamper")
     /\ left' = [left EXCEPT ![p] = @ - 1]
     /\ UNCHANGED <<log, head, tampered, history>>
 
@@ -242,9 +260,9 @@ AppendCommit(p) ==
 
 Tamper(p) ==
     /\ pc[p] = "tamper"
-    /\ (op[p].kind = "rewrite" => tampered.kind = "none")
+    /\ (op[p].kind \in {"rewrite", "relabel"} => ~tampered.rw)
     /\ LET targets == {i \in (IF op[p].at = 0 THEN 1..Len(log) ELSE {op[p].at}) :
-                          i <= Len(log) /\ (op[p].kind \in {"hide", "forge"} => log[i].kind = "beat")}
+                          i <= Len(log) /\ (op[p].kind \in {"hide", "forge", "relabel"} => log[i].kind = "beat")}
        IN \/ targets = {} /\ UNCHANGED <<log, tampered>>
           \/ \E i \in targets :
                 /\ CASE op[p].kind = "edit" -> log' = [log EXCEPT ![i].edited = tampered.n + 1]
@@ -252,8 +270,11 @@ Tamper(p) ==
                      [] op[p].kind = "forge" -> log' = [log EXCEPT ![i].edited = tampered.n + 1, ![i].claims = Len(log), ![i].claimsVer = Ver]
                      [] op[p].kind = "revert" -> log' = [log EXCEPT ![i].edited = 0, ![i].hidden = FALSE, ![i].claims = 0]
                      [] OTHER -> log' = [j \in 1..Len(log) |-> IF j < i THEN log[j]
-                                                        ELSE [log[j] EXCEPT !.ver = @ + 1, !.forged = (j = i) \/ @]]
-                /\ tampered' = IF op[p].kind = "revert" THEN tampered ELSE [kind |-> IF op[p].kind = "rewrite" THEN "rewrite" ELSE "edit", at |-> i, n |-> tampered.n + 1]
+                                                        ELSE [log[j] EXCEPT !.ver = @ + 1, !.forged = (j = i) \/ @,
+                                                                            !.kind = IF j = i /\ op[p].kind = "relabel" THEN "vault" ELSE @]]
+                /\ tampered' = IF op[p].kind = "revert" THEN tampered
+                                ELSE [kind |-> IF op[p].kind \in {"rewrite", "relabel"} THEN "rewrite" ELSE "edit", at |-> i, n |-> tampered.n + 1,
+                                      rw |-> tampered.rw \/ op[p].kind \in {"rewrite", "relabel"}]
     /\ Goto(p, "idle")
     /\ UNCHANGED <<head, op, l, left, history>>
 
@@ -274,7 +295,7 @@ BeatAttest(p) ==
             THEN Read(p, "beat.head", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver, !.ok = w.ok, !.fault = w.fault,
                                                     !.fEdit = IF w.fault = 0 THEN 0 ELSE log[w.fault].edited,
                                                     !.to = w.to, !.toVer = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.done = w.done,
-                                                    !.after = tampered.kind = "rewrite"])
+                                                    !.after = tampered.rw])
             ELSE Read(p, "beat.walk", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver])
 
 BeatWalk(p) ==
@@ -282,7 +303,7 @@ BeatWalk(p) ==
     /\ LET w == WalkFrom([at |-> l[p].from, ver |-> l[p].fromVer])
        IN Read(p, "beat.head", [l[p] EXCEPT !.ok = w.ok, !.fault = w.fault, !.fEdit = IF w.fault = 0 THEN 0 ELSE log[w.fault].edited,
                                              !.to = w.to, !.toVer = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.done = w.done,
-                                             !.after = tampered.kind = "rewrite"])
+                                             !.after = tampered.rw])
 
 BeatHead(p) == pc[p] = "beat.head" /\ TakeHead(p, "beat.commit")
 
@@ -413,7 +434,7 @@ ProbeCkpt(p) ==
 Init ==
     /\ log = InitLog
     /\ head = None
-    /\ tampered = [kind |-> "none", at |-> 0, n |-> 0]
+    /\ tampered = [kind |-> "none", at |-> 0, n |-> 0, rw |-> FALSE]
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]

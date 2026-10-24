@@ -139,7 +139,7 @@ test('readiness counts a checkpoint under a key the vault replaced only over a p
   const { publicKey } = (await vault.about()).checkpointKeys[checkpoint.keyId]!;
   // The vault as after a rotation at entry `until`: the key that signed this checkpoint is one it replaced.
   const rotatedAt = (until: number) =>
-    ({ about: async () => ({ checkpointKeys: { [checkpoint.keyId]: { publicKey, until } }, rootAdmins: [] }) }) as unknown as Vault;
+    ({ verifyLog: vault.verifyLog, about: async () => ({ checkpointKeys: { [checkpoint.keyId]: { publicKey, until } }, rootAdmins: [] }) }) as unknown as Vault;
   assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq + 1), chainKey)).ok, true);
   assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq), chainKey)).checkpointed, false);
 });
@@ -340,33 +340,36 @@ test('a beat counts only by its MAC, and only for a point before its own row (fo
   assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
 });
 
-test('a finder made one of the vault\'s rows after its checkpoint signed it leaves readiness red: the signed prefix moved', async () => {
+/**
+ * Beat X walks past entry x, clean, and waits to append; x is edited; beat F walks from before x, finds it, and waits
+ * too; X commits first, with its checkpoint, then F, with its checkpoint unless `checkpointsF` is false.
+ */
+async function finderAfterOvertaker({ checkpointsF }: { checkpointsF: boolean }) {
   await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
   await db.runtime.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'secret.read', decision: 'allow' }]));
   const x = (await entries()).at(-1)!.seq;
   assert.ok((await slow.checkpoint()).ok);
-  // Beat X walks past entry x, clean, and waits to append; x is edited; beat F walks from before x, finds it, and
-  // waits too; X commits first, then F, each with its checkpoint.
   const pause = () => {
     let reached!: () => void;
     let go!: () => void;
     const at = new Promise<void>((resolve) => (reached = resolve));
     const released = new Promise<void>((resolve) => (go = resolve));
-    const db = stepping(async ({ write }, phase) => {
+    const paused = stepping(async ({ write }, phase) => {
       if (write && phase === 'before') {
         reached();
         await released;
       }
     });
-    return { db, at, go };
+    return { db: paused, at, go };
   };
   const px = pause();
   const beatX = writeAuditHeartbeat(px.db, chainKey, slow, quiet);
   await px.at;
   await overwrite(x, { metadata: '{"edited":true}' });
   const pf = pause();
-  const beatF = writeAuditHeartbeat(pf.db, chainKey, slow, { warn: () => undefined });
+  const vaultF = checkpointsF ? slow : { ...slow, checkpoint: async () => ({ ok: true as const, checkpoint: null as never }) };
+  const beatF = writeAuditHeartbeat(pf.db, chainKey, vaultF, { warn: () => undefined });
   await pf.at;
   px.go();
   await beatX;
@@ -374,17 +377,20 @@ test('a finder made one of the vault\'s rows after its checkpoint signed it leav
   await beatF;
   const finder = (await beats()).at(-1)!;
   assert.equal(said(finder).broken?.seq, Number(x));
-  const { checkpointKeys } = await slow.about();
-  const keys = { about: async () => ({ checkpointKeys, rootAdmins: [] }) } as unknown as Vault;
-  assert.equal((await auditReadiness(db.runtime, keys, chainKey)).ok, false);
-  // F made the vault's, its hash recomputed, and the rows after it, all the vault's, chained to it again: a walk of
-  // the app's sees a chain whole, and no beat. Only the hash the newest checkpoint signed for F is no longer there.
-  const [row, ...after] = (await entries()).filter((entry) => entry.seq >= finder.seq) as StoredEntry[];
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
+  return { x, finder };
+}
+
+/**
+ * Entry `seq` made one of the vault's, its hash recomputed, and the rows after it, all the vault's, chained to it
+ * again, the head row too: to the app's walk, a chain whole, and no beat.
+ */
+async function makeVaults(seq: bigint) {
+  const [row, ...after] = (await entries()).filter((entry) => entry.seq >= seq) as StoredEntry[];
   assert.ok(after.every((entry) => entry.author === 'vault'));
-  const relabelled = { ...row!, author: 'vault' as const };
-  let prevHash = entryHash(relabelled.prevHash, relabelled, relabelled.mac);
+  let prevHash = entryHash(row!.prevHash, { ...row!, author: 'vault' }, row!.mac);
   await withLogUnlocked(db.owner, async (owner) => {
-    await owner.update(auditLog).set({ author: 'vault', hash: prevHash }).where(eq(auditLog.seq, row!.seq));
+    await owner.update(auditLog).set({ author: 'vault', hash: prevHash }).where(eq(auditLog.seq, seq));
     for (const entry of after) {
       const next = entryHash(prevHash, entry, entry.mac);
       await owner.update(auditLog).set({ prevHash, hash: next }).where(eq(auditLog.seq, entry.seq));
@@ -392,8 +398,23 @@ test('a finder made one of the vault\'s rows after its checkpoint signed it leav
     }
     await owner.update(auditChainHead).set({ headHash: prevHash });
   });
-  const ready = await auditReadiness(db.runtime, keys, chainKey);
-  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, false, false]);
+}
+
+test('a finder made one of the vault\'s rows after its checkpoint signed it leaves readiness red (formal/Audit.tla, ReadinessAsksVault)', async () => {
+  const { finder } = await finderAfterOvertaker({ checkpointsF: true });
+  await makeVaults(finder.seq);
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
+});
+
+test('a finder made one of the vault\'s rows before its checkpoint ran leaves readiness red, through the refusal and writes after it (formal/Audit.tla, ReadinessAsksVault)', async () => {
+  const { finder } = await finderAfterOvertaker({ checkpointsF: false });
+  await makeVaults(finder.seq);
+  // The vault refuses, by its MAC of the row; the app writes on, its head still ahead of the one it remembers.
+  const refused = await slow.checkpoint();
+  assert.ok(!refused.ok);
+  await db.runtime.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'secret.read', decision: 'allow' }]));
+  const ready = await auditReadiness(db.runtime, slow, chainKey);
+  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
 });
 
 test('a beat that could not walk is no point to resume from: the next goes on from the one before', async () => {

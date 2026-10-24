@@ -1,10 +1,10 @@
-import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
-import type { Database } from '@coffre/db';
+import { verifyCheckpoint, type LogHead, type Vault } from '@coffre/core/vault';
+import type { Database, Queryable } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { appendAudit, appLogKey, CHAIN_START, resumePoint, walkChain, type ChainPoint } from './db/audit.ts';
-import { auditHashAt, readiness } from './db/queries.ts';
+import { latestTallied, readiness } from './db/queries.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;
@@ -126,11 +126,15 @@ export type Readiness = {
 /**
  * Readiness: the database migrated, the newest heartbeat under
  * `HEARTBEAT_STALE_AFTER_SECONDS` old, its walk of the chain whole, and a
- * checkpoint after it whose signature is the vault's; and the next beat's
- * walk, run now from where it would resume to the head, whole too. That
- * walk is the entries since the newest beat's began, as a beat's own walk
- * is: it finds a beat row hidden or changed since, and a finding of a beat
- * that committed before the newest but walked after it. A heartbeat alone, a checkpoint with no
+ * checkpoint after it whose signature is the vault's; and the log verified
+ * now, as a verification does (`verifyAudit`): the app's walk from where
+ * the next beat would resume, or the newest checkpoint's prefix if that is
+ * further back, to the head, then the vault's of its own entries over the
+ * same stretch. That is the entries since the newest beat's walk began, as
+ * a beat's own walk is. The app's finds a beat row hidden or changed
+ * since, and a finding of a beat that committed before the newest but
+ * walked after it; the vault's, a row made one of its own, which the app
+ * cannot check, and a checkpoint it refused since. A heartbeat alone, a checkpoint with no
  * heartbeat, or a refused checkpoint all leave it red, and so does a fresh
  * database until the first pair. Liveness deliberately does not call this:
  * a database incident should mark the service unavailable, not trigger a
@@ -142,32 +146,47 @@ export async function auditReadiness(db: Database, vault: Vault, chainKey: Buffe
     if (!(await migrated(db))) return unready;
     // In one snapshot: read apart, a beat and a checkpoint that were never the newest together could answer green
     // (formal/Audit.tla, `ReadinessInOneSnapshot`), as a beat that stopped short commits between them.
-    // So is the walk (`ReadinessWalks`), run only when the beat says the chain verified.
-    const { beat, checkpoint, walked, holds } = await db.transaction(async (tx) => {
+    // So is the app's walk (`ReadinessWalks`), run only when the beat says the chain verified.
+    const { beat, checkpoint, walked } = await db.transaction(async (tx) => {
       const rows = await readiness(tx, appLogKey(chainKey));
       const said = rows.beat === null ? null : (JSON.parse(rows.beat.metadata) as { broken?: unknown; unverified?: unknown } | null);
       const clean = rows.beat !== null && rows.beat.authentic && said?.broken === undefined && said?.unverified === undefined;
-      const walk = clean ? await walkChain(tx, chainKey, await resumePoint(tx, chainKey)) : null;
-      // The prefix the checkpoint signed still there as it signed it, as a verification holds it (`verifyAudit`):
-      // the vault's rows after it are the vault's to check, and a row made one of them since, and chained again,
-      // changes the hash it signed.
-      const holds = rows.checkpoint !== null && (await auditHashAt(tx, BigInt(rows.checkpoint.seq))) === rows.checkpoint.hash;
-      return { ...rows, walked: walk !== null && walk.ok && walk.done, holds };
+      return { ...rows, walked: clean ? await walkToHead(tx, chainKey) : null };
     }, SNAPSHOT);
     if (beat === null) return unready;
+    // The vault's entries over the same stretch, by its key (`ReadinessAsksVault`), outside the app's transaction.
+    const vouched = walked !== null && (await vault.verifyLog(walked)).ok;
     // Asked each time: after a rotation, the key the vault signed with until then counts only for what came before.
     const key = checkpoint === null ? undefined : (await vault.about()).checkpointKeys[checkpoint.keyId];
     const checkpointed =
       checkpoint !== null &&
-      holds &&
       key !== undefined &&
       (key.until === null || checkpoint.seq < key.until) &&
       BigInt(checkpoint.seq) >= beat.seq &&
       (await verifyCheckpoint(checkpoint, key.publicKey));
     const fresh = Number.isFinite(beat.ageSeconds) && beat.ageSeconds <= HEARTBEAT_STALE_AFTER_SECONDS;
-    const broken = !walked;
+    const broken = !vouched;
     return { ok: fresh && checkpointed && !broken, heartbeatAgeSeconds: beat.ageSeconds, checkpointed, broken };
   } catch {
     return unready;
   }
+}
+
+/**
+ * The app's half of readiness's verification, in the caller's snapshot: the
+ * walk from where the next beat would resume, or the newest checkpoint's
+ * prefix if that is further back, so that the vault may leave the links to
+ * it from there, to the head; and what to ask the vault, or null if the
+ * walk found a fault or could not reach the head.
+ */
+async function walkToHead(tx: Queryable, chainKey: Buffer): Promise<{ upTo: LogHead | null; from: number | 'start' } | null> {
+  const [resume, tallied] = await Promise.all([resumePoint(tx, chainKey), latestTallied(tx)]);
+  if (tallied !== null && tallied.checkpoint === null) return null;
+  const signed = tallied === null ? CHAIN_START : { seq: BigInt(tallied.checkpoint!.seq), hash: Buffer.from(tallied.checkpoint!.hash, 'hex') };
+  const walked = await walkChain(tx, chainKey, resume.seq <= signed.seq ? resume : signed);
+  if (!walked.ok || !walked.done) return null;
+  return {
+    upTo: walked.at.seq < 0n ? null : { seq: Number(walked.at.seq), hash: walked.at.hash.toString('hex') },
+    from: tallied === null ? 'start' : Number(tallied.entry),
+  };
 }

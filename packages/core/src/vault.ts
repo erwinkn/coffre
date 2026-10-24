@@ -183,7 +183,7 @@ export interface Vault {
    * through `upTo`, as the app does first; with none, the vault recomputes
    * them itself, no further than one walk. A verdict and nothing else, so
    * anyone may ask; the app asks for those who read the whole log
-   * (`readsWholeLog`).
+   * (`readsWholeLog`), and for readiness.
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
