@@ -186,11 +186,25 @@ const roleDefinition = z.object({
  */
 const MAX_BULK_KEYS = MAX_SCOPE_PLACES;
 
+/**
+ * A record keyed by name, held to `max` keys before its values are
+ * validated: the first pass checks the keys and counts them with the values
+ * left unknown, so a body far over the cap is refused without validating
+ * every value (a union is costly, one issue per member per entry); the
+ * pipe validates the values of a body within the cap. Keeps per-request
+ * work within R27's budget even for a body at the node cap.
+ */
+function sizedRecord<V extends z.ZodType>(key: z.ZodType<string>, value: V, max: number, message: string) {
+  return z.record(key, z.unknown()).refine((record) => Object.keys(record).length <= max, message).pipe(z.record(key, value));
+}
+
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
-const accessPatch = z.record(
+const accessPatch = sizedRecord(
   z.string().max(200),
   z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
-).refine((patch) => Object.keys(patch).length <= MAX_BULK_KEYS, `an access change sets at most ${MAX_BULK_KEYS} places at once`);
+  MAX_BULK_KEYS,
+  `an access change sets at most ${MAX_BULK_KEYS} places at once`,
+);
 /** A token's or a binding's scope, each place by path and its role: `{ "market/dev": "developer" }`. All its account holds when left out. */
 const credentialScope = z
   .record(z.string().max(200), role)
@@ -366,8 +380,7 @@ export const routes = {
   }),
   ...route('PATCH /projects/:project/:environment/dismissals', {
     // `true` dismisses a missing key, `null` restores it.
-    input: z.record(secretKey, z.literal(true).nullable())
-      .refine((map) => Object.keys(map).length <= MAX_BULK_KEYS, `at most ${MAX_BULK_KEYS} keys at once`),
+    input: sizedRecord(secretKey, z.literal(true).nullable(), MAX_BULK_KEYS, `at most ${MAX_BULK_KEYS} keys at once`),
     needs: 'secret.write',
     action: 'missing.dismiss',
     run: (ctx, { place, input }) => setDismissals(ctx, place, input),
@@ -385,12 +398,15 @@ export const routes = {
     // generated; `{ "value", "sensitivity": "sensitive" }` one and who sees it (`{ "value", "plain": true }`,
     // as 0.9 said plain); `{ "sensitivity": "sensitive" }` the key's value as it is, made stricter;
     // `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
-    input: z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())
-      .superRefine((patch, issues) => {
-        if (Object.keys(patch).length > MAX_BULK_KEYS) issues.addIssue({ code: 'custom', message: `a write names at most ${MAX_BULK_KEYS} keys at once` });
-        const problem = generationProblem(patch);
-        if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
-      }),
+    input: sizedRecord(
+      secretKey,
+      z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable(),
+      MAX_BULK_KEYS,
+      `a write names at most ${MAX_BULK_KEYS} keys at once`,
+    ).superRefine((patch, issues) => {
+      const problem = generationProblem(patch);
+      if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
+    }),
     // `?dryRun=1` answers what the patch would do and writes nothing. Any
     // other query is refused, not ignored: a mistyped flag must not write.
     query: dryRunFlag,
