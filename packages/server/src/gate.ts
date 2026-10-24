@@ -42,11 +42,16 @@ type Epoch = { nonce: string; seen: Set<string> };
 /**
  * One workload's gate, in memory: what `Gate` asks of it, with the time
  * given on each call. Every method runs to its end without waiting, so no
- * two requests interleave inside one.
+ * two requests interleave inside one. Its clock never goes back: a call
+ * given an earlier time than one before it runs at the later, so a clock
+ * stepped back neither revives an epoch nor starts a count's window again.
  */
 export class GateState {
   readonly #started: number;
   readonly #ceiling: number;
+  /** Whether its counts over `DURABLE_WINDOW_MS` or more are kept for `flush`: a Durable Object's, which writes them. */
+  readonly #durable: boolean;
+  #latest: number;
   #n = 0;
   #current: Epoch;
   #previous: Epoch | null = null;
@@ -58,24 +63,30 @@ export class GateState {
   /** The durable counts changed since `flush` last took them. */
   readonly #dirty = new Set<string>();
 
-  constructor(now: number, ceiling = GATE_CEILING) {
+  constructor(now: number, options: { ceiling?: number; durable?: boolean } = {}) {
     this.#started = now;
-    this.#ceiling = ceiling;
+    this.#latest = now;
+    this.#ceiling = options.ceiling ?? GATE_CEILING;
+    this.#durable = options.durable ?? false;
     this.#current = epoch(0);
   }
 
   nonce(now: number): string {
-    this.#rotate(now);
+    this.#rotate(this.#clock(now));
     return this.#current.nonce;
   }
 
   /**
    * Replay first, when there is a proof: its nonce must be the current or
-   * the previous one, and its `jti` new under it, which it then is no
-   * longer, whatever follows. Then every count: past any one, the request
-   * is refused and none counts it.
+   * the previous one, and its `jti` taken under neither, which it then is,
+   * whatever follows. Then every count, each named once: past any, the
+   * request is refused and none counts it.
    */
-  admit(request: { replay?: { jti: string; nonce: string }; counts?: readonly GateCount[] }, now: number): GateAdmission {
+  admit(request: { replay?: { jti: string; nonce: string }; counts?: readonly GateCount[] }, given: number): GateAdmission {
+    const { replay, counts = [] } = request;
+    const ids = counts.map(countId);
+    if (new Set(ids).size !== ids.length) throw new Error(`a request names a count twice: ${ids.join(', ')}`);
+    const now = this.#clock(given);
     this.#rotate(now);
     const second = Math.floor(now / 1000);
     if (second !== this.#second) {
@@ -85,30 +96,30 @@ export class GateState {
     if (this.#inSecond >= this.#ceiling) return { ok: false, reason: 'overloaded' };
     this.#inSecond += 1;
 
-    const { replay, counts = [] } = request;
     if (replay !== undefined) {
       const under = replay.nonce === this.#current.nonce ? this.#current : replay.nonce === this.#previous?.nonce ? this.#previous : null;
       if (under === null) return { ok: false, reason: 'use_dpop_nonce', nonce: this.#current.nonce };
-      if (under.seen.has(replay.jti)) return { ok: false, reason: 'replayed' };
+      if (this.#current.seen.has(replay.jti) || this.#previous?.seen.has(replay.jti)) return { ok: false, reason: 'replayed' };
       under.seen.add(replay.jti);
     }
 
-    const windows = counts.map((count) => {
-      const id = countId(count);
+    const windows = counts.map((count, i) => {
+      const id = ids[i]!;
       const start = Math.floor(now / count.windowMs) * count.windowMs;
       let held = this.#counts.get(id);
       if (held === undefined || held.start !== start) {
         held = { start, taken: 0, refused: false };
         this.#counts.set(id, held);
       }
-      return { id, count, held };
+      return { id, count, held, end: start + count.windowMs };
     });
-    const past = windows.find(({ count, held }) => held.taken >= count.most);
+    // Past several, the one that ends last says when to retry.
+    const past = windows.filter(({ count, held }) => held.taken >= count.most).sort((a, b) => b.end - a.end)[0];
     if (past !== undefined) {
       const first = !past.held.refused;
       past.held.refused = true;
       this.#touched(past.id, past.count.windowMs);
-      return { ok: false, reason: 'limit', key: past.count.key, retryAfterMs: past.held.start + past.count.windowMs - now, first };
+      return { ok: false, reason: 'limit', key: past.count.key, retryAfterMs: past.end - now, first };
     }
     for (const { id, count, held } of windows) {
       held.taken += 1;
@@ -117,7 +128,7 @@ export class GateState {
     return { ok: true, nonce: this.#current.nonce };
   }
 
-  /** The durable counts changed since the last call, by `countId`, to write. */
+  /** The durable counts changed since the last call, by `countId`, to write; `unwritten` gives them back if the write fails. */
   flush(): [string, Count][] {
     const changed = [...this.#dirty].flatMap((id): [string, Count][] => {
       const held = this.#counts.get(id);
@@ -127,26 +138,36 @@ export class GateState {
     return changed;
   }
 
+  /** Counts `flush` gave whose write failed: they wait to be written again. */
+  unwritten(ids: Iterable<string>) {
+    for (const id of ids) if (this.#counts.has(id)) this.#dirty.add(id);
+  }
+
   /** Whether a durable count waits to be written. */
   get dirty(): boolean {
     return this.#dirty.size > 0;
   }
 
   /** Durable counts as `flush` gave them, read back when a Durable Object starts again: those whose window has ended are left out. */
-  restore(counts: Iterable<[string, Count]>, now: number) {
+  restore(counts: Iterable<[string, Count]>) {
     for (const [id, held] of counts) {
-      if (held.start + windowOf(id) > now) this.#counts.set(id, { ...held });
+      if (held.start + windowOf(id) > this.#latest) this.#counts.set(id, { ...held });
     }
   }
 
+  #clock(now: number): number {
+    if (now > this.#latest) this.#latest = now;
+    return this.#latest;
+  }
+
   #touched(id: string, windowMs: number) {
-    if (windowMs >= DURABLE_WINDOW_MS) this.#dirty.add(id);
+    if (this.#durable && windowMs >= DURABLE_WINDOW_MS) this.#dirty.add(id);
   }
 
   /**
    * The epoch `now` falls in, counted from the start: epoch `n`'s nonce is
    * taken from `n × EPOCH_MS` until `(n + 2) × EPOCH_MS`, however few
-   * requests came. A clock that goes back keeps the epoch it has.
+   * requests came.
    */
   #rotate(now: number) {
     const n = Math.floor((now - this.#started) / EPOCH_MS);

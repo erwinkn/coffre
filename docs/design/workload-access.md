@@ -764,10 +764,13 @@ and a proof must still be signed by the session's key. Epoch `n`'s nonce
 is taken from `n × 2` minutes after the start until `(n + 2) × 2`,
 however few requests came, so as the current or the previous nonce. The
 gate remembers the `jti`s it took under each. Everything else answers
-`use_dpop_nonce` with the current nonce. A `jti` is spent for the whole
-workload, whichever of its sessions sends it, as soon as the gate sees
-it, even if a count then refuses the request: a superset of the
-`(session, jti)` pairs, so never weaker, and smaller.
+`use_dpop_nonce` with the current nonce. A `jti` taken under either live
+nonce is refused under both, whichever of the workload's sessions sends
+it, and it is spent as soon as the gate sees it, even if a count then
+refuses the request. Once both epochs are gone, a proof's nonce is
+refused anyway. The gate's clock never goes back: a time earlier than one
+it was given runs as the later, so a clock stepped back revives no epoch
+and restarts no count.
 
 - **A restart or an eviction forgets nothing that matters.** A new epoch
   means every proof made before it carries an unknown nonce and is refused,
@@ -803,8 +806,9 @@ interface Gate {
 
 Counts are fixed windows on the clock: a minute's starts on the minute,
 a day's at 00:00 UTC. A burst across a boundary can therefore take up to
-twice a limit in a moment. A request past any one of its counts counts in
-none, and `retryAfterMs` is when that window ends. A count whose window is
+twice a limit in a moment. A request names each count once, and one past
+any of its counts counts in none; `retryAfterMs` is when the last of the
+windows it is past ends. A count whose window is
 an hour or more, a day's, lives in the object's storage too, written by an
 alarm at most 10 seconds after it changes, so an eviction loses at most
 10 seconds of it. A Durable Object has no eviction hook. Any shorter
@@ -1523,7 +1527,7 @@ these:
 | Import the `jwk` (cached per isolate by `jkt`, as a settled value) | ~50 µs cold, 0 warm |
 | One ES256 verify (BoringSSL in workerd) | ~100–200 µs |
 | The one SQL statement of 5.3 (row, member's generation, binding, ancestors, freezes) | ~100 µs of client work, plus a round trip through Hyperdrive |
-| The gate's RPC, from the caller's side | ~10 µs, plus a round trip inside the database's region |
+| The gate: the Worker's `fetch` to the workload's object, and its work there | 1.6 µs of the gate's own (`GateState.admit`, a proof and two counts, in Node); in local workerd, about 1 ms a call, nearly all of it the Durable Object call's own machinery, as much by RPC (`packages/server/test/bench/gate.ts`). Plus a round trip to the object, made near the workload |
 | A cold request: `vault.access` and the opening, through the vault's connection | as a handle's cold request today |
 
 The budget is under 0.5 ms of CPU on a warm request, plus two round trips:

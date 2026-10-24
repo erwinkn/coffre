@@ -58,15 +58,15 @@ export function workersGates(namespace: GatesNamespace): Gates {
 /** The Durable Object class `GATES` binds. */
 export class CoffreGates {
   readonly #storage: GateObjectState['storage'];
-  readonly #gate = new GateState(Date.now());
-  /** Whether an alarm will write the durable counts. */
+  readonly #gate = new GateState(Date.now(), { durable: true });
+  /** Whether an alarm is set to write the durable counts. */
   #flushing = false;
 
   constructor(state: GateObjectState, _env: unknown) {
     this.#storage = state.storage;
     void state.blockConcurrencyWhile(async () => {
       const stored = await this.#storage.list<Count>({ prefix: COUNT });
-      this.#gate.restore([...stored].map(([name, count]) => [name.slice(COUNT.length), count]), Date.now());
+      this.#gate.restore([...stored].map(([name, count]) => [name.slice(COUNT.length), count]));
     });
   }
 
@@ -75,15 +75,22 @@ export class CoffreGates {
     const now = Date.now();
     const answer = call.op === 'nonce' ? { nonce: this.#gate.nonce(now) } : this.#gate.admit(call, now);
     if (this.#gate.dirty && !this.#flushing) {
-      this.#flushing = true;
       await this.#storage.setAlarm(now + FLUSH_MS);
+      this.#flushing = true;
     }
     return Response.json(answer);
   }
 
+  /** Writes the durable counts; a write that fails gives them back, and the alarm, retried, writes them again. */
   async alarm(): Promise<void> {
     this.#flushing = false;
     const changed = this.#gate.flush();
-    if (changed.length > 0) await this.#storage.put(Object.fromEntries(changed.map(([id, count]) => [COUNT + id, count])));
+    if (changed.length === 0) return;
+    try {
+      await this.#storage.put(Object.fromEntries(changed.map(([id, count]) => [COUNT + id, count])));
+    } catch (error) {
+      this.#gate.unwritten(changed.map(([id]) => id));
+      throw error;
+    }
   }
 }

@@ -70,9 +70,56 @@ test('a clock that goes back keeps the epoch: nothing is taken twice', () => {
   assert.deepEqual(gate.admit(proof(1, nonce), T0), { ok: false, reason: 'replayed' });
 });
 
+test('a jti taken under the previous nonce is refused under the current one too, while the gate remembers it', () => {
+  const gate = new GateState(T0);
+  const first = gate.nonce(T0);
+  assert.equal(gate.admit(proof(1, first), T0).ok, true);
+  const second = gate.nonce(T0 + EPOCH_MS);
+  assert.deepEqual(gate.admit(proof(1, second), T0 + EPOCH_MS), { ok: false, reason: 'replayed' });
+  // And the other way: taken under the current nonce, refused under the previous one.
+  assert.equal(gate.admit(proof(2, second), T0 + EPOCH_MS).ok, true);
+  assert.deepEqual(gate.admit(proof(2, first), T0 + EPOCH_MS), { ok: false, reason: 'replayed' });
+});
+
+test("a clock stepped back across a window's start counts in the window it had: a day's limit is not given again", () => {
+  const midnight = Math.ceil(T0 / 86_400_000) * 86_400_000;
+  const gate = new GateState(midnight - 10);
+  const perDay = [{ key: 'stripe', windowMs: 86_400_000, most: 1 }];
+  assert.equal(gate.admit({ counts: perDay }, midnight + 5).ok, true);
+  assert.equal(gate.admit({ counts: perDay }, midnight - 1).ok, false);
+  assert.deepEqual(gate.admit({ counts: perDay }, midnight + 7), { ok: false, reason: 'limit', key: 'stripe', retryAfterMs: 86_400_000 - 7, first: false });
+});
+
+test('a request that names a count twice is an error, before it spends anything', () => {
+  const gate = new GateState(T0);
+  const nonce = gate.nonce(T0);
+  const twice = [{ key: 'stripe', windowMs: 60_000, most: 2 }, { key: 'stripe', windowMs: 60_000, most: 2 }];
+  assert.throws(() => gate.admit({ ...proof(1, nonce), counts: twice }, T0), /names a count twice: 60000:stripe, 60000:stripe/);
+  assert.equal(gate.admit({ ...proof(1, nonce), counts: [twice[0]!] }, T0).ok, true);
+});
+
+test('past several counts, the one whose window ends last says when to retry', () => {
+  const gate = new GateState(T0);
+  const day = Math.floor(T0 / 86_400_000) * 86_400_000;
+  const counts = [{ key: 'per-minute', windowMs: 60_000, most: 0 }, { key: 'per-day', windowMs: 86_400_000, most: 0 }];
+  assert.deepEqual(gate.admit({ counts }, T0), { ok: false, reason: 'limit', key: 'per-day', retryAfterMs: day + 86_400_000 - T0, first: true });
+});
+
+test("a Node process's gate keeps no count for a write: only a Durable Object writes them", () => {
+  const counts = [{ key: 'stripe', windowMs: 86_400_000, most: 5 }];
+  const node = new GateState(T0);
+  node.admit({ counts }, T0);
+  assert.equal(node.dirty, false);
+  assert.deepEqual(node.flush(), []);
+  const object = new GateState(T0, { durable: true });
+  object.admit({ counts }, T0);
+  assert.equal(object.dirty, true);
+  assert.deepEqual(object.flush(), [['86400000:stripe', { start: Math.floor(T0 / 86_400_000) * 86_400_000, taken: 1, refused: false }]]);
+});
+
 test(`past ${GATE_CEILING} requests in a second, overloaded; the next second takes them again`, () => {
-  const gate = new GateState(T0 - (T0 % 1000));
   const start = T0 - (T0 % 1000);
+  const gate = new GateState(start);
   const nonce = gate.nonce(start);
   for (let n = 0; n < GATE_CEILING; n++) assert.equal(gate.admit(proof(n, nonce), start + (n % 1000)).ok, true);
   assert.deepEqual(gate.admit(proof(GATE_CEILING, nonce), start + 999), { ok: false, reason: 'overloaded' });
@@ -125,13 +172,20 @@ test("a Node process holds one gate per workload: one workload's nonce is not an
 function objectState(stored = new Map<string, unknown>()) {
   let alarm: number | null = null;
   const starting: Promise<unknown>[] = [];
+  /** The storage operations that fail next, once each. */
+  const failing = new Set<'put' | 'setAlarm'>();
+  const fail = (operation: 'put' | 'setAlarm') => {
+    if (failing.delete(operation)) throw new Error(`${operation} failed`);
+  };
   const state = {
     storage: {
       list: async <T>({ prefix }: { prefix: string }) => new Map([...stored].filter(([key]) => key.startsWith(prefix)) as [string, T][]),
       put: async <T>(entries: Record<string, T>) => {
+        fail('put');
         for (const [key, value] of Object.entries(entries)) stored.set(key, structuredClone(value));
       },
       setAlarm: async (time: number) => {
+        fail('setAlarm');
         alarm = time;
       },
     },
@@ -141,7 +195,7 @@ function objectState(stored = new Map<string, unknown>()) {
       return done;
     },
   };
-  return { state, stored, alarm: () => alarm, started: () => Promise.all(starting) };
+  return { state, stored, failing, alarm: () => alarm, started: () => Promise.all(starting) };
 }
 
 /** The namespace a Worker binds: an object per name, made by its first call, and again by the first after an eviction, as Cloudflare does. */
@@ -199,6 +253,24 @@ test("on Workers, a day's counts are written within a flush and read back after 
   assert.ok(!refused.ok && refused.reason === 'limit' && refused.first);
   await second.alarm();
   assert.equal((held.stored.get(`count:${perDay.windowMs}:stripe`) as { refused: boolean }).refused, true);
+});
+
+test('on Workers, a write that fails is written by the retried alarm, and an alarm that could not be set is set by the next request', async () => {
+  const held = objectState();
+  const object = new CoffreGates(held.state, {});
+  await held.started();
+  const gate = workersGates(namespace(() => object).gates)('token:api');
+  const perDay = { key: 'stripe', windowMs: 86_400_000, most: 5 };
+  held.failing.add('setAlarm');
+  await assert.rejects(gate.admit({ counts: [perDay] }), /the workload gate failed|setAlarm failed/);
+  assert.equal(held.alarm(), null);
+  assert.equal((await gate.admit({ counts: [perDay] })).ok, true);
+  assert.notEqual(held.alarm(), null, 'no request set the alarm again');
+  held.failing.add('put');
+  await assert.rejects(object.alarm(), /put failed/);
+  assert.equal(held.stored.size, 0);
+  await object.alarm();
+  assert.equal((held.stored.get('count:86400000:stripe') as { taken: number }).taken, 2);
 });
 
 test('a gate that fails is an error, never an answer', async () => {

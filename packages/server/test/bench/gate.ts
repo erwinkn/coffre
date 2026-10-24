@@ -84,7 +84,7 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
-const gate = new GateState(Date.now(), Number.MAX_SAFE_INTEGER);
+const gate = new GateState(Date.now(), { ceiling: Number.MAX_SAFE_INTEGER });
 const nonce = gate.nonce(Date.now());
 const started = process.cpuUsage();
 const many = 200_000;
