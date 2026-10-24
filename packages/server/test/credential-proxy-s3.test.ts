@@ -7,12 +7,13 @@
 // hand (the design's section 5).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, type Hash, type Hmac } from 'node:crypto';
+import { createHash, createHmac, randomBytes, type Hash, type Hmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { SignatureV4 } from '@smithy/signature-v4';
+import { contentDigest } from '@coffre/client/dpop';
 
 import { clientFor } from './api-fixture.ts';
 import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
@@ -327,6 +328,46 @@ test('a streamed upload sends nothing of a handle split across chunks, and nothi
   assert.equal(objects.has('uploads/streamed'), false);
   assert.equal((await upload([four], 4)).status, 200, 'exactly as declared');
   assert.equal(objects.get('uploads/streamed'), 'abcd');
+});
+
+test("a handle's upload past 16 MiB that declares its Content-Digest streams, S3 checking that digest too; other bytes, or the handle split across chunks, never reach it whole", async () => {
+  const { handle } = await appClient();
+  const upload = (key: string, bytes: Buffer, declared: Buffer = bytes, cut = 1024 * 1024) => {
+    let at = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(out) {
+        if (at >= bytes.length) return out.close();
+        // At `cut`, then each MiB: a boundary the test places.
+        const end = at < cut ? cut : at + 1024 * 1024;
+        out.enqueue(bytes.subarray(at, end));
+        at = end;
+      },
+    });
+    return route(`/use/market/dev/s3/uploads/${key}`, {
+      method: 'PUT',
+      headers: {
+        authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`,
+        'content-digest': contentDigest(createHash('sha256').update(declared).digest('hex')),
+        'content-length': String(bytes.length),
+      },
+      body,
+      duplex: 'half',
+    } as RequestInit);
+  };
+  const document = randomBytes(20 * 1024 * 1024);
+  const sent = await upload('digested.pdf', document);
+  assert.equal(sent.status, 200, await sent.text());
+  assert.equal(objects.get('uploads/digested.pdf'), `${document.length} bytes`);
+  assert.ok(seen.at(-1)!.verified);
+  assert.equal(seen.at(-1)!.hash, createHash('sha256').update(document).digest('hex'), 'signed with the digest it declared');
+  const tampered = Buffer.from(document);
+  tampered[12345] = tampered[12345]! ^ 1;
+  const swapped = await upload('tampered.pdf', tampered, document);
+  assert.deepEqual([swapped.status, ((await swapped.json()) as { message: string }).message], [400, 'the body is not what its Content-Digest says']);
+  const carrying = Buffer.concat([document.subarray(0, 3 * 1024 * 1024), Buffer.from(handle), document.subarray(3 * 1024 * 1024)]);
+  const leaked = await upload('leaked.pdf', carrying, carrying, 3 * 1024 * 1024 + 20);
+  assert.deepEqual([leaked.status, ((await leaked.json()) as { message: string }).message], [400, 'the handle is in the body']);
+  assert.equal(objects.has('uploads/tampered.pdf') || objects.has('uploads/leaked.pdf'), false, 'S3 stored neither');
 });
 
 test('an upload past what the proxy holds streams through: 20 MiB, signed again, the handle nowhere in it', async () => {

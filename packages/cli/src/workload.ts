@@ -175,6 +175,9 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
         } else {
           // Any other body is signed whole, so it is read whole, hashed as it comes: the chunks as they came, one copy and in
           // memory, never on disk, then its digest and length declared, which coffre streams it on by, checking the bytes.
+          const tooLarge = () => answer(413, 'too_large', `a request's body through coffre is at most ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes`);
+          // A length said past it is refused before a byte is read.
+          if (Number(length ?? 0) > MAX_DIGESTED_BODY) return tooLarge();
           const own = headers.get('content-digest');
           let declared: string | null;
           try {
@@ -187,7 +190,7 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
           let size = 0;
           for await (const chunk of req as AsyncIterable<Buffer>) {
             size += chunk.length;
-            if (size > MAX_DIGESTED_BODY) return answer(413, 'too_large', `a request's body through coffre is at most ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes`);
+            if (size > MAX_DIGESTED_BODY) return tooLarge();
             hash.update(chunk);
             chunks.push(chunk);
           }

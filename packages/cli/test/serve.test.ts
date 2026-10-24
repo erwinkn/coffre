@@ -294,11 +294,23 @@ test('through the sidecar, a 55 MB document is held once, in memory, hashed as i
   assert.equal(again.status, 200, await again.text());
   assert.deepEqual(coffre.log.filter((line) => line.startsWith('POST /use/yousign/v3/documents')), ['POST /use/yousign/v3/documents use_dpop_nonce', 'POST /use/yousign/v3/documents 200']);
 
-  // Past 95 MiB, refused by the sidecar itself, before a byte goes to coffre.
+  // Past 95 MiB, refused by the sidecar itself, before a byte goes to coffre: as it reads past it, or at once when its length says so.
   const forwards = coffre.forwarded.length;
-  const huge = await fetch(`${listener}/use/yousign/v3/documents`, { method: 'POST', body: new Uint8Array(95 * 1024 * 1024 + 1) });
+  const over = new Uint8Array(95 * 1024 * 1024 + 1);
+  const huge = await fetch(`${listener}/use/yousign/v3/documents`, { method: 'POST', body: new ReadableStream({ start: (out) => (out.enqueue(over), out.close()) }), duplex: 'half' } as RequestInit);
   assert.equal(huge.status, 413);
   assert.match(((await huge.json()) as { message: string }).message, /at most 95 MiB/);
+  const refusedAtOnce = await new Promise<number>((resolve, reject) => {
+    const asked = request(`${listener}/use/yousign/v3/documents`, { method: 'POST', headers: { 'content-length': String(over.length) } }, (answered) => {
+      answered.resume();
+      resolve(answered.statusCode!);
+      asked.destroy();
+    });
+    asked.on('error', reject);
+    // Nothing of the body is sent: the answer comes before it.
+    asked.flushHeaders();
+  });
+  assert.equal(refusedAtOnce, 413);
   assert.equal(coffre.forwarded.length, forwards);
 });
 

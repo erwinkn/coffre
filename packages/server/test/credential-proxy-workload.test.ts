@@ -495,6 +495,13 @@ test('a body other than its Content-Digest says, short of its length, past it, o
   assert.deepEqual([stale.status, stale.body.message], [400, 'the body is not what its Content-Digest says']);
   await sleep(50);
   assert.deepEqual([reached.length, broken.length], [whole, cut], 'nothing of it reached the upstream');
+  // Through an AWS-signed credential, a Content-Digest alone is the payload hash coffre signs again, which S3 checks too.
+  const s3Url = `${ORIGIN}/use/s3/bucket/digested`;
+  const s3Proof = await createProof(held.key, { method: 'PUT', url: s3Url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: { 'content-digest': contentDigest(digest) }, body: digest } });
+  const s3 = await read((await pluginRoute(new Request(s3Url, { method: 'PUT', headers: { 'content-digest': contentDigest(digest), 'content-length': String(bytes.length), authorization: `DPoP ${held.token}`, dpop: s3Proof }, body: chunked(bytes), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.equal(s3.status, 200, JSON.stringify(s3.body));
+  assert.deepEqual([reached.at(-1)!.headers['x-amz-content-sha256'], reached.at(-1)!.sha256], [digest, digest]);
+  assert.match(reached.at(-1)!.headers.authorization as string, new RegExp(`^AWS4-HMAC-SHA256 Credential=${AWS.AWS_ACCESS_KEY_ID}/`));
   // An app's own digest of another algorithm declares nothing: read whole, under 16 MiB, and sent on as it is.
   const sha512 = `sha-512=:${createHash('sha512').update(bytes).digest('base64')}:`;
   const own = await use(held, 'POST', '/use/yousign/v3/documents', { headers: { 'content-digest': sha512 }, body: 'a small body' });

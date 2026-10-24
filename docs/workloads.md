@@ -486,7 +486,11 @@ a body near the limit gets coffre's answer, not the zone's. **Size the
 sidecar's memory limit for the uploads you run at once**: the process's
 own (about 120 MB at its peak in the test, signed in and idle), and up to
 95 MiB more for each upload in flight. A 55 MB Yousign document raised the
-sidecar's peak by 70 MB. An app's own `Content-Digest` of another
+sidecar's peak by 70 MB. A body goes to coffre as a stream, which the SDK
+sends with a nonce under 100 seconds old: after a quieter spell than that, a
+request first renews the session, one short call, so that a large body is
+not sent twice for a stale nonce. If coffre still asks for a fresh one, the
+sidecar sends the body again from what it holds. An app's own `Content-Digest` of another
 algorithm (`sha-512`) keeps its member, and the sidecar adds its `sha-256`
 beside it. An S3 upload, which
 declares its own hash, streams through without being held, up to 5 GiB.
