@@ -103,6 +103,8 @@ export const DETAIL_ACTIONS = [
   'key.check',
   'audit.heartbeat',
   'audit.checkpoint',
+  // A step of the app key's rotation, a hundred rows signed again; its `key.rotate` is shown.
+  'key.reseal',
 ] as const;
 
 /** Detail entries a page left out, by action. */

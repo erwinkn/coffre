@@ -2,7 +2,7 @@
 // log says the app's key stands, and its signed rows, a stretch at a time.
 import type { StoredEntry } from '@coffre/core/audit';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { engineOf, changedRows, rowsOf } from '@coffre/db/dialect';
+import { changedRows, engineOf, forUpdate, rowsOf } from '@coffre/db/dialect';
 import { entryColumns, MOVES_FROM } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
@@ -58,11 +58,16 @@ function signedTable(db: Queryable, table: AuthTable) {
   }[table];
 }
 
-/** Up to `limit` of a signed table's rows after id `after` (null: from the first), by id. */
+/**
+ * Up to `limit` of a signed table's rows after id `after` (null: from the
+ * first), by id, locked until the step commits: a change that does not
+ * take the log's head, a session's renewal, waits for it, then finds the
+ * row signed again and refuses, rather than the step missing it.
+ */
 export async function signedRowsAfter(tx: Transaction, table: AuthTable, after: string | null, limit: number): Promise<AuthRow[]> {
   const rows = signedTable(tx, table);
   const query = tx.select().from(rows);
-  return (await (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit)) as AuthRow[];
+  return (await forUpdate(tx, (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit))) as AuthRow[];
 }
 
 /** A row signed again: its MAC as read, which it must still carry, and its new one; and when it ends, a session signed out or a device's login used up. */

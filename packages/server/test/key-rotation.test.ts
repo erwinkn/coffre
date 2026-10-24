@@ -441,3 +441,21 @@ test('a step the door takes while another start holds the head leaves it to that
   }
   assert.equal(await keyReady(next), null);
 });
+
+test('an anchor store that cannot be used holds the rotation back before key.rotate, and Node stops stepping until it can', async () => {
+  const anchor = testAnchor();
+  await runScheduled(startUnder(A, [], [auditWatch({ anchor })]));
+  let broken = true;
+  const flaky = { read: () => (broken ? Promise.reject(new Error('EACCES: the anchor file')) : anchor.read()), write: anchor.write };
+  const next = startUnder(B, [A], [auditWatch({ anchor: flaky })]);
+  // Returns rather than spinning: every row is signed, and the anchor waits.
+  await settleKey(next);
+  assert.equal(next.appKey.settled, false);
+  assert.deepEqual(await keyReady(next), { kind: 'stalled' });
+  const answered = await respond(new Request(`${ORIGIN}/api/me`), next, null, async () => new Response('served'));
+  assert.deepEqual([answered.status, (await answered.json()).error], [503, 'rotating']);
+  assert.equal((await appEntries()).filter((entry) => entry.action === 'key.rotate').length, 0);
+  broken = false;
+  assert.equal(await keyReady(next), null);
+  assert.equal((await anchor.read())!.keyId, appLogKey(B).keyId);
+});
