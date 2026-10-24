@@ -1086,7 +1086,8 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     const declared = request.headers.get('x-amz-content-sha256');
     const bytes = content.streamed ? content.declared !== '0' : (content.body?.byteLength ?? 0) > 0;
     declaring = credential.inject.kind === 'sigv4' && declared !== null && bytes;
-    const digest = content.streamed ? null : await bodyDigest(content.body ?? new Uint8Array(0));
+    // A stream that declares no bytes is an empty body (`scanned` stops it if it carries any); any other stream, the declared hash.
+    const digest = content.streamed && bytes ? null : await bodyDigest(content.body ?? new Uint8Array(0));
     const body = declaring ? (/^[0-9a-f]{64}$/.test(declared!) ? declared! : UNSIGNED_BODY) : digest!;
     if (declaring && !content.streamed && body !== UNSIGNED_BODY && body !== digest) return failure(400, 'the body is not what its x-amz-content-sha256 says');
     payload = body === UNSIGNED_BODY ? 'UNSIGNED-PAYLOAD' : body;

@@ -323,9 +323,16 @@ test('a streamed SigV4 upload is bound by the payload hash it declares; UNSIGNED
   assert.match(chosen.body.message as string, /name it in hdr/);
   // Signed, the header and the bytes it declares go through.
   assert.equal((await use(held, 'PUT', '/use/s3/bucket/declared', { headers: { 'x-amz-content-sha256': goodHash }, body: good, signed: { line: goodHash } })).status, 200);
-  // An empty body is no body, whatever its header says, on every platform.
+  // An empty body is no body, whatever its header says, on every platform: buffered, or streamed with content-length 0.
   assert.equal((await use(held, 'PUT', '/use/s3/bucket/empty', { headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }, body: '' })).status, 200);
-  assert.equal(reached.length, 5);
+  const marker = `${ORIGIN}/use/s3/bucket/prefix/`;
+  const empty = createHash('sha256').digest('hex');
+  const markerHeaders = { 'x-amz-content-sha256': empty };
+  const markerProof = await createProof(held.key, { method: 'PUT', url: marker, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: markerHeaders, body: await bodyDigest('') } });
+  const streamedEmpty = await read((await pluginRoute(new Request(marker, { method: 'PUT', headers: { ...markerHeaders, 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: markerProof }, body: new Blob([]).stream(), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.equal(streamedEmpty.status, 200, JSON.stringify(streamedEmpty.body));
+  assert.equal(reached.at(-1)!.length, 0);
+  assert.equal(reached.length, 6);
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, strict);
   await bind({ unsignedUploads: true });
   const loose = await session();
