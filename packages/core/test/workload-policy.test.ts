@@ -62,8 +62,15 @@ test('a policy holds only what its profile allows, and is canonical: one policy,
   assert.equal(policyText(again), policyText(policy));
   assert.deepEqual(checkPolicy('enrollment', JSON.parse(policyText(policy)), { service: SERVICE }), policy);
 
-  assert.equal(policyText(checkPolicy('github', {}, { service: SERVICE })), '{}');
-  assert.equal(policyText(checkPolicy('github', { keyAudience: true, sessionHours: 24 }, { service: SERVICE })), '{"keyAudience":true}');
+  // A platform whose caller picks the audience always names the key in it, said or not; never off.
+  for (const profile of ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly'] as const) {
+    assert.equal(policyText(checkPolicy(profile, {}, { service: SERVICE })), '{"keyAudience":true}', profile);
+    assert.equal(policyText(checkPolicy(profile, { keyAudience: true, sessionHours: 24 }, { service: SERVICE })), '{"keyAudience":true}', profile);
+    assert.throws(() => checkPolicy(profile, { keyAudience: false }, { service: SERVICE }), /name the session's key/, profile);
+  }
+  assert.equal(policyText(checkPolicy('custom', {}, { service: SERVICE })), '{}');
+  assert.equal(policyText(checkPolicy('custom', { keyAudience: false }, { service: SERVICE })), '{}');
+  assert.equal(policyText(checkPolicy('custom', { keyAudience: true }, { service: SERVICE })), '{"keyAudience":true}');
   assert.equal(policyText(checkPolicy('azure', { audience: 'api://coffre-acme', reads: { [ENV]: { keys: '*' } } }, { service: SERVICE })), `{"audience":"api://coffre-acme","reads":{"${ENV}":{"keys":"*"}}}`);
   // A place listing nothing reads nothing, and is left out.
   assert.equal(policyText(checkPolicy('aws', { reads: { [ENV]: { keys: [] } }, sources: [] }, { service: SERVICE })), '{}');
@@ -120,7 +127,7 @@ test('a freeze target has one spelling, or none', () => {
   assert.equal(freezeTarget(`binding:${KEY.toUpperCase()}`), `binding:${KEY}`);
   assert.equal(freezeTarget(`session:${KEY}`), `session:${KEY}`);
   assert.equal(freezeTarget(`credential:${ENV.toUpperCase()}/stripe`), `credential:${ENV}/stripe`);
-  for (const bad of ['Instance', 'token:', 'token:a b', 'binding:x', `credential:${ENV}`, `credential:${ENV}/Stripe`, `credential:${ENV}/a/b`, 'credential:market/prod/stripe', `secret:${KEY}`, '']) {
+  for (const bad of ['tokenx', 'tokens', 'instancex', 'Instance', 'token:', 'token:a b', 'binding:x', `credential:${ENV}`, `credential:${ENV}/Stripe`, `credential:${ENV}/a/b`, 'credential:market/prod/stripe', `secret:${KEY}`, '']) {
     assert.equal(freezeTarget(bad), null, bad);
   }
 });
@@ -159,6 +166,8 @@ test("a child's constraints are checked and canonical, and its operations held t
   assert.ok(!at('https://api.stripe.com/v1/refunds/re%2F1'));
   assert.ok(!at('https://api.stripe.com/v1/refunds/re%252e'));
   assert.ok(!at('https://api.stripe.com/v1/refunds', 'GET'));
+  assert.ok(at('https://api.stripe.com/v1/refunds', 'post'), 'post is POST, as Fetch sends it');
+  assert.ok(!constraintsAllow({ methods: ['PATCH'] }, { place: 'market/prod', credential: 'stripe', request: { method: 'patch', url: 'https://api.stripe.com/v1' } }), 'patch is not PATCH');
   assert.ok(!constraintsAllow(child, { place: 'market/prod', credential: 'openai', request: { method: 'POST', url: 'https://api.openai.com/v1/refunds' } }));
   // No request to check: sign, verify, mint and the tunnel are refused wherever methods or paths are limited.
   assert.ok(!constraintsAllow(child, { place: 'market/prod', credential: 'stripe' }));

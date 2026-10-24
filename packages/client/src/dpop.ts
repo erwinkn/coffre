@@ -103,26 +103,60 @@ export async function generateProofKey(): Promise<ProofKey> {
 const UNRESERVED = /^[A-Za-z0-9\-._~]$/;
 
 /**
- * A URL as `htu` names it, as Cloudflare's zones normalize an incoming
- * path by default: scheme and host lowercased, no default port, no user,
- * query or fragment; dot segments removed and `\` made `/` (the WHATWG
- * parser's), runs of `/` merged, an escaped unreserved character decoded,
- * and every other escape's hex in upper case (RFC 3986, section 6.2.2).
+ * A URL as `htu` names it: scheme and host lowercased, no default port, no
+ * user, query or fragment, and its path as Cloudflare's zones normalize an
+ * incoming one by default, in their order: an escaped unreserved character
+ * decoded and every other escape's hex in upper case (RFC 3986, section
+ * 6.2.2), `\` made `/`, runs of `/` merged, then dot segments removed.
  * Both sides sign this form, so a zone's normalization changes nothing, and
- * a mismatch fails closed. Idempotent; throws on a URL that is not http or
- * https.
+ * a mismatch fails closed. Idempotent. Throws on a URL that is not http or
+ * https, and on a `%` that two hex digits do not follow, which would let
+ * two paths read as one.
  *
  *   canonicalHtu('HTTPS://Secrets.Acme.Example:443//use/%7estripe/a%2fb?x=1')
  *     === 'https://secrets.acme.example/use/~stripe/a%2Fb'
+ *   canonicalHtu('https://secrets.acme.example/hello//../path')
+ *     === 'https://secrets.acme.example/path'
  */
 export function canonicalHtu(input: string | URL): string {
   const url = new URL(String(input));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new TypeError(`a proof signs an http or https URL, not ${url.protocol}`);
-  const path = url.pathname.replace(/\/{2,}/g, '/').replace(/%([0-9A-Fa-f]{2})/g, (_, code: string) => {
+  // The path as given, before the WHATWG parser removes its dot segments, which it would do before merging slashes.
+  const raw = typeof input === 'string' ? /^[^:/?#]+:\/\/[^/?#]*([^?#]*)/.exec(input)?.[1] ?? url.pathname : url.pathname;
+  if (/%(?![0-9A-Fa-f]{2})/.test(raw)) throw new TypeError('a URL a proof signs escapes a character with % and two hex digits, never a lone %');
+  const decoded = raw.replace(/%([0-9A-Fa-f]{2})/g, (_, code: string) => {
     const char = String.fromCharCode(parseInt(code, 16));
     return UNRESERVED.test(char) ? char : `%${code.toUpperCase()}`;
   });
-  return `${url.protocol}//${url.host}${path}`;
+  const merged = decoded.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  // Then as the parser writes a path: characters a path never holds raw escaped, as fetch sends them.
+  return `${url.protocol}//${url.host}${new URL(withoutDotSegments(merged.startsWith('/') ? merged : `/${merged}`), url.origin).pathname}`;
+}
+
+/** RFC 3986's `remove_dot_segments` (section 5.2.4), on an absolute path. */
+function withoutDotSegments(path: string): string {
+  const kept: string[] = [];
+  const parts = path.split('/').slice(1);
+  parts.forEach((part, i) => {
+    if (part !== '.' && part !== '..') kept.push(part);
+    else {
+      if (part === '..') kept.pop();
+      // `/a/b/..` is `/a/`: a dot segment last leaves its slash.
+      if (i === parts.length - 1) kept.push('');
+    }
+  });
+  return `/${kept.join('/')}`;
+}
+
+/**
+ * A method as `htm` names it, and the Fetch API sends it: one of DELETE,
+ * GET, HEAD, OPTIONS, POST and PUT in upper case, whatever case it was
+ * given in, and any other exactly as given. Methods are case-sensitive
+ * (RFC 9110, section 9.1), so `patch` is not `PATCH`, and a proof signs one.
+ */
+export function fetchMethod(method: string): string {
+  const upper = method.toUpperCase();
+  return ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upper) ? upper : method;
 }
 
 /** The SHA-256 of a buffered body, in hex, as a canonical request's last line holds it. */
@@ -203,7 +237,7 @@ export async function createProof(
   const header = { typ: 'dpop+jwt', alg: 'ES256', jwk: { kty: key.jwk.kty, crv: key.jwk.crv, x: key.jwk.x, y: key.jwk.y } };
   const claims: ProofClaims = {
     jti: request.jti ?? base64url(crypto.getRandomValues(new Uint8Array(16))),
-    htm: request.method.toUpperCase(),
+    htm: fetchMethod(request.method),
     htu: canonicalHtu(request.url),
     iat: request.iat ?? Math.floor(Date.now() / 1000),
   };

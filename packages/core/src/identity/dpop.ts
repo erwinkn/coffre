@@ -20,6 +20,7 @@
  */
 import {
   canonicalHtu,
+  fetchMethod,
   fromBase64url,
   requestDigest,
   thumbprint,
@@ -29,7 +30,7 @@ import {
   type PublicJwk,
 } from '@coffre/client/dpop';
 
-export { canonicalHtu, canonicalRequest, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
+export { canonicalHtu, canonicalRequest, fetchMethod, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
 
 /** The longest proof, in characters. */
 export const MAX_PROOF_LENGTH = 2048;
@@ -59,7 +60,7 @@ export type VerifiedProof = { ok: true; jkt: string; jti: string; nonce: string 
 
 /** What the request says a proof must sign. */
 export type ProofExpectation = {
-  /** The request's method and URL, as received. */
+  /** The request's method and URL, as received: `Request.method`, which the Fetch API has normalized as `fetchMethod` does. */
   method: string;
   url: string | URL;
   /** The session row's `jkt`; none at the exchange, where the proof's key becomes the session's. */
@@ -79,7 +80,8 @@ const refuse = (reason: ProofReason, message: string): ProofRefusal => ({ ok: fa
 const DECODER = new TextDecoder('utf-8', { fatal: true });
 const ENCODER = new TextEncoder();
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]+$/;
-const METHOD = /^[A-Z]{1,16}$/;
+/** A method, a token of RFC 9110: in any case, compared exactly. */
+const METHOD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,16}$/;
 const CLAIMS = new Set(['jti', 'htm', 'htu', 'iat', 'ath', 'nonce', 'hdr', 'req']);
 
 /** A part of the proof as a JSON object, or null for anything else. */
@@ -167,7 +169,7 @@ export async function verifyProof(proof: string | ParsedProof, expect: ProofExpe
   const valid = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, parsed.signature as Uint8Array<ArrayBuffer>, ENCODER.encode(parsed.signingInput));
   if (!valid) return refuse('signature', 'the proof\'s signature does not verify');
 
-  if (claims.htm !== expect.method.toUpperCase()) return refuse('htm', 'the proof signs another method');
+  if (claims.htm !== fetchMethod(expect.method)) return refuse('htm', 'the proof signs another method');
   let htu: string;
   try {
     htu = canonicalHtu(expect.url);

@@ -12,6 +12,8 @@
  *   POST https://api.stripe.com/v1/refunds/%2e%2e/charges refused: it is /v1/charges once parsed
  *   POST https://api.stripe.com/v1/refundsX              refused: a prefix matches whole segments
  */
+import { fetchMethod } from '@coffre/client/dpop';
+
 import { CREDENTIAL_NAME } from './workloads.ts';
 
 export type Constraints = {
@@ -151,7 +153,8 @@ export function constraintsAllow(
   if (constraints.credentials !== undefined && !constraints.credentials.includes(operation.credential)) return false;
   if (constraints.methods === undefined && constraints.paths === undefined) return true;
   if (operation.request === undefined) return false;
-  if (constraints.methods !== undefined && !constraints.methods.includes(operation.request.method.toUpperCase())) return false;
+  // Exactly, as a proof signs it: a child of POST is refused `post`, which an upstream may read otherwise.
+  if (constraints.methods !== undefined && !constraints.methods.includes(fetchMethod(operation.request.method))) return false;
   if (constraints.paths === undefined) return true;
   let path: string;
   try {

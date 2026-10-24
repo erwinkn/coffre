@@ -139,25 +139,47 @@ const pathPart = gs.oneOf(
   gs.sampledFrom(['/', '//', '/./', '/../', '\\']),
 );
 
-test(`canonicalHtu is idempotent, drops the query, and keeps every escape but an unreserved character's, seed ${settings.seed}`, () => hegel.test((tc) => {
+/**
+ * The reference: a path as Cloudflare normalizes it by default, step by step
+ * as its docs list them: unreserved escapes decoded and the rest upper case,
+ * `\` made `/`, runs of `/` merged, then RFC 3986's dot-segment removal.
+ */
+function cloudflarePath(raw: string): string {
+  let path = raw.replace(/%([0-9a-fA-F]{2})/g, (_, code: string) => (UNRESERVED.has(parseInt(code, 16)) ? String.fromCharCode(parseInt(code, 16)) : `%${code.toUpperCase()}`));
+  path = path.replaceAll('\\', '/').replace(/\/+/g, '/');
+  const out: string[] = [];
+  const segments = path.split('/').slice(1);
+  for (const [i, part] of segments.entries()) {
+    if (part === '..') out.pop();
+    if (part === '.' || part === '..') {
+      if (i === segments.length - 1) out.push('');
+      continue;
+    }
+    out.push(part);
+  }
+  return `/${out.join('/')}`;
+}
+
+test(`canonicalHtu is idempotent, drops the query, and normalizes the path as Cloudflare's zones do, in their order, seed ${settings.seed}`, () => hegel.test((tc) => {
   const path = tc.draw(gs.arrays(pathPart, { maxSize: 12 })).join('');
   const host = tc.draw(gs.sampledFrom(['Secrets.Acme.Example', 'secrets.acme.example:443', 'SECRETS.acme.example:8443']));
   const input = `HTTPS://${host}/${path}?q=1#f`;
   const once = canonicalHtu(input);
   assert.equal(canonicalHtu(once), once, input);
-  assert.ok(once.startsWith('https://secrets.acme.example'), once);
-  assert.ok(!once.includes('?') && !once.includes('#') && !once.includes('\\') && !once.slice('https://'.length).includes('//'), once);
-  // An escape left is an escape of what needs one, in upper case; an unreserved character is never escaped.
+  assert.equal(once, `https://${host.toLowerCase().replace(':443', '')}${cloudflarePath(`/${path}`)}`, input);
+  // An escape left is an escape of what needs one, in upper case.
   for (const [, code] of once.matchAll(/%(..)/g)) {
     assert.match(code!, /^[0-9A-F]{2}$/);
     assert.ok(!UNRESERVED.has(parseInt(code!, 16)), `${code} escapes an unreserved character`);
   }
-  // Every escape of a reserved character in the path survives.
-  const resolved = new URL(input).pathname;
-  const kept = [...resolved.matchAll(/%([0-9A-Fa-f]{2})/g)].map(([, code]) => code!.toUpperCase()).filter((code) => !UNRESERVED.has(parseInt(code, 16)));
-  assert.deepEqual([...once.matchAll(/%([0-9A-F]{2})/g)].map(([, code]) => code), kept);
+  // A lone % anywhere in the path makes it no URL a proof signs: two paths would read as one.
+  const at = tc.draw(gs.integers({ minValue: 0, maxValue: path.length }));
+  const lone = `HTTPS://${host}/${path.slice(0, at)}%${tc.draw(gs.sampledFrom(['', 'g', '3', 'z1']))}/x`;
+  assert.throws(() => canonicalHtu(lone), TypeError, lone);
 }, propertySettings(256)));
 
+/** Where the caller picks the token's audience (section 4.2), so it always names the key. */
+const KEY_NAMING_PROFILES: readonly WorkloadProfile[] = ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly'];
 const ENVIRONMENTS = ['6b1c2d3e-4f50-4a6b-8c7d-8e9fa0b1c2d3', 'a0b1c2d3-e4f5-4061-8273-8495a6b7c8d9'];
 const KEYS = ['0f0e0d0c-0b0a-4908-8706-050403020100', 'ffeeddcc-bbaa-4998-8776-554433221100', '12345678-9abc-4def-8123-456789abcdef'];
 
@@ -171,7 +193,8 @@ function spelled(tc: hegel.TestCase, profile: WorkloadProfile): Record<string, u
     if (field !== 'audience' && field !== 'replicas' && !tc.draw(gs.booleans())) continue;
     switch (field) {
       case 'audience': policy.audience = tc.draw(gs.sampledFrom(['api://coffre-acme', 'https://vercel.com/acme'])); break;
-      case 'keyAudience': policy.keyAudience = tc.draw(gs.booleans()); break;
+      // Off is refused where the caller picks the audience; said on, or not at all, it is on there.
+      case 'keyAudience': policy.keyAudience = KEY_NAMING_PROFILES.includes(profile) ? true : tc.draw(gs.booleans()); break;
       case 'reads': policy.reads = Object.fromEntries(some(ENVIRONMENTS).filter((id, i, all) => all.indexOf(id) === i).map((id) => [caseOf(id), {
         ...(tc.draw(gs.booleans()) ? { keys: tc.draw(gs.booleans()) ? '*' : some(KEYS).map(caseOf) } : {}),
         ...(tc.draw(gs.booleans()) ? { mints: some(['aws', 'github', 'r2']) } : {}),
@@ -199,7 +222,7 @@ function meaning(profile: WorkloadProfile, policy: Record<string, unknown>) {
   return {
     profile,
     audience: policy.audience ?? null,
-    keyAudience: policy.keyAudience === true,
+    keyAudience: policy.keyAudience === true || KEY_NAMING_PROFILES.includes(profile),
     reads,
     sources: [...new Set(((policy.sources ?? []) as string[]).map((source) => (source.toLowerCase().startsWith('2001:db8') ? '2001:db8::/32' : source)))].sort(),
     sessionHours: policy.sessionHours ?? 24,

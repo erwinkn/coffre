@@ -636,8 +636,9 @@ export type BindingReads = Readonly<Record<string, { readonly keys?: readonly st
  * - `audience`: the exact audience of an `azure` or `vercel` token, which
  *   those platforms fix; required for them, refused for every other.
  * - `keyAudience`: the token's audience must name the session's key,
- *   `<publicUrl>#jkt=<thumbprint>`; for the platforms whose caller picks
- *   the audience (`github…`, `gcp`, `fly`, and `custom`).
+ *   `<publicUrl>#jkt=<thumbprint>`: always for the platforms whose caller
+ *   picks the audience (`KEY_NAMING_PROFILES`), and where a `custom`
+ *   binding says so.
  * - `reads`: the escape hatch, by ID (section 6.1).
  * - `sources`: CIDRs a session's client address must be within.
  * - `sessionHours`: a session's hard end after its proof, at most 168.
@@ -682,6 +683,12 @@ type PolicyField = keyof BindingPolicy;
 
 const SESSION_FIELDS: readonly PolicyField[] = ['reads', 'sources', 'sessionHours', 'unsignedUploads'];
 const KEY_AUDIENCE: readonly PolicyField[] = [...SESSION_FIELDS, 'keyAudience'];
+
+/**
+ * The profiles whose caller picks the token's audience, so their binding's
+ * policy always says `keyAudience`: `checkPolicy` sets it, and refuses it off.
+ */
+export const KEY_NAMING_PROFILES: readonly WorkloadProfile[] = ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly'];
 
 /** The fields each profile's policy may hold. */
 export const POLICY_FIELDS: Record<WorkloadProfile, readonly PolicyField[]> = {
@@ -781,10 +788,14 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
   } else if (allowed.includes('audience')) {
     throw new BindingInvalid(`a ${profile} binding names the audience its platform puts in its tokens: ${profile} lets no caller choose one`);
   }
-  if (given.keyAudience !== undefined) {
-    if (typeof given.keyAudience !== 'boolean') throw new BindingInvalid('keyAudience is true or false');
-    if (given.keyAudience) policy.keyAudience = true;
-  }
+  if (given.keyAudience !== undefined && typeof given.keyAudience !== 'boolean') throw new BindingInvalid('keyAudience is true or false');
+  if (KEY_NAMING_PROFILES.includes(profile)) {
+    // Its caller picks the audience, so the token names the key, or a copy of it would buy a session for any key.
+    if (given.keyAudience === false) {
+      throw new BindingInvalid(`a ${profile} binding's tokens name the session's key in their audience: ${profile} lets its caller choose one, so a copied token works for no other key`);
+    }
+    policy.keyAudience = true;
+  } else if (given.keyAudience === true) policy.keyAudience = true;
   if (given.reads !== undefined) {
     const reads = checkReads(given.reads);
     if (reads !== undefined) policy.reads = reads;
@@ -948,6 +959,7 @@ export function addressWithin(address: string, sources: readonly string[]): bool
 export function freezeTarget(text: string): string | null {
   if (text === 'instance') return text;
   const colon = text.indexOf(':');
+  if (colon < 0) return null;
   const kind = text.slice(0, colon);
   const rest = text.slice(colon + 1);
   switch (kind) {

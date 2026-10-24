@@ -72,6 +72,8 @@ test('each part of the request a proof signs, changed, is refused for what it is
   const cases: [string, Partial<ProofExpectation>, string][] = [
     ['another key', { jkt: await thumbprint(other.jwk) }, 'jkt'],
     ['another method', { method: 'PUT' }, 'htm'],
+    // Methods are case-sensitive: `post` is POST as Fetch sends it, and no proof of POST is one of `patch`.
+    ['the method in lower case, normalized by Fetch', { method: 'post' }, 'ok'],
     ['another path', { url: URL_.replace('charges', 'refunds') }, 'htu'],
     ['another host', { url: URL_.replace('secrets.acme', 'secrets.evil') }, 'htu'],
     ['another query', { url: URL_.replace('balance_transaction', 'customer') }, 'req'],
@@ -87,6 +89,12 @@ test('each part of the request a proof signs, changed, is refused for what it is
   for (const [what, change, expected] of cases) {
     assert.equal(reason(await verifyProof(proof, await expectation(key, change))), expected, what);
   }
+  const patch = await signed(key, { method: 'PATCH' });
+  assert.equal(reason(await verifyProof(patch, await expectation(key, { method: 'PATCH' }))), 'ok');
+  assert.equal(reason(await verifyProof(patch, await expectation(key, { method: 'patch' }))), 'htm', 'patch is not PATCH');
+  const lower = await signed(key, { method: 'patch' });
+  assert.equal(reason(await verifyProof(lower, await expectation(key, { method: 'patch' }))), 'ok', 'a proof signs patch as given');
+  assert.equal(reason(await verifyProof(lower, await expectation(key, { method: 'PATCH' }))), 'htm');
   // A header the proof did not name is dropped, not refused: the proxy forwards only what `hdr` names.
   const added = headers();
   added.set('via', '1.1 proxy');
@@ -175,6 +183,9 @@ test('htu is the URL as Cloudflare normalizes its path, and canonicalHtu is idem
     ['https://secrets.acme.example/use/a/../b/./c', 'https://secrets.acme.example/use/b/c'],
     ['https://secrets.acme.example/use/a/%2e%2E/b', 'https://secrets.acme.example/use/b'],
     ['https://secrets.acme.example//use///a\\b', 'https://secrets.acme.example/use/a/b'],
+    // Cloudflare's own example: slashes merged before dot segments go.
+    ['https://secrets.acme.example/hello//../path', 'https://secrets.acme.example/path'],
+    ['https://secrets.acme.example/use/a b/é', 'https://secrets.acme.example/use/a%20b/%C3%A9'],
     ['https://secrets.acme.example', 'https://secrets.acme.example/'],
   ];
   for (const [given, expected] of cases) {
@@ -182,6 +193,10 @@ test('htu is the URL as Cloudflare normalizes its path, and canonicalHtu is idem
     assert.equal(canonicalHtu(canonicalHtu(given)), expected, `${given}, again`);
   }
   assert.throws(() => canonicalHtu('wss://secrets.acme.example/use/db'), TypeError);
+  // A lone %, which would make `%3%41` and `%3A` one path.
+  for (const lone of ['https://secrets.acme.example/use/%3%41', 'https://secrets.acme.example/use/%%32%65/', 'https://secrets.acme.example/use/%', 'https://secrets.acme.example/use/%zz']) {
+    assert.throws(() => canonicalHtu(lone), TypeError, lone);
+  }
 });
 
 test('a canonical request is one line each, and holds no line break nor a body that is no digest', () => {
