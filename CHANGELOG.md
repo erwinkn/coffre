@@ -199,9 +199,11 @@
   further than where the walk of any broken beat after that began; so
   every beat row past that point is one the walk reads, and one hidden or
   changed there is found. Readiness runs that same walk, to the head: it
-  is red as soon as a finding stands, and while the finder is hidden. Its
-  cost is the entries since the newest beat's walk began. No database
-  migration. Found by `formal/Audit.tla`, which now gives the attacker any
+  is red as soon as a finding stands, and while the finder is hidden, and
+  red when the prefix the newest checkpoint signed is no longer there. Its
+  cost is a beat's walk: the entries since the newest beat's began. A beat
+  whose database was out of reach no longer sends the next walk back to
+  the first entry. No database migration. Found by `formal/Audit.tla`, which now gives the attacker any
   beat row to hide, forge or put back at any step.
 - **Readiness reads the newest beat and the newest checkpoint in one
   snapshot.** Read apart, a beat that stopped short committing between

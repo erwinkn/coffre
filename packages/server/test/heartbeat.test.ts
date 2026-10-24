@@ -5,7 +5,7 @@ import { deriveLogKey, entryHash, sealEntry, type StoredEntry } from '@coffre/co
 import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
-import { asc, desc, eq, gte } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 
 import { appendAudit, appLogKey, resumePoint } from '../src/db/audit.ts';
 import { latestCheckpoint } from '../src/db/queries.ts';
@@ -27,26 +27,16 @@ function entries() {
   return db.owner.select().from(auditLog).orderBy(asc(auditLog.seq));
 }
 
-/** Moves the newest beat `seconds` into the past. Readiness reads its date, and walks the chain from it. */
+/** Moves the newest beat, the log's last entry, `seconds` into the past. Readiness reads its date. */
 async function beatAgo(seconds: number) {
-  const [beat, ...after] = (await db.owner
-    .select()
-    .from(auditLog)
-    .where(gte(auditLog.seq, (await db.owner.select().from(auditLog).where(eq(auditLog.action, 'audit.heartbeat')).orderBy(desc(auditLog.seq)).limit(1))[0]!.seq))
-    .orderBy(asc(auditLog.seq))) as StoredEntry[];
+  const [beat] = (await db.owner.select().from(auditLog).orderBy(desc(auditLog.seq)).limit(1)) as StoredEntry[];
+  assert.equal(beat!.action, 'audit.heartbeat');
   // Sealed again under the app's key, as if the app had written it then: readiness believes only the app's beats.
   const aged = { ...beat!, occurredAt: Date.now() - seconds * 1000 };
   const { mac, hash } = sealEntry(appLogKey(chainKey), aged.prevHash, aged);
   await withLogUnlocked(db.owner, async (owner) => {
     await owner.update(auditLog).set({ occurredAt: aged.occurredAt, mac, hash }).where(eq(auditLog.seq, beat!.seq));
-    // And the entries after it chained to it again, as they would have been.
-    let prevHash = hash;
-    for (const entry of after) {
-      const next = entryHash(prevHash, entry, entry.mac);
-      await owner.update(auditLog).set({ prevHash, hash: next }).where(eq(auditLog.seq, entry.seq));
-      prevHash = next;
-    }
-    await owner.update(auditChainHead).set({ headHash: prevHash });
+    await owner.update(auditChainHead).set({ headHash: hash });
   });
 }
 
@@ -163,22 +153,26 @@ test('an empty log has nothing to checkpoint, and logs nothing for it', async ()
   assert.deepEqual(await auditReadiness(db.runtime, vault, chainKey), { ok: false, heartbeatAgeSeconds: null, checkpointed: false, broken: false });
 });
 
-test('readiness accepts a recent beat and rejects a stale one', async () => {
-  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  // The vault's keys as it gives them: it would refuse a log whose head moved under it, as `beatAgo` moves it.
-  const { checkpointKeys } = await vault.about();
-  const keys = { about: async () => ({ checkpointKeys, rootAdmins: [] }) } as unknown as Vault;
-  await beatAgo(12);
-  const recent = await auditReadiness(db.runtime, keys, chainKey);
+test('readiness accepts a recent beat and rejects a stale one', async (t) => {
+  /** A beat written `seconds` ago, then checkpointed: the vault signs it as it stands. */
+  const beat = async (seconds: number) => {
+    const checkpoint = t.mock.method(vault, 'checkpoint', async () => ({ ok: true }));
+    await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+    checkpoint.mock.restore();
+    await beatAgo(seconds);
+    assert.ok((await vault.checkpoint()).ok);
+  };
+  await beat(12);
+  const recent = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(recent.ok, true);
   assert.ok(Math.abs(recent.heartbeatAgeSeconds! - 12) < 5);
 
   // A Cron run that fires a few seconds late is not a logging failure.
-  await beatAgo(307);
-  assert.equal((await auditReadiness(db.runtime, keys, chainKey)).ok, true);
+  await beat(307);
+  assert.equal((await auditReadiness(db.runtime, vault, chainKey)).ok, true);
 
-  await beatAgo(HEARTBEAT_STALE_AFTER_SECONDS + 60);
-  const stale = await auditReadiness(db.runtime, keys, chainKey);
+  await beat(HEARTBEAT_STALE_AFTER_SECONDS + 60);
+  const stale = await auditReadiness(db.runtime, vault, chainKey);
   assert.equal(stale.ok, false);
   assert.equal(stale.checkpointed, true);
   assert.ok(stale.heartbeatAgeSeconds! > HEARTBEAT_STALE_AFTER_SECONDS);
@@ -344,6 +338,76 @@ test('a beat counts only by its MAC, and only for a point before its own row (fo
   await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
   assert.equal(said((await beats()).at(-1)!).broken?.seq, Number(x));
   assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
+});
+
+test('a finder made one of the vault\'s rows after its checkpoint signed it leaves readiness red: the signed prefix moved', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await db.runtime.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'secret.read', decision: 'allow' }]));
+  const x = (await entries()).at(-1)!.seq;
+  assert.ok((await slow.checkpoint()).ok);
+  // Beat X walks past entry x, clean, and waits to append; x is edited; beat F walks from before x, finds it, and
+  // waits too; X commits first, then F, each with its checkpoint.
+  const pause = () => {
+    let reached!: () => void;
+    let go!: () => void;
+    const at = new Promise<void>((resolve) => (reached = resolve));
+    const released = new Promise<void>((resolve) => (go = resolve));
+    const db = stepping(async ({ write }, phase) => {
+      if (write && phase === 'before') {
+        reached();
+        await released;
+      }
+    });
+    return { db, at, go };
+  };
+  const px = pause();
+  const beatX = writeAuditHeartbeat(px.db, chainKey, slow, quiet);
+  await px.at;
+  await overwrite(x, { metadata: '{"edited":true}' });
+  const pf = pause();
+  const beatF = writeAuditHeartbeat(pf.db, chainKey, slow, { warn: () => undefined });
+  await pf.at;
+  px.go();
+  await beatX;
+  pf.go();
+  await beatF;
+  const finder = (await beats()).at(-1)!;
+  assert.equal(said(finder).broken?.seq, Number(x));
+  const { checkpointKeys } = await slow.about();
+  const keys = { about: async () => ({ checkpointKeys, rootAdmins: [] }) } as unknown as Vault;
+  assert.equal((await auditReadiness(db.runtime, keys, chainKey)).ok, false);
+  // F made the vault's, its hash recomputed, and the rows after it, all the vault's, chained to it again: a walk of
+  // the app's sees a chain whole, and no beat. Only the hash the newest checkpoint signed for F is no longer there.
+  const [row, ...after] = (await entries()).filter((entry) => entry.seq >= finder.seq) as StoredEntry[];
+  assert.ok(after.every((entry) => entry.author === 'vault'));
+  const relabelled = { ...row!, author: 'vault' as const };
+  let prevHash = entryHash(relabelled.prevHash, relabelled, relabelled.mac);
+  await withLogUnlocked(db.owner, async (owner) => {
+    await owner.update(auditLog).set({ author: 'vault', hash: prevHash }).where(eq(auditLog.seq, row!.seq));
+    for (const entry of after) {
+      const next = entryHash(prevHash, entry, entry.mac);
+      await owner.update(auditLog).set({ prevHash, hash: next }).where(eq(auditLog.seq, entry.seq));
+      prevHash = next;
+    }
+    await owner.update(auditChainHead).set({ headHash: prevHash });
+  });
+  const ready = await auditReadiness(db.runtime, keys, chainKey);
+  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, false, false]);
+});
+
+test('a beat that could not walk is no point to resume from: the next goes on from the one before', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+  const before = await db.runtime.transaction((tx) => resumePoint(tx, chainKey));
+  assert.ok(before.seq >= 0n);
+  // Its first transaction fails, as a dropped connection would: it says so, and where it began it cannot say.
+  await writeAuditHeartbeat(stepping(async ({ n }, phase) => {
+    if (n === 1 && phase === 'before') throw new Error('connection lost');
+  }), chainKey, vault, { warn: () => undefined });
+  const failed = (await beats()).at(-1)!;
+  assert.deepEqual([said(failed).verified, (JSON.parse(failed.metadata) as { unverified?: string }).unverified], [undefined, 'connection lost']);
+  assert.deepEqual(await db.runtime.transaction((tx) => resumePoint(tx, chainKey)), before);
 });
 
 test('beats the app wrote since are no finding, however many instances beat at once', async () => {

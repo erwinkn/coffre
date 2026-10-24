@@ -868,8 +868,12 @@ row finds it.
      the walk got to, behind it, unless another call signed as far;
   4. a refusal's entry, in a transaction of its own.
 - **Readiness** (`auditReadiness`, `readiness`): in one snapshot, the
-  newest beat, the newest checkpoint, and the next beat's walk, from
-  where it would resume to the head.
+  newest beat, the newest checkpoint and that the prefix it signed is
+  still there, and the next beat's walk, from where it would resume to
+  the head. That walk costs what a beat's own does: the entries since the
+  newest beat's walk began, at most `CHAIN_WALK` (`request-cost.test.ts`
+  holds it to that however long the log). Past `CHAIN_WALK`, readiness is
+  red, as the beat itself would be.
 
 Why that is enough, by induction over beats. Say beat F found entry e
 edited, its walk having begun at point s, before e. Take any later beat X
@@ -934,8 +938,19 @@ What it does not claim, as the code does not:
   short says how far it got, which readiness reads as red, and the next
   goes on from there. A row hidden past where it stopped is read by the
   next. The model's walks are four entries.
-- **Rewinding the database.** Deleting the newest rows, the head row put
-  back, is the limit [architecture.md](architecture.md#limits) states.
+- **Rewinding the database, or rewriting its tail.** Deleting the newest
+  rows, the head row put back, is the limit
+  [architecture.md](architecture.md#limits) states: a finder cut so loses
+  its finding, and every row left is genuine. Rewriting the newest rows
+  does no more. The model's attacker rewrites once and keeps each entry's
+  author; the code's walk checks the vault's rows only for their place in
+  the chain, so a finder made one of the vault's rows, with only the
+  vault's rows after it, all chained to it again, is no beat and no fault
+  to the app. An app row after it would fail its MAC, so this is the
+  log's tail only, which a cut removes as well. Unlike a cut, the vault
+  finds it, by its MACs, at its next checkpoint, and refuses; and a
+  checkpoint already signed over the finder no longer finds the hash it
+  signed, which readiness checks (`auditHashAt`), as a verification does.
 
 The race it found in heartbeats, with readiness's walk off. Two run at
 once, as on two Node instances, each beating on its own timer. Beat 1
@@ -1012,8 +1027,12 @@ A check that is under way when the timer fires skips that tick. #296
 first kept it (`due`), when a tick skipped at the deadline could leave a
 session open 2R + D. Since #308 a check's deadline is at most its
 interval, and the watchdog bounds the session on its own: a tick falls
-during a check only as that check times out, which ends the group. TLC
-finds nothing that keeping it changes, so the code does not.
+during a check only as that check times out, which ends the group. TLC,
+which puts the deadline and the next tick on one tick, finds nothing that
+keeping it changes, so the code does not. In the code the deadline's timer
+starts just after the check does, so with D = R a yes inside that gap
+skips a tick, and the watchdog can end a session whose handle stands: an
+availability edge, not a bound, which `StandingStaysOpen` does not see.
 
 ### Their invariants
 

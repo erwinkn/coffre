@@ -736,7 +736,8 @@ reads it: it resumes no further than where the walk of any broken beat it
 reads began (`resumePoint`), and finds 812 again. Readiness runs that
 same walk, from the same point to the head, so it is red as soon as F
 commits, and red while F's row is hidden. Its cost is the entries since
-the newest beat's walk began: a few, as a beat's own walk. The model of
+the newest beat's walk began, as a beat's own walk: one beat's worth of
+writes. Past 10,000 of them readiness is red, as the beat would be. The model of
 it, against someone who hides, edits and puts back any beat row at any
 step, is [formal.md](formal.md#the-audit-chain-and-the-tunnel).
 
@@ -1115,7 +1116,10 @@ Each limit is stated here once; the other documents link to it.
   app or vault process that ran across the rewind, which refuses to append
   behind the head it remembers, and, with AWS KMS, CloudTrail, whose Decrypts
   then have no entries. Restarting both processes after a restore is what
-  makes a deliberate rewind work ([restore.md](restore.md)).
+  makes a deliberate rewind work ([restore.md](restore.md)). A cut of the
+  newest entries can take a heartbeat that found the log broken, and its
+  finding, with it; rewriting them instead does no more, and the vault
+  refuses its next checkpoint over them.
 - **A cut in the middle of the log is found at the next checkpoint, and an
   edit in place within a lap of the past, not at once.** Say Ada was
   removed at entry 812, and the database's owner deletes 812 and puts back

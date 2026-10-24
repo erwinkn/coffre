@@ -24,6 +24,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
+import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -88,6 +89,9 @@ let service: CoffreClient;
 let workload: () => Promise<void>;
 /** The same through a Cloudflare service binding, its caller the binding's `props`. */
 let bound: () => Promise<void>;
+/** The scheduled beat, and `/readyz`'s check, on the counted connections. */
+let beat: () => Promise<boolean>;
+let ready: () => Promise<{ ok: boolean }>;
 
 /** A client that calls the API as a CLI or a CI run does, its token checked on each request. */
 function bearer(runtime: CoffreRuntime, token: string): CoffreClient {
@@ -118,6 +122,8 @@ before(async () => {
   });
   if (auth.mode !== 'signin') throw new Error('unreachable');
   const base: FixtureDeps = { db: createDatabase(app), vault, chainKey: randomBytes(32) };
+  beat = () => writeAuditHeartbeat(base.db, base.chainKey, vault, { warn: () => assert.fail('the beat warned') });
+  ready = () => auditReadiness(base.db, vault, base.chainKey);
   const signinService = new SigninService({ ...base, signin: auth.signin });
   const deps: FixtureDeps = { ...base, signin: signinService };
   const runtime: CoffreRuntime = {
@@ -363,4 +369,16 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
       assert.deepEqual(spent, small[name], why);
     }
   }, growthSettings);
+});
+
+test("readiness reads the entries since the newest beat's walk began, however long the log", POSTGRES, async () => {
+  // An hour of beats, the most a resume reads back.
+  for (let i = 0; i < 12; i++) await beat();
+  assert.equal((await ready()).ok, true);
+  const small = await cost(ready);
+  // The log grown by writes, then a beat that walks them: readiness walks from where the next beat would.
+  for (let i = 0; i < 150; i++) await root.secrets.set('market/busy', { [`READY_${i % 20}`]: `fake-${i}` });
+  await beat();
+  assert.equal((await ready()).ok, true);
+  assert.deepEqual(await cost(ready), small, 'readiness ran more statements or read more rows once the log grew');
 });

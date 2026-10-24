@@ -164,14 +164,17 @@ const BEATS_SINCE = 1000;
  * that walked first committing last. Its finding stands until a walk from
  * where it began passes it (`NoResumePastFinding`). One past the point
  * that its MAC does not vouch for is read by the walk, and found changed.
- * Before the first beat, past the hour of them, or past `BEATS_SINCE`
- * since, the first entry.
+ * Before the first beat that walked, past the hour of them, or past
+ * `BEATS_SINCE` since, the first entry.
  */
 export async function resumePoint(db: Queryable, chainKey: Buffer): Promise<ChainPoint> {
   const key = appLogKey(chainKey);
   const said = (beat: Awaited<ReturnType<typeof newestHeartbeats>>[number]) => {
     if (!verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [key] }).ok) return null;
     const { verified, broken } = JSON.parse(beat.metadata) as { verified?: { seq?: unknown; hash?: unknown }; broken?: unknown };
+    // One that ran no walk, its database out of reach, says nothing of where to resume: the walk from an older
+    // one's point reads its row.
+    if (verified === undefined && broken === undefined) return null;
     const { seq, hash } = verified ?? {};
     const point =
       typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 && BigInt(seq) < beat.seq && typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)
