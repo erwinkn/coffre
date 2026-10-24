@@ -2,7 +2,7 @@
 // src/server.ts, and so only on the server. The app reaches the database
 // through Hyperdrive and the keys only through the vault Worker's service
 // binding.
-import { createCoffre, github, githubApp, postgres, signin, type CoffreContext, type SocketsNamespace, type Vault } from '@coffre/server/cloudflare';
+import { createCoffre, github, githubApp, postgres, signin, type CoffreContext, type GatesNamespace, type SocketsNamespace, type Vault } from '@coffre/server/cloudflare';
 
 export type Env = {
   HYPERDRIVE: Hyperdrive;
@@ -28,6 +28,8 @@ export type Env = {
   MCP_TOTAL: RateLimit;
   /** The Durable Object that hosts plugins' WebSockets, `CoffreSockets` (src/server.ts): the credential proxy's database tunnel. */
   SOCKETS: SocketsNamespace;
+  /** The Durable Object that holds each workload's gate, `CoffreGates` (src/server.ts). */
+  GATES: GatesNamespace;
 };
 
 export const coffre = createCoffre((env: Env) => {
@@ -42,9 +44,12 @@ export const coffre = createCoffre((env: Env) => {
     vault: env.VAULT,
     auth: signin({
       providers: [app ? github({ app }) : github(client)],
-      // CI runs may sign in as services with their platform's ID token, through
-      // the trust bindings owners make (docs/design/oidc.md).
+      // CI runs and apps may sign in as services with their platform's proof,
+      // through the trust bindings owners make (docs/design/oidc.md), into
+      // key-bound sessions only: no service token is issued or taken
+      // (docs/design/workload-access.md, section 6.3).
       workloads: {
+        useOnly: true,
         limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
         allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
         github: app,
@@ -59,6 +64,8 @@ export const coffre = createCoffre((env: Env) => {
     // Where plugins' WebSockets run, one object per `coffre run` and database: the
     // credential proxy's tunnel, once you add it (docs/design/credential-proxy.md).
     sockets: env.SOCKETS,
+    // Each workload's gate: its sessions' proofs taken once, and its limits.
+    gates: env.GATES,
   };
 });
 

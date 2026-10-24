@@ -5,7 +5,7 @@
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
 import { createCoffre, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
-import type { RateLimiter, SocketsNamespace, Vault } from '@coffre/server/cloudflare';
+import type { GatesNamespace, RateLimiter, SocketsNamespace, Vault } from '@coffre/server/cloudflare';
 import { credentialProxy, postgres as tunnel } from '@coffre/server/plugins/credential-proxy';
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
 
@@ -27,6 +27,8 @@ export type Env = {
   MCP_TOTAL: RateLimiter;
   /** The Durable Object that hosts the tunnel's WebSockets, `CoffreSockets` (src/server.ts). */
   SOCKETS: SocketsNamespace;
+  /** The Durable Object that holds each workload's gate, `CoffreGates` (src/server.ts). */
+  GATES: GatesNamespace;
 };
 
 // Behind a tunnel, the dev IdP is known by its public URL, as its issuer and in
@@ -96,6 +98,7 @@ export const coffre = createCoffre((env: Env) => {
     // insecureUpstreams reaches.
     plugins: [vaultKv(), credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true })],
     sockets: env.SOCKETS,
+    gates: env.GATES,
   };
 });
 

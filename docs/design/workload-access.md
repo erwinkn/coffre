@@ -793,9 +793,15 @@ holds what must be both shared and fast.
 
 - **On Workers**, a Durable Object, `CoffreGates`, named
   `gate:<principal>`. The deployment binds it as `GATES`, as it binds
-  `SOCKETS`, and `coffre init` writes it. Its location hint is the
-  database's region: every request already crosses there for its credential
-  read, so the hop costs one round trip inside that region.
+  `SOCKETS`, and `coffre init` writes it. It has no location hint:
+  Cloudflare makes it where its first request comes from, which is where
+  the workload runs, and the Worker that asks it runs near the workload
+  too, so the hop stays short. A hint naming the database's region
+  would add a long one whenever the Worker runs near its caller. The
+  Worker asks the object with `fetch`, not RPC: RPC needs the class to
+  extend `DurableObject` from `cloudflare:workers`, which Node, where the
+  server's tests load it, cannot resolve. Either way, a call is one round
+  trip.
 - **On Node**, an object in the app's process. A Node deployment runs one
   app process, as `examples/node` does. Several processes, Coffre itself as
   more than one replica on Kubernetes included, would each hold a gate of
@@ -803,13 +809,27 @@ holds what must be both shared and fast.
   The gate's nonce makes that fail loudly rather than unsafely (below). The
   docs say so wherever Coffre on Kubernetes is mentioned.
 
-**Nonces are epochs.** A gate draws a random `epoch` when it starts and
-rotates it every 2 minutes. Its nonce is `g<n>.<epoch>`, 16 random bytes in
-base64url after the rotation's count `n`. It need not be secret: it only
-names an epoch, and a proof must still be signed by the session's key. The
-gate accepts proofs carrying the current or the previous nonce, and
-remembers the `jti`s seen under each. Everything else answers
-`use_dpop_nonce` with the current nonce.
+**Nonces are epochs.** A gate draws a new nonce when it starts and every
+2 minutes after: `g<n>.` and 16 random bytes in base64url, `n` the epoch's
+number since the start. It need not be secret: it only names an epoch,
+and a proof must still be signed by the session's key. Epoch `n`'s nonce
+is taken from `n × 2` minutes after the start until `(n + 2) × 2`,
+however few requests came, so as the current or the previous nonce. The
+gate remembers the `jti`s it took under each. Everything else answers
+`use_dpop_nonce` with the current nonce. A `jti` taken under either live
+nonce is refused under both, whichever of the workload's sessions sends
+it, and it is spent as soon as the gate sees it, even if a count then
+refuses the request. Once both epochs are gone, a proof's nonce is
+refused anyway. Clocks step, both ways, and the gate's epochs and counts
+take it apart. Its epochs run on the latest time it was given: a step back
+of up to 10 seconds, two machines' skew, revives none, and a step back
+further starts a new epoch, as a restart does, so a clock that jumped
+ahead and came back costs a nonce retry. Each count holds one window, the
+one it was last asked in, or a later one up to 10 seconds ahead, which a
+clock a little behind still counts in; asked in any other window, it
+starts again at zero, and that is written too, so what an eviction reads
+back is what memory held. A count never waits for the clock to come back
+to it.
 
 - **A restart or an eviction forgets nothing that matters.** A new epoch
   means every proof made before it carries an unknown nonce and is refused,
@@ -843,9 +863,15 @@ interface Gate {
 }
 ```
 
-A count with a window of a day lives in the object's storage, flushed by an
-alarm every 10 seconds, so an eviction loses at most 10 seconds of counts. A
-Durable Object has no eviction hook. Any shorter window lives in memory.
+Counts are fixed windows on the clock: a minute's starts on the minute,
+a day's at 00:00 UTC. A burst across a boundary can therefore take up to
+twice a limit in a moment. A request names each count once, and one past
+any of its counts counts in none; `retryAfterMs` is when the last of the
+windows it is past ends. A count whose window is
+an hour or more, a day's, lives in the object's storage too, written by an
+alarm at most 10 seconds after it changes, so an eviction loses at most
+10 seconds of it. A Durable Object has no eviction hook. Any shorter
+window lives in memory alone.
 
 **The gate is not the source of truth for any decision a person made.**
 Freezes, revocations and grants are in the database and the log, read on each
@@ -1560,10 +1586,10 @@ these:
 | Import the `jwk` (cached per isolate by `jkt`, as a settled value) | ~50 µs cold, 0 warm |
 | One ES256 verify (BoringSSL in workerd) | ~100–200 µs |
 | The one SQL statement of 5.3 (row, member's generation, binding, ancestors, freezes) | ~100 µs of client work, plus a round trip through Hyperdrive |
-| The gate's RPC, from the caller's side | ~10 µs, plus a round trip inside the database's region |
+| The gate: the Worker's `fetch` to the workload's object, and its work there | On Cloudflare (PR 1b's live check, 600 requests each): about 0.2 ms on the Worker's side (CPU p50 413 µs against a floor of 202 µs, p99 647 against 406) and about 0.2 ms in the object (p50 203 µs). The gate's own work is 1.6 µs (`GateState.admit`, a proof and two counts, in Node); the rest is the Durable Object call's own machinery, as much by RPC. Plus a round trip to the object, made near the workload: 4 ms of wall time at p50 from the check's client |
 | A cold request: `vault.access` and the opening, through the vault's connection | as a handle's cold request today |
 
-The budget is under 0.5 ms of CPU on a warm request, plus two round trips:
+The budget is under 0.7 ms of CPU on a warm request, the gate's 0.4 included, plus two round trips:
 one to the database and one to the gate. Freezes and revocations are then
 seen on every request. A body's hash adds about 2 ms per MiB. The bench
 reports cold and warm. `request-cost.test.ts` gains a workload case that

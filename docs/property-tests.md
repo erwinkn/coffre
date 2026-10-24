@@ -106,6 +106,15 @@ Each file names its model and its sources in its header.
   schedule Hegel draws: every byte once and in order, nothing held past its
   bound, both ends finish, and a cheating peer gets its 1008 at the frame
   that cheats. Two files, as a server test may not import the CLI.
+- **The workload gate** (`packages/server/test/gate-properties.test.ts`):
+  a workload's gate
+  ([workload-access.md](design/workload-access.md#52-the-gate-replay-nonces-live-counters))
+  against a reference written from the design: random requests with and
+  without a proof or counts, clock steps both ways, restarts, and for a
+  Durable Object's gate its writes and evictions; every answer must be the
+  reference's. The reference keeps every proof taken across restarts, so a
+  gate that took one twice disagrees. A small ceiling lets sequences reach
+  `overloaded`. It needs no database, so `pnpm test:properties` runs it.
 
 ## Database-backed properties
 

@@ -31,8 +31,18 @@
   "services": [{ "binding": "VAULT", "service": "coffre-vault" }],
   // Where plugins' WebSockets run: the credential proxy's database tunnel, one
   // object per `coffre run` and database. Idle until you add the tunnel.
-  "durable_objects": { "bindings": [{ "name": "SOCKETS", "class_name": "CoffreSockets" }] },
-  "migrations": [{ "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] }],
+  // And each workload's gate, one object per service: what holds a key-bound
+  // session's proofs to one use, and counts its limits.
+  "durable_objects": {
+    "bindings": [
+      { "name": "SOCKETS", "class_name": "CoffreSockets" },
+      { "name": "GATES", "class_name": "CoffreGates" }
+    ]
+  },
+  "migrations": [
+    { "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] },
+    { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] }
+  ],
   // The heartbeat and audit checkpoints.
   "triggers": { "crons": ["*/5 * * * *"] },
   // What a CI run's exchange of its ID token passes first: per address, and
