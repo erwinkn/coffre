@@ -43,7 +43,7 @@ import {
 import { deriveLogKey, GENESIS_HASH, entryHash, entryMac, sealEntry, verifyEntries, type LogFields, type LogKey, type StoredEntry } from '../packages/core/src/audit/chain.ts';
 import { encodeAad, type SecretContext } from '../packages/core/src/context.ts';
 import { handsBack, type RefusalCode } from '../packages/core/src/vault.ts';
-import { keyRefusals, sensitiveRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
+import { keyRefusals, referenceRefusal, sensitiveRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
 import type { EnvironmentRow } from '../packages/vault/src/store.ts';
 
 const [oracle, ...flags] = process.argv.slice(2);
@@ -78,7 +78,7 @@ const PROJECTS = ['market', 'ops'] as const;
 const INHERITED = ['constructor', '__proto__', 'toString'] as const;
 const SLUGS = ['dev', 'prod', 'fork'] as const;
 const ENVIRONMENTS = [...PROJECTS.flatMap((project) => SLUGS.map((slug) => `${project}/${slug}`)), 'market/dev@ada', 'ghost', ''];
-const ROLE_NAMES = [...Object.keys(ROLES), 'custom', 'ghost', 'constructor'];
+const ROLE_NAMES = [...Object.keys(ROLES), 'custom', 'ghost', ...INHERITED];
 const INSTANCE_ROLE_NAMES = [...Object.keys(INSTANCE_ROLES), 'ghost', ...INHERITED];
 const PEOPLE = ['user:ada', 'user:bo', 'token:ci', 'service:deploy'];
 
@@ -151,6 +151,7 @@ function holdings(given?: Policy): Holdings {
     ...(chance(0.7) ? {} : { service: chance(0.5) }),
   };
 }
+const EVERYWHERE_SCOPE: Scope = { projects: 'all', environments: 'all' };
 const setting = (): Scope | null => (chance(0.2) ? null : scope());
 function account(): ServiceAccount {
   return { grants: some([{ role: pick(ROLE_NAMES), place: place() }, { role: pick(ROLE_NAMES), place: place() }], 2), admittedBy: chance(0.5) ? pick(PEOPLE) : null };
@@ -173,7 +174,8 @@ const canonical = (value: unknown): unknown =>
       : value;
 // How often each yes-or-no function says yes, or a decision allows every key: a generator that only ever met one
 // answer would hold the model to nothing. Undefined for functions that answer otherwise.
-const yes = (value: unknown): boolean | undefined => {
+const yes = (op: string, value: unknown): boolean | undefined => {
+  if (op === 'referenceRefusal') return value === null;
   if (typeof value === 'boolean') return value;
   if (Array.isArray(value)) return value.length > 0 && value.every((code) => code === null);
   if (typeof value === 'object' && value !== null && 'ok' in value) return value.ok === true;
@@ -189,10 +191,10 @@ function compare(): void {
   const answers = run.stdout.trimEnd().split('\n');
   if (answers.length !== cases.length) throw new Error(`the oracle answered ${answers.length} of ${cases.length} cases`);
   cases.forEach(({ input, expected }, i) => {
-    const count = counts.get(input.op) ?? { cases: 0, differ: 0, yes: yes(expected) === undefined ? undefined : 0 };
+    const count = counts.get(input.op) ?? { cases: 0, differ: 0, yes: yes(input.op, expected) === undefined ? undefined : 0 };
     counts.set(input.op, count);
     count.cases += 1;
-    if (count.yes !== undefined && yes(expected) === true) count.yes += 1;
+    if (count.yes !== undefined && yes(input.op, expected) === true) count.yes += 1;
     const answer = JSON.parse(answers[i]!) as unknown;
     if (JSON.stringify(canonical(answer)) === JSON.stringify(canonical(expected))) return;
     count.differ += 1;
@@ -242,6 +244,12 @@ repeat(6000, () => {
   const role = pick(ROLE_NAMES);
   const kept = chance(0.3) ? definition() : undefined;
   add({ op: 'givesService', holder, setting: where, role, place: at, ...(kept === undefined ? {} : { kept }) }, givesService(holder, where, role, at, kept));
+  // An unscoped Developer giving viewer on a whole project of an inherited name: what reaches `protectedWithin` there.
+  if (chance(0.1)) {
+    const developer: Holdings = { ...holder, role: 'developer', scope: { projects: 'all', environments: 'all' }, credentialScope: null, service: false };
+    const odd = { projectId: pick(INHERITED) };
+    add({ op: 'givesService', holder: developer, setting: EVERYWHERE_SCOPE, role: 'viewer', place: odd }, givesService(developer, EVERYWHERE_SCOPE, 'viewer', odd));
+  }
   const actor = pick(PEOPLE);
   const of = account();
   add({ op: 'managesService', holder, setting: where, actor, account: of }, managesService(holder, where, actor, of));
@@ -316,6 +324,19 @@ repeat(3000, () => {
   add(
     { op: 'keyRefusals', reader: who, principal: 'user:ada', permission, secrets, at: secrets, environments: [...rows].map(([id, row]) => ({ id, row })), needs: [null], owns: [false] },
     keyRefusals(who, { principal: 'user:ada', permission, secrets, at: secrets, environments: rows, needs: [null], owns: [false] }),
+  );
+});
+
+// Making a reference: the maker's rights at both ends, the source's nature, and personal configs at either.
+repeat(6000, () => {
+  const who = reader();
+  const holder = secretPlace();
+  const source = secretPlace();
+  const rows = environments();
+  const sensitive = chance(0.4);
+  add(
+    { op: 'referenceRefusal', reader: who, holder, source, environments: [...rows].map(([id, row]) => ({ id, row })), sensitive },
+    referenceRefusal(who, holder, source, rows, sensitive),
   );
 });
 

@@ -245,13 +245,13 @@ theorem personal_holds_no_reference {r principal p secret held envs need owns} {
 
 /-! ## References
 
-Making a reference (`reference` in `vault.ts`) takes writing where it is
+Making a reference (`reference` in `vault.ts`, its check `referenceRefusal`) takes writing where it is
 held, reading its source, and using it there too if it is sensitive (R24). A
 read through it is decided where it is held, by its source's nature (R20,
 R23): a share, by someone who could read the value, to whoever reads where
 it lands. -/
 
-/-- `reference`'s check for one reference, before what the database settles (`bad_claim`, `invalid`). -/
+/-- `referenceRefusal`: `reference`'s check of one reference, past what only the database settles (`bad_claim`, `invalid`). -/
 def referenceRefusal (r : Reader) (holder source : SecretPlace) (envs : Table EnvRow)
     (sourceSensitive : Bool) : Code :=
   let ownerOf (s : SecretPlace) := (envs.get? s.env).bind (·.owner)

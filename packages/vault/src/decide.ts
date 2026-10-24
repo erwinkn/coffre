@@ -3,9 +3,9 @@ import { handsBack, type Access, type RefusalCode } from '@coffre/core/vault';
 import type { EnvironmentRow } from './store.ts';
 
 /**
- * How the vault decides each key of one call, as functions of what the
- * decision read and nothing else: the rest of `#keys` reads, locks and
- * logs around them. Pure, so that `formal/lean` holds them to its model
+ * How the vault decides each key of one call, and each reference one makes,
+ * as functions of what the decision read and nothing else: the rest of
+ * `#keys` and `reference` reads, locks and logs around them. Pure, so that `formal/lean` holds them to its model
  * case by case (`pnpm formal:lean`, docs/formal.md).
  */
 
@@ -145,4 +145,28 @@ export function sensitiveRefusals(
     if (handedBack && !readsSensitive(reader.live, secret.projectId)) return 'not_owner_issued';
     return null;
   });
+}
+
+/**
+ * Why `reader` may not make a reference at `holder` to `source`, or null, past
+ * what only the database settles (a source of another claim, a reference to
+ * itself). A personal config's values are bound to its owner: no reference
+ * holds one, nor reads one. Making one hands its source's value to whoever
+ * reads the holder, whatever its nature becomes: its maker writes the holder,
+ * reads the source there, as any direct access, and, for a sensitive one,
+ * which nobody reads, uses it there too (R24).
+ */
+export function referenceRefusal(
+  reader: Reader,
+  holder: SecretPlace,
+  source: SecretPlace,
+  environments: ReadonlyMap<string, EnvironmentRow>,
+  sensitive: boolean,
+): RefusalCode | null {
+  if (environments.get(holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
+  const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
+  const at = placeIn(source, environments);
+  return refuses(reader, 'secret.write', placeIn(holder, environments), gone(holder))
+    ?? refuses(reader, 'secret.read', at, gone(source))
+    ?? (sensitive ? refuses(reader, 'secret.use', at, gone(source)) : null);
 }

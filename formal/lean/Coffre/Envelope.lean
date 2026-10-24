@@ -18,7 +18,7 @@ is one the vault made for exactly that context.
 
 - `encodeAad_injective`: no two contexts encode to the same AAD.
 - `open_only_as_sealed`: what opens as `ctx` is a value whose key the vault
-  wrapped as exactly `ctx`, and the value it encrypted under that key: no
+  wrapped as exactly `ctx`, and the value encrypted under that key: no
   swap across projects, environments, keys, owners or sensitivity.
 - `versions_not_bound`: what is not bound. Two versions of one key share a
   context, so either's row opens as the other's: a rollback, which needs a
@@ -148,12 +148,13 @@ theorem wrapAad_injective {k : List Char} {c d : Ctx} (hc : Wellformed c) (hd : 
 /-- The value's own AAD: the ids alone, so that a version made sensitive keeps its ciphertext. -/
 def valueAad (c : Ctx) : List Char := encodeAad { c with owner := none, sensitive := false }
 
-/-! ## An ideal AEAD, and what the vault sealed
+/-! ## An ideal AEAD, and what was sealed
 
-`dec k a c` opens ciphertext `c` under key `k` with AAD `a`. The vault's
-history is two lists. Each `Value` is one value it encrypted (`encrypt`,
-`seal`): a fresh DEK, and the value under it with its ids. Each `Wrap` is one
-wrap of a DEK under the KEK, as a context (`keks.wrap`): one for each version
+`dec k a c` opens ciphertext `c` under key `k` with AAD `a`. The history is
+two lists. Each `Value` is one value the app encrypted (`encrypt`, in
+`packages/server/src/api/keys.ts`): a fresh DEK, and the value under it with
+its ids. Each `Wrap` is one wrap of a DEK under the KEK, as a context, which
+only the vault makes (`keks.wrap`): one for each version
 written, and one more for each version a rewrap makes of an old one's key
 (`key.rewrap`: a version restored, a value made sensitive or, by an Owner, a
 secret), so a DEK may have several. -/
@@ -184,12 +185,14 @@ The assumptions, stated rather than proved:
   the vault or the KMS: whatever opens under it is a wrap the vault made, of
   its DEK, with its AAD.
 - `dekIntegrity`: the same for each DEK the vault wrapped, against anyone who
-  never held it: whatever opens under it is the value the vault encrypted
+  never held it: whatever opens under it is the value the app encrypted
   under it, with its ids. (Whoever was handed the DEK read the value already.)
+  The app holds every DEK it encrypts with, so this assumes it too: that it
+  encrypts under a key only the value it was made for.
 - `fresh`: each DEK encrypts one value (`freshDek`, 32 random bytes); a
   rewrap wraps a key again, and never encrypts another value under it.
-- `correct`: what the vault wrapped and encrypted opens as it did.
-- `wellformed`: the vault wraps and encrypts only contexts `checkContext` accepts.
+- `correct`: what was wrapped and encrypted opens as it was.
+- `wellformed`: only contexts `checkContext` accepts are wrapped and encrypted.
 -/
 structure Assumptions (dec : Key → List Char → Cipher → Option Key) (decValue : Key → List Char → Cipher → Option Plain)
     (kek : Key) (kekId : List Char) (values : List (Value Key Cipher Plain)) (wraps : List (Wrap Key Cipher)) : Prop where
@@ -224,7 +227,7 @@ variable {dec : Key → List Char → Cipher → Option Key} {decValue : Key →
 **A row opens only as it was sealed.** Whatever the database holds, if it
 opens as `ctx`, the vault wrapped its key as exactly `ctx` (its project,
 environment, key, owner and sensitivity), and what opens is the value the
-vault encrypted under that key, for those ids.
+app encrypted under that key, for those ids.
 -/
 theorem open_only_as_sealed (A : Assumptions dec decValue kek kekId values wraps) {ctx : Ctx} (hctx : Wellformed ctx)
     {row : Row Cipher} {m : Plain} (h : openRow dec decValue kek kekId ctx row = some m) :

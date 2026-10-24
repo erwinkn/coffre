@@ -311,7 +311,8 @@ pnpm formal:lean --seed=42     # another reproducible set
   name. [`AccessProofs.lean`](../formal/lean/Coffre/AccessProofs.lean) proves
   what the rules promise.
 - [`Decide.lean`](../formal/lean/Coffre/Decide.lean) is how the vault decides
-  each key of a read, [`packages/vault/src/decide.ts`](../packages/vault/src/decide.ts):
+  each key of a read, and each reference one makes,
+  [`packages/vault/src/decide.ts`](../packages/vault/src/decide.ts):
   personal configs, references, deleted places, sensitive values.
 - [`Envelope.lean`](../formal/lean/Coffre/Envelope.lean) is the AAD and the
   envelope, and [`Audit.lean`](../formal/lean/Coffre/Audit.lean) the chain
@@ -332,10 +333,10 @@ the code.
 | Theorem | In plain words |
 |---|---|
 | `credential_within_holder` | A request on a credential holds nothing its holder does not hold now. |
-| `personal_token_within_issuer` | A personal token holds nothing its issuer did not hold when they made it, at the place as it was named then, whatever happened since: roles widened, environments protected or unprotected or renamed, grants added. At a protected environment, it is held to what the issuer held there protected. |
+| `personal_token_within_issuer` | A personal token issued by 0.10 or later holds nothing its issuer did not hold when they made it, at the place as it was named then, whatever happened since: roles widened, environments protected or unprotected or renamed, grants added. At a protected environment, it is held to what the issuer held there protected. |
 | `role_edits_never_widen_credentials` | What a credential's scope leaves to its holder is the same under any edit of any role. |
 | `protected_never_widens` | Under valid roles (`definitionProblem`), a person holds no more in an environment once it is protected. |
-| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). |
+| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). One from before 0.11 is sealed as its sealer owns the project then (`sealCredentials`), which the model leaves out. |
 | `no_person_reads_sensitive` | No person, Owner or not, on a session or any token of theirs, is handed back a sensitive value: directly, through a reference, in a fork or in a personal config. |
 | `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the value's own project, the source's for a reference, whose issuer owned that project. |
 | `copy_keeps_sensitive` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive. |
@@ -343,7 +344,7 @@ the code.
 | `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24). |
 | `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |
-| `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the vault encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
+| `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
 | `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |
 | `no_person_opens_sensitive` | Even when an attacker rewrites the database's sensitivity, owner or place columns, a person is handed only a value whose key the vault wrapped not sensitive for that place, and no personal config's value but their own: the decision trusts the columns, and the wrap refuses to open what they lied about. |
 | `sensitive_value_never_reaches_a_person` | So a value whose key the vault only ever wrapped sensitive (it wraps a sensitive version's key again only as sensitive, but for an Owner's loosening, R30) reaches no person, whatever the database says. |
@@ -363,10 +364,11 @@ theorems that need it, each the standard property, idealised:
 
 - **AEAD integrity** (`Envelope.Assumptions`): whatever opens under the KEK
   is a wrap the vault made, of a DEK, with its AAD; whatever opens under a
-  DEK the vault wrapped is the value it encrypted under it, against anyone
-  who never held the DEK. Each DEK encrypts one value; it may be wrapped
-  several times, once a version, as a rewrap does. We do not prove
-  AES-256-GCM has this property.
+  DEK the vault wrapped is the value the app encrypted under it, against
+  anyone who never held the DEK. The app, which encrypts, holds every DEK:
+  this assumes it encrypts under each only the value it made it for. Each
+  DEK encrypts one value; it may be wrapped several times, once a version,
+  as a rewrap does. We do not prove AES-256-GCM has this property.
 - **Collision resistance** (`Audit.Injective`): the entry hash is injective
   and never the genesis hash. This is the symbolic idealisation, stronger
   than collision resistance: a proof under it says an attacker must find a
@@ -395,23 +397,25 @@ They run a batch of 20,000 at a time.
 | Compared | Cases | From |
 |---|---|---|
 | `allows`, `withinCredential` | 20,000 each | `@coffre/core/access` |
-| `givesService`, `managesService`, `issuesCredential` | 6,000 each | `@coffre/core/access` |
+| `givesService`, `managesService`, `issuesCredential` | about 6,500, 6,000, 6,000 | `@coffre/core/access` |
 | `heldColumns`, `issuedGrant`, `readsSensitive`, `ownsProject`, `mayManageAccess`, `runsInstance`, `readsWholeLog`, `makesProjects` | 4,000 each | `@coffre/core/access` |
-| `keyRefusals`, `sensitiveRefusals` | 13,000, 10,000 | `packages/vault/src/decide.ts` |
+| `keyRefusals`, `sensitiveRefusals`, `referenceRefusal` | 13,000, 10,000, 6,000 | `packages/vault/src/decide.ts` |
 | `encodeAad` | 2,000 | `@coffre/core/envelope` |
 | `verifyEntries` | 2,000 | `@coffre/core/audit`, real keys and hashes |
 
 The run prints how often each yes-or-no function says yes, so a generator
 that stopped meeting one answer shows. And the comparison was itself tested:
-each of these changes to the code makes the run fail, by 4 to 519 cases:
-`holds` ignoring protection, `heldColumns` asking at the project,
-`readsSensitive` across projects, `ownsProject` for a service, a personal
-config's owner past their credential, a person handed a sensitive value,
-`verifyEntries` letting a gap through. Changing the model the same way
-breaks the proofs first.
+each of these changes to the code makes the run fail, by 4 to 519 cases or
+by throwing: `holds` ignoring protection, `heldColumns` asking at the
+project, `readsSensitive` across projects, `ownsProject` for a service, a
+personal config's owner past their credential, a person handed a sensitive
+value, a reference made to a sensitive source without using it there,
+`verifyEntries` letting a gap through, a lookup by an inherited name.
+Changing the model the same way breaks the proofs first.
 
-The vault's per-key decision lives in `decide.ts`, pure, so that it can be
-compared: `#keys` reads, locks and logs around it. It tells a personal
+The vault's per-key decision and its check of each reference made live in
+`decide.ts`, pure, so that they can be compared: `#keys` and `reference`
+read, lock and log around them. It tells a personal
 config's own key from a reference into it by the environments' ids, as the
 model does, where it compared their rows as objects: the same on every map
 the store builds, one row an id.
@@ -444,7 +448,9 @@ the store builds, one row an id.
   decision, not the API, the database's reads, which `Holdings` and the
   environment rows the vault builds, or the locking (TLA+ above).
   `serviceGrant`, how `issuedScope` keeps a service's grant, is modelled and
-  proved but not compared: `narrowest` is private to the server.
+  proved but not compared: `narrowest` is private to the server. Nor is
+  `sealCredentials`, which reads a credential of before 0.11 as its sealer
+  holds.
 - **The cryptography itself**, as assumed above, and KMS's encryption
   context, which the model does not encode (only the local KEK's AAD).
 - **Freshness.** Rolling back the log and all its checkpoints together needs

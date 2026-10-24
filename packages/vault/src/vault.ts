@@ -103,7 +103,7 @@ import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/g
 import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
-import { keyRefusals, placeIn, refuses, sensitiveRefusals, type SecretPlace } from './decide.ts';
+import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -1402,19 +1402,11 @@ class VaultService implements Vault {
         const source = sources.get(item.source.secretId);
         return source === undefined ? [item.holder.environmentId] : [item.holder.environmentId, source.environmentId];
       }));
-      const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
       const codes = items.map((item): RefusalCode | null => {
         const source = sources.get(item.source.secretId);
         if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
         if (source.secretId === item.holder.secretId) return 'invalid';
-        // A personal config's values are bound to its owner: no reference holds one, nor reads one.
-        if (environments.get(item.holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
-        // Making one hands its source's value to whoever reads the holder, whatever its nature becomes: its maker reads
-        // it at the source, as any direct access there, and, for a sensitive one, which nobody reads, uses it there too.
-        const at = placeIn(source, environments);
-        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder))
-          ?? refuses(reader, 'secret.read', at, gone(source))
-          ?? (natures.get(source.secretId) === 'sensitive' ? refuses(reader, 'secret.use', at, gone(source)) : null);
+        return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) === 'sensitive');
       });
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));

@@ -121,7 +121,9 @@ theorem credential_capped_under_edits {h : Holdings} {s roles instanceRoles p x}
 
 /-! ## A personal token holds no more than its issuer did
 
-A personal token's grant at `x₀` keeps its role's columns, each cut down to
+A personal token's grant at `x₀`, one 0.10 or later issued (`issuedGrant`;
+one from before keeps a role's name alone, read as it ships), keeps its
+role's columns, each cut down to
 what its issuer held at `x₀` then (`heldColumns`). The theorem: at any place
 `x` and under any policy later, what the token leaves to a request, the
 issuer held at `x` when they made it, named as it was then (`slugOf`, the
@@ -283,7 +285,8 @@ theorem covers_project_of {g : ScopeGrant} {x : Place} {proj : String} (hp : g.p
   split at hcov <;> simp_all
 
 /--
-**A personal token never holds more than its issuer did.** Whatever the
+**A personal token never holds more than its issuer did.** For a token
+0.10 or later issued, whatever the
 policy has become (`h₁.policy`: roles widened, environments protected),
 whatever grants its issuer holds now, however its places were renamed since,
 a request on a token whose every grant `h₀` issued (`IssuedBy`) holds `p` at
@@ -477,7 +480,9 @@ theorem readsSensitive_iff {h : Holdings} {proj : String} :
 **R32.** A request reads a project's sensitive values only as a service, on
 a credential with a grant in that project whose issuer (`issuerOf`, who made
 it by `serviceGrant`) owns the project: no person, and no Owner of another
-project, handed it them.
+project, handed it them. A credential from before 0.11 reads them once sealed
+(`sealCredentials` in `services.ts`), as its sealer owns the project then,
+which this does not model.
 -/
 theorem owner_issued_only {h : Holdings} {proj : String} {s : List ScopeGrant} (issuerOf : ScopeGrant → Holdings)
     (hcred : h.cred = some s)

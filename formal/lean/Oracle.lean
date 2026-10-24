@@ -225,6 +225,9 @@ def answer (j : Json) : Parse Json := do
       let (project, sensitive) := secrets.getD i ("", false)
       sensitiveRefusal (codes.getD i none) r a principal purpose keeps project sensitive
     pure (Json.arr (out.map code).toArray)
+  | "referenceRefusal" =>
+    pure (code (referenceRefusal (← reader (← req j "reader")) (← secretPlace (← req j "holder")) (← secretPlace (← req j "source"))
+      (← envRows (← req j "environments")) (← (← req j "sensitive").getBool?)))
   | "encodeAad" => pure (Json.str (String.ofList (Envelope.encodeAad (← aadCtx (field j "ctx")))))
   | "verifyEntries" => verifyCase j
   | _ => throw s!"no op {op}"
