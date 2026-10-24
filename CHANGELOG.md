@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.12.1 (2026-10-24)
+
 - **Upgrading to 0.12.1, in short.** No migration: the database, the
   settings and the API are as in 0.12.0, so `coffre migrate` has nothing to
   apply. To send a body past 16 MiB through the proxy, upgrade the instance
