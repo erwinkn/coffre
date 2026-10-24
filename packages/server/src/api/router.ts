@@ -17,22 +17,12 @@ import { routes, type Check, type Route } from './routes.ts';
  * The most an API request body may be, read as it streams and abandoned
  * past this: a control-plane request, a bulk secret write its largest. Well
  * above anything the CLI or UI sends for a typical change, though a very
- * large `.env` import (over this, or over `MAX_BODY_KEYS` keys) is refused
+ * large `.env` import (over this, or over a route's key cap) is refused
  * with a 400 and must be split. Bounded so no request buffers an unbounded
- * body; at this size a plain parse stays within R27's budget, and
- * `MAX_BODY_KEYS` caps the entries a body drives before they are validated.
+ * body; the body's value count is held to `MAX_BODY_NODES` in `readJson`
+ * before validation, which is what keeps a parse within R27's budget.
  */
 const API_BODY_BYTES = 1024 * 1024;
-
-/**
- * The most top-level entries a request body may name, refused before the
- * body is validated. A bulk write, a dismissal map and an access patch are
- * objects keyed by name; each entry is validated and does per-key work, so
- * the count is capped above any real one and well within one request's CPU
- * budget (R27). No route's body carries more; a larger one is refused here,
- * before validation walks every entry.
- */
-const MAX_BODY_KEYS = 1000;
 
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
 
@@ -210,11 +200,6 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
       }
     }
     const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
-    // Before validation, which walks every entry: an object body that names more than the cap is refused here, so a
-    // huge map never drives per-key work (R27). No route's body carries more than this many top-level entries.
-    if (raw !== null && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length > MAX_BODY_KEYS) {
-      throw badRequest(`the body names more than ${MAX_BODY_KEYS} entries`);
-    }
     const input = def.input === undefined ? undefined : def.input.parse(raw);
     const query =
       request.method === 'GET' || def.query === undefined

@@ -54,14 +54,26 @@ export async function readLimitedText(request: Request, max: number): Promise<st
 }
 
 /**
- * Parse a JSON body, refusing a top-level `__proto__` key. `JSON.parse`
- * makes it an own property, not prototype pollution, but validation treats
- * it inconsistently (a secret named that would seem to write and store
- * nothing), so refuse it outright. Top-level is enough: a body's data keys
- * (secret names, paths) live there, and every nested object a route takes is
- * `.strict()`, so a `__proto__` deeper is already refused. A plain parse,
- * not a reviver that runs a function per node: the reviver cost is what let
- * a large body of many tiny entries burn CPU (R27).
+ * The most values a request body may hold, counted over the whole tree
+ * (every object entry, array element and leaf). Validation builds work, and
+ * sometimes an error, per value, so a body is held to this before it is
+ * validated: well above the largest real one (a 1000-key bulk write of
+ * generated values is about 11k), and far below what a megabyte of tiny
+ * entries or array elements would reach, which cost seconds of CPU (R27).
+ */
+const MAX_BODY_NODES = 20000;
+
+/**
+ * Parse a JSON body, then walk it once under a node cap, refusing a
+ * `__proto__` key anywhere. `JSON.parse` makes `__proto__` an own property,
+ * not prototype pollution, but validation treats it inconsistently (a secret
+ * named that would seem to write and store nothing), so it is refused. The
+ * walk counts every value and stops the body — before validation — once it
+ * is too large: a plain parse (not a per-node reviver) is bounded by the
+ * byte cap, but validating a huge array or record is not, so the count is
+ * what keeps a request within R27's CPU budget. The walk pushes a node's
+ * children only while under the cap, so a 262k-element array is refused
+ * after counting it, never after copying it.
  */
 function parseJsonBody(text: string): unknown {
   let body: unknown;
@@ -70,8 +82,22 @@ function parseJsonBody(text: string): unknown {
   } catch {
     throw badRequest('the body is not JSON');
   }
-  if (body !== null && typeof body === 'object' && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, '__proto__')) {
-    throw badRequest('__proto__ cannot be used as a key');
+  let nodes = 1;
+  const stack: unknown[] = [body];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (value === null || typeof value !== 'object') continue;
+    if (Array.isArray(value)) {
+      nodes += value.length;
+      if (nodes > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
+      for (const element of value) stack.push(element);
+    } else {
+      if (Object.prototype.hasOwnProperty.call(value, '__proto__')) throw badRequest('__proto__ cannot be used as a key');
+      const keys = Object.keys(value);
+      nodes += keys.length;
+      if (nodes > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
+      for (const key of keys) stack.push((value as Record<string, unknown>)[key]);
+    }
   }
   return body;
 }

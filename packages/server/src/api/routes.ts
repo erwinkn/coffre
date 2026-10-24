@@ -177,11 +177,20 @@ const roleDefinition = z.object({
   permissions: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
   protected: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
 }).strict();
+/**
+ * The most keys a bulk write or dismissal map names at once, and the most
+ * places an access patch sets: each entry drives its own grant or secret
+ * write, so the count is capped as a scope's places are (the body's total
+ * value count is bounded before this, in `readJson`). Above any real
+ * environment, and well within one request's budget (R27).
+ */
+const MAX_BULK_KEYS = MAX_SCOPE_PLACES;
+
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
 const accessPatch = z.record(
   z.string().max(200),
   z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
-);
+).refine((patch) => Object.keys(patch).length <= MAX_BULK_KEYS, `an access change sets at most ${MAX_BULK_KEYS} places at once`);
 /** A token's or a binding's scope, each place by path and its role: `{ "market/dev": "developer" }`. All its account holds when left out. */
 const credentialScope = z
   .record(z.string().max(200), role)
@@ -357,7 +366,8 @@ export const routes = {
   }),
   ...route('PATCH /projects/:project/:environment/dismissals', {
     // `true` dismisses a missing key, `null` restores it.
-    input: z.record(secretKey, z.literal(true).nullable()),
+    input: z.record(secretKey, z.literal(true).nullable())
+      .refine((map) => Object.keys(map).length <= MAX_BULK_KEYS, `at most ${MAX_BULK_KEYS} keys at once`),
     needs: 'secret.write',
     action: 'missing.dismiss',
     run: (ctx, { place, input }) => setDismissals(ctx, place, input),
@@ -377,6 +387,7 @@ export const routes = {
     // `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
     input: z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())
       .superRefine((patch, issues) => {
+        if (Object.keys(patch).length > MAX_BULK_KEYS) issues.addIssue({ code: 'custom', message: `a write names at most ${MAX_BULK_KEYS} keys at once` });
         const problem = generationProblem(patch);
         if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
       }),

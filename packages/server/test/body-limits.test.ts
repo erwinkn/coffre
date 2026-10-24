@@ -46,9 +46,19 @@ test('readJson abandons an oversize body instead of buffering and parsing it', a
   await assert.rejects(readJson(request, 4 * 1024), /larger than 4096 bytes/);
   // readLimitedText stops reading past the cap too.
   await assert.rejects(readLimitedText(new Request('https://x/', { method: 'POST', body: big }), 1024), /larger than 1024 bytes/);
-  // Within the cap, it still parses, and still refuses a __proto__ key.
+  // Within the cap, it still parses, and still refuses a __proto__ key, nested too.
   assert.deepEqual(await readJson(new Request('https://x/', { method: 'POST', body: '{"a":1}' }), 4 * 1024), { a: 1 });
   await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: '{"__proto__":1}' }), 4 * 1024), /__proto__/);
+  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: '{"a":{"b":{"__proto__":1}}}' }), 4 * 1024), /__proto__/);
+});
+
+test('readJson refuses a body with too many values, nested array or record alike', async () => {
+  const bigArray = `{"paths":[${Array.from({ length: 30000 }, () => '0').join(',')}]}`;
+  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: bigArray }), 4 * 1024 * 1024), /more than 20000 values/);
+  const bigRecord = `{${Array.from({ length: 30000 }, (_, i) => `"K${i}":0`).join(',')}}`;
+  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: bigRecord }), 4 * 1024 * 1024), /more than 20000 values/);
+  // A legal-sized nested array passes.
+  assert.ok(await readJson(new Request('https://x/', { method: 'POST', body: '{"paths":[1,2,3]}' }), 4 * 1024));
 });
 
 test('a body is abandoned soon after the cap, not drained to the end', async () => {
