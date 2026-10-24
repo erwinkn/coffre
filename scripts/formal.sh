@@ -56,6 +56,35 @@ REMOVALS=(
   "Bulk CountsTheRequest CapHolds"
   "Bulk PerPrincipal CapHolds"
   "Bulk StampedWhenCounted CapHolds"
+  "WorkloadReplay KeyCheckedAgainstRow CopyIsUseless"
+  "WorkloadReplay RequestDigestChecked ForwardedIsSigned"
+  "WorkloadReplay OnlySignedHeadersForwarded ForwardedIsSigned"
+  "WorkloadReplay NonceEpochs ProofOnce"
+  "WorkloadEnding LiveCheckBeforeCache FreezeBound"
+  "WorkloadEnding TunnelRecheckSeesFreezes FreezeBound"
+  "WorkloadEnding GenerationInStatement RevokeBound"
+  "WorkloadEnding RenewCappedAtNotAfter NotAfter"
+  "WorkloadNarrow AncestorsChecked NarrowSubset"
+  "WorkloadNarrow TargetResolvedBeforeConstraints NarrowSubset"
+  "WorkloadNarrow ChildOpsRefused NarrowSubset"
+  "WorkloadCapacity CountUnderHead Capacity"
+  "WorkloadCapacity RenewOnlyLive Capacity"
+  "WorkloadCapacity SupersedeCheckedAtExchange Superseded"
+  "WorkloadCapacity SupersedeCheckedAtRenewal Superseded"
+  "WorkloadCapacity SupersedeCheckInUpdate Superseded"
+  "WorkloadMinting ScopeFromCode MinterBound"
+  "WorkloadMinting SensitiveNeedsOwnerMinter MinterBound"
+  "WorkloadMinting MinterFence MinterBound"
+  "WorkloadMinting MintRefusesEnrollment+MintedByNotSelf MinterBound"
+  "WorkloadMinting MintRefusesChildren MinterBound"
+  "WorkloadDeploys RootsOnly NoFalseContention"
+  "WorkloadThief ExcessIntegral TripwireFires"
+  "WorkloadThief ChurnCounted TripwireFires"
+  "WorkloadCopy ReplicasFull CopyCaught"
+  "WorkloadCopy ThiefStays CopyCaught"
+  "WorkloadReads CheckWhereHeld NoLaundering"
+  "WorkloadReads ReadsByID NoLaundering"
+  "WorkloadReads RefusesUnreadableSources NoLaundering"
 )
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -86,6 +115,9 @@ model() { sed -n '2s/^\\\* model \([A-Za-z]*\)$/\1/p' "$work/$1"; }
 tlc() {
   local module
   module="$(model "$1")"
+  # TLC names its states directory by the second it starts: two runs in one
+  # second would share it, and the second fail.
+  rm -rf "$work/states"
   (cd "$work" && java -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -nowarning -difftrace \
     -workers "$workers" -metadir "$work/states" -config "$1" "${module:-MC}.tla") >"$work/out.txt" 2>&1 || true
 }
