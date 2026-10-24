@@ -15,16 +15,19 @@
     version of a value made a secret or sensitive in place since comes back
     so, whatever was written after, and only whoever reads it as such may
     restore it. A Contributor, who reads no secret, could read one by
-    restoring its plain version (R24); an Owner's loosening (R30) is kept.
+    restoring its plain version (R24). The vault holds the same rule, so no
+    app brings back a value made sensitive as anything looser (R16), and an
+    Owner's loosening (R30) is kept: such a value's old version, once
+    refused, comes back a secret.
   - A value holding a lone UTF-16 surrogate is refused with 400, rather than
     stored as U+FFFD, a value other than the one written.
   - A fork's key with neither a value nor a reference, written around the
-    app, refuses a read rather than serve its parent's; a fork chain written
+    app, reads as no value rather than serve its parent's; a fork chain written
     around the app past three parents counts the same keys whichever
     environment is listed first.
   - `GET /api/me`, which every page asks, reads only the projects its caller
     reaches, rather than every environment and secret of the instance.
-  - An upstream's `Location` that does not parse is a 502, not a 500;
+  - A redirect to an upstream `Location` that does not parse is a 502, not a 500;
     SASLprep judges right-to-left passwords as Postgres does; the listener
     no longer leaves a tunnel half-closed for 30 seconds when the app
     closes while the database still sends; a trust binding naming a

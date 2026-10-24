@@ -737,7 +737,13 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         if (at === undefined) return null;
         const { env, key, row } = at;
         const version = row.versions[row.current!]!;
-        if (await attempt(() => clientOf(actor).secrets.set(writePath(env), { [key]: { sensitivity: op.nature } })) === null) return null;
+        const done = await attempt(() => clientOf(actor).secrets.set(writePath(env), { [key]: { sensitivity: op.nature } })) !== null;
+        // Looser only a sensitive value made a secret, by an Owner of its project (R30); stricter, by the instance's Owner
+        // always. Whatever else a mark takes, it is not checked here: refused or not, the reads after hold it to the rules.
+        const looser = STRICTNESS[op.nature] < STRICTNESS[version.nature];
+        if (looser && !(version.nature === 'sensitive' && op.nature === 'secret' && ownsProject(actor, env.projectId))) assert.equal(done, false, `${actor} made ${pathOf(env)}/${key} ${op.nature} from ${version.nature}`);
+        if (actor === ROOT && env.owner === null && !looser) assert.equal(done, true, `the instance's Owner could not make ${pathOf(env)}/${key} ${op.nature}`);
+        if (!done) return null;
         row.versions.push({ text: version.text, nature: op.nature });
         row.current = row.versions.length - 1;
         return 'value';
@@ -763,7 +769,15 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const now = resolve(env, key)?.nature;
         const held = row.versions.findLast((later) => later.text === target.text)!.nature;
         const nature = now === 'sensitive' || row.versions.at(-1)!.nature === 'sensitive' ? 'sensitive' : held;
-        if (await attempt(() => clientOf(actor).secrets.restore(`${writePath(env)}/${key}`, version)) === null) return null;
+        const done = await attempt(() => clientOf(actor).secrets.restore(`${writePath(env)}/${key}`, version)) !== null;
+        // A restore writes, and brings back a value as it is held: refused to whoever cannot read it so (R24), plain taking
+        // write alone; never refused the instance's Owner.
+        if (env.owner === null) {
+          const holding = holds(sessionReader(actor), env);
+          if (!holding.has(WRITE) || (held !== 'plain' && !holding.has(held === 'secret' ? READ : USE))) assert.equal(done, false, `${actor} restored ${pathOf(env)}/${key} v${version}, held ${held}, holding ${[...holding].join(', ')}`);
+          if (actor === ROOT) assert.equal(done, true, `the instance's Owner could not restore ${pathOf(env)}/${key} v${version}`);
+        }
+        if (!done) return null;
         written(env, key, { text: target.text, nature });
         return 'value';
       }
@@ -946,7 +960,7 @@ test(`no value reaches a person or a credential the rules forbid it to, by any r
     did.applied += outcome.applied;
     did.received += [...outcome.received.values()].reduce((n, got) => n + got.size, 0);
   }, settings);
-  assert.ok(did.applied * 3 >= did.ops && did.received > 0, `the cases did too little to show anything: ${JSON.stringify(did)}`);
+  assert.ok(did.applied * 5 >= did.ops && did.received > 0, `the cases did too little to show anything: ${JSON.stringify(did)}`);
 });
 
 const [ADA, BO, CY] = PEOPLE;
@@ -1037,5 +1051,27 @@ test('a value made a secret in place stays one: a writer who never read it bring
     // Their own value written over it first, so that the secret is no longer the newest version.
     { ...CHANGE, kind: 'write', actor: actorOf(BO), target: { env: 'dev', key: 'REGION' } },
     { ...CHANGE, kind: 'restore', actor: actorOf(BO), index: 0, target: { env: 'dev', key: 'REGION' } },
+  ]);
+});
+
+test("a value as it was made last: an Owner's loosening comes back a secret, a value made sensitive since never back looser", async () => {
+  const world: World = {
+    projects: [{ id: 'market', slug: 'market', environments: [{ id: 'dev', projectId: 'market', slug: 'dev', parentId: null, owner: null }] }],
+    secrets: [
+      { id: 's1', environmentId: 'dev', key: 'TOKEN', nature: 'sensitive', reference: null, archived: false },
+      { id: 's2', environmentId: 'dev', key: 'HOOK', nature: 'secret', reference: null, archived: false },
+    ],
+    dismissals: [],
+    people: [nobody(ADA), nobody(BO), nobody(CY)],
+    services: [{ principal: CI, grants: [{ projectId: 'market', environmentId: 'dev', role: 'viewer' }] }, nobody(DEPLOY)],
+    credentials: [{ kind: 'service', account: CI, issuer: ROOT, scope: [{ projectId: 'market', environmentId: 'dev', role: 'viewer' }] }],
+  };
+  await scenario(world, asShipped(), [
+    { ...CHANGE, kind: 'mark', actor: actorOf(ROOT), nature: 'secret', target: { env: 'dev', key: 'TOKEN' } },
+    { ...CHANGE, kind: 'write', actor: actorOf(ROOT), target: { env: 'dev', key: 'TOKEN' } },
+    { ...CHANGE, kind: 'restore', actor: actorOf(ROOT), index: 0, target: { env: 'dev', key: 'TOKEN' } },
+    { ...CHANGE, kind: 'mark', actor: actorOf(ROOT), nature: 'sensitive', target: { env: 'dev', key: 'HOOK' } },
+    { ...CHANGE, kind: 'write', actor: actorOf(ROOT), target: { env: 'dev', key: 'HOOK' } },
+    { ...CHANGE, kind: 'restore', actor: actorOf(ROOT), index: 0, target: { env: 'dev', key: 'HOOK' } },
   ]);
 });

@@ -1023,12 +1023,14 @@ class VaultService implements Vault {
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'bad_claim', input), secretVersionId: source.id,
       })));
     }
-    // A value is made looser only by writing it again: a sensitive version's key, or one of a secret whose newest is,
-    // is never wrapped again as anything but sensitive, so that a person who may not read it never makes it readable.
-    // But for one: a key's current sensitive value made a secret, in place, by an Owner of its project, who reads it
-    // anyway through a service account they give read (R30). Older versions stay as they were held.
+    // A value is made looser only by writing it again: a sensitive value's key, or one of a secret whose newest version
+    // is, is never wrapped again as anything but sensitive, so that a person who may not read it never makes it readable.
+    // A value is as it is held now, by the newest version of its very ciphertext: one made sensitive in place since, an
+    // old version of it restored included, stays so. But for one: a key's current sensitive value made a secret, in
+    // place, by an Owner of its project, who reads it anyway through a service account they give read (R30), and so any
+    // version of that value restored after.
     const loosens = items.map((item, i) => item.secret.sensitive !== true && loaded.versions[i].secret.sensitive === true && loaded.versions[i].current);
-    if (items.some((item, i) => !loosens[i] && item.secret.sensitive !== true && (loaded.versions[i].secret.sensitive || loaded.versions[i].newestSensitive))) {
+    if (items.some((item, i) => !loosens[i] && item.secret.sensitive !== true && (loaded.versions[i].heldSensitive || loaded.versions[i].newestSensitive))) {
       return this.#refuseVersions(principal, 'invalid', loaded.versions.map((source) => ({
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'invalid', input), secretVersionId: source.id,
       })), LOOSER);

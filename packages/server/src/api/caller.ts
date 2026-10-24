@@ -5,6 +5,7 @@ import {
   withinCredential,
   PERMISSIONS,
   roleGrants,
+  runsInstance,
   scopeDefinition,
   type GrantPlace,
   type InstanceRole,
@@ -175,13 +176,15 @@ export function seesProject(caller: Caller, project: { id: string; environments:
 }
 
 /**
- * The projects the caller may reach or name, by id, or null for any: those
- * of their grants, their credential's and their scope's lists, and, when
- * their instance role holds anything, every project its scope does not
- * list alone. What a project the caller can do nothing in holds, they need
+ * The projects the caller may reach or name, by id, or null for any: every
+ * one for whoever runs the instance; else those of their grants, their
+ * credential's and their scope's lists, and, when their instance role holds
+ * anything, every project its scope does not list alone. What a project the caller can do nothing in holds, they need
  * not read.
  */
 export function projectsReached(caller: Caller): string[] | null {
+  // Whoever runs the instance names every project, its setting for service accounts too, whatever their role holds.
+  if (runsInstance(caller)) return null;
   const { projects } = caller.scope;
   const role = caller.policy.instanceRoles[caller.role];
   const holdsAnything = role !== undefined && (role.permissions.length > 0 || role.protected.length > 0);

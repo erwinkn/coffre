@@ -478,6 +478,30 @@ test("a write's entry says what the key was as it commits: a reference's source 
   assert.deepEqual((await writesOf('WEBHOOK')).at(-1), { key: 'WEBHOOK', version: 1, was: 'sensitive' });
 });
 
+test('the vault judges a rollback by its value as held now: made sensitive in place since, never back looser; loosened by an Owner since, back a secret', async (t) => {
+  // HOOK: v1 a secret, v2 that value made sensitive in place, v3 another value, a secret.
+  await root.secrets.set('market/dev', { HOOK: 'whsec_first_0123456789' });
+  await root.secrets.set('market/dev', { HOOK: { sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { HOOK: { value: 'whsec_second_0123456789', sensitivity: 'secret' } });
+  await root.secrets.restore('market/dev/HOOK', 1);
+  assert.deepEqual((await history('market/dev/HOOK'))[0], [4, 'sensitive'], 'the app asks for it sensitive');
+  // An app that asked for it looser, a secret, is refused by the vault itself (R16): the vault is the backstop.
+  await root.secrets.set('market/dev', { HOOK: { value: 'whsec_third_0123456789', sensitivity: 'secret' } });
+  const rewrap = deps.vault.rewrap;
+  t.mock.method(deps.vault, 'rewrap', (input: Parameters<typeof rewrap>[0]) => rewrap({ ...input, items: input.items.map((item) => ({ ...item, secret: { ...item.secret, sensitive: false } })) }));
+  await assert.rejects(root.secrets.restore('market/dev/HOOK', 1), /only by writing it again/);
+  assert.deepEqual((await history('market/dev/HOOK'))[0], [5, 'secret'], 'nothing restored');
+  t.mock.restoreAll();
+
+  // TOKEN: v1 sensitive, v2 that value made a secret in place by an Owner (R30), v3 another value: v1 comes back a secret.
+  await root.secrets.set('market/dev', { TOKEN: { value: 'tok_first_0123456789', sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { TOKEN: { sensitivity: 'secret' } });
+  await root.secrets.set('market/dev', { TOKEN: 'tok_second_0123456789' });
+  await root.secrets.restore('market/dev/TOKEN', 1);
+  assert.deepEqual((await history('market/dev/TOKEN'))[0], [4, 'secret']);
+  assert.deepEqual((await ci.secrets.reveal('market/dev/TOKEN')).values, { TOKEN: 'tok_first_0123456789' });
+});
+
 test("a rollback's entry says what the key was as it commits: a reference's source written again as a secret while it is rewrapped", async (t) => {
   await root.environments.create('market/prod');
   await root.secrets.set('market/prod', { API_KEY: 'sk_live_old_0123456789abcdef' });
