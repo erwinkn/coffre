@@ -39,6 +39,8 @@ export type TunnelSocket = {
   addEventListener(type: 'open' | 'close' | 'error' | 'message', listener: (event: object) => void): void;
   pause?(): void;
   resume?(): void;
+  /** The `ws` package's: ends the connection at once, a paused one included, which reads no closing handshake. */
+  terminate?(): void;
 };
 
 /** A WebSocket class that takes the upgrade's headers, as all of those do. */
@@ -222,7 +224,10 @@ export class TunnelStream extends Duplex {
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
     clearInterval(this.#keepalive);
-    if (this.#ws !== null && this.#ws.readyState <= 1) this.#ws.close();
+    if (this.#ws !== null && this.#ws.readyState <= 1) {
+      if (this.#ws.terminate !== undefined) this.#ws.terminate();
+      else this.#ws.close();
+    }
     // Writes that waited for room end with the stream.
     this.#waiting = null;
     callback(error);

@@ -206,3 +206,36 @@ test("a service's run refuses a plan whose tunnels name no key for their URL", a
   assert.match(run.stderr(), /names its tunnels without the key each URL goes in/);
   assert.equal(coffre.log.at(-1), 'POST /api/auth/logout 200');
 });
+
+test('through the sidecar: a redirect within coffre comes back to it, a SigV4 upload streams past the buffered limit, and a refused upgrade gives the next one its nonce', async (t) => {
+  const database = await fakePostgres();
+  t.after(() => database.close());
+  let url = '';
+  const coffre = await fakeCoffre({
+    database,
+    sigv4: ['s3'],
+    upstream: (sent) =>
+      sent.path === '/use/openai/start' ? { status: 302, headers: { location: `${url}/use/openai/next?x=1` } } : { status: 200, body: { path: sent.path, size: sent.body.length } },
+  });
+  url = coffre.url;
+  t.after(() => coffre.close());
+  const run = cli(t, ['serve', '--url', coffre.url, '--service', 'api-prod', '--proof', 'enrollment', '--listen', '127.0.0.1:0', '--tunnel', 'db=127.0.0.1:0']);
+  const [, listener] = await said(run, /(http:\/\/127\.0\.0\.1:\d+)\/use\/<credential>/);
+  const [, databaseUrl] = await said(run, /db on (postgres:\/\/\S+)/);
+
+  const followed = await fetch(`${listener}/use/openai/start`);
+  assert.deepEqual(await followed.json(), { path: '/use/openai/next', size: 0 });
+
+  const size = 17 * 1024 * 1024;
+  const upload = await fetch(`${listener}/use/s3/bucket/big`, { method: 'PUT', headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }, body: new Uint8Array(size) });
+  assert.deepEqual(await upload.json(), { path: '/use/s3/bucket/big', size });
+
+  // The gate restarts: the next upgrade is refused for its nonce, and the one after it signs with the nonce that refusal gave.
+  coffre.gate.restart();
+  await assert.rejects(new pg.Client({ connectionString: databaseUrl }).connect());
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  assert.deepEqual((await client.query('select six')).rows, [{ value: 'select six' }]);
+  await client.end();
+  assert.deepEqual(coffre.log.filter((line) => line.startsWith('GET /use/db')), ['GET /use/db use_dpop_nonce', 'GET /use/db upgrade']);
+});

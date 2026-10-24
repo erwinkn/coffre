@@ -157,20 +157,36 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
     const gone = new AbortController();
     res.on('close', () => gone.abort());
     void (async () => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      for await (const chunk of req as AsyncIterable<Buffer>) {
-        size += chunk.length;
-        if (size > MOST_BODY) return answer(413, 'too_large', `a request's body is at most ${MOST_BODY} bytes`);
-        chunks.push(chunk);
-      }
       const headers = new Headers();
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         if (!DROPPED.has(req.rawHeaders[i]!.toLowerCase())) headers.append(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
       }
       const method = req.method ?? 'GET';
-      const response = await coffre.fetch(target.href, { method, headers, body: method === 'GET' || method === 'HEAD' ? undefined : Buffer.concat(chunks), redirect: 'manual', signal: gone.signal });
+      let body: BodyInit | undefined;
+      if (method !== 'GET' && method !== 'HEAD') {
+        if (headers.has('x-amz-content-sha256')) {
+          // An upload to an AWS-signed credential is bound by the digest it declares: it streams, of any size.
+          body = Readable.toWeb(req) as ReadableStream<Uint8Array>;
+        } else {
+          // Any other body is signed whole, so it is read whole, within the proxy's own limit.
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const chunk of req as AsyncIterable<Buffer>) {
+            size += chunk.length;
+            if (size > MOST_BODY) return answer(413, 'too_large', `a request's body is at most ${MOST_BODY} bytes`);
+            chunks.push(chunk);
+          }
+          body = Buffer.concat(chunks);
+        }
+      }
+      const response = await coffre.fetch(target.href, { method, headers, body, redirect: 'manual', signal: gone.signal, ...(body instanceof ReadableStream ? { duplex: 'half' } : {}) } as RequestInit);
       const back: [string, string][] = [...response.headers].filter(([name]) => !UNANSWERED.has(name) && name !== 'set-cookie');
+      // A redirect to coffre's own /use/ comes back through this listener, which signs it: a path, which the app resolves against the listener.
+      const location = back.find(([name]) => name === 'location');
+      if (location !== undefined) {
+        const to = URL.canParse(location[1], target.href) ? new URL(location[1], target.href) : null;
+        if (to !== null && to.origin === origin && to.pathname.startsWith('/use/')) location[1] = `${to.pathname}${to.search}${to.hash}`;
+      }
       for (const cookie of response.headers.getSetCookie()) back.push(['set-cookie', cookie]);
       res.writeHead(response.status, back);
       // Read only as fast as the app takes it.
@@ -194,7 +210,7 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
 }
 
 /** A tunnel as a workload's plan names it: the key the app reads its URL from, and coffre's end. */
-type Planned = { values?: Record<string, unknown>; credentials?: unknown; tunnels?: Record<string, { key?: unknown; url?: unknown }>; left?: unknown };
+type Planned = { values?: Record<string, unknown>; credentials?: unknown; tunnels?: Record<string, { key?: unknown; url?: unknown }>; left?: unknown; useOnly?: unknown };
 
 /** What `coffre --service <name> run` gives its command, key-bound: the plan's values, the credentials' local URLs, and the tunnels'. */
 export type KeyBound = { places: string[]; env: Record<string, string>; close: () => Promise<void> };
@@ -252,7 +268,8 @@ export async function keyBound(origin: string, service: string, proof: Proof, po
         opened.push(listener);
         Object.defineProperty(env, tunnel.key, { value: listener.url, enumerable: true, writable: true, configurable: true });
       }
-      const left = names(plan.left);
+      // What the session uses and may not hold: the plan's `left`, or the reveal's `useOnly`, as the server names them.
+      const left = [...new Set([...names(plan.left), ...names(plan.useOnly)])];
       if (left.length > 0) log(`coffre: ${place}: ${listOf(left)} ${left.length === 1 ? 'is' : 'are'} used through coffre now; list ${left.length === 1 ? 'it' : 'them'} in the binding's reads if this job must hold ${left.length === 1 ? 'it' : 'them'}`);
     }
     // What `credential(name)` (`@coffre/client/credential`) reads: each credential at the local listener, which signs, and no handle.

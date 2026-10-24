@@ -9,7 +9,7 @@
 // password is empty: the sidecar's boundary is the pod.
 import { createServer, type Socket } from 'node:net';
 
-import { upgradeHeaders, type Workload } from '@coffre/client/workload';
+import { upgradeHeaders, upgradeRefused, type Workload } from '@coffre/client/workload';
 import { WebSocket } from 'ws';
 
 /** A tunnel the plan names: the key the app reads its database's URL from, and coffre's end of it. */
@@ -69,6 +69,8 @@ export async function listen(
     const ws = new WebSocket(tunnel.url, { headers: { ...(typeof as === 'string' ? { authorization: `Bearer ${as}` } : {}), [FLOW]: 'credit' }, handshakeTimeout: handshakeMs, finishRequest: signed(as, tunnel.url) });
     carry(socket, ws, keepaliveMs);
     ws.on('unexpected-response', (request, response) => {
+      // A workload's refusal carries the gate's newest nonce: the next connection signs with it.
+      if (typeof as !== 'string') upgradeRefused(as, { get: (name) => (typeof response.headers[name] === 'string' ? (response.headers[name] as string) : null) });
       // coffre's refusal, said once for each reason: the app sees its connection close, and a driver may retry it at once.
       let body = '';
       response.setEncoding('utf8');

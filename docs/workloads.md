@@ -182,7 +182,9 @@ it uses with its own key.
   standard error, or through `log`.
 - **Follows redirects hop by hop**, signing each hop within coffre afresh,
   and sending a hop elsewhere with the app's own headers alone, never the
-  session's.
+  session's, and, as fetch does, without the app's `Authorization` and
+  `Cookie` once it leaves the origin. Its own calls to coffre, the
+  exchange above all, follow no redirect.
 - **Logs out on `SIGTERM`**, every session it proved, then lets the signal
   end the process if no other handler is listening. `close()` does the same
   on demand, waits at most 3 seconds for coffre to confirm, and rejects if

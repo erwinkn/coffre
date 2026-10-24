@@ -82,7 +82,10 @@ test('a streamed upload to an AWS-signed credential is bound by its declared dig
     const response = await session.fetch(`${session.url('s3')}/bucket/key`, { method: 'PUT', headers: { 'x-amz-content-sha256': declared }, body: stream(), duplex: 'half' } as RequestInit);
     assert.equal(response.status, 200, await response.text());
   }
-  assert.deepEqual(coffre.forwarded.map((sent) => sent.body), ['object bytes', 'object bytes']);
+  // A Request object's stream streams too.
+  const request = new Request(`${session.url('s3')}/bucket/other`, { method: 'PUT', headers: { 'x-amz-content-sha256': digest }, body: stream(), duplex: 'half' } as RequestInit);
+  assert.equal((await session.fetch(request)).status, 200);
+  assert.deepEqual(coffre.forwarded.map((sent) => sent.body), ['object bytes', 'object bytes', 'object bytes']);
 });
 
 test('a nonce the gate no longer knows is refused once, and the request sent again with the new one; the newest is always used', async (t) => {
@@ -393,11 +396,13 @@ test('a redirect is followed hop by hop: signed afresh within coffre, and withou
         : sent.path === '/use/openai/next' ? { status: 303, headers: { location: elsewhere } }
           : { status: 200, body: sent },
   });
-  const response = await session.fetch(`${session.url('openai')}/start`, { method: 'POST', body: 'payload', headers: { 'x-app': '1' } });
+  const response = await session.fetch(`${session.url('openai')}/start`, { method: 'POST', body: 'payload', headers: { 'x-app': '1', authorization: 'Bearer mine', cookie: 'a=1' } });
   assert.equal(await response.text(), 'elsewhere');
   assert.deepEqual(coffre.forwarded.map((sent) => [sent.method, sent.path, sent.body]), [['POST', '/use/openai/start', 'payload'], ['POST', '/use/openai/next', 'payload']]);
   assert.equal(seen[0]!['x-app'], '1');
+  // As fetch does, credentials the app set go to no other origin; nor does the session's.
   assert.equal(seen[0]!.authorization, undefined);
+  assert.equal(seen[0]!.cookie, undefined);
   assert.equal(seen[0]!.dpop, undefined);
   // Asked not to follow, the redirect is the answer.
   assert.equal((await session.fetch(`${session.url('openai')}/start`, { method: 'POST', redirect: 'manual' })).status, 307);
@@ -429,4 +434,20 @@ test('close() stops an exchange waiting for approval, and a logout that never an
 
 test('workload() talks to coffre over https, or http on this machine only', async () => {
   await assert.rejects(workload({ url: 'http://192.0.2.1:7300', service: 'api-prod', proof: oidc('t'), log: quiet, fetch: () => assert.fail('nothing is sent') }), /over https/);
+});
+
+test("a proof goes to coffre's exchange alone: a redirect there is refused, and its target gets nothing", async (t) => {
+  const seen: string[] = [];
+  const other = createServer((req, res) => (seen.push(req.url!), res.end())).listen(0, '127.0.0.1');
+  t.after(() => other.close());
+  await once(other, 'listening');
+  const coffre = await fakeCoffre({ exchange: () => ({ status: 307, headers: { location: `http://127.0.0.1:${(other.address() as { port: number }).port}/steal` } }) });
+  t.after(() => coffre.close());
+  await assert.rejects(workload({ url: coffre.url, service: 'api-prod', proof: enrollment(`coffre_enr_${'r'.repeat(43)}`), log: quiet }));
+  assert.deepEqual(seen, []);
+});
+
+test('a logout coffre keeps asking a fresh nonce for has not ended the session: close() says so', async (t) => {
+  const { session } = await signedIn(t, { nonceLogout: true });
+  await assert.rejects(session.close(), /did not end the session/);
 });

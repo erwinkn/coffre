@@ -41,8 +41,9 @@ export type FakeOptions = {
   paced?: boolean;
   /** Where the tunnel's bytes go. */
   database?: { port: number };
-  /** A logout that never answers. */
+  /** A logout that never answers; one that asks for a fresh nonce every time. */
   stallLogout?: boolean;
+  nonceLogout?: boolean;
 };
 
 const WINDOW = 1024 * 1024;
@@ -144,6 +145,10 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       if (typeof session === 'string') return record(session), refuse(res, session);
       if (url.pathname === '/api/auth/logout') {
         if (options.stallLogout) return record('stalled');
+        if (options.nonceLogout) {
+          record('use_dpop_nonce');
+          return answer(res, { status: 401, body: { error: 'unauthorized', reason: 'use_dpop_nonce' }, headers: { 'www-authenticate': 'DPoP error="use_dpop_nonce"' } });
+        }
         session.revoked = true;
         return record('200'), answer(res, { status: 200, body: { revoked: true } });
       }

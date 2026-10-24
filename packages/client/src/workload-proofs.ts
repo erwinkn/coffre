@@ -35,7 +35,7 @@ export type ProofContext = {
   fetch: Fetch;
   /** Where the SDK says what it waits for: stderr unless the app said otherwise. */
   log: (line: string) => void;
-  /** Aborted when the session closes: a proof that waits (a spent token's next) stops waiting. */
+  /** Aborted when the session closes: a proof that waits (a spent token's next) stops waiting, and one that asks a socket (Fly's) stops asking. `fetch` ends with it already. */
   signal?: AbortSignal;
 };
 
@@ -279,7 +279,7 @@ export function fly(socketPath = '/.fly/api'): Proof {
       const { request } = await import('node:http');
       const body = JSON.stringify({ aud: keyAudience(context) });
       const token = await new Promise<string>((resolve, reject) => {
-        const asked = request({ socketPath, path: '/v1/tokens/oidc', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': ENCODER.encode(body).length } }, (answer) => {
+        const asked = request({ socketPath, path: '/v1/tokens/oidc', method: 'POST', signal: context.signal, headers: { 'content-type': 'application/json', 'content-length': ENCODER.encode(body).length } }, (answer) => {
           let text = '';
           answer.setEncoding('utf8');
           answer.on('data', (chunk: string) => (text += chunk));
