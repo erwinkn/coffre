@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.12.0 (2026-10-24)
+
 - **Upgrading to 0.12, in short.** Run `coffre migrate` before you deploy,
   as always: it applies `0017_capped_alerts` (`0016_capped_alerts` on
   SQLite), which only adds a table, so the release before keeps serving on
