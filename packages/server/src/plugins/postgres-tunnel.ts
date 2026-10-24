@@ -226,9 +226,11 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   const deadline = setTimeout(end, STARTUP_MS);
   const unwatch = session.watch(end);
   void client.closed.then(end, end);
-  /** A step of the startup, which an ended session does not wait for. */
+  /** A step of the startup, which an ended session does not wait for: its work, left behind, fails unheard (a dial given up). */
   const step = <T,>(work: Promise<T>): Promise<T> =>
-    ended ? Promise.reject(new Error('the session ended')) : Promise.race([work, client.closed.then(() => Promise.reject(new Error('the app went away')))]);
+    ended
+      ? (work.catch(() => undefined), Promise.reject(new Error('the session ended')))
+      : Promise.race([work, client.closed.then(() => Promise.reject(new Error('the app went away')))]);
   try {
     // The startup: SSL and GSS refused (the hop to the listener is local), a cancel forwarded, or the real StartupMessage.
     let startup: Map<string, string> | null = null;
