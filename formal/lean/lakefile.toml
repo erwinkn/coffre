@@ -1,0 +1,9 @@
+name = "coffre"
+defaultTargets = ["Coffre", "oracle"]
+
+[[lean_lib]]
+name = "Coffre"
+
+[[lean_exe]]
+name = "oracle"
+root = "Oracle"

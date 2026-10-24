@@ -132,7 +132,12 @@ export function assignableToEnvironment(role: Role, policy: Policy = DEFAULT_POL
 
 /** A project role's definition in `policy`, or undefined for none. */
 export function definitionOf(policy: Policy, role: Role): RoleDefinition | undefined {
-  return Object.hasOwn(policy.roles, role) ? policy.roles[role] : undefined;
+  return own(policy.roles, role);
+}
+
+/** A record's own value at `key`: `constructor` or `__proto__` names nothing. */
+function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
 /**
@@ -184,7 +189,7 @@ export function isInstanceRole(value: string): value is InstanceRole {
 
 /** Whether an instance role holds `permission` where nothing is protected, as `policy` defines it: as it ships, unless told. */
 export function instanceRoleGrants(role: InstanceRole, permission: Permission, policy: Policy = DEFAULT_POLICY): boolean {
-  return (policy.instanceRoles[role]?.permissions ?? []).includes(permission);
+  return (own(policy.instanceRoles, role)?.permissions ?? []).includes(permission);
 }
 
 /**
@@ -512,7 +517,7 @@ export function heldColumns(holder: Holdings, place: Place): Columns {
  */
 export function protectedWithin(policy: Policy, place: Place): Place[] {
   if (place.environmentId != null) return [];
-  return (policy.protectedIn[place.projectId] ?? []).map(({ environmentId, slug }) => ({ projectId: place.projectId, environmentId, environmentSlug: slug }));
+  return (own(policy.protectedIn, place.projectId) ?? []).map(({ environmentId, slug }) => ({ projectId: place.projectId, environmentId, environmentSlug: slug }));
 }
 
 /** What a scope's grant holds, as it was issued, as a role holds it: whatever the role is now, which no edit changes. */
@@ -647,7 +652,7 @@ export function covers(grant: GrantPlace, place: Place): boolean {
 export function allows(holder: Holdings, permission: Permission, place: Place): boolean {
   if (holder.credentialScope != null && !scopeHolds(holder, permission, place)) return false;
   const policy = holder.policy ?? DEFAULT_POLICY;
-  if (inScope(holder.scope, place) && holds(policy.instanceRoles[holder.role], permission, place, holder)) return true;
+  if (inScope(holder.scope, place) && holds(own(policy.instanceRoles, holder.role), permission, place, holder)) return true;
   return holder.grants.some((grant) => covers(grant, place) && holds(definitionOf(policy, grant.role), permission, place, holder));
 }
 
@@ -815,7 +820,7 @@ export function issuesCredential(
  * they hold `audit.read` in.
  */
 export function readsWholeLog(holder: Holdings): boolean {
-  const role = (holder.policy ?? DEFAULT_POLICY).instanceRoles[holder.role];
+  const role = own((holder.policy ?? DEFAULT_POLICY).instanceRoles, holder.role);
   return holder.credentialScope == null && unscoped(holder.scope)
     && role !== undefined && role.permissions.includes('audit.read') && role.protected.includes('audit.read');
 }

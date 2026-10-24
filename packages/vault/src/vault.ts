@@ -25,7 +25,6 @@ import {
   ownsInstance,
   ownsProject,
   PROJECT_ONLY_PERMISSIONS,
-  readsSensitive,
   ROLE_ID,
   ROLES,
   runsInstance,
@@ -40,7 +39,6 @@ import {
   type RoleDefinition,
   type Scope,
   type ServiceAccount,
-  withinCredential,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
@@ -62,7 +60,6 @@ import {
   checkpointMessage,
   checkpointVerifier,
   describeAccessFault,
-  handsBack,
   POLICY_REVISION,
   policyRevision,
   type Access,
@@ -106,6 +103,7 @@ import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/g
 import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
+import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -1203,45 +1201,13 @@ class VaultService implements Vault {
       const at = secrets.map((secret, i) => call.places?.[i] ?? secret);
       // Each a personal config is a config of too, whose read its owner needs (`places`).
       const environments = d.reads.environments;
-      const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
       owners.clear();
       for (const [id, environment] of environments) if (environment.owner !== null) owners.set(id, ownerKey(environment.owner));
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
-      const refusalOf = (secret: SecretRef, i: number): RefusalCode | null => {
-        const personal = personalRefusal(reader, principal, call.permission, secret, at[i]!, environments);
-        if (personal !== undefined) return personal;
-        const also = needs[i];
-        if (also != null) {
-          const place = placeIn(at[i]!, environments);
-          const refused = also.map((permission) => refuses(reader, permission, place, gone(secret) || gone(at[i]!)));
-          if (refused.every((code) => code !== null)) return refused[0]!;
-        }
-        // Through a reference, the holder's grants decide, its source's never: a reference takes its value and nature
-        // (a sensitive one stays use-only) from its source, and its permissions from where it lives. Its maker held what
-        // the source's nature asks when it was made (`reference`).
-        return refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
-      };
-      // A loosening takes its reader owning the project besides, a personal config's owner too, there.
-      const codes: (RefusalCode | null)[] = secrets.map((secret, i) => {
-        const code = refusalOf(secret, i);
-        return code === null && call.owns?.[i] === true && !ownsProject(reader.live, secret.projectId) ? 'not_allowed' : code;
-      });
-      if (call.vet !== undefined && !codes.some((code) => code !== null)) {
-        (await call.vet(d.tx, d.reads)).forEach((code, i) => (codes[i] = code));
-      }
-      // A sensitive value is only ever used for a person, never handed back, by whatever credential of theirs asks; and
-      // handed back to a service account only on a credential an Owner of its own project issued, a reference's
-      // source's too, whose value it is (`readsSensitive`, R32). And a fork copies one, for anyone, a service account too, only where its app says it
-      // keeps it sensitive: an app of 0.9, mid-deploy, would write the copy as a secret its people read.
-      const copying = action === 'secret.read' && call.input.purpose === 'copy';
-      const handedBack = action === 'secret.read' && handsBack({ purpose: call.input.purpose ?? '', keepsSensitive: call.input.keepsSensitive === true });
-      const person = principal.startsWith('user:');
-      secrets.forEach((secret, i) => {
-        if (codes[i] !== null || secret.sensitive !== true) return;
-        // A sensitive value read through a reference is never copied: a fork keeps it a reference to its source, so the
-        // value stays in its own project, where R16/R32 decide who reads it. Copying it would move it to the fork's.
-        if ((copying && call.input.keepsSensitive !== true) || (copying && call.viaReference?.[i] === true) || (handedBack && person)) codes[i] = 'sensitive';
-        else if (handedBack && !readsSensitive(reader.live, secret.projectId)) codes[i] = 'not_owner_issued';
+      let codes = keyRefusals(reader, { principal, permission: call.permission, secrets, at, environments, needs, owns: call.owns });
+      if (call.vet !== undefined && !codes.some((code) => code !== null)) codes = await call.vet(d.tx, d.reads);
+      codes = sensitiveRefusals(codes, reader, {
+        action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive, secrets, viaReference: call.viaReference,
       });
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
@@ -1442,19 +1408,11 @@ class VaultService implements Vault {
         const source = sources.get(item.source.secretId);
         return source === undefined ? [item.holder.environmentId] : [item.holder.environmentId, source.environmentId];
       }));
-      const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
       const codes = items.map((item): RefusalCode | null => {
         const source = sources.get(item.source.secretId);
         if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
         if (source.secretId === item.holder.secretId) return 'invalid';
-        // A personal config's values are bound to its owner: no reference holds one, nor reads one.
-        if (environments.get(item.holder.environmentId)?.owner != null || environments.get(source.environmentId)?.owner != null) return 'personal';
-        // Making one hands its source's value to whoever reads the holder, whatever its nature becomes: its maker reads
-        // it at the source, as any direct access there, and, for a sensitive one, which nobody reads, uses it there too.
-        const at = placeIn(source, environments);
-        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder))
-          ?? refuses(reader, 'secret.read', at, gone(source))
-          ?? (natures.get(source.secretId) === 'sensitive' ? refuses(reader, 'secret.use', at, gone(source)) : null);
+        return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) === 'sensitive');
       });
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));
@@ -3142,64 +3100,6 @@ function viaDetail(via: Via, seal: Sealed | null): Record<string, unknown> {
     via: { reference: via.reference, seq: via.seq, path: seal.holder.path, createdBy: seal.createdBy, createdAt: iso(seal.createdAt) },
     also: { projectId: seal.holder.projectId, environmentId: seal.holder.environmentId, secretId: seal.holder.secretId },
   };
-}
-
-/** An environment a secret is in, or that holds a reference to one. */
-type SecretPlace = { projectId: string; environmentId: string };
-
-/**
- * Where a decision checks a permission: an environment, with its slug as
- * the store has it when it was read and is in the project claimed;
- * otherwise none, which no grant on a slug matches.
- */
-function placeIn(place: SecretPlace, environments: ReadonlyMap<string, { projectId: string; slug: string }>): Place {
-  const environment = environments.get(place.environmentId);
-  const slug = environment?.projectId === place.projectId ? environment.slug : null;
-  return { projectId: place.projectId, environmentId: place.environmentId, environmentSlug: slug };
-}
-
-/**
- * Why `reader` may not do `permission` at `where`, or null if they may. A
- * deleted place is refused before any grant is asked, so no kind of grant,
- * on the project, the environment or every project, can reach into one.
- */
-/**
- * A key of a personal config is its owner's alone (docs/design/forking.md,
- * section 4): no grant or role opens or wraps it, an Owner's included,
- * only its owner, while they read the environment it is a config of,
- * whatever the call is. Nor does any reference reach into or out of one.
- * Undefined for a key of any other environment, decided as ever.
- */
-function personalRefusal(
-  reader: Standing,
-  principal: string,
-  permission: Permission,
-  secret: SecretPlace,
-  at: SecretPlace,
-  environments: ReadonlyMap<string, store.EnvironmentRow>,
-): RefusalCode | null | undefined {
-  const own = environments.get(secret.environmentId);
-  const held = at.environmentId === secret.environmentId ? own : environments.get(at.environmentId);
-  if (own?.owner == null && held?.owner == null) return undefined;
-  if (own !== held || principal !== own?.owner || own.parentId === null) return 'personal';
-  const parent = placeIn({ projectId: secret.projectId, environmentId: own.parentId }, environments);
-  // Its owner reads what they wrote while they read or use the environment it configures (R8).
-  const gone = own.deleted || (environments.get(own.parentId)?.deleted ?? true);
-  const refused = refuses(reader, 'secret.use', parent, gone) === null ? null : refuses(reader, 'secret.read', parent, gone);
-  if (refused !== null) return refused;
-  // The credential's scope caps the owner still: their viewer token on the parent reads, and wraps no key. Reading their
-  // own values takes use there: a Contributor's handle reads what its owner wrote, and nothing of the parent's.
-  return withinCredential(reader.live, permission === 'secret.read' ? 'secret.use' : permission, parent) ? null : 'no_grant';
-}
-
-function refuses(reader: Standing, permission: Permission, where: Place, deleted: boolean): RefusalCode | null {
-  if (reader.status === 'tampered') return 'tampered';
-  if (reader.status === 'removed') return 'removed';
-  if (reader.status === 'unknown') return 'not_a_member';
-  if (deleted) return 'deleted';
-  if (allows(reader.live, permission, where)) return null;
-  // Would a grant that has lapsed have covered it?
-  return allows(reader.all, permission, where) ? 'expired' : 'no_grant';
 }
 
 /**

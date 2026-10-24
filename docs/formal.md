@@ -500,3 +500,189 @@ shortest one.
   - Apalache checks symbolically, by trace length, and is much larger.
   - Quint's simulator samples traces rather than covering every one, and
     its exhaustive mode downloads Apalache at run time.
+
+# Proofs in Lean
+
+TLC explores every interleaving of a few requests; it says nothing about a
+single decision being right. The rules themselves (who reads what, what a
+token keeps, what a ciphertext is bound to, what the log's checks accept) are
+proved in [Lean 4](https://lean-lang.org), about a model of the code, and
+that model is held to the code case by case:
+
+```sh
+pnpm formal:lean               # the proofs, and about 120,000 cases, half a minute
+pnpm formal:lean --long        # ten times the cases
+pnpm formal:lean --seed=42     # another reproducible set
+```
+
+- [`formal/lean/Coffre/Access.lean`](../formal/lean/Coffre/Access.lean) is
+  `packages/core/src/access.ts`, a definition for each function, under its
+  name. [`AccessProofs.lean`](../formal/lean/Coffre/AccessProofs.lean) proves
+  what the rules promise.
+- [`Decide.lean`](../formal/lean/Coffre/Decide.lean) is how the vault decides
+  each key of a read, and each reference one makes,
+  [`packages/vault/src/decide.ts`](../packages/vault/src/decide.ts):
+  personal configs, references, deleted places, sensitive values.
+- [`Envelope.lean`](../formal/lean/Coffre/Envelope.lean) is the AAD and the
+  envelope, and [`Audit.lean`](../formal/lean/Coffre/Audit.lean) the chain
+  and its checkpoints.
+- [`Oracle.lean`](../formal/lean/Oracle.lean) runs the model on JSON cases,
+  and [`scripts/formal-lean.ts`](../scripts/formal-lean.ts) generates them,
+  runs each through the TypeScript and the oracle, and fails on any answer
+  that differs. [`scripts/formal-lean.sh`](../scripts/formal-lean.sh) builds
+  both and runs it.
+
+CI runs it in the *Formal proofs* job of `validate.yml`.
+
+## What is proved
+
+Each theorem is about the model; the next section is what ties the model to
+the code.
+
+| Theorem | In plain words |
+|---|---|
+| `credential_within_holder` | A request on a credential holds nothing its holder does not hold now. |
+| `personal_token_within_issuer` | A personal token issued by 0.10 or later holds nothing its issuer did not hold when they made it, at the place as it was named then, whatever happened since: roles widened, environments protected or unprotected or renamed, grants added. At a protected environment, it is held to what the issuer held there protected. |
+| `role_edits_never_widen_credentials` | What a credential's scope leaves to its holder is the same under any edit of any role. |
+| `protected_never_widens` | Under valid roles (`definitionProblem`), a person holds no more in an environment once it is protected. |
+| `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). One from before 0.11 reads them if its own issuer owns the project when it is sealed (`sealCredentials`), which the model leaves out. |
+| `no_person_reads_sensitive` | No person, Owner or not, on a session or any token of theirs, is handed back a sensitive value: directly, through a reference, in a fork or in a personal config. |
+| `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the value's own project, the source's for a reference, whose issuer owned that project. |
+| `copy_keeps_sensitive`, `copy_never_through_reference` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive, and never one read through a reference: it keeps the reference. |
+| `personal_owner_only`, `personal_holds_no_reference` | A personal config's key opens for its owner alone, and no reference reads into or out of one. |
+| `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24). |
+| `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
+| `encodeAad_injective` | No two contexts encode to the same AAD. |
+| `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
+| `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |
+| `no_person_opens_sensitive` | Even when an attacker rewrites the database's sensitivity, owner or place columns, a person is handed only a value whose key the vault wrapped not sensitive for that place, and no personal config's value but their own: the decision trusts the columns, and the wrap refuses to open what they lied about. |
+| `sensitive_value_never_reaches_a_person` | So a value whose key the vault only ever wrapped sensitive reaches no person, whatever the database says. That every wrap of a sensitive value's key is sensitive is the theorem's hypothesis, which `rewrap` is written to keep (but for an Owner's loosening, R30). |
+| `verify_append`, `resume_sound` | Verifying a log in batches, or going on from where a walk stopped, decides over the entries it read exactly as one walk from genesis (R25). A row edited behind where it resumes is the vault's scrub's to find. |
+| `head_determines_chain` | Two runs that verify from genesis to the same head are the same entries. |
+| `checkpoint_pins_prefix` | A valid checkpoint pins the log up to it, every field and MAC, as its authors wrote it (the true log). |
+| `walk_from_checkpoint_extends` | What a walk from a valid checkpoint accepts is the true log up to it, then entries that chain on, each its own hash and passing the walk's MAC check: the app's walk checks its own entries' MACs, the vault's its own, each the other's by place. |
+
+## What is assumed
+
+Nothing is assumed in a `sorry` or an `axiom`:
+[`CheckAxioms.lean`](../formal/lean/CheckAxioms.lean) has Lean list what
+every declaration of the proofs depends on, and fails on anything but Lean's
+own three axioms (`propext`, `Classical.choice`, `Quot.sound`), a `sorry` or
+a `native_decide` included. The cryptography is assumed as hypotheses of the
+theorems that need it, each the standard property, idealised:
+
+- **AEAD integrity** (`Envelope.Assumptions`): whatever opens under the KEK
+  is a wrap the vault made, of a DEK, with its AAD; whatever opens under a
+  DEK the vault wrapped is the value the app encrypted under it, against
+  anyone who never held the DEK. The app, which encrypts, holds every DEK:
+  this assumes it encrypts under each only the value it made it for. Each
+  DEK encrypts one value; it may be wrapped several times, once a version,
+  as a rewrap does. We do not prove AES-256-GCM has this property.
+- **Collision resistance** (`Audit.Injective`): the entry hash is injective
+  and never the genesis hash. This is the symbolic idealisation, stronger
+  than collision resistance: a proof under it says an attacker must find a
+  SHA-256 collision.
+- **Unforgeability** (`Audit.Signed`): a checkpoint that verifies is one the
+  vault signed, over a prefix of the log as it was.
+- **MACs**: the chain's proofs take each entry's MAC check as given
+  (`macOk`): whichever the walk makes, the app's of its own entries or the
+  vault's of its own, each author checking its own over the same stretch.
+  Who can make one is HMAC's property.
+- **About the data**: an environment's id is never `""` (`NoBlankEnv`), and
+  contexts are well formed, as `checkContext` makes them.
+
+## How the model is tied to the code
+
+`scripts/formal-lean.ts` draws cases from a seeded generator over a small
+world (two projects, their environments, a fork, a personal config, ids no
+row has) that meets every branch: edited and invalid roles, custom roles,
+protected environments and `*`, credentials of 0.10 and of before, services,
+deleted places, lapsed grants, every member status, tampered chains, holders
+with no policy, scope grants with no project, and names a plain object
+already holds (`constructor`, `__proto__`). Each case runs through the
+TypeScript and through the oracle, which runs the very definitions the
+proofs are about. A case without a field the code needs is an error to the
+oracle, never an answer, so it cannot pass for one the code would refuse.
+They run a batch of 20,000 at a time.
+
+| Compared | Cases | From |
+|---|---|---|
+| `allows`, `withinCredential` | 20,000 each | `@coffre/core/access` |
+| `givesService`, `managesService`, `issuesCredential` | about 6,500, 6,000, 6,000 | `@coffre/core/access` |
+| `heldColumns`, `issuedGrant`, `readsSensitive`, `ownsProject`, `mayManageAccess`, `runsInstance`, `readsWholeLog`, `makesProjects` | 4,000 each | `@coffre/core/access` |
+| `keyRefusals`, `sensitiveRefusals`, `referenceRefusal` | 13,000, 10,000, 6,000 | `packages/vault/src/decide.ts` |
+| `encodeAad` | 2,000 | `@coffre/core/envelope` |
+| `verifyEntries` | 2,000 | `@coffre/core/audit`, real keys and hashes |
+
+The run prints how often each yes-or-no function says yes, so a generator
+that stopped meeting one answer shows. And the comparison was itself tested:
+each of these changes to the code makes the run fail, by 4 to 519 cases or
+by throwing: `holds` ignoring protection, `heldColumns` asking at the
+project, `readsSensitive` across projects, `ownsProject` for a service, a
+personal config's owner past their credential, a person handed a sensitive
+value, a reference made to a sensitive source without using it there,
+`verifyEntries` letting a gap through, a lookup by an inherited name.
+Changing the model the same way breaks the proofs first.
+
+The vault's per-key decision and its check of each reference made live in
+`decide.ts`, pure, so that they can be compared: `#keys` and `reference`
+read, lock and log around them. It tells a personal
+config's own key from a reference into it by the environments' ids, as the
+model does, where it compared their rows as objects: the same on every map
+the store builds, one row an id.
+
+## What it found
+
+- **An empty list of permissions skipped the check.** `#keys` takes, for
+  each key, permissions any one of which it needs besides the call's
+  (`needs`). Given none, `refused[0]` was undefined, which passed for no
+  refusal, and the key was released without the call's own permission
+  checked. No caller passes an empty list; `keyRefusals` now refuses one.
+- **The version is not bound** (`versions_not_bound`). An attacker who can
+  write the database can put an older version's row in place of the newer,
+  and it opens. They could as well point the key at the older version: the
+  rollback coffre accepts (`docs/design/oidc.md`). Binding the version would
+  be a new envelope format.
+- **A lookup read names a plain object already holds.** `allows` read an
+  instance role as `instanceRoles[holder.role]`, and `protectedWithin` a
+  project's protected environments as `protectedIn[projectId]`: a role named
+  `constructor` made `allows` throw, and a project of that id made
+  `givesService` throw. Roles are checked and ids are UUIDs before they get
+  there, so nothing reached it; each lookup now takes only the record's own
+  keys, as `definitionOf` did.
+- **References share by design** (`reference_shares_by_design`): a stronger
+  claim than the code makes would be false, so the model says so.
+
+## What it does not cover
+
+- **The code around the decisions.** The model is the rules and the per-key
+  decision, not the API, the database's reads, which `Holdings` and the
+  environment rows the vault builds, or the locking (TLA+ above).
+  `serviceGrant`, how `issuedScope` keeps a service's grant, is modelled and
+  proved but not compared: `narrowest` is private to the server. Nor is
+  `sealCredentials`, which reads a credential of before 0.11 as its issuer
+  holds when it is sealed.
+- **The cryptography itself**, as assumed above. KMS's encryption context
+  (`kek/aws-kms.ts`) is not encoded, and needs no injectivity proof: it is a
+  map, so distinct contexts are distinct by construction; KMS binds the
+  ciphertext to the key, whose returned `KeyId` the code checks; and
+  `kekIntegrity`'s adversary is anyone without `kms:Encrypt` on the key.
+- **The rewrap rule.** `rewrap` wraps a sensitive version's key again only as
+  sensitive (`LOOSER`, re-checked under the head), but for an Owner's
+  loosening: what makes `sensitive_value_never_reaches_a_person`'s hypothesis
+  hold. Neither is modelled or compared.
+- **Freshness.** Rolling back the log and all its checkpoints together needs
+  no key.
+- **Bytes.** The model encodes the AAD as characters; the code, UTF-8. They
+  agree on the ASCII contexts `checkContext` admits, which the cases compare.
+
+## Lean
+
+- **Version:** Lean 4.35.0 (`formal/lean/lean-toolchain`), released
+  2026-10-12, core alone: no Mathlib, so a clean build of every proof and the
+  oracle takes seconds. `scripts/formal-lean.sh` pins each platform's release
+  archive by SHA-256 and uses elan's Lean instead when it is that release.
+- **Adding a rule:** a definition in `Access.lean` beside the code's, an
+  operation in `Oracle.lean` and its cases in `formal-lean.ts`, then the
+  theorem. Workload sessions narrowed from a parent's would be one more
+  `IssuedBy`, and `personal_token_within_issuer` the shape of its proof.

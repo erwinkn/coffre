@@ -223,6 +223,13 @@ unsupported diff select full validation.
   of the code's protections must fail. It needs Java 11+, and downloads TLC's
   jar once, checked against its pinned SHA-256. A change to the locks a flow
   takes, or what it re-checks under the head, changes the model too.
+- `pnpm formal:lean` checks the Lean proofs in `formal/lean` (`docs/formal.md`,
+  "Proofs in Lean") and holds their model to `@coffre/core/access`, the
+  vault's per-key decision (`packages/vault/src/decide.ts`), the AAD and the
+  chain verifier on about 120,000 generated cases (`--long`, `--seed=<n>`).
+  It uses elan's Lean if it is the pinned release, or downloads that release
+  once, checked against its SHA-256. A change to any of those rules changes
+  `formal/lean` in the same pull request, or the cases disagree.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
   (every path, script and link the docs name exists) do not need Postgres.
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers

@@ -106,6 +106,7 @@ pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/p
 pnpm test:properties:server  # modeled server operations; --long for 40 sequences
 pnpm test:schema       # what the restricted logins may and may not do
 pnpm formal            # the locking, credential and bulk-limit protocols, model-checked over every interleaving (docs/formal.md)
+pnpm formal:lean       # the Lean proofs of the access rules, envelopes and log, and their model held to the code
 pnpm build             # every package
 pnpm typecheck         # every package, the examples and dev/ (after pnpm build)
 pnpm conformance:workers   # examples/workers, held to docs/conformance.md (after pnpm build)
