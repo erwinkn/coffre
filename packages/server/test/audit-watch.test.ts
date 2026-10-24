@@ -187,7 +187,7 @@ test('an app entry the walk finds edited stands, checked alone each beat, until 
 });
 
 test('a finding at the anchored entry clears only once the entry verifies, not when its hash column is put back', async () => {
-  const b = (log = warned().log) => writeAuditHeartbeat(db.runtime, chainKey, slow, anchor, log);
+  const b = (log: HeartbeatLogger = warned().log) => writeAuditHeartbeat(db.runtime, chainKey, slow, anchor, log);
   // Far enough from the first entry that the vault's scrub, an entry a call, does not reach it here.
   for (let i = 0; i < 10; i++) await append();
   await b(quiet);

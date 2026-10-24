@@ -249,7 +249,7 @@ function sameOr(was: AnchorFinding | null, found: AnchorFinding): AnchorFinding 
  * it stood.
  */
 async function repaired(ctx: WatchContext, seq: number, anchor: Fields): Promise<boolean> {
-  const point = [anchor.verified, anchor.checkpoint].find((held) => held?.seq === seq);
+  const point = [anchor.verified, anchor.checkpoint].find((held) => held?.seq === seq) ?? undefined;
   const alone = await ctx.log.check(seq, 'log');
   return alone?.ok === true && (point === undefined || alone.hash === point.hash);
 }
