@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.0 (2026-10-24)
+
 - **Upgrading to 0.13.0, in short.** No migration: the database, the
   settings and the API are as in 0.12.1, so `coffre migrate` has nothing to
   apply, and there is nothing to roll back beyond what 0.12 already was.
