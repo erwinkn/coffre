@@ -20,8 +20,9 @@
   of is not read, and only named keys clash.
 - **`coffre export --keys`, and `keys` on `POST /api/reveals`.** The Action
   runs `coffre export --format github --keys …`, which `--format github`
-  now requires. `--keys` takes the same names and prefixes, in every format
-  but `--watch`: the CLI lists the environments first, which opens no
+  now requires. `--keys` takes the same names and prefixes, in every format,
+  but not with `--watch`, nor for a person's placeholders, which the
+  credential proxy plans for whole environments: the CLI lists the environments first, which opens no
   value, then asks the instance for those keys only (`{"path":
   "market/prod", "keys": ["DATABASE_URL", "STRIPE_KEY"]}`). The other keys
   are never opened, logged or counted against the vault's bulk limit. An

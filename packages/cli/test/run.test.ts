@@ -493,6 +493,31 @@ test("a terminal's Ctrl-C reaches a run's command, and the run waits for it; a S
   assert.deepEqual(await once(terminated, 'exit'), [9, null]);
 });
 
+test("a person's export --keys, on an instance with the credential proxy, is refused before a handle is made or a key listed", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pat = `coffre_pat_${'p'.repeat(43)}`;
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    if (req.url === '/use') return res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ proxy: 'coffre', credentials: [] }));
+    res.writeHead(500).end();
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  signedInWithToken(home, `http://127.0.0.1:${port}`, pat);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'market/dev', '--keys', 'DATABASE_URL'], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 1);
+  assert.equal(stderr, "coffre: --keys picks values, and a person's export here gets placeholders, which the credential proxy plans for whole environments: leave --keys out\n");
+  assert.deepEqual(requests, ['GET /use']);
+});
+
 test("a person's run, on an instance with the credential proxy, gets placeholders: one handle, the plan's variables, and what it leaves out, said", async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));

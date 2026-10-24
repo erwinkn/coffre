@@ -1433,6 +1433,10 @@ async function exportEnv(args: string[]): Promise<void> {
     }).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   }
 
+  // A person's placeholders are planned for whole environments, the handle's helpers with them: no key of them is picked.
+  if (patterns !== null && format !== 'github' && (await proxied(target()))) {
+    fail("--keys picks values, and a person's export here gets placeholders, which the credential proxy plans for whole environments: leave --keys out");
+  }
   // The keys --keys names, by environment, listed before anything is made or read.
   const only = patterns === null ? null : await listKeys(paths, reader([403, 404]), patterns).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   // What a prefix found, refused as a name is, and as `githubEnvironment` would refuse it once read.
@@ -1443,8 +1447,7 @@ async function exportEnv(args: string[]): Promise<void> {
   if (placed !== null && placed.tunnels.length > 0) {
     process.stderr.write(`coffre: left out of the export: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')}, whose tunnel lives only as long as \`coffre run\`\n`);
   }
-  const chosen = only === null ? null : new Set([...only.values()].flat());
-  const entries = byKey(placed === null ? await readOrEnd(paths, only) : Object.entries(placed.env).filter(([key]) => chosen === null || chosen.has(key)));
+  const entries = byKey(placed === null ? await readOrEnd(paths, only) : Object.entries(placed.env));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.

@@ -406,7 +406,8 @@ coffre --url https://secrets.acme.example --service api-deploy export market/pro
 It requires `GITHUB_ENV`, and `--keys`, as the Action requires `keys`. The
 `json`, `dotenv` and `shell` formats write to stdout and do not issue
 GitHub mask commands; they take `--keys` too, and read every key without
-it. Use `github` when loading values into an Actions job.
+it. A person's export, on an instance with the credential proxy, gets
+placeholders of whole environments and refuses `--keys`. Use `github` when loading values into an Actions job.
 
 ## Cloudflare Workers
 
