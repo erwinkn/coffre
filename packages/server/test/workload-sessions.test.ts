@@ -477,6 +477,9 @@ test("a session issues no credential and changes no one's access, in any mode: a
   const onto = await call(held, 'PUT', '/api/projects/market/dev', { body: { from: 'prod' } });
   assert.deepEqual([onto.status, onto.body.reason], [403, 'workload_cannot_issue']);
   assert.equal((await isProtected('dev')).protected, false, 'unchanged');
+  // Each refusal is logged, as the router's are.
+  const logged = await db.owner.select({ decision: auditLog.decision, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'environment.update'));
+  assert.equal(logged.filter((entry) => entry.decision === 'deny' && JSON.parse(entry.metadata).reason === 'workload_cannot_issue').length, 3);
   const fresh = await call(held, 'PUT', '/api/projects/market/staging', { body: { from: 'prod' } });
   assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
   assert.equal((await isProtected('staging')).protected, true);
@@ -548,6 +551,9 @@ test("the per-request statement reads its rows through their indexes, however ma
   assert.doesNotMatch(lines, /Seq Scan on credentials/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_token_hash_key/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_pkey/, lines);
+  // Nor of the log, which only grows: each freeze and the tombstone through an index.
+  assert.doesNotMatch(lines, /Seq Scan on audit_log/, lines);
+  assert.match(lines, /audit_log_freeze_idx/, lines);
 });
 
 test('a session whose binding is removed, or whose row is changed around the app, is no session', async () => {

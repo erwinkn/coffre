@@ -146,14 +146,9 @@ export function gateOf(runtime: Pick<CoffreRuntime, 'gates'>, principal: string)
   return runtime.gates(principal);
 }
 
-/** A row's limits, a `narrow` child's; null for a root. One the MAC passed but that does not parse limits it to nothing. */
+/** A row's limits, a `narrow` child's; null for a root. Under the row's MAC, so only coffre wrote them: one that does not parse is a bug of coffre's, and throws. */
 function constraintsOf(stored: string | null): Constraints | null {
-  if (stored === null) return null;
-  try {
-    return checkConstraints(JSON.parse(stored));
-  } catch {
-    return { places: [], credentials: [], methods: [], paths: [] };
-  }
+  return stored === null ? null : checkConstraints(JSON.parse(stored));
 }
 
 /** A row's ancestors' IDs, root first; null for one that is no list, which stands for nothing. */
@@ -210,14 +205,14 @@ export async function standingSession(
     throw refusal(new ApiError('bad_request', 'an environment is named by its ID, and a credential by its name in the configuration'));
   }
 
+  const tokenHash = hashToken(token);
   let rows: Awaited<ReturnType<typeof workloadSession>>;
   try {
-    rows = await workloadSession(runtime.db, hashToken(token), { place: ask.place, credential: ask.credential });
+    rows = await workloadSession(runtime.db, tokenHash, { place: ask.place, credential: ask.credential });
   } catch (error) {
     console.error('checking a workload session failed', logged(error));
     throw refusal(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
-  const tokenHash = hashToken(token);
   const own = rows.find((candidate) => candidate.credential.tokenHash.equals(tokenHash));
   if (own === undefined) throw unknown();
   const { credential: row, binding, now } = own;
@@ -230,6 +225,15 @@ export async function standingSession(
   ) {
     throw unknown();
   }
+  // The proof next, before anything that tells a live session apart: a token without its key learns nothing more.
+  const verified = await verifyProof(parsed, {
+    method: request.method,
+    url: signedUrl(request, runtime.publicUrl),
+    jkt: row.jkt!,
+    token,
+    content: ask.body === undefined ? undefined : { headers: request.headers, body: ask.body },
+  });
+  if (!verified.ok) throw proofRefused(verified.reason, verified.message);
   const policy = JSON.parse(binding.policy) as BindingPolicy;
   // The environment it uses: the one named, or the one the session was made for (`/use/<credential>`).
   const places = placesOf(row.places);
@@ -257,15 +261,6 @@ export async function standingSession(
     throw refusal(new ApiError('forbidden', 'this instance lets no binding list reads (noReads): bind the workload again without them', 'no_reads'));
   }
 
-  // The proof: the key the row is bound to, this request's method and URL, the token, and what is forwarded.
-  const verified = await verifyProof(parsed, {
-    method: request.method,
-    url: signedUrl(request, runtime.publicUrl),
-    jkt: row.jkt!,
-    token,
-    content: ask.body === undefined ? undefined : { headers: request.headers, body: ask.body },
-  });
-  if (!verified.ok) throw proofRefused(verified.reason, verified.message);
 
   if (policy.sources !== undefined && !ending && (sourceIp === null || !addressWithin(sourceIp, policy.sources))) {
     throw refusal(new ApiError('unauthenticated', sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${sourceIp} is outside the binding's sources`, 'source'));
