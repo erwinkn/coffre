@@ -31,6 +31,7 @@
     "@coffre/client": "workspace:*",
     "@coffre/core": "workspace:*",
     "@coffre/db": "workspace:*",
+    "@hegeldev/hegel": "0.4.7",
     "@types/node": "26.1.1",
     "@types/pg": "8.20.0",
     "@types/ws": "8.18.1",

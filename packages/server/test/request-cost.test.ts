@@ -10,6 +10,8 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import * as hegel from '@hegeldev/hegel';
+import * as gs from '@hegeldev/hegel/generators';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
@@ -22,6 +24,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { propertySettings } from '../../../scripts/property-settings.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
@@ -190,4 +193,109 @@ test('a request runs the same statements, and reads the same rows, however large
   for (const [name, { request }] of Object.entries(requests)) {
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
+});
+
+test("a caller's check reads nothing of a project they reach nothing in", POSTGRES, async () => {
+  await reader.me();
+  const before = await cost(() => reader.me());
+  await root.projects.create('elsewhere', { name: 'Elsewhere' });
+  for (const environment of ['dev', 'prod', 'qa']) await root.environments.create(`elsewhere/${environment}`, { name: environment });
+  await root.secrets.set('elsewhere/dev', { A: 'fake-a', B: 'fake-b' });
+  assert.deepEqual(await cost(() => reader.me()), before);
+});
+
+/**
+ * The instance grown every way at once, in an order Hegel draws: other
+ * environments written, other projects and their forks made, members granted, the
+ * reader's own role flipped, environments protected and not, roles edited
+ * and made, references made into the environment the requests read, keys
+ * made sensitive, tokens issued. Whatever it grew by, each request costs
+ * what it did before.
+ */
+const growth = gs.record({
+  kind: gs.sampledFrom(['write', 'project', 'fork', 'member', 'flip', 'protect', 'role', 'reference', 'sensitive', 'token'] as const),
+  place: gs.integers({ minValue: 0, maxValue: 7 }),
+  count: gs.integers({ minValue: 1, maxValue: 12 }),
+  on: gs.booleans(),
+});
+const growthSettings = propertySettings(4, 10);
+
+test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, POSTGRES, async () => {
+  for (const { request } of Object.values(requests)) await request();
+  const small: Record<string, Cost> = {};
+  for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
+  // Places made so far: names from a counter, since the instance keeps what every case made. So Hegel's replay of a
+  // failing case runs on a larger instance, and may pass, which it reports as flaky: the first failure is printed whole.
+  const made = { projects: [] as string[], environments: ['market/busy', 'market/prod'], keys: [] as string[] };
+  let n = 0;
+  await hegel.testAsync(async (tc) => {
+    const steps = tc.draw(gs.arrays(growth, { minSize: 1, maxSize: 8 }));
+    for (const step of steps) {
+      const at = made.environments[step.place % made.environments.length]!;
+      const id = n++;
+      switch (step.kind) {
+        case 'write': {
+          const keys = Object.fromEntries(Array.from({ length: step.count }, (_, i) => [`GROWN_${id}_${i}`, `fake-${id}-${i}`]));
+          await root.secrets.set(at, keys);
+          made.keys.push(...Object.keys(keys).map((key) => `${at}/${key}`));
+          break;
+        }
+        case 'project': {
+          await root.projects.create(`grown-${id}`, { name: `Grown ${id}` });
+          for (const environment of ['dev', 'prod']) await root.environments.create(`grown-${id}/${environment}`, { name: environment });
+          made.projects.push(`grown-${id}`);
+          made.environments.push(`grown-${id}/dev`, `grown-${id}/prod`);
+          break;
+        }
+        case 'fork': {
+          // In another project than market: a caller reads the environments of the projects they reach, its forks among them.
+          const [project, from] = at.split('/');
+          if (project === 'market') break;
+          await root.environments.create(`${project}/fork-${id}`, { name: `Fork ${id}`, from });
+          made.environments.push(`${project}/fork-${id}`);
+          break;
+        }
+        case 'member': {
+          const member = `user:grown-${id}@acme.example`;
+          await root.members.add(member);
+          await root.access.set(member, { [step.on ? 'market/dev' : at]: step.count % 2 === 0 ? 'viewer' : 'developer' });
+          break;
+        }
+        case 'flip':
+          await root.access.set(`user:${READER}`, { 'market/dev': step.on ? 'developer' : 'viewer' });
+          break;
+        case 'protect':
+          // Never market/dev, which the reader reads: protected, a viewer there only uses.
+          await root.environments.protect(at, step.on);
+          break;
+        case 'role':
+          await root.roles.set(step.on ? `grown-${step.count % 3}` : 'auditor', {
+            name: `Grown ${step.count}`, description: '', permissions: step.count % 2 === 0 ? ['audit.read'] : ['audit.read', 'secret.read', 'secret.use'], protected: ['audit.read'],
+          }, step.on ? undefined : { instance: true });
+          break;
+        case 'reference':
+          await root.secrets.set(at, { [`REFERS_${id}`]: { ref: step.on ? 'market/dev/API_KEY' : 'market/dev/DATABASE_URL' } });
+          break;
+        case 'sensitive': {
+          const grown = made.keys.filter((path) => !path.startsWith('market/dev/'));
+          if (grown.length === 0) break;
+          const path = grown[step.count % grown.length]!;
+          const slash = path.lastIndexOf('/');
+          await root.secrets.set(path.slice(0, slash), { [path.slice(slash + 1)]: { sensitivity: step.on ? 'sensitive' : 'secret' } });
+          break;
+        }
+        case 'token':
+          await (step.on
+            ? root.tokens.issue(SERVICE, { label: `grown-${id}`, expiresInDays: 1 })
+            : root.tokens.issue(`user:${ROOT}`, { label: `grown-${id}`, expiresInMinutes: 60, scope: { [at]: 'viewer' } }));
+          break;
+      }
+    }
+    for (const [name, { request }] of Object.entries(requests)) {
+      const spent = await cost(request);
+      const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;
+      if (JSON.stringify(spent) !== JSON.stringify(small[name])) console.error(why);
+      assert.deepEqual(spent, small[name], why);
+    }
+  }, growthSettings);
 });

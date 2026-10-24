@@ -113,6 +113,8 @@ test('a token matches when it carries every claim, one of a list; a pull request
   // Only GitHub's profiles read a pull request at its base, and a claim that is no string never matches.
   assert.deepEqual(differingClaims('custom', { ref: 'refs/heads/main' }, pr), ['ref']);
   assert.deepEqual(match({ ...push, repository_id: 41532 }), ['repository_id']);
+  // Only the ref at its end is read at the base, even an empty one: slice(0, -0) would have left nothing of the file.
+  assert.deepEqual(differingClaims('github', { workflow_ref: 'refs/heads/main' }, { ...pr, ref: '', workflow_ref: 'acme/api/.github/workflows/ci.yml@' }), ['workflow_ref']);
 });
 
 test('a GitHub binding may name the environment its job runs in, matched whatever its case, whatever sub says', () => {
@@ -215,6 +217,8 @@ test('claims are bounded strings with names a binding may match, and never the e
     refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', [name]: 'y' } }, /never names/);
   }
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', 'kubernetes.io serviceaccount': 'y' } }, /not a claim name/);
+  // As a JSON body has it: an own `__proto__`, which the stored binding would otherwise drop, matching more than it says.
+  refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: JSON.parse('{"sub":"x","__proto__":"y"}') as Record<string, unknown> }, /not a claim name/);
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

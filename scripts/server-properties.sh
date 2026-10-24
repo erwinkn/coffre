@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The standalone property file owns one random scratch database. The normal
-# suite still runs it on a private clone via test-database-worker.mjs.
+# The standalone property files share one random scratch database. The normal
+# suite still runs each on a private clone via test-database-worker.mjs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 for argument in "$@"; do
@@ -31,3 +31,8 @@ case "$COFFRE_TEST_ENGINE" in
     *) echo 'COFFRE_TEST_ENGINE must be postgres or sqlite' >&2; exit 2 ;;
 esac
 node --conditions=coffre:source packages/server/test/operations-properties.test.ts "$@"
+node --conditions=coffre:source packages/server/test/forks-properties.test.ts "$@"
+node --conditions=coffre:source packages/server/test/audit-visibility-properties.test.ts "$@"
+node --conditions=coffre:source packages/server/test/natures-properties.test.ts "$@"
+# Its growth property, and its fixed budgets beside it; Postgres only.
+node --conditions=coffre:source packages/server/test/request-cost.test.ts "$@"

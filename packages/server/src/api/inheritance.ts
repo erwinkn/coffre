@@ -30,22 +30,17 @@ export function resolveKeys(
   const removed = new Map<string, Set<string>>();
   for (const row of dismissed) removed.set(row.environmentId, (removed.get(row.environmentId) ?? new Set()).add(row.key));
 
-  const resolved = new Map<string, Map<string, Held>>();
+  // Each chain walked whole, never through another's: what a parent resolves to may reach further than the depth left here.
   const resolve = (id: string, depth: number): Map<string, Held> => {
-    const known = resolved.get(id);
-    if (known !== undefined) return known;
     const keys = new Map(own.get(id));
     const parentId = parentOf.get(id) ?? null;
     if (parentId !== null && parentOf.has(parentId) && depth < MAX_PARENTS) {
       const without = removed.get(id) ?? new Set();
       for (const [key, held] of resolve(parentId, depth + 1)) if (!keys.has(key) && !without.has(key)) keys.set(key, held);
     }
-    // Cached only from the top of a chain: one met deeper may have been cut short by the depth.
-    if (depth === 0) resolved.set(id, keys);
     return keys;
   };
-  for (const environment of environments) resolve(environment.id, 0);
-  return resolved;
+  return new Map(environments.map((environment) => [environment.id, resolve(environment.id, 0)]));
 }
 
 /** A key a fork's parent resolves to: its row, and the environment it is held in. */

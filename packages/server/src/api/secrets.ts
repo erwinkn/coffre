@@ -1583,9 +1583,16 @@ export async function restoreVersion(
     };
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
-    const level = foundSensitive ? 'sensitive' : sensitivityOf(target);
-    // An old value is made live only by whoever could have read it (`madeLive`), as the vault decides again.
-    if (target.id !== prepared.currentVersionId) madeLive(ctx, place, sensitivityOf(target), 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
+    // An old version comes back no looser than it was, nor than its value was made since: the newest version of its very
+    // ciphertext, a mark in place, whatever was written after, known by its IV and tag, which no erasure changes. Its plain version brings back no secret: making a secret
+    // plain takes reading it, which a restore does not (R24). An Owner's loosening in place is the current value's alone
+    // (R30): its sensitive version comes back sensitive. A value written meanwhile makes this attempt prepare again, so
+    // `versions` is the history the restore commits on.
+    const since = sensitivityOf(versions.find((each) => each.envelope.iv.equals(target.envelope.iv) && each.envelope.authTag.equals(target.envelope.authTag))!);
+    const held = stricter(since, sensitivityOf(target)) ? since : sensitivityOf(target);
+    const level = foundSensitive ? 'sensitive' : held;
+    // An old value is made live only by whoever could read it as it is held (`madeLive`), as the vault decides again.
+    if (target.id !== prepared.currentVersionId) madeLive(ctx, place, held, 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
     if (!rewrapped.ok) {
       throw vaultRefusal(ctx, rewrapped.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });

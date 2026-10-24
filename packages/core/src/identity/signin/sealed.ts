@@ -36,8 +36,11 @@ export function seal(key: Uint8Array, value: unknown, ttlSeconds: number, now = 
 /** The sealed value, or null when it is malformed, forged, tampered with or expired. */
 export function unseal<T>(key: Uint8Array, sealed: string | undefined | null, now = Date.now()): T | null {
   if (!sealed?.startsWith(`${VERSION}.`)) return null;
-  const raw = Buffer.from(sealed.slice(VERSION.length + 1), 'base64url');
-  if (raw.length <= IV_BYTES + TAG_BYTES) return null;
+  const body = sealed.slice(VERSION.length + 1);
+  const raw = Buffer.from(body, 'base64url');
+  // The decoder skips what is not base64url and a last character's unused
+  // bits, so only the spelling `seal` writes opens: one string per value.
+  if (raw.length <= IV_BYTES + TAG_BYTES || raw.toString('base64url') !== body) return null;
   try {
     const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, IV_BYTES));
     decipher.setAAD(Buffer.from(VERSION));

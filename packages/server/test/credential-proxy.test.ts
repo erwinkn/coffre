@@ -419,6 +419,9 @@ test("a credential with an egress leaves through it, never the global fetch, as 
     assert.equal(echoed.headers.get('cache-control'), 'no-store');
     answer = () => new Response(null, { status: 302, headers: { location: 'https://evil.example/steal' } });
     assert.equal((await call('/redirect')).status, 502);
+    // A Location no URL reads is nowhere under the upstream either.
+    answer = () => new Response(null, { status: 302, headers: { location: '//' } });
+    assert.equal((await call('/redirect')).status, 502);
 
     // Refused before it leaves, as without an egress: the handle in the body, a path out of the upstream.
     const before = sent.length;
@@ -517,7 +520,9 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
 
   // A dot segment, encoded or not, is resolved before coffre sees it, out of the credential's path altogether; an encoded slash is refused.
   for (const path of ['/../admin', '/%2e%2e/admin', '/.%2E/admin']) assert.equal((await call(path)).headers.get('coffre-proxy'), 'refused', path);
-  for (const path of ['/a%2Fb', '/a%5Cb', '/a%2fb%2f..%2f..']) {
+  // As is a dot segment with path parameters, which Tomcat and Spring read as one (`/..;/`), however it is encoded, one
+  // encoded twice, which a server behind another decodes twice, and one with a control byte, blanks or an overlong dot.
+  for (const path of ['/a%2Fb', '/a%5Cb', '/a%2fb%2f..%2f..', '/..;/admin', '/companies/%2e%2e;x/admin', '/companies/..%3B', '/companies/%252e%252e/%252e%252e/admin', '/a%252Fb', '/companies/..%253b', '/companies/..%00/admin', '/companies/..%20/admin', '/companies/%c0%ae%c0%ae/admin']) {
     const climbed = await call(path);
     assert.equal(climbed.status, 400, path);
     assert.equal(climbed.headers.get('coffre-proxy'), 'refused');
@@ -876,6 +881,7 @@ test("the configuration is checked: HTTPS upstreams, no private address, rules t
   assert.throws(make({ a: { upstream: 'https://169.254.169.254/latest', inject: header('x', '{K}') } }), /private address/);
   assert.throws(make({ a: { upstream: 'https://[::1]', inject: header('x', '{K}') } }), /private address/);
   assert.throws(make({ a: { upstream: 'https://localhost', inject: header('x', '{K}') } }), /private address/);
+  assert.throws(make({ a: { upstream: 'https://localhost./v1', inject: header('x', '{K}') } }), /private address/, 'a resolver reads localhost. as localhost');
   assert.throws(make({ a: { upstream: 'https://api.example.com', inject: header('x', 'static') } }), /names no key/);
   assert.throws(make({ A: { upstream: 'https://api.example.com', inject: header('x', '{K}') } }), /lowercase/);
   // `expose` and a credential's `identifiers` are gone in 0.10: refused at typecheck and at startup, saying what to do instead.

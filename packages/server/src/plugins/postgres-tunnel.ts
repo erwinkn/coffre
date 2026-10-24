@@ -479,6 +479,15 @@ class Scram {
 }
 
 /**
+ * Right-to-left characters (RandALCat), RFC 3454's table D.1, as Postgres
+ * has it: Hebrew's and Arabic's punctuation and tatweel too, which are no
+ * letters of those scripts. Left-to-right ones (table D.2, LCat) are
+ * judged as letters of any other script, which leaves out the spacing marks
+ * and symbols that table also holds (U+0903, a Devanagari sign, say).
+ */
+const rtl = /[\u05BE\u05C0\u05C3\u05D0-\u05EA\u05F0-\u05F4\u061B\u061F\u0621-\u063A\u0640-\u064A\u066D-\u066F\u0671-\u06D5\u06DD\u06E5\u06E6\u06FA-\u06FE\u0700-\u070D\u0710\u0712-\u072C\u0780-\u07A5\u07B1\u200F\uFB1D\uFB1F-\uFB28\uFB2A-\uFB36\uFB38-\uFB3C\uFB3E\uFB40\uFB41\uFB43\uFB44\uFB46-\uFBB1\uFBD3-\uFD3D\uFD50-\uFD8F\uFD92-\uFDC7\uFDF0-\uFDFC\uFE70-\uFE74\uFE76-\uFEFC]/;
+
+/**
  * SASLprep (RFC 4013), as Postgres runs it on a SCRAM password: non-ASCII
  * spaces made spaces, what maps to nothing dropped, NFKC; and the password
  * as it is when nothing is left, or the result holds a prohibited or an
@@ -498,9 +507,7 @@ export function saslprep(password: string): string {
   const prohibited = /[\u0000-\u001F\u007F-\u009F\u06DD\u070F\u180E\u200E\u200F\u2028-\u202E\u2FF0-\u2FFB\u2060-\u2063\u206A-\u206F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF9-\uFFFF\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}\u{F0000}-\u{10FFFF}\u{1FFFE}\u{1FFFF}\u{2FFFE}\u{2FFFF}]|\p{Cs}/u;
   // Nothing left, or a character Unicode leaves unassigned: Postgres's own fallback, the password as it is.
   if (mapped === '' || prohibited.test(mapped) || /\p{Cn}/u.test(mapped)) return password;
-  // Bidirectional text: right-to-left letters only, no left-to-right one, the first and the last right-to-left.
-  // Right-to-left letters (RandALCat), by script and as letters, never a digit, which is no letter's direction.
-  const rtl = /(?=[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}])\p{L}/u;
+  // Bidirectional text: right-to-left characters only, no left-to-right one, the first and the last right-to-left.
   const chars = [...mapped];
   if (chars.some((char) => rtl.test(char))) {
     if (chars.some((char) => /\p{L}/u.test(char) && !rtl.test(char)) || !rtl.test(chars[0]!) || !rtl.test(chars.at(-1)!)) return password;
