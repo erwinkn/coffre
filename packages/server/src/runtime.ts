@@ -9,6 +9,7 @@ import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
 import type { Gates } from './gate.ts';
 import { auditAlerter } from './alerts.ts';
+import { actorOf } from './db/audit.ts';
 import { logged } from './logged.ts';
 import { watchContext, watcherOf, type WatchActor, type WatchContext, type Watcher } from './watch.ts';
 import { McpService } from './mcp/service.ts';
@@ -130,7 +131,11 @@ export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (act
   const hooks = runtime.plugins.map(watcherOf).find((found) => found !== undefined);
   if (hooks === undefined) return null;
   const alert = auditAlerter(runtime);
-  return { hooks, context: (actor) => watchContext({ db: runtime.db, chainKey: runtime.chainKey, vault: runtime.vault, alert, actor }) };
+  return {
+    hooks,
+    context: (actor) =>
+      watchContext({ db: runtime.db, chainKey: runtime.chainKey, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
+  };
 }
 
 /** What a handler gets: the runtime's stores and the request's caller. */

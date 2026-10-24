@@ -122,7 +122,10 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
     // A walk between beats (`walkOn`) moved only how far the app verified, toward the same checkpoint: this beat goes
     // on from there, as if it had read it first. Another beat's anchor, a later checkpoint's, is the next beat's to
     // go on from, and this one writes nothing.
-    const now = await anchors.read().catch(() => null);
+    const now = await anchors.read().catch((error: Error) => {
+      ctx.warn({ err: error.message }, 'the audit anchor could not be read again after another wrote it first');
+      return null;
+    });
     if (lost === WRITES_LOST || prev === null || now === null || !ctx.own(now) || now.epoch !== prev.epoch || !samePoint(now.checkpoint, prev.checkpoint)) {
       ctx.warn({}, 'another beat wrote the audit anchor first: the next goes on from it');
       return false;
@@ -160,8 +163,8 @@ async function outcome(ctx: WatchContext, base: Fields, signed: Signed, unwritte
   const fails = (by: AnchorFinding['by'], reason: string): Fields => ({ ...base, finding: standing ?? sameOr(base.finding, { seq: null, reason, by, since: Date.now() }) });
   if (unwritten !== null) return fails('app', `the log takes no writes: ${unwritten}`);
   if (!signed.ok) return fails('vault', signed.reason);
-  if (standing !== null && !(await repaired(ctx, standing.seq!, base))) return { ...base, finding: standing };
   try {
+    if (standing !== null && !(await repaired(ctx, standing.seq!, base))) return { ...base, finding: standing };
     return await advance(ctx, base, signed.checkpoint);
   } catch (error) {
     ctx.warn({ err: (error as Error).message }, 'the audit log could not be verified from the anchor');
@@ -323,8 +326,9 @@ export async function readiness(ctx: WatchContext, anchors: AnchorStore): Promis
  * first, in their name (the context's actor), with the range and the
  * finding, which stays in the log as it was found; then the anchor moved
  * past the range, in a new epoch, and an alert. The next beat walks on
- * from the entry after the range, checked alone, or, with none, from the
- * one before it; whatever the range holds now is never walked. Tampering
+ * from the entry after the range, checked alone, and whatever the range
+ * holds now is never walked; or, with no entry after it, from the one
+ * before it, over whatever the log holds from `from` on now. Tampering
  * anywhere else is found as before. A refusal throws a `Refusal`. Should
  * the anchor change meanwhile to anything but the same finding sealed
  * again, an `audit.loss_unapplied` entry says the acceptance did not take.

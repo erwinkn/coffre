@@ -225,12 +225,16 @@ async function logIsEmpty(runtime: CoffreRuntime): Promise<boolean> {
 
 /**
  * More of the audit watch's backlog walked, a walk after another, up to
- * `walks`: what Node's scheduled job runs after each run (on Workers, the
- * anchor's Durable Object's alarm). Whether more is left.
+ * `walks`, and none begun after `until` (ms since the epoch): what Node's
+ * scheduled job runs after each run (on Workers, the anchor's Durable
+ * Object's alarm). Whether more is left.
  */
-export async function walkAuditBacklog(runtime: CoffreRuntime, walks: number): Promise<boolean> {
+export async function walkAuditBacklog(runtime: CoffreRuntime, walks: number, until = Infinity): Promise<boolean> {
   const watch = watchOf(runtime);
   if (watch === null) return false;
-  for (let i = 0; i < walks; i++) if (!(await watch.hooks.walkOn(watch.context()))) return false;
+  for (let i = 0; i < walks; i++) {
+    if (Date.now() >= until) return true;
+    if (!(await watch.hooks.walkOn(watch.context()))) return false;
+  }
   return true;
 }

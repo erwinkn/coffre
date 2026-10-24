@@ -20,15 +20,19 @@ import type { CoffreRuntime } from './runtime.ts';
 
 /**
  * The audit's own alerts, on a workload's alerts' channel: the deployment's
- * `alert` (`signin({ workloads: { alert } })`), after the response. The
- * entry in the log is the caller's own, `audit.reanchor` or
- * `audit.loss_accepted`. Never throws.
+ * `alert` (`signin({ workloads: { alert } })`), after the response, in the
+ * name of `by`, the scheduler's unless an Owner's request says; with no
+ * channel, the process's log. The entry in the log is the caller's own,
+ * `audit.reanchor` or `audit.loss_accepted`. Never throws.
  */
-export function auditAlerter(runtime: Pick<CoffreRuntime, 'auth' | 'waitUntil'>): (text: string) => void {
+export function auditAlerter(runtime: Pick<CoffreRuntime, 'auth' | 'waitUntil'>): (text: string, by?: string) => void {
   const deliver = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads?.alert ?? null : null;
-  return (text) => {
-    if (deliver === null) return;
-    const alert: WorkloadAlert = { kind: 'audit', service: 'system:coffre-scheduler', binding: null, session: null, ip: null, text };
+  return (text, by = 'system:coffre-scheduler') => {
+    if (deliver === null) {
+      console.warn(`audit alert, with no alert channel to send it on (signin({ workloads: { alert } })): ${text}`);
+      return;
+    }
+    const alert: WorkloadAlert = { kind: 'audit', service: by, binding: null, session: null, ip: null, text };
     runtime.waitUntil(
       Promise.resolve()
         .then(() => deliver(alert))

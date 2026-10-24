@@ -73,6 +73,9 @@ const SCHEDULE_MINUTES = 5;
 /** Walks of the audit watch's backlog after a scheduled run, at most: 10,000 entries each, a million a run. */
 const BACKLOG_WALKS = 100;
 
+/** How long before the next run the backlog's walks stop: a walk's time, with room to spare. */
+const BACKLOG_MARGIN_MS = 30_000;
+
 /**
  * coffre on Node, its configuration checked now. The database opens with
  * the first request or the first run of the scheduled job, and serves the
@@ -108,16 +111,19 @@ export function createCoffre(config: NodeConfig): CoffreNode {
     },
     schedule() {
       if (timer !== undefined) return;
-      // Then the audit watch's backlog, a walk after another, until none is left or the next run is due.
-      const tick = () =>
-        ready()
+      // Then the audit watch's backlog, a walk after another, until none is left, `BACKLOG_WALKS`, or a little
+      // before the next run is due.
+      const tick = () => {
+        const until = Date.now() + SCHEDULE_MINUTES * 60_000 - BACKLOG_MARGIN_MS;
+        return ready()
           .then(async (rt) => {
             const ran = await runScheduled(rt).then(() => null, (error: unknown) => error);
             // Each failure its own line: the walk's never hides the run's.
-            await walkAuditBacklog(rt, BACKLOG_WALKS).catch((error: unknown) => console.error('the audit backlog could not be walked', logged(error)));
+            await walkAuditBacklog(rt, BACKLOG_WALKS, until).catch((error: unknown) => console.error('the audit backlog could not be walked', logged(error)));
             if (ran !== null) throw ran;
           })
           .catch((error: unknown) => console.error('scheduled job failed', logged(error)));
+      };
       void tick();
       timer = setInterval(tick, SCHEDULE_MINUTES * 60_000);
       timer.unref();

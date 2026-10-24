@@ -1,9 +1,12 @@
 // The audit anchor in a file, for Node (anchor.ts): its own module, so that
 // a Worker's bundle never imports the file system.
 import { mkdir, open, readFile, rename } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import { admits, type AnchorStore, type AuditAnchor } from './anchor.ts';
+
+/** The write each file's next waits for, one at a time however many stores in this process name it. */
+const turns = new Map<string, Promise<unknown>>();
 
 /**
  * An anchor in a file, for one Node process with a persistent volume: each
@@ -14,7 +17,6 @@ import { admits, type AnchorStore, type AuditAnchor } from './anchor.ts';
  * compare-and-set of its own (docs/deploy.md, "The audit watch").
  */
 export function fileAnchor(path: string): AnchorStore {
-  let turn: Promise<unknown> = Promise.resolve();
   const read = async (): Promise<AuditAnchor | null> => {
     try {
       return JSON.parse(await readFile(path, 'utf8')) as AuditAnchor;
@@ -26,7 +28,8 @@ export function fileAnchor(path: string): AnchorStore {
   return {
     read,
     write: (prev, next) => {
-      const written = turn.then(async () => {
+      const file = resolve(path);
+      const written = (turns.get(file) ?? Promise.resolve()).then(async () => {
         if (!admits(await read(), prev, next)) return false;
         await mkdir(dirname(path), { recursive: true });
         const temporary = `${path}.${process.pid}.tmp`;
@@ -42,7 +45,7 @@ export function fileAnchor(path: string): AnchorStore {
         await directory.sync().finally(() => directory.close());
         return true;
       });
-      turn = written.catch(() => undefined);
+      turns.set(file, written.catch(() => undefined));
       return written;
     },
   };

@@ -56,10 +56,11 @@ export const coffre = createCoffre({
   // The audit watch: every five minutes, the log walked from what it last
   // verified, which it keeps outside the database, in a file. Put the file
   // on a volume that outlives the process: on a disk that goes with the
-  // container, every restart walks the log whole again and alerts, and a
-  // cut made while it was down goes unseen. More than one process wants a
-  // store they share (docs/deploy.md, "The audit watch"). Remove it, and
-  // the log is checked only when someone runs `coffre verify log`.
+  // container, every restart walks the log whole again and alerts (through
+  // workloads' `alert`, or else in the process's log), and a cut made
+  // while it was down goes unseen. More than one process wants a store
+  // they share (docs/deploy.md, "The audit watch"). Remove it, and the log
+  // is checked only when someone runs `coffre verify log`.
   plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) })],
 });
 

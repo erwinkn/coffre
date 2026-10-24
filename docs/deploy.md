@@ -918,7 +918,8 @@ walk a second (the Durable Object's alarm on Workers, the scheduled job on
 Node), with `/readyz` green meanwhile, since an empty store is no evidence
 of tampering. A clean walk writes the anchor, logs `audit.reanchor` and
 sends one alert on the deployment's alert channel (`signin({ workloads: {
-alert } })`, as a workload's alerts). A walk that finds the log broken
+alert } })`, as a workload's alerts), or, without one, a warning in the
+process's log. A walk that finds the log broken
 keeps that as a finding: red, and nothing anchored past it. A cut made
 before the store emptied cannot be seen: the alert says when to look.
 
