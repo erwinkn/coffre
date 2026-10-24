@@ -164,7 +164,7 @@ export type AuditVerification =
  * log itself.
  */
 export type AuditKeys = {
-  /** `previous`, newest first; absent from a release before 0.13's answer. */
+  /** `previous`, newest first; absent from 0.13.0's answer and earlier releases'. */
   app: { keyId: string; previous?: string[] };
   vault: {
     current: { vaultId: string; provider: string };

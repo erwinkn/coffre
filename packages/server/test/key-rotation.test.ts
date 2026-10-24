@@ -243,8 +243,8 @@ test('starts that race each other rotate once, each step going on from the one b
   assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 11);
   assert.equal(new Set(steps.map((step) => JSON.stringify(step.next))).size, steps.length, 'no step went on from where another had');
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
-  // A start with a third key, racing too late, finds the log under B, a key it does not hold.
-  assert.equal((await keyState(deps.db, startUnder(C, [A]))).kind, 'refused');
+  // A start with a third key, racing too late, finds the log under B, a key it does not hold: it serves, as a key replaced without a rotation does.
+  assert.equal((await keyState(deps.db, startUnder(C, [A]))).kind, 'settled');
   await walked(starts[0]!);
 });
 
@@ -287,18 +287,19 @@ test('the door answers rotating while the rotation steps, readiness steps it too
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
 });
 
-test('a key the log refuses: the wrong one, one the log moved on from, or not the one a rotation under way moves to', async () => {
+test('a key the log refuses: one the log moved on from, or not the one a rotation under way moves to; a key it does not know serves, as before rotations', async () => {
   const refusal = async (runtime: CoffreRuntime) => {
     const state = await keyState(deps.db, runtime);
     return state.kind === 'refused' ? state.reason : state.kind;
   };
-  assert.equal(await refusal(startUnder(C)), `the app's entries are under ${appLogKey(A).keyId}, a key this app does not hold: it was given the wrong app key, or the one it replaced is missing from previousAuditChainKeys`);
+  // A lost key, or the wrong one: the instance serves, everyone signed out, as before; the server's log says which key.
+  assert.equal(await refusal(startUnder(C)), 'settled');
   assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2 })).kind, 'rotating');
   assert.equal(await refusal(startUnder(C, [A, B])), `a rotation to ${appLogKey(B).keyId} is under way, and this app's key is ${appLogKey(C).keyId}: deploy that one as auditChainKey to finish it`);
   assert.equal(await refusal(startUnder(B)), `the rotation under way moves from ${appLogKey(A).keyId}, a key missing from previousAuditChainKeys: put it back to finish it`);
   await settleKey(startUnder(B, [A]));
   // Rolled back to A, with or without B: the log moved on, and A writes no more.
-  assert.equal(await refusal(startUnder(A)), `the log moved on to ${appLogKey(B).keyId}, a key this app does not hold: a deployment given a newer app key replaced this one, and a key the app moved on from writes no more`);
+  assert.equal(await refusal(startUnder(A)), `the log moved on from ${appLogKey(A).keyId}, this app's key: a key the app moved on from writes no more, and comes back only as a new key's rotation`);
   const rolledBack = startUnder(A, [B]);
   assert.equal(await refusal(rolledBack), `the log moved on from ${appLogKey(A).keyId}, this app's key: a key the app moved on from writes no more, and comes back only as a new key's rotation`);
   const before = (await appEntries()).length;
@@ -307,13 +308,11 @@ test('a key the log refuses: the wrong one, one the log moved on from, or not th
   assert.equal((await appEntries()).length, before, 'a refused start writes nothing');
   // Once rotated, B no longer needs A to serve.
   assert.equal(await refusal(startUnder(B)), 'settled');
-  // The door says so in general terms; the server's log says which keys.
-  const wrong = startUnder(C);
-  const request = new Request(`${ORIGIN}/api/me`, { headers: { accept: 'application/json' } });
-  const response = await respond(request, wrong, null, async () => new Response('served'));
-  assert.equal(response.status, 503);
-  assert.equal((await response.json()).error, 'app_key');
-  assert.equal(wrong.appKey.settled, false);
+  // A key lost after the rotation, B's successor never given its predecessor: it serves.
+  const lost = startUnder(C);
+  const response = await respond(new Request(`${ORIGIN}/api/me`), lost, null, async () => new Response('served'));
+  assert.equal(await response.text(), 'served');
+  assert.equal(lost.appKey.settled, true);
 });
 
 test('a second rotation moves from the first one\'s key, and each old key verifies only its own stretch', async () => {
@@ -374,15 +373,20 @@ test('a rotation cut short before its anchor was sealed again seals it at the ne
   assert.equal((await ready.json()).ok, false);
 });
 
-test('an entry under the new key before the rotation began changes nothing: the old key is still moved from', async () => {
-  // However it got there: a start that wrote under B before its first step.
-  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'early', action: 'audit.heartbeat', decision: 'allow' }]));
+test('a key replaced without a rotation, then listed, is cut off: what the swap ended stays ended', async () => {
+  // A was swapped for B by hand, as before rotations: B wrote since, and every row A signed fails under B.
+  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'after-the-swap', action: 'audit.heartbeat', decision: 'allow' }]));
   const next = startUnder(B, [A]);
-  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null } });
+  assert.deepEqual(await keyState(deps.db, next), { kind: 'retiring', from: A });
   await settleKey(next);
   assert.equal(next.appKey.settled, true);
-  assert.equal(await verifies(held.service, next), true);
+  const moves = (await appEntries()).filter((entry) => entry.action === 'key.reseal' || entry.action === 'key.rotate');
+  assert.deepEqual(moves.map((entry) => [entry.action, entry.subjectPrincipal, JSON.parse(entry.metadata)]), [['key.rotate', appLogKey(A).keyId, { from: appLogKey(A).keyId, signedAgain: false }]]);
+  // Nothing A signed is brought back, and A writes no more.
+  assert.equal(await verifies(held.service, next), false);
+  assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every((signed) => !signed)));
   await assert.rejects(startUnder(A).db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])), KeyRetired);
+  await walked(next);
 });
 
 test('a database that cannot be reached serves nothing before the key is settled', async () => {

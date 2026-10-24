@@ -1031,9 +1031,13 @@ What it changes, and what it keeps:
   503 `unavailable`.
 - **A key replaced stays replaced.** A start under a key the log moved on
   from, as a rollback of the deploy would be, answers 503 `app_key`, and
-  the server's log says which keys; so does a start under a key the log
-  does not know, or one whose rotation is under way to another. To undo a
-  rotation, rotate again to a new key.
+  the server's log says which keys; so does a start under a key whose
+  rotation is under way to another, or whose old key was taken out of
+  `previousAuditChainKeys` before the rotation ended. To undo a rotation,
+  rotate again to a new key. A key the log does not know, a lost one or
+  the wrong one, is served under as before rotations: everyone signs in
+  again, every token and binding fails, the log stops verifying, and the
+  server's log names the key it lacks.
 - **A crash, or several isolates at once, change nothing.** Each step is
   one transaction under the log's head: the next goes on from the one the
   log says came before, whichever process takes it.
@@ -1044,9 +1048,10 @@ What it changes, and what it keeps:
   each service's tokens and bindings after the rotation
   (`coffre tokens <service>`, `coffre trust <service>`), and your own
   (`coffre tokens`).
-- **A key replaced without a rotation**, as before this release, is moved
-  from once it is listed in `previousAuditChainKeys`: the rows it signed
-  are signed again, and its entries verify only before that rotation.
+- **A key replaced without a rotation**, as before this release, is cut off
+  once it is listed in `previousAuditChainKeys`: a `key.rotate` that signs
+  nothing again, so the tokens and sessions that swap ended stay ended,
+  its entries verify only before it, and it writes no more.
 
 **When may the old key go?** Keep it in `previousAuditChainKeys` for as
 long as the log holds entries written under it, which is for good: it

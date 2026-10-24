@@ -24,9 +24,11 @@
     old key during the deploy has its writes refused. From `key.rotate`, it
     vouches for no row, and verifies only the log's entries from before the
     first step: an entry under it after is a finding. A key replaced cannot
-    come back: a start under it answers 503 `app_key`, and so does a start
-    under a key the log does not know, or an instance still writing under
-    the old one. Keep the old key configured, and
+    come back: a start under it answers 503 `app_key`, and so does an
+    instance still writing under the old one. A start under a key the log
+    does not know, a lost key, serves as before, everyone signed out. A key
+    replaced by hand before this release, once listed, is cut off with a
+    `key.rotate` that signs nothing again: what that swap ended stays ended. Keep the old key configured, and
     escrowed: a walk of the whole log needs it.
   - **Rotations are crash-safe and race-free**: each step is one
     transaction under the log's head, and goes on from the step before,

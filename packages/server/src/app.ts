@@ -214,6 +214,7 @@ export async function keyReady(runtime: CoffreRuntime, { wait = false }: { wait?
   try {
     state = await keyStateNow(runtime.db, runtime);
     if (state.kind === 'rotating') state = await rotateStep(runtime.db, runtime, { wait });
+    if (state.kind === 'retiring') state = await finishRotation(runtime.db, runtime, { wait });
     if (state.kind === 'sealing') {
       // A store that cannot be used holds the rotation back, and says so: the next step tries again.
       const sealed = await resealAnchor(runtime, state.from).then(() => true, (error: unknown) => {
