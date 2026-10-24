@@ -796,9 +796,11 @@ same app can sign people in ([github-app.md](github-app.md)).
 A workload's key-bound session sends a fresh proof with each request
 ([design](design/workload-access.md#52-the-gate-replay-nonces-live-counters)),
 and each workload's gate takes each proof once and counts its limits. A
-deployment `coffre init` writes has it, and `workloads: { useOnly: true }`,
-which leaves services nothing but those sessions
-([section 6.3](design/workload-access.md#63-the-strict-instance-and-the-path-from-today)).
+deployment `coffre init` writes has it. `workloads: { useOnly: true }`
+leaves services nothing but those sessions
+([section 6.3](design/workload-access.md#63-the-strict-instance-and-the-path-from-today));
+`coffre init` writes it again once conformance and the Action sign
+services in with a key.
 
 On Workers, the gates are a Durable Object, one per workload, made where
 its first request comes from. An older deployment adds, in

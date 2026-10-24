@@ -270,7 +270,8 @@ export async function logout(request: Request, runtime: CoffreRuntime, sourceIp:
   const session = dpopToken(request);
   if (session !== null) {
     try {
-      await standingSession(request, runtime, session, sourceIp, { place: null, credential: null, children: true, freezes: false });
+      // Its key's proof is all it takes to end one's own session: no freeze, pending approval or moved address keeps it alive.
+      await standingSession(request, runtime, session, sourceIp, { place: null, credential: null, children: true, ending: true });
       if (runtime.signin !== null) await runtime.signin.signOut(session, { requestId: crypto.randomUUID(), sourceIp });
       return jsonResponse({ signedOut: true });
     } catch (error) {

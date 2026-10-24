@@ -110,7 +110,7 @@ test("each route of the design is declared in the API and answers 501, naming th
     assert.equal(WORKLOAD_ROUTES[key], false, key);
   }
   for (const key of ISSUING_ROUTES) assert.equal(WORKLOAD_ROUTES[key], false, key);
-  assert.deepEqual(Object.keys(PROOFS), ['oidc']);
+  assert.deepEqual(Object.keys(PROOFS), ['oidc', 'aws']);
 });
 
 test("a workload's narrowing is declared beside /api/auth/oidc, and answers 501", async () => {

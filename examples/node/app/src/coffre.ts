@@ -35,12 +35,12 @@ export const coffre = createCoffre({
     providers: [app ? github({ app }) : github(client)],
     // CI runs and apps may sign in as services with their platform's proof,
     // through the trust bindings owners make (docs/design/oidc.md), into
-    // key-bound sessions only: no service token is issued or taken
-    // (docs/design/workload-access.md, section 6.3). Each exchange passes
+    // key-bound sessions or, for now, bearer credentials; `useOnly: true`
+    // leaves them key-bound sessions only (docs/design/workload-access.md,
+    // section 6.3). Each exchange passes
     // these limits first, and each session's requests its gate; both are
     // this process's, so run one.
     workloads: {
-      useOnly: true,
       limits: processLimits({ perSource: 30, total: 300 }),
       // Set by conformance only: a binding's issuer may then be plain HTTP on
       // loopback. Refused unless PUBLIC_URL is loopback too.

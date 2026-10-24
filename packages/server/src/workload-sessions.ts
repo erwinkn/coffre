@@ -89,6 +89,12 @@ export type SessionAsk = {
    * session, and the lift would restore nothing.
    */
   freezes?: boolean;
+  /**
+   * Whether the request ends the session, logout: proving the key is all
+   * it takes to end one's own session, so no freeze, approval still to
+   * come, `noReads` or `sources` keeps it alive.
+   */
+  ending?: boolean;
 };
 
 /** Why a session was refused, as the workload's SDK reads it: the status, a reason, and the headers RFC 9449 asks for. */
@@ -231,7 +237,8 @@ export async function standingSession(
   if (ask.credential !== null && place === null) {
     throw refusal(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this session reaches none, or several'));
   }
-  if (policy.approve === true && row.approvedAt === null) {
+  const ending = ask.ending === true;
+  if (policy.approve === true && row.approvedAt === null && !ending) {
     throw refusal(new ApiError('unauthenticated', 'this session waits for a manager of its service to approve it', 'pending'));
   }
   // Its ancestors, a `narrow` child's, each live, the service's own, its MAC good, and unfrozen.
@@ -246,7 +253,7 @@ export async function standingSession(
   if (ancestors.length > 0 && ask.children !== true) {
     throw refusal(new ApiError('forbidden', 'a narrowed session reaches only /use, narrow and logout', 'narrowed'));
   }
-  if (workloads.noReads && policy.reads !== undefined) {
+  if (workloads.noReads && policy.reads !== undefined && !ending) {
     throw refusal(new ApiError('forbidden', 'this instance lets no binding list reads (noReads): bind the workload again without them', 'no_reads'));
   }
 
@@ -260,11 +267,11 @@ export async function standingSession(
   });
   if (!verified.ok) throw proofRefused(verified.reason, verified.message);
 
-  if (policy.sources !== undefined && (sourceIp === null || !addressWithin(sourceIp, policy.sources))) {
+  if (policy.sources !== undefined && !ending && (sourceIp === null || !addressWithin(sourceIp, policy.sources))) {
     throw refusal(new ApiError('unauthenticated', sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${sourceIp} is outside the binding's sources`, 'source'));
   }
   const frozen = own.frozen;
-  if (ask.freezes !== false && (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session))) {
+  if (ask.freezes !== false && !ending && (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session))) {
     throw refusal(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
   }
 

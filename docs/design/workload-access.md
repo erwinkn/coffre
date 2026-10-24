@@ -1828,6 +1828,9 @@ line of registration after the owner has merged:
   Cloudflare call reaches the same `workload` through `bindingRoute`,
   which only coffre's entrypoint calls, never a method any plugin could
   call with any principal.
+- **`coffre init` and the examples write no `useOnly` yet.** Conformance
+  and the Action still sign services in with bearer credentials; the PR
+  that moves them to key-bound sessions, after PR 5, writes it back (D8).
 - **A service's sessions are listed with its tokens**
   (`GET /members/:member/tokens`, each with `session`), and its managers
   revoke one there.
@@ -1924,7 +1927,10 @@ worker, deleted and then verified gone through the provider's API:
    *Alternative:* a `freezes` table under MAC, one more place that holds the
    same fact.
 8. **Bearer paths stay until `useOnly`.** `coffre init` writes
-   `useOnly: true`. The contract step, removing `/api/auth/oidc` and the
+   `useOnly: true`, once a later PR, after PR 5, moves conformance (its
+   people, sign-in, CLI, access and workload checks) and the Action to
+   key-bound sessions: until then it writes bearer-compatible config
+   (coordinator, during PR 1a). The contract step, removing `/api/auth/oidc` and the
    issuing of service tokens, is one release after Equisafe has run on
    `useOnly`. Erwin decides that release.
 9. **Delivered minting is a listed read.** A child credential with a

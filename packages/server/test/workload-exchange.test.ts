@@ -1055,7 +1055,7 @@ test("/api/auth/oidc takes only a binding of today's five profiles with no polic
   assert.equal((await trade(token(rsa))).status, 200, 'and the bearer binding it was takes it again');
   // A binding of any other profile carries a policy, and a bearer profile's one when given: `/api/auth/workload` takes those.
   published.set('https://cluster.acme.example/.well-known/openid-configuration', { issuer: 'https://cluster.acme.example', jwks_uri: KEYS });
-  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'kubernetes', issuer: 'https://cluster.acme.example', claims: { sub: 'x', 'kubernetes.io.serviceaccount.uid': 'y' }, label: null, replaces: [] }, { dryRun: false });
+  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'kubernetes', issuer: 'https://cluster.acme.example', claims: { sub: 'system:serviceaccount:prod:api', 'kubernetes.io.serviceaccount.uid': 'b9f0c6a2-7d3e-4c1a-9f00-2c6d5e4b3a10' }, label: null, replaces: [] }, { dryRun: false });
   assert.ok('binding' in made);
   assert.deepEqual(made.binding.policy, {});
   const keyed = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: { ...DEPLOY, ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' }, label: null, replaces: [], policy: {} }, { dryRun: false });

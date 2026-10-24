@@ -46,10 +46,10 @@ export const coffre = createCoffre((env: Env) => {
       providers: [app ? github({ app }) : github(client)],
       // CI runs and apps may sign in as services with their platform's proof,
       // through the trust bindings owners make (docs/design/oidc.md), into
-      // key-bound sessions only: no service token is issued or taken
-      // (docs/design/workload-access.md, section 6.3).
+      // key-bound sessions or, for now, bearer credentials; `useOnly: true`
+      // leaves them key-bound sessions only (docs/design/workload-access.md,
+      // section 6.3).
       workloads: {
-        useOnly: true,
         limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
         allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
         github: app,

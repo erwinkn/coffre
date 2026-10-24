@@ -23,8 +23,10 @@
   stored by ID, a sensitive one only if an Owner of its project makes it
   (R32). `workloads: { useOnly: true }` issues and takes no service token
   and answers 410 at `/api/auth/oidc`; `noReads: true` lets no binding list
-  `reads`. A deployment needs a workload gate (PR 1b) before any session
-  is accepted; without one the routes answer 503. No database migration.
+  `reads`. `coffre init` does not write `useOnly` yet: it goes back once
+  conformance and the Action sign services in with a key. A deployment
+  needs a workload gate before any session is accepted; without one the
+  routes answer 503. No database migration.
 - **Breaking: a tunnel with no `hosts` dials only an address.** Its URL is
   a secret's value, whose host anyone who writes the environment picks,
   and a name may resolve to a private address, which the lexical check
@@ -143,8 +145,8 @@
   gates live in the server's process; on Workers, in a Durable Object per
   workload, whose counts over an hour or more outlive an eviction. `coffre init`
   writes the `GATES` binding and its migration, `gates: env.GATES` and
-  `export const CoffreGates = coffre.Gates`, and `workloads: { useOnly:
-  true }`; an older Workers deployment adds them by hand
+  `export const CoffreGates = coffre.Gates`; an older Workers deployment
+  adds them by hand
   ([deploy.md](docs/deploy.md#key-bound-sessions-and-their-gate)). Nothing
   asks a gate yet: the sessions that do come with that design's PR 1a. No
   database migration.

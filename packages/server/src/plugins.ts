@@ -5,7 +5,7 @@
 // table, checks, vault and audit log as the CLI.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
-import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type GateCount, type WorkloadCaller } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type GateCount, type WorkloadCaller } from '@coffre/core/identity';
 
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
@@ -328,7 +328,14 @@ async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceI
   if (token === null) return null;
   let session: StandingSession;
   try {
-    session = await standingSession(request, runtime, token, sourceIp, { ...at, children: true });
+    // The fields a plugin may ask, each by name: nothing it adds reaches the checks (a `freezes`, say).
+    session = await standingSession(request, runtime, token, sourceIp, {
+      place: at.place,
+      credential: at.credential,
+      ...(at.body === undefined ? {} : { body: at.body }),
+      ...(at.counts === undefined ? {} : { counts: at.counts }),
+      children: true,
+    });
   } catch (error) {
     if (error instanceof SessionRefused) throw await workloadRefused(error.response, error.limit);
     throw error;
@@ -344,7 +351,7 @@ async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceI
  * grant with its binding's `reads` (`sessionScope`). Null for a caller
  * coffre did not make.
  */
-async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sourceIp: string | null, standings: Standings): Promise<{ identity: AuthenticatedIdentity; expiresAt: string } | null> {
+async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sourceIp: string | null, standings: Standings): Promise<{ identity: AuthenticatedIdentity; expiresAt: string; constraints: Constraints | null } | null> {
   const standing = standings.get(caller);
   if (standing === undefined) return null;
   const { row, binding, policy, policySeq } = standing.kind === 'session' ? standing.session : { ...standing, row: null };
@@ -355,6 +362,7 @@ async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sou
   const callerOf = callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload');
   if (callerOf.generation !== generation) return null;
   return {
+    constraints: standing.kind === 'session' ? standing.session.caller.constraints : null,
     expiresAt: (row?.expiresAt ?? new Date(Date.now() + 60_000)).toISOString(),
     identity: {
       principal: { type: 'service', id, commonName: id },
@@ -436,10 +444,10 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
           expiresAt = caller.credentialExpiresAt!;
         } else {
           // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
-          // A `narrow` child never reads (section 8.4): it uses, and is handed nothing back.
-          if (handle.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
           const made = await workloadIdentity(runtime, handle, sourceIp, standings);
           if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
+          // A `narrow` child never reads (section 8.4): it uses, and is handed nothing back. Decided on what coffre kept, not on what the plugin holds.
+          if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
           ({ identity: caller, expiresAt } = made);
         }
         const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), asked);

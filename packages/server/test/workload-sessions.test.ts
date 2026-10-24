@@ -36,7 +36,8 @@ const IP = '203.0.113.9';
 const GITHUB = 'https://token.actions.githubusercontent.com';
 const CLUSTER = 'https://cluster.acme.example';
 const TENANT = 'https://login.microsoftonline.com/7f1c0d3e-0000-4000-8000-00000000c0de/v2.0';
-const ENTRA_AUDIENCE = 'api://coffre-acme';
+/** A v2 token's audience: the API application's client ID. */
+const ENTRA_AUDIENCE = '0d2c4e6a-8b1f-4a3c-9e5d-7f6a8b9c0d1e';
 
 const DEPLOY = {
   repository_owner_id: '9919',
@@ -45,8 +46,8 @@ const DEPLOY = {
   ref: 'refs/heads/main',
   event_name: 'push',
 };
-const POD = { sub: 'system:serviceaccount:prod:api', 'kubernetes.io': { serviceaccount: { name: 'api', uid: 'b9f0c6a2-uid' } } };
-const IDENTITY = { tid: '7f1c0d3e-0000-4000-8000-00000000c0de', oid: '5a1e-object-id' };
+const POD = { sub: 'system:serviceaccount:prod:api', 'kubernetes.io': { namespace: 'prod', serviceaccount: { name: 'api', uid: 'b9f0c6a2-7d3e-4c1a-9f00-2c6d5e4b3a10' } } };
+const IDENTITY = { tid: '7f1c0d3e-0000-4000-8000-00000000c0de', oid: '5a1e0b2c-3d4e-4f60-8a7b-9c0d1e2f3a4b' };
 
 const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
 const seconds = () => Math.floor(Date.now() / 1000);
@@ -68,7 +69,7 @@ async function githubToken(key: ProofKey, claims: Record<string, unknown> = {}):
 const podToken = (claims: Record<string, unknown> = {}) => token(CLUSTER, { aud: ORIGIN, ...POD, ...claims });
 
 /** An Entra managed identity's token, cached by its platform for hours: the same one every time. */
-const entraToken = (claims: Record<string, unknown> = {}) => token(TENANT, { aud: ENTRA_AUDIENCE, sub: IDENTITY.oid, ...IDENTITY, ...claims });
+const entraToken = (claims: Record<string, unknown> = {}) => token(TENANT, { aud: ENTRA_AUDIENCE, ver: '2.0', sub: IDENTITY.oid, ...IDENTITY, ...claims });
 
 /**
  * A gate as section 5.2 describes it, in memory: its nonce an epoch, the
@@ -435,6 +436,10 @@ test('a session reaches the routes a service token does, and none only a person 
 });
 
 test("a session issues no credential and changes no one's access, in any mode: a token, binding or code it made would read what it may only use", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'prod' });
+  await root.access.set(MEMBER, { market: 'owner' });
   await bindGithub();
   const held = await githubSession();
   const other = 'token:batch';
@@ -456,10 +461,14 @@ test("a session issues no credential and changes no one's access, in any mode: a
     ['DELETE', '/api/instance-roles/auditor'],
     ['PUT', '/api/settings', { serviceAccounts: { projects: 'all', environments: 'all' } }],
   ];
+  // Nor (un)protect an environment, which decides what every role reads there, as an Owner of its project.
+  asked.push(['PATCH', '/api/projects/market/prod', { protected: true }], ['PATCH', '/api/projects/market/prod', { protected: false }]);
   for (const [method, path, body] of asked) {
     const refused = await call(held, method, path, body === undefined ? {} : { body });
-    assert.deepEqual([refused.status, refused.body.reason], [403, 'workload_cannot_issue'], `${method} ${path}`);
+    assert.deepEqual([refused.status, refused.body.reason], [403, 'workload_cannot_issue'], `${method} ${path} ${JSON.stringify(body)}`);
   }
+  // A rename of it is a write, which stays.
+  assert.equal((await call(held, 'PATCH', '/api/projects/market/prod', { body: { name: 'Production' } })).status, 200);
   // It still writes, and reads what a service reads.
   assert.equal((await call(held, 'GET', `/api/members/${MEMBER}/tokens`)).status, 200);
 });
@@ -551,6 +560,10 @@ test("a binding's sources hold a session to its addresses, at the exchange and o
   assert.deepEqual([outside.status, outside.body.reason], [401, 'source']);
   const key = await generateProofKey();
   const url = `${ORIGIN}/api/auth/workload`;
+  // Its key's proof ends it from anywhere: logout is never refused for where it comes from.
+  const out = await call(held, 'POST', '/api/auth/logout', { sourceIp: '198.51.100.7' });
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.equal((await me(held)).status, 401);
   const elsewhere = await read(await answer(new Request(url, { method: 'POST', headers: { 'content-type': 'application/json', dpop: await createProof(key, { method: 'POST', url }) }, body: JSON.stringify({ service: MEMBER, proof: { oidc: podToken() } }) }), runtime, ui, '198.51.100.7'));
   assert.deepEqual([elsewhere.status, elsewhere.body.reason], [401, 'source']);
 });
@@ -660,7 +673,7 @@ test("a binding's reads name keys by path and name, are stored by ID, and list a
   const id = (name: string) => keys.find((key) => key.key === name)!.id;
 
   // A dry run shows what will be stored, by name.
-  const plan = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'kubernetes', issuer: CLUSTER, claims: { sub: POD.sub, 'kubernetes.io.serviceaccount.uid': 'u' }, label: null, replaces: [], policy: { reads: { 'market/prod': ['STRIPE_WEBHOOK_SECRET', 'DATABASE_URL'] } } }, { dryRun: true });
+  const plan = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'kubernetes', issuer: CLUSTER, claims: { sub: POD.sub, 'kubernetes.io.serviceaccount.uid': '11111111-2222-4333-8444-555555555555' }, label: null, replaces: [], policy: { reads: { 'market/prod': ['STRIPE_WEBHOOK_SECRET', 'DATABASE_URL'] } } }, { dryRun: true });
   assert.ok('policy' in plan && !('binding' in plan));
   assert.deepEqual(plan.policy, { reads: { 'market/prod': ['DATABASE_URL', 'STRIPE_WEBHOOK_SECRET'] } });
 
@@ -683,7 +696,7 @@ test("a binding's reads name keys by path and name, are stored by ID, and list a
 
   // A manager who is no Owner of market lists no sensitive key; "*" stays theirs, the sensitive values left out by the scope.
   await deps.vault.admit({ actor: `user:${ROOT}`, principal: `user:${DEV}`, role: 'admin' });
-  const asDev = async (reads: Record<string, unknown>) => runtime.workloads!.bind(await contextFor(deps, DEV), SERVICE, { profile: 'kubernetes', issuer: CLUSTER, claims: { sub: POD.sub, 'kubernetes.io.serviceaccount.uid': 'u2' }, label: null, replaces: [], policy: { reads } }, { dryRun: false });
+  const asDev = async (reads: Record<string, unknown>) => runtime.workloads!.bind(await contextFor(deps, DEV), SERVICE, { profile: 'kubernetes', issuer: CLUSTER, claims: { sub: POD.sub, 'kubernetes.io.serviceaccount.uid': '66666666-7777-4888-8999-000000000000' }, label: null, replaces: [], policy: { reads } }, { dryRun: false });
   await assert.rejects(asDev({ 'market/prod': ['DATABASE_URL'] }), (error: { status?: number; message: string }) => error.status === 403 && /Owner of market/.test(error.message));
   assert.ok('binding' in (await asDev({ 'market/prod': ['STRIPE_SIGNING_SECRET'] })));
   await root.access.set(MEMBER, { market: null, 'market/dev': 'viewer' });
@@ -738,7 +751,9 @@ function probe(seen: { caller?: WorkloadUse; context?: PluginContext }) {
         const [, , place, credential] = url.pathname.split('/');
         try {
           const body = new Uint8Array(await request.arrayBuffer());
-          const caller = await coffre.workload(request, { place: place === '-' ? null : place!, credential: credential ?? null, body: await bodyDigest(body) });
+          // What a plugin might add to what it asks, past its type: a test's, in a header.
+          const extra = JSON.parse(request.headers.get('x-extra') ?? '{}') as Record<string, unknown>;
+          const caller = await coffre.workload(request, { ...extra, place: place === '-' ? null : place!, credential: credential ?? null, body: await bodyDigest(body) } as never);
           if (caller === null) return Response.json({ caller: null });
           seen.caller = caller;
           return Response.json({ caller: seen.caller }, { headers: { 'dpop-nonce': seen.caller.nonce ?? '' } });
@@ -778,9 +793,10 @@ test("PluginContext.workload: the caller of a forwarded request, its content sig
   // A body changed on the way is refused.
   const changed = await forward(`/use/-/stripe/v1/charges`, { body: '{"amount":9000}', signed: { headers: { 'content-type': 'application/json' }, body: await bodyDigest('{"amount":2000}') } });
   assert.deepEqual([changed.status, changed.body.reason], [401, 'req']);
-  // The credential it uses, frozen, is refused for it alone.
+  // The credential it uses, frozen, is refused for it alone; nothing a plugin adds to its ask turns the freeze off.
   await freeze(`credential:${place}/stripe`);
   assert.equal((await forward(`/use/-/stripe/v1/charges`, { body: '{}' })).body.reason, 'frozen');
+  assert.equal((await forward(`/use/-/stripe/v1/charges`, { body: '{}', headers: { 'x-extra': '{"freezes":false,"ending":true}' } })).body.reason, 'frozen');
   assert.equal((await forward(`/use/-/openai/v1/chat`, { body: '{}' })).status, 200);
   // `use` takes the caller coffre made for this request, and no lookalike a plugin built, nor one an earlier request's context made.
   const earlier = { caller: seen.caller!, context: seen.context! };
@@ -816,7 +832,9 @@ test("a narrowed session's row stands only while every ancestor does, and reache
   const used = await use();
   assert.equal(used.status, 200, JSON.stringify(used.body));
   assert.deepEqual((used.body.caller as Record<string, unknown>).constraints, { credentials: ['stripe'] });
-  // It uses values, and is handed none back.
+  // It uses values, and is handed none back, whatever the plugin makes of the caller it holds.
+  await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'expose', logged: {} }), { reason: 'narrowed' });
+  (seen.caller as { constraints: unknown }).constraints = null;
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'expose', logged: {} }), { reason: 'narrowed' });
   const api = await me(child);
   assert.deepEqual([api.status, api.body.reason], [403, 'narrowed']);

@@ -229,7 +229,10 @@ export type TokenRow = {
   expiresAt: string;
   lastUsedAt: string | null;
   lastUsedIp: string | null;
-  /** What it reaches, of what its account or person holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
+  /**
+   * What it reaches, of what its account or person holds, by path; null for one 0.4 made and the app has not sealed
+   * yet, which reaches all of it, or for a workload's session (`session`), which holds its binding's.
+   */
   scope: ScopeByPath | null;
   /** A workload's key-bound session (docs/design/workload-access.md): the binding it signed in through, whose scope it holds when its own is null. */
   session?: { bindingId: string | null };
