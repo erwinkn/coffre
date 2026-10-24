@@ -27,8 +27,9 @@
     come back: a start under it answers 503 `app_key`, and so does an
     instance still writing under the old one. A start under a key the log
     does not know, a lost key, serves as before, everyone signed out. A key
-    replaced by hand before this release, once listed, is cut off with a
-    `key.rotate` that signs nothing again: what that swap ended stays ended. Keep the old key configured, and
+    replaced by hand before this release is rotated from once listed,
+    which brings back the tokens that swap ended: leave out one replaced
+    because it leaked. Keep the old key configured, and
     escrowed: a walk of the whole log needs it.
   - **Rotations are crash-safe and race-free**: each step is one
     transaction under the log's head, and goes on from the step before,

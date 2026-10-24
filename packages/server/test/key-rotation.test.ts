@@ -373,20 +373,33 @@ test('a rotation cut short before its anchor was sealed again seals it at the ne
   assert.equal((await ready.json()).ok, false);
 });
 
-test('a key replaced without a rotation, then listed, is cut off: what the swap ended stays ended', async () => {
-  // A was swapped for B by hand, as before rotations: B wrote since, and every row A signed fails under B.
-  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'after-the-swap', action: 'audit.heartbeat', decision: 'allow' }]));
+test('a start under the new key alone, before the old one is listed, loses nothing once it is: the old key is still rotated from', async () => {
+  // As `wrangler secret put APP_KEY` alone would: B serves, everyone signed out meanwhile, and writes an entry or two.
+  const alone = startUnder(B);
+  assert.equal(await keyReady(alone), null);
+  assert.equal(await verifies(held.service, alone), false);
+  await runScheduled(alone).catch(() => {});
+  await alone.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'meanwhile', action: 'audit.heartbeat', decision: 'allow' }]));
+  // The deploy that lists A rotates from it all the same.
   const next = startUnder(B, [A]);
-  assert.deepEqual(await keyState(deps.db, next), { kind: 'retiring', from: A });
+  assert.deepEqual(await keyState(deps.db, next), { kind: 'rotating', from: A, next: { table: 'identities', after: null } });
   await settleKey(next);
   assert.equal(next.appKey.settled, true);
-  const moves = (await appEntries()).filter((entry) => entry.action === 'key.reseal' || entry.action === 'key.rotate');
-  assert.deepEqual(moves.map((entry) => [entry.action, entry.subjectPrincipal, JSON.parse(entry.metadata)]), [['key.rotate', appLogKey(A).keyId, { from: appLogKey(A).keyId, signedAgain: false }]]);
-  // Nothing A signed is brought back, and A writes no more.
-  assert.equal(await verifies(held.service, next), false);
-  assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every((signed) => !signed)));
+  assert.equal(await verifies(held.service, next), true);
+  assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
   await assert.rejects(startUnder(A).db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])), KeyRetired);
-  await walked(next);
+});
+
+test('the order previous keys are listed in changes nothing: each that wrote is rotated from', async () => {
+  // C wrote too, a key A replaced by hand before rotations: listed oldest first.
+  await deps.db.transaction((tx) => appendAudit(tx, C, [{ actorType: 'system', actorId: 'older', action: 'audit.heartbeat', decision: 'allow' }]));
+  const next = startUnder(B, [C, A]);
+  await settleKey(next);
+  assert.equal(next.appKey.settled, true);
+  const rotations = (await appEntries()).filter((entry) => entry.action === 'key.rotate').map((entry) => entry.subjectPrincipal);
+  assert.deepEqual(rotations.sort(), [appLogKey(A).keyId, appLogKey(C).keyId].sort());
+  assert.equal(await verifies(held.service, next), true);
+  assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
 });
 
 test('a database that cannot be reached serves nothing before the key is settled', async () => {

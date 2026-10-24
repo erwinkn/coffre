@@ -979,9 +979,20 @@ for the vault key ([keys.md](keys.md#a-local-key)).
    previousAuditChainKeys: [env.OLD_APP_KEY],        // the one it replaces
    ```
 
-   On Workers, `wrangler secret put APP_KEY -c app/wrangler.jsonc` with
-   the new key, `wrangler secret put OLD_APP_KEY -c app/wrangler.jsonc`
-   with the old one; on Node, both in `.env`.
+   Change both secrets and the code in one version. On Workers,
+   `wrangler versions secret put` stages a secret without deploying it:
+
+   ```sh
+   pnpm exec wrangler versions secret put OLD_APP_KEY -c app/wrangler.jsonc   # the old key
+   pnpm exec wrangler versions secret put APP_KEY -c app/wrangler.jsonc       # the new key
+   ```
+
+   and the deploy in step 4 takes both with the code that lists the old
+   key. Not `wrangler secret put`, which deploys each at once under the
+   code already live: until the old key is listed, the app runs under the
+   new key alone, everyone signed out and every token and binding failing;
+   they come back once the deploy that lists it rotates. On Node, both in
+   `.env`, with the code, then one restart.
 4. **Deploy, then wait for readiness.** The first start under the new key
    signs every row the old key signed again under the new one, a step of
    100 rows a request, seals the audit anchor again under it, and then
@@ -1048,10 +1059,12 @@ What it changes, and what it keeps:
   each service's tokens and bindings after the rotation
   (`coffre tokens <service>`, `coffre trust <service>`), and your own
   (`coffre tokens`).
-- **A key replaced without a rotation**, as before this release, is cut off
-  once it is listed in `previousAuditChainKeys`: a `key.rotate` that signs
-  nothing again, so the tokens and sessions that swap ended stay ended,
-  its entries verify only before it, and it writes no more.
+- **A key replaced without a rotation**, as before this release, is
+  rotated from once it is listed in `previousAuditChainKeys`, like any
+  other: the rows it signed are signed again, so the tokens and bindings
+  that swap ended work again. Don't list one you replaced to end what it
+  signed, because it leaked: leave it out, and its entries stay
+  unverifiable, as they are now.
 
 **When may the old key go?** Keep it in `previousAuditChainKeys` for as
 long as the log holds entries written under it, which is for good: it
