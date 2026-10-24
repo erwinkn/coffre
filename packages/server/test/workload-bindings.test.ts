@@ -266,7 +266,17 @@ test('with workloads off, the routes say how to turn them on', async () => {
   delete deps.workloads;
   await assert.rejects(bind(), /this instance trusts no workloads: the deployment's signin\(\{ workloads \}\) turns them on/);
   // The configuration that turns them on.
-  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS, github: null });
+  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS, github: null, useOnly: false, noReads: false, alert: null });
+  // Workload access's switches and alerts (docs/design/workload-access.md, sections 6.3 and 8.3), checked when given.
+  const alert = () => undefined;
+  const switched = defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, useOnly: true, noReads: true, alert } }).workloads;
+  assert.deepEqual(switched, { allowLoopback: false, limits: LIMITS, github: null, useOnly: true, noReads: true, alert });
+  for (const [option, value] of [['useOnly', 'yes'], ['noReads', 1], ['alert', 'https://hooks.slack.com/x']] as const) {
+    assert.throws(
+      () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, [option]: value } as never }),
+      new RegExp(`workloads\\.${option} is`),
+    );
+  }
   // Never without both limits.
   assert.throws(
     () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: {} as never }),
@@ -281,7 +291,7 @@ test('loopback issuers are for development: an instance off loopback refuses to 
   assert.throws(() => at('https://secrets.acme.example'), /allowLoopbackIssuersForDevelopment is for an instance on loopback, and https:\/\/secrets\.acme\.example is not one: turn it off/);
   assert.throws(() => at('https://127.0.0.1.nip.io'), /is not one/);
   for (const publicUrl of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000']) {
-    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS, github: null });
+    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS, github: null, useOnly: false, noReads: false, alert: null });
   }
   // As a deployment writes it: signin() takes it, and the instance's own URL decides.
   const auth = signinAuth({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, allowLoopbackIssuersForDevelopment: true } });

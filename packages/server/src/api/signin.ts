@@ -746,9 +746,10 @@ export class SigninService {
    * Revoke one credential: your own; or anyone's, if you run the instance;
    * or, `of` a service account the caller manages (`managedAccount`, asked
    * before: no vault call runs in a transaction), one of its tokens. With
-   * `of`, a credential that is not one of the member's tokens is unknown.
+   * `of`, a credential that is not one of the member's tokens is unknown;
+   * as `'own handle'`, one that is not a handle of the caller's.
    */
-  async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | null = null): Promise<{ revoked: true }> {
+  async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
     // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
     return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
@@ -758,10 +759,10 @@ export class SigninService {
           denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { targetCredentialId: credentialId } }),
         );
       if (row === null || row.revokedAt !== null) throw unknown();
-      if (of !== null && (row.principal !== of.member || !isToken(row))) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principal === principalOf(principal);
-      if (!own && of?.managed !== true) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
+      if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !isToken(row))) throw unknown();
+      if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
       const revoked = await updateAuth(
         tx,
         this.#deps.chainKey,

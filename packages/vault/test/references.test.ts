@@ -10,9 +10,8 @@ import { appendEntries } from '@coffre/db/log';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { snapshot } from '../src/snapshot.ts';
-import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
 
 // References (docs/design/environments.md): the vault's `reference.create`
 // entry is the reference, and a read through one is checked against it.

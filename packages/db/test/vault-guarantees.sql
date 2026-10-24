@@ -201,6 +201,7 @@ BEGIN
     FOREACH statement IN ARRAY ARRAY[
         'SELECT * FROM identities',
         'SELECT * FROM credentials',
+        'SELECT * FROM enrollments',
         'SELECT * FROM device_authorizations',
         'SELECT * FROM service_bindings',
         'SELECT * FROM consumed_tokens',

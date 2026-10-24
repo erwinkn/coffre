@@ -1024,3 +1024,40 @@ test('replacing keys keeps which binding a run matches: of two that take the sam
     assert.equal(await matched(), 'dev', `after rotation ${rotation + 1}`);
   }
 });
+
+test("/api/auth/oidc takes only a binding of today's five profiles with no policy: a workload's binding never buys a reading credential there", async () => {
+  // The same binding, its MAC good for each change: one with a policy, then one of a profile a key-bound session signs in with.
+  const rebind = async (change: { policy?: string | null; profile?: string }) => {
+    const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+    const { authMac: _, ...fields } = { ...row!, ...change };
+    await db.owner.update(serviceBindings).set({ ...change, authMac: authMac(deps.chainKey, 'service_bindings', fields) }).where(eq(serviceBindings.id, bound));
+  };
+  const listed = async () => (await runtime.workloads!.listBindings(await contextFor(deps, ROOT), SERVICE)).map((binding) => binding.id);
+  assert.equal((await trade(token(rsa))).status, 200);
+
+  await rebind({ policy: '{"keyAudience":true}' });
+  // Its MAC holds, policy and all: it is refused for what it is, not as a row changed around the app.
+  assert.deepEqual(await listed(), [bound]);
+  const policed = await trade(token(rsa));
+  assert.deepEqual([policed.status, policed.body.reason], [401, 'no_match']);
+  // A policy changed, or cleared, under the same MAC fails it.
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  await db.owner.update(serviceBindings).set({ policy: null }).where(eq(serviceBindings.id, bound));
+  assert.deepEqual(await listed(), []);
+  await db.owner.update(serviceBindings).set({ policy: row!.policy, authMac: row!.authMac }).where(eq(serviceBindings.id, bound));
+
+  await rebind({ policy: null, profile: 'kubernetes' });
+  assert.deepEqual(await listed(), [bound]);
+  const kubernetes = await trade(token(rsa));
+  assert.deepEqual([kubernetes.status, kubernetes.body.reason], [401, 'no_match']);
+
+  await rebind({ profile: 'github' });
+  assert.equal((await trade(token(rsa))).status, 200, 'and the bearer binding it was takes it again');
+  // Nor does this release make a binding of any other profile: those carry a policy, which `/api/auth/workload` brings.
+  for (const profile of ['kubernetes', 'enrollment']) {
+    await assert.rejects(
+      runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile, issuer: 'https://cluster.acme.example', claims: { sub: 'x', 'kubernetes.io.serviceaccount.uid': 'y' }, label: null, replaces: [] }, { dryRun: false }),
+      /signs in at \/api\/auth\/workload/,
+    );
+  }
+});

@@ -48,12 +48,23 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'DELETE /members/:member/tokens/:id': false,
   // A placeholder for an agent's app, within the token's scope and never past its end: it reaches only the credential proxy.
   'POST /handles': true,
+  // Ending a handle of its own ends nothing it does not outlive: `coffre run` revokes its own when its command ends.
+  'DELETE /handles/:id': true,
   'GET /members/:member/bindings': false,
   'POST /members/:member/bindings': false,
   'POST /members/:member/bindings/keys': false,
   'GET /workloads/lookup': false,
   'GET /workloads/repositories': false,
   'DELETE /members/:member/bindings/:id': false,
+  // An enrollment code is a credential of a service: never a token's to mint, promote or approve a session of.
+  'GET /members/:member/bindings/:id/enrollments': false,
+  'POST /members/:member/bindings/:id/enrollments': false,
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': false,
+  'POST /members/:member/tokens/:id/approve': false,
+  // Freezing and lifting stay with people, signed in as themselves, as access does.
+  'GET /freezes': false,
+  'POST /freezes': false,
+  'DELETE /freezes/:target': false,
   'PATCH /access/:member': false,
   // What a role holds is no secret within the instance: a token's person reads it, to know what their scope gives.
   'GET /roles': true,

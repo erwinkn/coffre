@@ -27,7 +27,9 @@ import {
   readsWholeLog,
   ROLES,
   runsInstance,
+  useOnly,
   withinCredential,
+  type CallerKind,
   type Columns,
   type CredentialScope,
   type Filter,
@@ -43,7 +45,7 @@ import {
 import { deriveLogKey, GENESIS_HASH, entryHash, entryMac, sealEntry, verifyEntries, type LogFields, type LogKey, type StoredEntry } from '../packages/core/src/audit/chain.ts';
 import { encodeAad, type SecretContext } from '../packages/core/src/context.ts';
 import { handsBack, type RefusalCode } from '../packages/core/src/vault.ts';
-import { keyRefusals, referenceRefusal, sensitiveRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
+import { keyRefusals, referenceRefusal, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
 import type { EnvironmentRow } from '../packages/vault/src/store.ts';
 
 const [oracle, ...flags] = process.argv.slice(2);
@@ -81,6 +83,9 @@ const ENVIRONMENTS = [...PROJECTS.flatMap((project) => SLUGS.map((slug) => `${pr
 const ROLE_NAMES = [...Object.keys(ROLES), 'custom', 'ghost', ...INHERITED];
 const INSTANCE_ROLE_NAMES = [...Object.keys(INSTANCE_ROLES), 'ghost', ...INHERITED];
 const PEOPLE = ['user:ada', 'user:bo', 'token:ci', 'service:deploy'];
+/** Key IDs a workload's `reads` lists, and one a plain object holds already. */
+const KEYS = ['k1', 'k2', 'k3', 'constructor'];
+const KINDS: readonly CallerKind[] = ['person', 'bearer', 'workload'];
 
 const slugOf = (environmentId: string): string | null => (environmentId.includes('/') ? environmentId.split('/')[1]!.replace('@ada', '') : null);
 const projectOf = (environmentId: string): string => (environmentId.includes('/') ? environmentId.split('/')[0]! : pick(PROJECTS));
@@ -137,6 +142,7 @@ function scopeGrant(): ScopeGrant {
     role: legacy ? pick([...Object.keys(ROLES), 'custom']) : pick(ROLE_NAMES),
     ...(legacy ? {} : { permissions: columns() }),
     ...(chance(0.5) ? { sensitive: chance(0.5) } : {}),
+    ...(chance(0.6) ? {} : { reads: chance(0.3) ? '*' as const : unique(some(KEYS, 2)) }),
   };
 }
 function holdings(given?: Policy): Holdings {
@@ -149,6 +155,7 @@ function holdings(given?: Policy): Holdings {
     // No policy, now and then: the code reads DEFAULT_POLICY.
     ...(given === undefined && chance(0.1) ? {} : { policy: given ?? policy() }),
     ...(chance(0.7) ? {} : { service: chance(0.5) }),
+    ...(chance(0.5) ? {} : { kind: pick(KINDS) }),
   };
 }
 const EVERYWHERE_SCOPE: Scope = { projects: 'all', environments: 'all' };
@@ -289,6 +296,13 @@ const secretPlace = (): SecretPlace => {
   return { projectId: chance(0.9) ? projectOf(environmentId) : pick(PROJECTS), environmentId };
 };
 const CODES: (RefusalCode | null)[] = [null, null, null, 'no_grant', 'personal', 'deleted', 'ended'];
+/** A key where its value is held: its place, and its ID. */
+const heldKey = () => ({ ...secretPlace(), secretId: pick(KEYS) });
+/** A workload whose scope covers `key`'s place half the time, listing it, `'*'` or others. */
+function workload(key: { projectId: string; environmentId: string }): Holdings {
+  const at = (): ScopeGrant => ({ ...scopeGrant(), projectId: key.projectId, environmentId: chance(0.5) ? null : key.environmentId });
+  return { ...holdings(), kind: 'workload', credentialScope: chance(0.1) ? null : some([at(), scopeGrant(), at()], 3) };
+}
 repeat(10000, () => {
   const who = reader();
   const principal = chance(0.4) ? 'user:ada' : pick(PEOPLE);
@@ -315,6 +329,20 @@ repeat(10000, () => {
     },
     sensitiveRefusals(codes, who, { action, principal, purpose, keepsSensitive, secrets: flagged, viaReference }),
   );
+  // A workload's list, at where each value is held.
+  const held = secrets.map((secret) => ({ ...secret, secretId: pick(KEYS) }));
+  const listing: Reader = chance(0.5) ? who : { ...who, live: workload(held.length === 0 ? heldKey() : pick(held)) };
+  add(
+    { op: 'useOnlyRefusals', codes, reader: listing, action, ...(purpose === undefined ? {} : { purpose }), secrets: held },
+    useOnlyRefusals(codes, listing, { action, purpose, secrets: held }),
+  );
+});
+
+// Whether a value is use-only: a workload's, unlisted by key where it is held; nobody else's.
+repeat(6000, () => {
+  const key = heldKey();
+  const holder = chance(0.7) ? workload(key) : holdings();
+  add({ op: 'useOnly', holder, key }, useOnly(holder, key));
 });
 
 // A personal config's key read by its owner, whose credential and holdings at its parent decide.
@@ -333,14 +361,14 @@ repeat(3000, () => {
 
 // Making a reference: the maker's rights at both ends, the source's nature, and personal configs at either.
 repeat(6000, () => {
-  const who = reader();
   const holder = secretPlace();
-  const source = secretPlace();
+  const source = heldKey();
+  const who = chance(0.7) ? reader() : { ...reader(), status: 'active' as const, live: { ...workload(source), role: 'owner' as const, scope: EVERYWHERE_SCOPE } };
   const rows = environments();
-  const sensitive = chance(0.4);
+  const nature = pick(['plain', 'secret', 'sensitive'] as const);
   add(
-    { op: 'referenceRefusal', reader: who, holder, source, environments: [...rows].map(([id, row]) => ({ id, row })), sensitive },
-    referenceRefusal(who, holder, source, rows, sensitive),
+    { op: 'referenceRefusal', reader: who, holder, source, environments: [...rows].map(([id, row]) => ({ id, row })), nature },
+    referenceRefusal(who, holder, source, rows, nature),
   );
 });
 

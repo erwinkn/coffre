@@ -147,6 +147,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'POST /handles': { not: "a handle is the placeholder `coffre run` gives the app it starts, which only the credential proxy takes: a page has no app to give one" },
+  'DELETE /handles/:id': { not: '`coffre run` ends its handle when its command ends; a page ends a handle as a token, Account › Tokens' },
   'DELETE /members/:member/tokens/:id': { ui: [{ does: 'a bearer token › Revoke', in: 'components/service-tokens.tsx', call: 'tokens.revoke' }] },
   'GET /members/:member/bindings': { ui: [{ does: 'a service account › Sign-in › Sign in with OIDC', in: 'components/trusted-workloads.tsx', call: 'bindings.list' }] },
   'POST /members/:member/bindings': {
@@ -162,6 +163,14 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'DELETE /members/:member/bindings/:id': { ui: [{ does: 'a trust binding › Remove', in: 'components/trusted-workloads.tsx', call: 'bindings.remove' }] },
+  // A service's enrollment codes, their scope and the sessions waiting for approval; the Freeze buttons and what is frozen.
+  'GET /members/:member/bindings/:id/enrollments': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the service page' },
+  'POST /members/:member/bindings/:id/enrollments': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the service page' },
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the service page' },
+  'POST /members/:member/tokens/:id/approve': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the service page' },
+  'GET /freezes': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the Freeze buttons' },
+  'POST /freezes': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the Freeze buttons' },
+  'DELETE /freezes/:target': { inFlight: 'docs/design/workload-access.md (#289), its PR 9: the Freeze buttons' },
   'GET /workloads/lookup': { ui: [{ does: 'Trust a workload: a repository named, its IDs looked up', in: 'components/trusted-workloads.tsx', call: 'bindings.lookup' }] },
   'GET /workloads/repositories': { ui: [{ does: "Trust a workload: the repositories the deployment's GitHub App is installed on, offered as the name is typed", in: 'lib/queries.ts', call: 'bindings.repositories' }] },
   'PATCH /access/:member': {

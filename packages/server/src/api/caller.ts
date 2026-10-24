@@ -15,7 +15,7 @@ import {
   type Role,
   type Scope,
 } from '@coffre/core/access';
-import type { Access, Vault } from '@coffre/core/vault';
+import type { Access, CallerKind, Vault } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { newestVaultSeq } from '@coffre/db/log';
 
@@ -70,6 +70,14 @@ export type Caller = {
   policySeq: bigint | null;
   /** A service account's: it holds each role's normal column, in a protected environment too. */
   service: boolean;
+  /**
+   * What the request came in on (`CallerKind`): a person's session or
+   * token, a bearer service credential, or a workload's key-bound session,
+   * which is handed back only plain values and those its scope lists
+   * (`useOnly`, docs/design/workload-access.md, section 6.1). The vault is
+   * told it with every call (`through`).
+   */
+  kind: CallerKind;
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -86,7 +94,19 @@ export function newestPolicySeq(db: Queryable): Promise<bigint | null> {
   return newestVaultSeq(db, 'policy.change');
 }
 
-export function callerFrom(principal: PrincipalRef, access: Access, policySeq: bigint | null, credentialScope: CredentialScope | null = null): Caller {
+/**
+ * A caller from what the vault said of its principal, and the credential it
+ * came in on: its scope, and its kind, a person's or a bearer's by its
+ * principal unless it says `workload`, whose scope lists what it reads
+ * (`scopeWithReads`).
+ */
+export function callerFrom(
+  principal: PrincipalRef,
+  access: Access,
+  policySeq: bigint | null,
+  credentialScope: CredentialScope | null = null,
+  kind: CallerKind = principal.type === 'user' ? 'person' : 'bearer',
+): Caller {
   return {
     principal,
     registered: access.status === 'active',
@@ -105,6 +125,7 @@ export function callerFrom(principal: PrincipalRef, access: Access, policySeq: b
     policy: access.policy ?? DEFAULT_POLICY,
     policySeq,
     service: principal.type === 'service',
+    kind,
   };
 }
 

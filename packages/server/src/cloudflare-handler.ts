@@ -4,7 +4,9 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
+import { CoffreGates } from './cloudflare-gates.ts';
 import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
+import { CoffreWorkload } from './cloudflare-workload.ts';
 import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
@@ -43,6 +45,10 @@ export type CoffreWorker<Env> = {
   upgrade(request: Request, env: Env): Promise<Response> | null;
   /** The Durable Object class `sockets` binds, which the Worker exports: `export const CoffreSockets = coffre.Sockets`. */
   Sockets: ReturnType<typeof socketsObject<Env>>;
+  /** The workloads' gates' Durable Object class, which `GATES` binds: `export const CoffreGates = coffre.Gates` (docs/design/workload-access.md, section 5.2). */
+  Gates: typeof CoffreGates;
+  /** The entrypoint another Worker binds with `props` naming its service: `export const CoffreWorkload = coffre.Workload` (section 9.2). */
+  Workload: typeof CoffreWorkload;
 };
 
 /**
@@ -115,5 +121,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => state.waitUntil(promise));
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
+    Gates: CoffreGates,
+    Workload: CoffreWorkload,
   };
 }

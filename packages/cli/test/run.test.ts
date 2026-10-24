@@ -379,6 +379,28 @@ test('get in a terminal ends its line, so the prompt comes back on one of its ow
   assert.equal(output, 'visible-value\r\n');
 });
 
+test("a terminal's Ctrl-C reaches a run's command, and the run waits for it; a SIGTERM to the run is passed on to its command", async (t) => {
+  const { environment } = await instance(t, { 'market/dev': { values: { API_KEY: 'k' } } });
+  const run = (script: string) =>
+    spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'run', 'market/dev', '--', process.execPath, '-e', script], { env: environment(), stdio: ['ignore', 'pipe', 'ignore'] });
+  // The command says when its handler is set, the run's set before it started: then the signal goes.
+  const started = async (child: ReturnType<typeof run>) => {
+    let said = '';
+    for await (const chunk of child.stdout!) if ((said += String(chunk)).includes('ready')) return;
+    assert.fail('the command never said it was ready');
+  };
+  // Its command answers SIGINT itself, as a psql at its prompt does: the run, sent it too by the terminal, keeps its listeners and waits.
+  const interrupted = run("process.on('SIGINT', () => {}); console.log('ready'); setTimeout(() => process.exit(7), 1000)");
+  await started(interrupted);
+  interrupted.kill('SIGINT');
+  assert.deepEqual(await once(interrupted, 'exit'), [7, null]);
+  // A SIGTERM sent to the run alone ends its command, which the run does not leave behind.
+  const terminated = run("process.on('SIGTERM', () => process.exit(9)); console.log('ready'); setTimeout(() => {}, 20000)");
+  await started(terminated);
+  terminated.kill('SIGTERM');
+  assert.deepEqual(await once(terminated, 'exit'), [9, null]);
+});
+
 test("a person's run, on an instance with the credential proxy, gets placeholders: one handle, the plan's variables, and what it leaves out, said", async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -394,6 +416,7 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     if (req.url === '/use') return send(200, { proxy: 'coffre', credentials: ['schumann'] });
     if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/dev': 'viewer' } });
+    if (req.method === 'DELETE' && req.url === '/api/handles/h1') return send(200, { revoked: true });
     if (req.url === '/use/market/dev') {
       const at = `http://${req.headers.host}/use/market/dev/schumann`;
       // A placeholder shaped as its client checks it, a JWT here, is no value given as it is.
@@ -427,8 +450,9 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
   assert.match(stderr, /placeholders for market\/dev: schumann/);
   assert.match(stderr, /values as they are, which you may read: WEBHOOK_SECRET$/m);
   assert.match(stderr, /left out, neither proxied nor yours to read: DATABASE_URL/);
-  // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle.
-  assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle']);
+  // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle; and
+  // once the command ended, the handle revoked, so that nothing the run started holds it after.
+  assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle', 'DELETE /api/handles/h1 token']);
   assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);
 });
 
@@ -475,7 +499,7 @@ test("a person's run carries each tunnel's connections to coffre, with the handl
   assert.match(stderr, /DATABASE_URL through a tunnel to its database/);
 });
 
-test('a tunnel whose coffre never answers the upgrade gives up on it, closing the app connection', { timeout: 30_000 }, async () => {
+test('a tunnel whose coffre never answers the upgrade gives up on it, closing the app connection', async () => {
   const { listen } = await import('../src/tunnels.ts');
   // A coffre that takes the connection and never answers it.
   const held: import('node:net').Socket[] = [];
@@ -484,15 +508,15 @@ test('a tunnel whose coffre never answers the upgrade gives up on it, closing th
   await once(silent, 'listening');
   try {
     const { port } = silent.address() as { port: number };
-    const tunnel = await listen({ key: 'DATABASE_URL', url: `ws://127.0.0.1:${port}/use/market/dev/db` }, `coffre_use_${'h'.repeat(43)}`);
+    const tunnel = await listen({ key: 'DATABASE_URL', url: `ws://127.0.0.1:${port}/use/market/dev/db` }, `coffre_use_${'h'.repeat(43)}`, { handshakeMs: 1000 });
     const url = new URL(tunnel.url);
     const app = (await import('node:net')).connect(Number(url.port), url.hostname);
     await once(app, 'connect');
     app.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
     const started = Date.now();
     await once(app, 'close');
-    // The listener waits 20 s, past the 15 s coffre has to answer with its own refusal.
-    assert.ok(Date.now() - started < 25_000);
+    // The listener waits its handshake's time (70 s unless told), past the time coffre has to answer with its own refusal.
+    assert.ok(Date.now() - started < 5_000);
     tunnel.close();
   } finally {
     for (const socket of held) socket.destroy();
@@ -518,6 +542,7 @@ for (const raced of [false, true]) {
       const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
       if (url === '/use') return send(200, { proxy: 'coffre', credentials: [] });
       if (url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), scope: { 'market/local': 'viewer' } });
+      if (req.method === 'DELETE' && url === '/api/handles/h1') return send(200, { revoked: true });
       if (url === '/use/market/local') {
         return mine === null
           ? send(200, { environment: 'market/local', env: { REGION: 'eu' }, credentials: {}, left: ['SEAL_KEY', 'TYPED'], generate: { SEAL_KEY: { recipe: 'bytes:32:hex', replaces: 'v-local-1' } } })
@@ -555,7 +580,7 @@ for (const raced of [false, true]) {
     assert.ok(!stderr.includes(value));
     assert.deepEqual(JSON.parse(stdout), { SEAL_KEY: raced ? 'the-other-runs-value' : value, REGION: 'eu' });
     assert.equal(/made your own SEAL_KEY in market\/local@me/.test(stderr), !raced);
-    assert.deepEqual(requests, ['GET /use', 'POST /api/handles', 'GET /use/market/local', 'PATCH /api/secrets/market/local@me', 'GET /use/market/local']);
+    assert.deepEqual(requests, ['GET /use', 'POST /api/handles', 'GET /use/market/local', 'PATCH /api/secrets/market/local@me', 'GET /use/market/local', 'DELETE /api/handles/h1']);
   });
 }
 

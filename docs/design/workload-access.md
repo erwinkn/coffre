@@ -647,10 +647,16 @@ the rest:
 - **`req`** is base64url(SHA-256) of a canonical request:
 
   ```
+  <the path as sent, as the WHATWG parser writes it: every slash and escape kept>\n
   <the raw query string as sent, without "?", or empty>\n
   <name>:<value>\n   for each header in hdr, in order, its value as received
-  <the body's SHA-256, hex | the declared payload hash, for a streamed SigV4 upload only>
+  <the body's SHA-256, hex | the declared payload hash, for a streamed SigV4 upload only, | UNSIGNED-PAYLOAD>
   ```
+
+  `htu` signs the path as a zone normalizes it; the first line signs it as
+  it goes upstream, so `/use/s3/a/b` and `/use/s3/a//b`, two objects to S3,
+  are two requests under one `htu` (PR 0's review r2). A path a zone
+  changed on the way fails closed.
 
   The declared form applies only to a credential injected by `sigv4`, and
   only when its `x-amz-content-sha256` is 64 hex characters, which S3
@@ -936,12 +942,14 @@ precedence, for a session whose binding gives `viewer` on `market/prod`:
       A `workload` caller must come with a credential scope, or the vault
       refuses it outright.
     - The app always materializes a workload's scope into per-place grants,
-      the binding's scope when the row holds none. Each grant carries
-      `reads: readonly string[] | '*'` beside R32's `sensitive`.
-    - The vault refuses every purpose that hands a value back
-      (`handsBack`) unless the key is listed at the place where the value
-      is held: a reference's source, a fork's parent for an inherited key.
-      The code is `use_only`.
+      the binding's scope when the row holds none (`scopeWithReads`). Each
+      environment's grant may carry `reads: readonly string[] | '*'` beside
+      R32's `sensitive`; a project's grant carries none, since on it a list
+      would read the whole project.
+    - The vault refuses every purpose but the proxy's `use`, a copy kept
+      sensitive included, unless the key is listed at the place where the
+      value is held: a reference's source, a fork's parent for an inherited
+      key. The code is `use_only`.
     - So `market/dev/S`, a reference to `market/prod/STRIPE_SECRET_KEY`, is
       not readable through a `"*"` listed for `market/dev`.
     - A `copy` for a workload caller is refused unless the source is

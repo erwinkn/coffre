@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { runsInstance, type Scope } from '@coffre/core/access';
 
 import { places } from '../db/queries.ts';
-import { requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { type ApiContext, requireInstance, through, withRefusals } from './context.ts';
 import { forbidden, vaultRefused } from './errors.ts';
 import { scopeIds, scopeView, type FilterInput } from './members.ts';
 import { formatMember } from './paths.ts';
@@ -40,7 +40,7 @@ export async function putSettings(
       requestId: ctx.requestId,
       operationId: randomUUID(),
       credentialId: ctx.provenance,
-      credentialScope: ctx.caller.credentialScope,
+      ...through(ctx.caller),
     });
     if (!result.ok) throw vaultRefused(result.refusal);
     return { serviceAccounts: scopeView(result.settings.serviceAccounts, known) };

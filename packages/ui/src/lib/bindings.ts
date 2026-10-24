@@ -1,5 +1,5 @@
 import { CoffreError, type BindingPlan, type BindingView } from '@coffre/client';
-import { claimValues, fullRef, githubReusable, githubWorkflow, gitlabProject, type BindingClaims } from '@coffre/core/workloads';
+import { claimValues, fullRef, githubReusable, githubWorkflow, gitlabProject, type BearerProfile, type BindingClaims } from '@coffre/core/workloads';
 
 /**
  * Trust bindings as the pages show and make them. A binding is its claims;
@@ -190,7 +190,7 @@ export function lookupFailure(name: string, failure: unknown): GitHubLookup {
 export function bindingOf(
   form: Form,
   found: GitHubIds | null = null,
-): { profile: BindingPlan['profile']; issuer: string | null; claims: BindingClaims; jwks?: KeySet } {
+): { profile: BearerProfile; issuer: string | null; claims: BindingClaims; jwks?: KeySet } {
   const needed = (value: string, what: string) => {
     if (value.trim() === '') throw new Error(`${what} is needed`);
     return value.trim();

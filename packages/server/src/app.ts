@@ -1,11 +1,14 @@
 import type { CoffreClient } from '@coffre/client';
 
 import { ApiError, badRequest } from './api/errors.ts';
+import { narrowWorkload } from './api/narrow.ts';
 import {
   finishSignin,
   logout,
   pollDevice,
+  exchangeWorkloadSession,
   exchangeWorkloadToken,
+  renewWorkloadSession,
   signOut,
   startDevice,
   startSignin,
@@ -42,6 +45,10 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/api/auth/oidc': { method: 'POST', handler: exchangeWorkloadToken },
+  // A workload's key-bound session (docs/design/workload-access.md): its sign-in, renewal, and a child with less.
+  '/api/auth/workload': { method: 'POST', handler: exchangeWorkloadSession },
+  '/api/auth/workload/renew': { method: 'POST', handler: renewWorkloadSession },
+  '/api/auth/workload/narrow': { method: 'POST', handler: narrowWorkload },
   // MCP clients' OAuth (docs/design/mcp.md, section 4), and the endpoint its tokens are for.
   '/api/oauth/token': { method: 'POST', handler: oauthToken },
   '/api/oauth/register': { method: 'POST', handler: oauthRegister },

@@ -110,6 +110,20 @@ test('coffre help names service accounts as people do, service:<name>, and offer
   assert.match(trust.stdout, /A service account, service:<name>, signs in by OIDC this way/);
 });
 
+test("each command of workload access is declared, takes its documented flags, and says which change brings it", async () => {
+  for (const [args, change] of [
+    [['enroll', 'api-prod', '--promote', '00000000-0000-4000-8000-000000000000', '--now'], 'PR 3'],
+    [['approve', 'api-prod', '00000000-0000-4000-8000-000000000000'], 'PR 3'],
+    [['freeze', 'service:api-prod', '--reason', 'leaked'], 'PR 4'],
+    [['unfreeze', 'service:api-prod'], 'PR 4'],
+    [['serve', '--service', 'api-prod', '--proof', 'gcp', '--listen', '127.0.0.1:7300'], 'PR 5'],
+  ] as const) {
+    const run = await coffre([...args]);
+    assert.equal(run.code, 1, `coffre ${args.join(' ')}: ${run.stderr}`);
+    assert.match(run.stderr, new RegExp(`coffre ${args[0]} is not built yet: docs/design/workload-access.md, ${change}`));
+  }
+});
+
 test('--version prints the version; help and --help the commands', async () => {
   const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
   for (const flag of ['--version', '-v']) assert.deepEqual(await coffre([flag]), { code: 0, stdout: `${version}\n`, stderr: '' });

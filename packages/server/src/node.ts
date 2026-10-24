@@ -116,6 +116,13 @@ export function createCoffre(config: NodeConfig): CoffreNode {
 export type NodeConfig = CoffreConfig & {
   /** `postgres://…`, or `file:coffre.db` for local SQLite. */
   database: string;
+  /**
+   * The client's address, for a deployment behind a load balancer, whose
+   * own address is all the socket shows: from its `X-Forwarded-For`, say,
+   * which only it can set. A binding with `sources` needs it
+   * (docs/design/workload-access.md, section 4.4). Not read yet.
+   */
+  clientAddress?: (request: Request) => string | null;
 };
 
 /** Check coffre's configuration on Node, failing on the first problem. */

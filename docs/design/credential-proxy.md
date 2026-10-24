@@ -859,9 +859,24 @@ Worker, with 426 or 401, before any object is made. An object holds 32
 sessions at most, so a pool gone wrong cannot fill it: the 33rd is
 refused with 503. A connection takes its slot before admission, and one
 refused keeps it until its admission is done, past a refusal for taking
-too long, a minute at most: neither a burst nor a slow database gets past
+too long, a minute past its refusal at most: neither a burst nor a slow database gets past
 the 32, and a database that never answers holds no slot for good. The
-listener says each refusal once a run, on stderr, with coffre's reason. The object's name digests the bearer token alone and
+object admits its connections in the order they came, one at a time until
+one is in, then four at once: measured on Cloudflare, a pool's 32 made
+together each read the URL from the vault and wrote two log entries, all
+on the object's one database client, and past 16 they reached their time
+to decide together. The first one in leaves the URL in the cache for the
+rest. Each has 45 seconds to be decided from its turn. One that has
+waited 15 seconds for the first stops waiting for the cache: four go at
+once from then, so that one never decided holds up no other for good; the
+listener waits 70 seconds for its answer. The time is that long for a
+burst of runs, each admitted in an object of its own and each writing to
+the one audit chain: 64 together took up to 22 seconds each. The
+listener says each refusal once a run, on stderr, with coffre's reason.
+Bytes go each way in a loop of reads and writes, not `pipeTo`: on
+Workers, piping into a stream of JavaScript's own, as this pipe is, keeps
+a promise for each chunk until the pipe ends, and a session that streamed
+4.7 GB from the database outgrew the object's 128 MB. The object's name digests the bearer token alone and
 the path's segments decoded, as admission reads them, so no spelling of
 either splits a run's connections. This is how any
 plugin's WebSocket carries its bytes on Workers, not the tunnel's own:
@@ -881,7 +896,16 @@ it owes none: a message that reaches the object, so an idle psql at its
 prompt keeps its WebSocket, and its object stays in memory with it. It
 sends a ping too, whose pong, the edge's, must come before the next: a
 connection whose network went away without a word ends within a minute,
-and the app's driver sees it drop, rather than a query that hangs. An app
+and the app's driver sees it drop, rather than a query that hangs. A
+terminal's Ctrl-C reaches the run's command and the run alike: the run
+leaves it to its command (a psql cancels its query through the listener)
+and waits for it, and passes a SIGTERM or SIGHUP sent to it alone on to
+it. When its command ends, or fails to start, the run revokes its handle
+(`DELETE /handles/:id`, which reaches a person's own handles only, a
+personal token's included: any of them, the token's scope aside, since a
+handle records its person, not the credential that made it). Under a
+supervisor that stops processes with SIGINT alone, the run waits for its
+command: stop it with SIGTERM, which it passes on. An app
 that stops reading (a psql in its pager) keeps its connection: paced, the
 listener goes on reading pongs and counts, and coffre sends no more than a
 window; with a coffre on Node, which does not pace, the listener stops

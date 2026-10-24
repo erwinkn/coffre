@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
+import { useOnly } from '@coffre/core/access';
+
 import { environmentSecrets, fileSecrets, liveEnvironment, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
+import { asking, audited, denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
@@ -87,6 +89,16 @@ export async function forkEnvironment(
     }
     if (unreferenceable.length > 0) {
       throw forbidden(`${project.slug}/${from} holds ${unreferenceable.join(', ')}: a reference to a sensitive value you cannot read, which a fork keeps a reference and never copies, so you cannot fork it`);
+    }
+    // A workload forks only values it is handed back, plain ones and those it lists where each is held (`useOnly`): a
+    // copy, or a reference, would move a value it only uses to a place whose keys it may read. The vault refuses each
+    // copy and reference of one too; refused here, the fork makes nothing.
+    const usedOnly = readable.items.filter((item) => !plain(item) && useOnly(ctx.caller, item.secret)).map((item) => `${item.key} (${item.secret.path})`);
+    if (usedOnly.length > 0) {
+      throw new Refusal(
+        forbidden(`${project.slug}/${from} holds ${usedOnly.join(', ')}, which this workload uses only through coffre: a fork would copy or refer to ${usedOnly.length === 1 ? 'it' : 'them'}, so it cannot fork it`),
+        denied(ctx, 'environment.fork', 'use_only', { projectId: project.id, metadata: { from, slug, keys: usedOnly } }),
+      );
     }
 
     // From here, as of the protection it made, if any: each transaction below commits only while that is the newest change.

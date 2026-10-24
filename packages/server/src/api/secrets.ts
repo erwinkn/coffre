@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ownsProject, readsSensitive, type Permission } from '@coffre/core/access';
+import { ownsProject, readsSensitive, useOnly, type Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
@@ -1126,6 +1126,14 @@ async function referenceTargets(
     need(ctx, 'secret.read', at, 'secret.reference', { operationId, metadata: { key, source: ref } });
     const version = found.secret.currentVersionId === null ? [] : [found.secret.currentVersionId];
     if ((await sensitiveVersions(ctx.db, version)).size > 0) need(ctx, 'secret.use', at, 'secret.reference', { operationId, metadata: { key, source: ref } });
+    // A workload refers only to a value it is handed back, a plain one or one it lists where it is held (`useOnly`): it
+    // would otherwise move a value it only uses to a place whose keys it reads. The vault decides the same.
+    if (useOnly(ctx.caller, { projectId: found.project.id, environmentId: found.environment.id, secretId: found.secret.id }) && (await plainVersions(ctx.db, version)).size === 0) {
+      throw new Refusal(
+        forbidden(`${ref} is used through coffre by this workload, never read: it refers only to a value its binding's reads list where it is held`),
+        denied(ctx, 'secret.reference', 'use_only', { ...environment, operationId, metadata: { key, source: ref } }),
+      );
+    }
     return { key, secretId: found.secret.id };
   }));
   const holders = refs.map(({ key }) => prepared.get(key)?.id ?? randomUUID());
@@ -1217,7 +1225,8 @@ export async function dryRunSecrets(
       // A generated value is new by making, and opens nothing to say so. A value is unchanged
       // only as it was held, plain, secret or sensitive: a plain one compares with no read, being no
       // secret, and a sensitive one never with the guess of whoever does not read it, a person or a
-      // service on a credential no Owner of the project issued (`readsSensitive`), who is not told it is right.
+      // service on a credential no Owner of the project issued (`readsSensitive`), who is not told it is right;
+      // nor a value a workload only uses (`useOnly`).
       const { current } = secret;
       const now = current === null ? null : sensitivityOf(current);
       if (isMark(value)) {
@@ -1230,7 +1239,8 @@ export async function dryRunSecrets(
       }
       const level = askedSensitivity(value) ?? bareLevel(now, { personal: place.environment!.owner !== null, generated: typeof value === 'object' && 'generated' in value });
       if (current === null || level !== now || (typeof value === 'object' && ('generated' in value || 'ref' in value))
-        || (now === 'sensitive' && !readsSensitive(ctx.caller, place.project.id))) {
+        || (now === 'sensitive' && !readsSensitive(ctx.caller, place.project.id))
+        || (now !== 'plain' && useOnly(ctx.caller, { projectId: place.project.id, environmentId: environment.environmentId, secretId: secret.id }))) {
         keys[key] = 'changed';
         continue;
       }
@@ -1641,6 +1651,10 @@ export type PickKeys = (
  * as the vault's own refusal. A service account reads them on a token or
  * trust binding an Owner of their project issued (R32); on any other, its
  * read of one is refused whole, naming them, as the vault would refuse it.
+ * A workload's read leaves out, naming them in `useOnly`, the secrets and
+ * sensitive values its scope does not list where each is held, and its read
+ * of one is refused whole (`useOnly`, docs/design/workload-access.md,
+ * section 6.1): it uses them, through the proxy, and never holds them.
  */
 export async function reveal(
   ctx: ApiContext,
@@ -1653,7 +1667,7 @@ export async function reveal(
    * left out, not refused: the proxy says which it needs.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
+): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence, at) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1682,9 +1696,12 @@ export async function reveal(
     // else, its key is a key like any other.
     const parentOf = (item: Readable) => ({ projectId: environment.projectId, environmentId: item.parent!.environmentId, environmentSlug: item.parent!.slug });
     const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
-    // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses.
+    // Whether a workload only uses a value, one its scope does not list where the value is held (`useOnly`).
+    const usedOnly = (item: Readable) => !plain(item) && useOnly(ctx.caller, item.secret);
+    // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses,
+    // and so does a workload, but for what it lists.
     const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
-    const readsAt = (item: Readable) => (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
+    const readsAt = (item: Readable) => !usedOnly(item) && (item.parent === undefined ? readsHere : can(ctx.caller, 'secret.read', parentOf(item)));
     const chosen = use === undefined ? null : typeof use.keys === 'function' ? use.keys(named, read.items.map((item) => ({
       key: item.key,
       inherited: item.parent !== undefined,
@@ -1696,10 +1713,14 @@ export async function reveal(
       recipe: told(item) && item.via === undefined && item.recipe?.pair === null ? item.recipe.recipe : null,
     }))) : use.keys;
     const wanted = (item: { key?: string }) => chosen === null || item.key === undefined || chosen.includes(item.key);
-    // What a person's read of a whole environment leaves out: its sensitive values, which nobody is handed.
-    const withheld = (item: Readable) => use === undefined && path.key === undefined && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
-    const rows = read.items.filter((item) => wanted(item) && !withheld(item));
-    const sensitive = read.items.filter(withheld).map((item) => item.key);
+    // What a read of a whole environment leaves out, naming it: a person's sensitive values, which nobody is handed,
+    // and a workload's values it only uses.
+    const whole = use === undefined && path.key === undefined;
+    const sensitiveTo = (item: Readable) => whole && ctx.caller.principal.type === 'user' && item.secret.sensitive === true;
+    const usedOnlyTo = (item: Readable) => whole && usedOnly(item);
+    const rows = read.items.filter((item) => wanted(item) && !sensitiveTo(item) && !usedOnlyTo(item));
+    const sensitive = read.items.filter(sensitiveTo).map((item) => item.key);
+    const usesOnly = read.items.filter(usedOnlyTo).map((item) => item.key);
     const unreadable = read.unreadable.filter(wanted);
     // A key neither here nor inherited. A fork's key may have no row of its own: its parent's is read.
     if (path.key !== undefined && rows.length === 0 && unreadable.length === 0 && (place.secret === null || place.secret.archivedAt !== null)) {
@@ -1732,9 +1753,18 @@ export async function reveal(
         denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
       );
     }
+    const purpose = use?.purpose ?? (path.key === undefined ? 'run' : 'reveal');
+    // A workload handed back what it only uses, one key or the proxy's: refused whole, as the vault would, naming them.
+    const unlisted = purpose === 'use' ? [] : rows.filter(usedOnly);
+    if (unlisted.length > 0) {
+      const keys = unlisted.map((item) => item.key);
+      throw new Refusal(
+        forbidden(`${named.path}: this workload uses ${keys.join(', ')} only through coffre, as its binding's reads do not list ${keys.length === 1 ? 'it where its value is' : 'them where their values are'} held`),
+        denied(ctx, 'secret.read', 'use_only', { ...environment, operationId, metadata: { keys } }),
+      );
+    }
     // A service's credential reads no sensitive value but of a project an Owner of which issued it: the value's own, a
     // reference's source's (`readsSensitive`). Refused whole, as the vault would, naming them, and who can.
-    const purpose = use?.purpose ?? (path.key === undefined ? 'run' : 'reveal');
     const notIssued = ctx.caller.principal.type === 'service' && handsBack({ purpose })
       ? rows.filter((item) => item.secret.sensitive === true && !readsSensitive(ctx.caller, item.secret.projectId))
       : [];
@@ -1759,14 +1789,14 @@ export async function reveal(
     if (use !== undefined) {
       // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
       log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
-      return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: null, environment: named, keys: read.items.map((item) => item.key) };
+      return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: null, environment: named, keys: read.items.map((item) => item.key) };
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
       log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: 'empty_environment' } }));
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
-    return { operationId, values: { ...values }, plain: plainKeys, sensitive, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
+    return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
 }
 
@@ -1781,15 +1811,16 @@ export async function reveal(
  * keys it counts need read on their parent, as a read does: their version
  * would say when the parent's value changed, which the listing tells only
  * that parent's readers. A person's leaves the sensitive keys out first,
- * as their read does: one inherited from a parent they do not read is
- * never theirs to read, and refuses neither.
+ * as their read does, and a workload's the values it only uses: one
+ * inherited from a parent they do not read is never theirs to read, and
+ * refuses neither.
  */
 export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): Promise<{ version: string }> {
   const environment = requireLive(place);
   const read = await readableValues(ctx.db, place, environment);
   // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
   const person = ctx.caller.principal.type === 'user';
-  const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true)) };
+  const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true) && (plain(item) || !useOnly(ctx.caller, item.secret))) };
   const unread = unreadParents(ctx, environment.projectId, opened, ['secret.read', 'secret.use']);
   if (unread.size > 0) {
     const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);

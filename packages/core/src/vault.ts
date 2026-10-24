@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 
 import type { AccessFault } from './access-fault.ts';
-import type { CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
+import type { CallerKind, CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
+
+export type { CallerKind } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -223,6 +225,14 @@ export type RefusalCode =
    */
   | 'not_owner_issued'
   /**
+   * A workload asked for a value its credential does not list where the
+   * value is held (`useOnly`) for anything but the proxy's use: to read
+   * it, compare a guess with it or copy it, or to make a reference to it.
+   * It uses that value through coffre, and never holds it, nor moves it
+   * where it would.
+   */
+  | 'use_only'
+  /**
    * The project or environment was deleted for good: nothing under it is
    * opened or wrapped again, whatever grant would cover it.
    */
@@ -340,12 +350,22 @@ type Correlation = {
 };
 
 /**
- * The scope of the credential the request came in on, a service token's or
- * a trust binding's: unlike the correlation, the vault decides on it, and
- * its principal holds nothing past it (`allows`). Null, or left out, for a
+ * The credential the request came in on, which the vault decides on, unlike
+ * the correlation.
+ *
+ * `credentialScope` is a service token's or a trust binding's scope: its
+ * principal holds nothing past it (`allows`). Null, or left out, for a
  * session's, which carries all its member holds.
+ *
+ * `caller` is what kind of credential it is (`CallerKind`): a person's, on
+ * a `user:` principal; a bearer's or a workload's, on a `token:` one. A
+ * workload's comes with its scope, or the vault refuses the call outright,
+ * and is handed back only the values the scope lists where each is held
+ * (`useOnly`, docs/design/workload-access.md, section 6.1): any other is
+ * refused `use_only`. An app older than 0.11 says none, and has no
+ * workloads: the vault, deployed first, decides for it as before.
  */
-export type Through = { credentialScope?: CredentialScope | null };
+export type Through = { credentialScope?: CredentialScope | null; caller: CallerKind };
 
 export type UnwrapInput = Correlation & Through & {
   principal: string;

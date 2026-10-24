@@ -307,6 +307,7 @@ BEGIN
         'UPDATE service_bindings SET profile = profile',
         'UPDATE service_bindings SET principal = principal',
         'UPDATE service_bindings SET generation = generation',
+        'UPDATE service_bindings SET policy = policy',
         'UPDATE service_bindings SET id = id',
         'DELETE FROM service_bindings',
         'TRUNCATE service_bindings'
@@ -470,6 +471,41 @@ BEGIN
         last_used_ip = last_used_ip, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
     UPDATE mcp_approvals SET status = status, outcome = outcome, decided_at = decided_at, reported_at = reported_at;
     RAISE NOTICE 'PASS: coffre_app changes clients and connections only where their MACs allow, approvals only in what became of them, and never deletes one';
+END
+$$;
+
+-- 21. A workload's session keeps what binds it: its key, hard end,
+-- ancestors, limits and code. Renewal moves its expiry, an approval names
+-- who; an enrollment code is only ever added.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE credentials SET jkt = jkt',
+        'UPDATE credentials SET not_after = not_after',
+        'UPDATE credentials SET ancestors = ancestors',
+        'UPDATE credentials SET constraints = constraints',
+        'UPDATE credentials SET enrollment_id = enrollment_id',
+        'UPDATE credentials SET kind = kind',
+        'UPDATE credentials SET created_by = created_by',
+        'UPDATE enrollments SET scope = scope',
+        'UPDATE enrollments SET expires_at = expires_at',
+        'UPDATE enrollments SET code_hash = code_hash',
+        'UPDATE enrollments SET auth_mac = auth_mac',
+        'DELETE FROM enrollments',
+        'TRUNCATE enrollments'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    UPDATE credentials SET expires_at = expires_at, approved_at = approved_at, approved_by = approved_by, auth_mac = auth_mac;
+    PERFORM count(*) FROM enrollments;
+    RAISE NOTICE 'PASS: coffre_app renews and approves a session, and never rebinds one or changes a code';
 END
 $$;
 

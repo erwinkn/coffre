@@ -21,6 +21,7 @@ import {
   githubReusable,
   githubWorkflow,
   gitlabProject,
+  type BearerProfile,
   type BindingClaims,
   type ClaimValue,
 } from '@coffre/core/workloads';
@@ -48,7 +49,7 @@ export type TrustFlags = {
   'namespace-id'?: string;
 };
 
-export type BindingRequest = { profile: BindingPlan['profile']; issuer: string | null; claims: BindingClaims };
+export type BindingRequest = { profile: BearerProfile; issuer: string | null; claims: BindingClaims };
 
 export type Lookup = (input: { github?: string; gitlab?: string; gitlabUrl?: string }) => Promise<WorkloadIds>;
 
@@ -377,6 +378,11 @@ export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims
     }
     case 'custom':
       return `runs whose ID token, from ${binding.issuer}, says ${Object.entries(claims).map(([name, value]) => `${name}=${value}`).join(', ')}`;
+    default: {
+      // A workload's binding (docs/design/workload-access.md), which `coffre trust` makes from PR 2 on, and says better there.
+      const says = Object.entries(claims).map(([name, value]) => `${name}=${value}`).join(', ');
+      return `${binding.profile} workloads${says === '' ? '' : ` whose proof says ${says}`}`;
+    }
   }
 }
 

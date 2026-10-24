@@ -11,6 +11,7 @@ import {
   differingClaims,
   GitHubAppUnavailable,
   GITLAB_ISSUER,
+  isBearerProfile,
   issuedRefusal,
   keySummaries,
   KeysInvalid,
@@ -31,7 +32,7 @@ import {
 import { shownMember } from '@coffre/core/schemas';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
-import { serviceBindings } from '@coffre/db/schema';
+import { serviceBindings, type credentials } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
 import {
@@ -106,7 +107,14 @@ export type ExchangeReason =
   | 'audience'
   | 'replayed'
   | 'busy'
-  | 'issuer_unavailable';
+  | 'issuer_unavailable'
+  // A workload's sign-in's own (docs/design/workload-access.md, section 4.1): its DPoP header missing or bad, a client
+  // address outside the binding's `sources` or none to check, an older enrollment code, a freeze, a code at capacity.
+  | 'dpop'
+  | 'source'
+  | 'superseded'
+  | 'frozen'
+  | 'full';
 
 /**
  * A refused exchange: 401 with its reason, 429 when too many come at once,
@@ -124,6 +132,85 @@ export class ExchangeRefused extends Error {
     this.status = status;
   }
 }
+
+/** The proofs a workload signs in with, by the one key of its body's `proof`: `{ "proof": { "aws": … } }`. */
+export type ProofName = 'oidc' | 'aws' | 'enrollment';
+
+/** What a proof's hooks are given: the instance, and who asks to sign in as what, with which key. */
+export type ProofContext = {
+  db: Database;
+  chainKey: Buffer;
+  config: WorkloadsConfig;
+  transport: WorkloadTransport;
+  publicUrl: string;
+  /** The service it signs in as, `token:<name>`. */
+  service: string;
+  /** The thumbprint of the key the exchange's DPoP proof names, which the session will be bound to. */
+  jkt: string;
+  sourceIp: string | null;
+  requestId: string;
+};
+
+/** A proof that holds, before the exchange's transaction: the binding it matched and what it said. */
+export type MatchedProof = {
+  binding: BindingRow;
+  claims: Record<string, unknown>;
+  /** What spending it records in `consumed_tokens`, for a bearer proof; none for one that names the key or repeats (section 4.1). */
+  spentKey?: Buffer;
+  /** A bearer token's own `exp`, which ends the session it makes (section 5.4). */
+  notAfter?: Date;
+};
+
+/** What a proof decides inside the exchange's transaction, on database facts alone. */
+export type CommittedProof = {
+  /** The code it was made from. */
+  enrollmentId?: string;
+  /** The code's scope, fixed at minting, which the session holds in place of its binding's (`MinterBound`). */
+  scope?: string;
+  /** The code's end. */
+  notAfter?: Date;
+  /** The session waits for a person's approval: the exchange answers 202. */
+  pending?: true;
+};
+
+/** The session an exchange made, for the hooks that run after it. */
+export type ExchangeOutcome = { verified: MatchedProof; committed: CommittedProof; sessionId: string };
+
+/** A workload's session as its row holds it, for renewal's hooks. */
+export type WorkloadSession = typeof credentials.$inferSelect;
+
+/**
+ * One kind of proof, as PR 1a's exchange dispatches to it (section 12).
+ * Each refusal is returned, never thrown, so the exchange alone decides
+ * what an error means. The session lives `lifetimeMs` past each renewal,
+ * and never past the earliest of the binding's `sessionHours` and the
+ * `notAfter`s of `verify` and `commit`.
+ */
+export type ProofKind = {
+  /** The binding profiles it may match, the exchange's one read's filter. */
+  profiles: readonly WorkloadProfile[];
+  /** Before the transaction: the proof checked, outside any. */
+  verify(input: unknown, ctx: ProofContext): Promise<MatchedProof | ExchangeRefused>;
+  /** Inside it, under the log's head: what the database says, an enrollment's capacity and tombstone. */
+  commit?(tx: Transaction, verified: MatchedProof, ctx: ProofContext): Promise<CommittedProof | ExchangeRefused>;
+  /** After it, outside: alerts, the tripwire. */
+  after?(outcome: ExchangeOutcome, ctx: ProofContext): Promise<void>;
+  /** 3_600_000, or 90_000 for an enrollment's, whose expiry is its liveness. */
+  lifetimeMs: number;
+  renew?: {
+    /** Inside renewal's update: a superseded code refuses it. */
+    check(tx: Transaction, session: WorkloadSession): Promise<ExchangeRefused | null>;
+    /** After it: the tripwire. */
+    after(session: WorkloadSession, ctx: ProofContext): Promise<void>;
+  };
+};
+
+/**
+ * The proofs the exchange takes, one line each: PR 1a registers `oidc`, PR
+ * 2 `aws` and PR 3 `enrollment`. Empty until then, so `/api/auth/workload`
+ * takes none.
+ */
+export const PROOFS: { readonly [K in ProofName]?: ProofKind } = {};
 
 /** How long a credential an exchange issues lives: one `coffre run` needs it for seconds. */
 export const EXCHANGED_CREDENTIAL_MS = 5 * 60 * 1000;
@@ -291,6 +378,8 @@ export class WorkloadService {
   async bind(ctx: Asker, serviceId: string, input: BindingInput, options: { dryRun: boolean }): Promise<BindingPlan | { binding: BindingView; replaced: string[] }> {
     const member = `token:${serviceId}`;
     const details = { principalType: 'service', principalId: serviceId, profile: input.profile, issuer: input.issuer };
+    // A binding with no policy is one `/api/auth/oidc` takes; another profile's carries one, which `/api/auth/workload` brings (PR 1a).
+    if (!isBearerProfile(input.profile)) throw badRequest(`a ${input.profile} binding signs in at /api/auth/workload, which this release does not serve yet`);
     const uploaded = input.jwks === undefined ? null : await keysOf(input.jwks);
     let policy: ReturnType<typeof checkBinding>;
     try {
@@ -370,6 +459,8 @@ export class WorkloadService {
           jwks: uploaded?.jwks ?? null,
           claims: canonicalClaims(planned.claims),
           scope: storedScope(scope),
+          // A binding this route makes is one `/api/auth/oidc` takes: no policy (`BEARER_PROFILES`).
+          policy: null,
           label: input.label?.slice(0, 120) ?? null,
           createdAt: now,
           createdBy: ctx.caller.principal.id,
@@ -477,6 +568,7 @@ export class WorkloadService {
             jwks: uploaded.jwks,
             claims: old.claims,
             scope: storedScope(scope),
+            policy: old.policy,
             label: old.label,
             // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
             createdAt: new Date(now.getTime() + i),

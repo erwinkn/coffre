@@ -134,11 +134,16 @@ export async function authenticateRequest(
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
-  const handle = tokenKind(token) === 'handle';
+  const kind = tokenKind(token);
+  const handle = kind === 'handle';
   if (handle && options.handle !== true) {
     return errorResponse(new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle'));
   }
   if (!handle && options.handle === true) return errorResponse(new ApiError('unauthenticated', 'the credential proxy takes a handle (coffre_use_…), as `coffre run` gives your app one'));
+  // An enrollment code buys a workload's session and is no credential; a session is used with its key's proof, never
+  // as a bearer: its hash covers its prefix, so neither is ever looked up as one (docs/design/workload-access.md).
+  if (kind === 'enrollment') return errorResponse(new ApiError('unauthenticated', 'an enrollment code is no credential: a workload exchanges it at /api/auth/workload', 'enrollment'));
+  if (kind === 'workload') return errorResponse(new ApiError('unauthenticated', "a workload's session is sent with its key's proof, Authorization: DPoP, never as a bearer token", 'workload'));
 
   let principal: Principal;
   let credentialId: string | null = null;

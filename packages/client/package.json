@@ -32,6 +32,11 @@
       "types": "./dist/credential.d.ts",
       "default": "./dist/credential.js"
     },
+    "./dpop": {
+      "coffre:source": "./src/dpop.ts",
+      "types": "./dist/dpop.d.ts",
+      "default": "./dist/dpop.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

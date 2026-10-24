@@ -44,12 +44,22 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'DELETE /members/:member/tokens/:id': 'manage-access',
   // A placeholder is for a person's own app, made by `coffre run`: a connected app holds no handle.
   'POST /handles': null,
+  'DELETE /handles/:id': null,
   'GET /members/:member/bindings': 'read',
   'POST /members/:member/bindings': 'manage-access',
   'POST /members/:member/bindings/keys': 'manage-access',
   'GET /workloads/lookup': 'read',
   'GET /workloads/repositories': 'read',
   'DELETE /members/:member/bindings/:id': 'manage-access',
+  'GET /members/:member/bindings/:id/enrollments': 'read',
+  // A code is a deploy's credential, minted by CI or a person: a connected app holds none, as it holds no handle.
+  'POST /members/:member/bindings/:id/enrollments': null,
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': null,
+  'POST /members/:member/tokens/:id/approve': null,
+  'GET /freezes': 'read',
+  // Freezing and lifting stay with people, in the pages and the CLI: an app that could lift one could undo a person's.
+  'POST /freezes': null,
+  'DELETE /freezes/:target': null,
   'PATCH /access/:member': 'manage-access',
   'GET /roles': 'read',
   // The instance's roles stay with its Owners, in the pages and the CLI, as its settings do.

@@ -4,3 +4,5 @@ const allowed = process.argv.slice(2).every((arg) => arg === '--long' || /^--see
 if (!allowed) throw new Error('Usage: pnpm test:properties [--long] [--seed=<unsigned integer>]');
 await import('../packages/core/test/audit-properties.test.ts');
 await import('../packages/core/test/access-properties.test.ts');
+await import('../packages/core/test/workload-properties.test.ts');
+await import('../packages/core/test/use-only-properties.test.ts');

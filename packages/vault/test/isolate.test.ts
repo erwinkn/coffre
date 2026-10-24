@@ -83,10 +83,10 @@ test("a first key operation answers while another waits on its own key check", p
   assert.equal((await openVault(db.vault, prepared).access(ROOT)).status, 'active');
   const stuck = await neverAnswers();
   const key = () => randomBytes(32).toString('base64');
-  const first = openVault(stuck.database, prepared).wrap({ principal: ROOT, items: [{ secret: one, key: key() }] }).catch(() => null);
+  const first = openVault(stuck.database, prepared).wrap({ principal: ROOT, caller: 'person', items: [{ secret: one, key: key() }] }).catch(() => null);
   await new Promise((resolve) => setTimeout(resolve, 50));
   try {
-    const wrapped = await within(10_000, openVault(db.vault, prepared).wrap({ principal: ROOT, items: [{ secret: two, key: key() }] }));
+    const wrapped = await within(10_000, openVault(db.vault, prepared).wrap({ principal: ROOT, caller: 'person', items: [{ secret: two, key: key() }] }));
     assert.ok(wrapped.ok, JSON.stringify(wrapped));
   } finally {
     await stuck.close();

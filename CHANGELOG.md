@@ -33,9 +33,28 @@
   beat now removes up to 5,000 records a beat of tokens spent over two
   hours ago: an exchange refuses a token issued over an hour ago, so
   those guard nothing. The runtime login still deletes no row itself: it
-  calls `prune_consumed_tokens`, which migration 0015 adds and which
+  calls `prune_consumed_tokens`, which migration 0016 adds and which
   deletes only those (Postgres; SQLite deletes them directly).
-
+- **A workload uses what its binding does not list, and moves none of it**
+  ([workload-access.md](docs/design/workload-access.md#61-the-rule), its
+  PR 1c). Every vault call now says what kind of credential it came in on,
+  a person's, a bearer's or a workload's key-bound session, and the vault
+  refuses a workload's call that comes with no scope. A workload is handed
+  back a secret or a sensitive value only where its scope's `reads` list
+  the key, by ID, at the place where the value is held: a reference's
+  source, a fork's parent, never the place the request names, so a rename
+  onto a listed name reads nothing new. Anything else the vault refuses
+  `use_only`, whatever the purpose but the proxy's use, a fork's copy
+  included, and so does making a reference to it. The app answers the same
+  first: a read of a whole environment leaves those keys out and names
+  them in `useOnly`, a read of one is refused 403 `use_only`, a dry run
+  never says whether a guess at one is right, and a fork or a reference
+  that would copy or point at one is refused before anything is made.
+  `scopeWithReads` puts a binding's `reads` on a session's scope, for the
+  exchange to call. No session of this kind is issued yet, and bearer
+  tokens and people are unchanged. The vault, deployed first, takes an
+  older app's calls, which say no kind, as before. The Lean model holds
+  the vault to it (`no_laundering`). No database migration.
 - **A credential revoked while its read is under way gets nothing.** A
   read checked its token, handle or MCP connection, then asked the vault,
   which decides on the member and is only told the credential: a token
@@ -59,7 +78,21 @@
   service account sensitive values, and the vault's bulk limit, each
   failing as it must without each of the code's protections
   ([formal.md](docs/formal.md#credentials-issuing-and-the-bulk-limit)).
-
+- **Workload access's foundation**
+  ([workload-access.md](docs/design/workload-access.md), its PR 0). A
+  database migration, `0015_workload_access`, which only adds: a
+  workload's key-bound sessions' columns on `credentials` and their kind,
+  a `policy` on trust bindings, and an `enrollments` table, so the release
+  before serves on it unchanged. `/api/auth/oidc` now takes only bindings
+  of today's five profiles with no policy, as every binding of before is.
+  Google's, Fly's, Vercel's and Entra's issuers now force their own
+  profiles, as github.com's and gitlab.com's do: a new `custom` binding
+  can no longer name them, and the binding they force signs in at
+  `/api/auth/workload` once that is served. Bindings already made are
+  unchanged.
+  The design's routes and the `coffre enroll`, `approve`, `freeze`,
+  `unfreeze` and `serve` commands are declared, and answer that they are
+  not built yet until the changes that serve them land.
 - **The database tunnel runs on Workers.** `coffre run market/dev -- psql
   "$DATABASE_URL"` now works against a Workers deployment as it does on
   Node: each run's connections to a database go to a Durable Object of
@@ -97,6 +130,18 @@
 - **A cancel request reaches only a session of the same tunnel.** It
   already needed the same handle; now its key must also name a session of
   the tunnel it came on, so it is sent the way that tunnel dials.
+- **The tunnel, tested on Cloudflare (#285).** A cancel request through a
+  network binding reaches the database (it sent nothing), and an app that
+  stops reading for a while keeps its connection (the listener ended it
+  after 30 to 60 seconds). A pool's 32 connections opened at once are all
+  let in: an object admits them in order, a few at a time, each with 45
+  seconds from its turn, where a burst of 17 or more ran out of its 15
+  together. A long result no longer fills the object: some 4.7 GB from the
+  database outgrew its 128 MB. `coffre run` leaves a terminal's Ctrl-C to
+  its command and keeps its tunnels for it, where it ended with them,
+  passes a SIGTERM on, and revokes its handle when its command ends. A
+  SIGINT sent to the run alone, with no terminal, is left to the command
+  too: stop a run with SIGTERM.
 
 - **Only an Owner hands a service account sensitive values** (R32).
   Anyone may set up a service account where the instance lets them, and

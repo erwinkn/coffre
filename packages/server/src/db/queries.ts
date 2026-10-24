@@ -1,4 +1,5 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
+import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
@@ -1131,9 +1132,12 @@ function hasTombstone(db: Queryable, id: SQL | string): SQL {
 /**
  * What an exchange may match, in one read: the service's live bindings on
  * this issuer, in its current generation as its member row says, with no
- * tombstone, each MAC-checked. A service holds at most `MAX_BINDINGS`, made
- * so under the log's head; more than that here is a database changed
- * around the app, and matches nothing.
+ * tombstone, each MAC-checked. Only those it may issue a bearer credential
+ * for, too: of `BEARER_PROFILES`, with no policy. A binding made for a
+ * key-bound session never buys one here, whatever token is presented
+ * (docs/design/workload-access.md, section 4.1). A service holds at most
+ * `MAX_BINDINGS`, made so under the log's head; more than that here is a
+ * database changed around the app, and matches nothing.
  */
 export async function exchangeCandidates(db: Queryable, chainKey: Buffer, principal: string, issuer: string, max: number): Promise<BindingRow[]> {
   const { serviceBindings, vaultMembers } = tablesOf(db);
@@ -1146,6 +1150,8 @@ export async function exchangeCandidates(db: Queryable, chainKey: Buffer, princi
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),
       isNull(serviceBindings.revokedAt),
+      isNull(serviceBindings.policy),
+      inArray(serviceBindings.profile, [...BEARER_PROFILES]),
       sql`NOT ${hasTombstone(db, id)}`,
     ))
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
@@ -1241,7 +1247,7 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
  * exchange refuses a token issued over an hour ago (`MAX_TOKEN_AGE_SECONDS`),
  * so their records guard nothing. On Postgres the runtime login deletes no
  * row itself, and asks `prune_consumed_tokens`, which deletes only those
- * (migration 0015). How many went.
+ * (migration 0016). How many went.
  */
 export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
   if (dialect.engineOf(db) === 'postgres') {

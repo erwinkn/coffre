@@ -14,7 +14,11 @@ import { postgresOnly } from './engine.ts';
 const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.head_hash',
   'audit_chain_head.next_seq',
+  // A workload's session: approved by a person, where its binding asks, and renewed (docs/design/workload-access.md).
+  'credentials.approved_at',
+  'credentials.approved_by',
   'credentials.auth_mac',
+  'credentials.expires_at',
   'credentials.last_used_at',
   'credentials.last_used_ip',
   'credentials.revoked_at',
