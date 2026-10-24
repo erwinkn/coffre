@@ -297,7 +297,7 @@ test('every other action has a sentence', () => {
     [{ action: 'key.rotate', author: 'vault', metadata: { from: 'vault:1a2b3c4d' } }, 'rotated its key'],
     [{ action: 'key.rotate', author: 'app', metadata: { from: 'app:1a2b3c4d' } }, 'moved to its new app key'],
     [{ action: 'key.reseal', author: 'app', metadata: { resealed: 98, signedOut: 2, unsignedCount: 0 } }, 'signed rows again under its new app key: 98, and 2 signed out'],
-    [{ action: 'key.reseal', author: 'app', metadata: { resealed: 3, signedOut: 0, unsignedCount: 1 } }, 'signed rows again under its new app key: 3, and 0 signed out; 1 neither key had signed, left as they were'],
+    [{ action: 'key.reseal', author: 'app', metadata: { resealed: 3, signedOut: 0, later: 4, unsignedCount: 1 } }, 'signed rows again under its new app key: 3, and 0 signed out; 4 another listed key signed, for its own rotation; 1 no key listed had signed, left as they were'],
     [{ action: 'sign_in', metadata: { kind: 'cli' } }, 'signed in to the CLI'],
     [{ action: 'sign_out' }, 'signed out'],
     [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a bearer token to service:ci-deploy'],

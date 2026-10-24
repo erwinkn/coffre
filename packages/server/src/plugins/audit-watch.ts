@@ -146,7 +146,7 @@ const WRITES_LOST = 3;
 function foreign(ctx: WatchContext, anchor: AuditAnchor): string {
   const sealed = typeof anchor.keyId === 'string' ? anchor.keyId : null;
   return sealed !== null && sealed !== ctx.keyId
-    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed without a rotation that moved from ${sealed} (previousAuditChainKeys). Empty its store, and the next beat re-anchors`
+    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed without a rotation from ${sealed}. If you still hold that key, list it in previousAuditChainKeys, and the rotation seals this anchor again, whatever it holds; only if it is lost, empty the store, and the next beat re-anchors`
     : 'the audit anchor is not one the app wrote: once it is understood, empty its store, and the next beat re-anchors';
 }
 

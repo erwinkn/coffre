@@ -21,12 +21,13 @@ export type CoffreConfig = {
    */
   auditChainKey: string;
   /**
-   * The app keys `auditChainKey` replaced, newest first, each as it was
+   * The app keys `auditChainKey` replaced, in any order, each as it was
    * given: they verify the log's entries written before the app moved on
    * from them, and nothing else. The first start under a new key signs
    * every row that must survive again under it, signs everyone out, and
-   * writes `key.rotate` (docs/deploy.md, "Rotating the app key"). None if
-   * left out.
+   * writes `key.rotate` (docs/deploy.md, "Rotating the app key"). One that
+   * is `auditChainKey` itself, as before the new key is given, counts once.
+   * None if left out.
    */
   previousAuditChainKeys?: readonly string[];
   /**
@@ -61,11 +62,10 @@ export function resolveConfig(config: CoffreConfig): ResolvedConfig {
   const auditChainKey = appKey('auditChainKey', config.auditChainKey);
   const previous = config.previousAuditChainKeys ?? [];
   if (!Array.isArray(previous)) throw new Error('previousAuditChainKeys is a list of the app keys auditChainKey replaced');
-  const previousAuditChainKeys = previous.map((text, i) => appKey(`previousAuditChainKeys[${i}]`, text));
-  for (const [i, key] of previousAuditChainKeys.entries()) {
-    const same = [auditChainKey, ...previousAuditChainKeys.slice(0, i)].findIndex((other) => other.equals(key));
-    if (same !== -1) throw new Error(`previousAuditChainKeys[${i}] is ${same === 0 ? 'auditChainKey itself' : `previousAuditChainKeys[${same - 1}] again`}: each key once`);
-  }
+  // Each key once: the current one, listed too while it is still the one in use, is the current one.
+  const previousAuditChainKeys = previous
+    .map((text, i) => appKey(`previousAuditChainKeys[${i}]`, text))
+    .filter((key, i, keys) => !key.equals(auditChainKey) && keys.findIndex((other) => other.equals(key)) === i);
   if (config.vault === undefined || config.vault === null) throw new Error('vault is required');
   const rotateAfterDays = config.rotateAfterDays === undefined ? ROTATE_AFTER_DAYS : config.rotateAfterDays;
   if (rotateAfterDays !== null && !(Number.isSafeInteger(rotateAfterDays) && rotateAfterDays > 0)) {

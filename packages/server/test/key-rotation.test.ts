@@ -159,7 +159,7 @@ test('the first start under a new key signs every row again under it, signs peop
     ['key.reseal', appLogKey(B).keyId, appLogKey(A).keyId, 'system:coffre-key-rotation'],
     ['key.rotate', appLogKey(B).keyId, appLogKey(A).keyId, 'system:coffre-key-rotation'],
   ]);
-  assert.deepEqual(JSON.parse(moves[0]!.metadata), { from: appLogKey(A).keyId, resealed: 9, signedOut: 2, unsigned: [], unsignedCount: 0, next: null });
+  assert.deepEqual(JSON.parse(moves[0]!.metadata), { from: appLogKey(A).keyId, resealed: 9, signedOut: 2, later: 0, unsigned: [], unsignedCount: 0, next: null });
   // Another start is settled at once, and writes nothing.
   const again = startUnder(B, [A]);
   assert.equal(await keyReady(again), null);
@@ -378,7 +378,6 @@ test('a start under the new key alone, before the old one is listed, loses nothi
   const alone = startUnder(B);
   assert.equal(await keyReady(alone), null);
   assert.equal(await verifies(held.service, alone), false);
-  await runScheduled(alone).catch(() => {});
   await alone.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'meanwhile', action: 'audit.heartbeat', decision: 'allow' }]));
   // The deploy that lists A rotates from it all the same.
   const next = startUnder(B, [A]);
@@ -388,6 +387,7 @@ test('a start under the new key alone, before the old one is listed, loses nothi
   assert.equal(await verifies(held.service, next), true);
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
   await assert.rejects(startUnder(A).db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])), KeyRetired);
+  await walked(next);
 });
 
 test('the order previous keys are listed in changes nothing: each that wrote is rotated from', async () => {
@@ -400,6 +400,28 @@ test('the order previous keys are listed in changes nothing: each that wrote is 
   assert.deepEqual(rotations.sort(), [appLogKey(A).keyId, appLogKey(C).keyId].sort());
   assert.equal(await verifies(held.service, next), true);
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
+  // C's rotation found A's rows A's to sign, not lost.
+  const steps = (await appEntries()).filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { from: string; later: number; unsignedCount: number });
+  assert.ok(steps.every((step) => step.unsignedCount === 0), JSON.stringify(steps));
+  assert.ok(steps.some((step) => step.from === appLogKey(C).keyId && step.later > 0), JSON.stringify(steps));
+  await walked(next);
+});
+
+test('the new key alone keeps the audit anchor as it was, and the rotation that lists the old key seals it again: readiness green', async () => {
+  const anchor = testAnchor();
+  await runScheduled(startUnder(A, [], [auditWatch({ anchor })]));
+  const sealed = (await anchor.read())!;
+  const alone = startUnder(B, [], [auditWatch({ anchor })]);
+  await assert.rejects(runScheduled(alone), /heartbeat failed/);
+  assert.deepEqual(await anchor.read(), sealed, 'left as it was');
+  const next = startUnder(B, [A], [auditWatch({ anchor })]);
+  await settleKey(next);
+  assert.equal((await anchor.read())!.keyId, appLogKey(B).keyId);
+  await runScheduled(next);
+  const request = new Request(`${ORIGIN}/readyz`);
+  const ready = await (await respond(request, next, null, async () => (await coffreRoute(request, next, null))!)).json();
+  assert.deepEqual([ready.ok, ready.anchored], [true, true]);
+  await walked(next);
 });
 
 test('a database that cannot be reached serves nothing before the key is settled', async () => {

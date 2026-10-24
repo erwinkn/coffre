@@ -16,8 +16,8 @@
 // under the head, and a Worker's step stays within its CPU. The app serves
 // nothing else until it is done (`keyReady` in app.ts).
 //
-//   key.reseal  { from: 'app:1f…', resealed: 69, signedOut: 31, unsigned: [], next: { table: 'credentials', after: '7c…' } }
-//   key.reseal  { from: 'app:1f…', resealed: 12, signedOut: 0, unsigned: [], next: null }
+//   key.reseal  { from: 'app:1f…', resealed: 69, signedOut: 31, later: 0, unsigned: [], next: { table: 'credentials', after: '7c…' } }
+//   key.reseal  { from: 'app:1f…', resealed: 12, signedOut: 0, later: 0, unsigned: [], next: null }
 //   (the anchor sealed again)
 //   key.rotate  { from: 'app:1f…' }
 import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
@@ -144,8 +144,9 @@ async function headFor(tx: Transaction, wait: boolean): Promise<boolean> {
  * it stands read again under it, then up to `rows` rows signed again from
  * there, and its entry. Rows the old key signed are signed under the new
  * one; a session is signed out as well, and a device's login approved but
- * not yet taken is used up; rows the new one signed already are left; a
- * row neither signed is left as it is, which fails it as it failed
+ * not yet taken is used up; rows the new one signed already are left, and
+ * so are rows another listed key signed, counted, for its own rotation; a
+ * row no key listed signed is left as it is, which fails it as it failed
  * before, and named. Where the app stands after: `sealing` once every row
  * is signed.
  */
@@ -157,7 +158,9 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
     if (standing.kind !== 'rotating') return standing;
     const { from } = standing;
     let next: Cursor | null = standing.next;
-    let [left, resealed, signedOut] = [rows, 0, 0];
+    let [left, resealed, signedOut, later] = [rows, 0, 0, 0];
+    // Keys listed beside the one moved from: a row one of them signed is its own rotation's to sign, next.
+    const others = keys.previousChainKeys.filter((key) => !key.equals(from));
     const now = new Date();
     while (next !== null && left > 0) {
       const { table, after }: Cursor = next as Cursor;
@@ -168,8 +171,10 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
         const ends = endsAt(table, row, now);
         const mac = signedAgain(from, keys.chainKey, table, row, (ends === null ? {} : ends) as never);
         if (mac !== null) changes.push({ id: row.id, was: row.authMac, mac, ends: ends === null ? null : now });
-        // Signed under the new key already, by a step that was cut short; or by neither, and left.
-        else if (!signedBy(keys.chainKey, table, row)) unsigned.push({ table, id: row.id });
+        // Signed under the new key already, by a step that was cut short; by another listed key; or by none, and left.
+        else if (signedBy(keys.chainKey, table, row)) continue;
+        else if (others.some((key) => signedBy(key, table, row))) later += 1;
+        else unsigned.push({ table, id: row.id });
       }
       const changed = new Set(await reseal(tx, table, changes));
       for (const change of changes) {
@@ -188,7 +193,7 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
       action: 'key.reseal',
       decision: 'allow',
       subject: fromId,
-      metadata: { from: fromId, resealed, signedOut, unsigned: unsigned.slice(0, NAMED), unsignedCount: unsigned.length, next },
+      metadata: { from: fromId, resealed, signedOut, later, unsigned: unsigned.slice(0, NAMED), unsignedCount: unsigned.length, next },
     }]);
     return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next };
   });

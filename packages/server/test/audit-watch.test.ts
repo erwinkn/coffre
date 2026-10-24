@@ -493,7 +493,7 @@ test('an anchor sealed under the app key before a change of APP_KEY without a ro
   assert.equal((await auditReadiness(db.runtime, vault, changed, anchor)).anchored, false);
   const { said, log } = warned();
   assert.equal(await writeAuditHeartbeat(db.runtime, changed, vault, anchor, log), false);
-  assert.ok(said.includes(`the audit anchor is sealed under ${sealed.keyId}, not the app's key ${appLogKey(changed).keyId}: auditChainKey changed without a rotation that moved from ${sealed.keyId} (previousAuditChainKeys). Empty its store, and the next beat re-anchors`), said.join('\n'));
+  assert.ok(said.includes(`the audit anchor is sealed under ${sealed.keyId}, not the app's key ${appLogKey(changed).keyId}: auditChainKey changed without a rotation from ${sealed.keyId}. If you still hold that key, list it in previousAuditChainKeys, and the rotation seals this anchor again, whatever it holds; only if it is lost, empty the store, and the next beat re-anchors`), said.join('\n'));
   assert.deepEqual(await anchor.read(), sealed);
 });
 

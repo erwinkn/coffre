@@ -948,11 +948,14 @@ both recover by themselves once it answers: what it holds was not lost.
 
 **A rotation of `APP_KEY` seals the anchor again** under the new key
 ([below](#rotating-the-app-key)): the record names the key it is sealed
-under, and the rotation, or the next beat, seals what it says again under
-the new one. Changing `APP_KEY` without a rotation, with the old key left
-out of `previousAuditChainKeys`, makes the anchor unreadable: readiness is
-red and the beat leaves the record alone until you empty its store; the
-next beat then re-anchors, with its alert. To empty it, delete the file on
+under, and the rotation seals what it says again under the new one,
+before its `key.rotate`. Changing `APP_KEY` with the old key left out of
+`previousAuditChainKeys` leaves the anchor under a key the app does not
+hold: readiness is red, and the beat leaves the record alone. List the old
+key if you still hold it, and the rotation seals the record again,
+findings and all. Only for a key that is lost, empty its store; the next
+beat then re-anchors, with its alert, and a cut made before then goes
+unseen. To empty it, delete the file on
 Node; on Workers, name a new object,
 `durableAnchor(env.ANCHOR, { name: 'anchor-2' })`, and deploy.
 
@@ -971,35 +974,29 @@ for the vault key ([keys.md](keys.md#a-local-key)).
 2. **Make a new key.** `coffre keys`, and take only the app key; or
    `openssl rand -base64 32`. Keep it in your password manager beside the
    old one.
-3. **Move the old key back.** The new key becomes `auditChainKey`, and the
-   old one goes first in `previousAuditChainKeys`, newest first:
+3. **List the old key, then give the new one.** First, keep the key in use
+   as `OLD_APP_KEY` too, and deploy the code that lists it; while both name
+   the same key, it counts once, and nothing changes:
 
    ```ts
-   auditChainKey: env.APP_KEY,                       // the new key
-   previousAuditChainKeys: [env.OLD_APP_KEY],        // the one it replaces
+   auditChainKey: env.APP_KEY,                       // the key in use, then the new one
+   previousAuditChainKeys: [env.OLD_APP_KEY],        // the key in use, kept as the one replaced
    ```
 
-   Change both secrets and the code in one version. On Workers,
-   `wrangler versions secret put` stages a secret without deploying it:
-
-   ```sh
-   pnpm exec wrangler versions secret put OLD_APP_KEY -c app/wrangler.jsonc   # the old key
-   pnpm exec wrangler versions secret put APP_KEY -c app/wrangler.jsonc       # the new key
-   ```
-
-   and the deploy in step 4 takes both with the code that lists the old
-   key. Not `wrangler secret put`, which deploys each at once under the
-   code already live: until the old key is listed, the app runs under the
-   new key alone, everyone signed out and every token and binding failing;
-   they come back once the deploy that lists it rotates. On Node, both in
-   `.env`, with the code, then one restart.
-4. **Deploy, then wait for readiness.** The first start under the new key
-   signs every row the old key signed again under the new one, a step of
-   100 rows a request, seals the audit anchor again under it, and then
+   On Workers, `wrangler secret put OLD_APP_KEY -c app/wrangler.jsonc` with
+   the key in use, then `pnpm run deploy`; on Node, `OLD_APP_KEY` in
+   `.env`, then a restart. Previous keys can be listed in any order.
+4. **Give the new key, then wait for readiness.** Set `APP_KEY` to the
+   new key: `wrangler secret put APP_KEY -c app/wrangler.jsonc`, which
+   deploys at once, or `.env` and a restart on Node. The first start under
+   it signs every row the old key signed again under the new one, a step
+   of 100 rows a request, seals the audit anchor again under it, and then
    writes `key.rotate`. Until then every request but `/livez` and `/readyz`
    answers 503 `rotating`, and each one, `/readyz` too, takes it a step
-   further; a Node process also steps it to the end as it starts. So a
-   deploy that waits on readiness finishes it:
+   further; a Node process also steps it to the end as it starts. Given
+   the new key without the old one listed, the app runs under the new key
+   alone, everyone signed out and every token and binding failing, until
+   a deploy lists the old key and rotates. Wait on readiness:
 
    ```sh
    until curl -fsS https://secrets.example.com/readyz; do sleep 1; done
@@ -1009,8 +1006,8 @@ for the vault key ([keys.md](keys.md#a-local-key)).
    them CI runs' spent ones, takes two hundred.
 5. **Check.** The audit log shows the rotation's `key.reseal` steps, each
    naming how many rows it signed again, how many sessions and approved
-   device logins it ended,
-   and any row it could not sign because neither key had signed it, which
+   device logins it ended, how many another listed key signed, which its
+   own rotation signs next, and any row no key listed had signed, which
    fails as it did before; then `key.rotate`. `coffre verify log` verifies
    the whole log; `coffre verify keys` takes the new key as the one the
    app signs with.
@@ -1042,9 +1039,11 @@ What it changes, and what it keeps:
   503 `unavailable`.
 - **A key replaced stays replaced.** A start under a key the log moved on
   from, as a rollback of the deploy would be, answers 503 `app_key`, and
-  the server's log says which keys; so does a start under a key whose
-  rotation is under way to another, or whose old key was taken out of
-  `previousAuditChainKeys` before the rotation ended. To undo a rotation,
+  the server's log says which keys; so does a start that lists both keys
+  of a rotation under way to another key, or the new key of one whose old
+  key was taken out of `previousAuditChainKeys` before it ended. A start
+  under a third key, given neither, serves as under any key the log does
+  not know. To undo a rotation,
   rotate again to a new key. A key the log does not know, a lost one or
   the wrong one, is served under as before rotations: everyone signs in
   again, every token and binding fails, the log stops verifying, and the

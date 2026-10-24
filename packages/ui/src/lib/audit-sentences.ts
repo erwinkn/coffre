@@ -528,8 +528,8 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'sign rows again under its new app key',
     what: ({ entry }) => {
       const count = (name: string) => (typeof entry.metadata[name] === 'number' ? (entry.metadata[name] as number) : 0);
-      const unsigned = count('unsignedCount');
-      return [`${count('resealed')}, and ${count('signedOut')} signed out${unsigned === 0 ? '' : `; ${unsigned} neither key had signed, left as they were`}`];
+      const [unsigned, later] = [count('unsignedCount'), count('later')];
+      return [`${count('resealed')}, and ${count('signedOut')} signed out${later === 0 ? '' : `; ${later} another listed key signed, for its own rotation`}${unsigned === 0 ? '' : `; ${unsigned} no key listed had signed, left as they were`}`];
     },
   },
   // The audit watch's (server plugins/audit-watch.ts): what it found, what cleared it, and an Owner's acceptance.
