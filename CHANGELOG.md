@@ -15,15 +15,16 @@
   so are site-local `fec0::/10` and `198.18.0.0/15`.
 - **`coffre export --format github` refuses keys a later step would take
   code from**: `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`,
-  `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `NODE_PATH`, npm's
-  `NPM_CONFIG_SCRIPT_SHELL`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`,
-  `JAVA_TOOL_OPTIONS`, `MAVEN_OPTS`, `CC`, `CFLAGS`, `RUSTC_WRAPPER`,
-  `CARGO_TARGET_*_RUNNER` and
-  the rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`), in any
+  `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `NODE_PATH`, npm's and pnpm's
+  `NPM_CONFIG_SCRIPT_SHELL` and `PNPM_CONFIG_NODE_OPTIONS`, `PYTHONPATH`,
+  `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `MAVEN_OPTS`, `MAVEN_ARGS`,
+  `GOCACHEPROG`, `CC`, `CFLAGS`, `RUSTC_WRAPPER`, `CARGO_TARGET_*_RUNNER`
+  and the rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`), in any
   case, with an error that names the key and nothing written. Before,
   only `NODE_OPTIONS`. Credentials beside them (`NPM_CONFIG_OTP`,
   `CARGO_REGISTRIES_*_TOKEN`, LaunchDarkly's `LD_SDK_KEY`) and `ENV`, which
-  only an interactive shell reads, still export.
+  only an interactive shell reads, still export. The list is the common
+  tools' one-variable hijacks, not every one there is.
 - **Spent ID tokens are forgotten two hours after.** `consumed_tokens`,
   which refuses a CI run's token sent twice, only grew. The scheduled
   beat now removes up to 5,000 records a beat of tokens spent over two

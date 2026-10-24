@@ -12,7 +12,9 @@ type Entries = Iterable<readonly [key: string, value: string]>;
  * refused. A `*` stands for any run of letters, digits and underscores, so
  * that a family is one pattern, and names compare case-blind, as on
  * Windows. GitHub refuses NODE_OPTIONS itself. What only points a tool at
- * another registry (NPM_CONFIG_REGISTRY, PIP_INDEX_URL) is no part of this,
+ * another registry (NPM_CONFIG_REGISTRY, PIP_INDEX_URL: the latter can run
+ * an sdist's build without --require-hashes, but it is also how a private
+ * index is authenticated) is no part of this,
  * nor what only names a directory to read files from (HOME, CARGO_HOME),
  * nor what only an interactive shell reads (ENV, PROMPT_COMMAND), nor a
  * credential (NPM_CONFIG_OTP, CARGO_REGISTRIES_*_TOKEN). A denylist is
@@ -25,19 +27,19 @@ export const RUNS_CODE: readonly string[] = [
   // Git, ssh and the programs they start.
   'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_EXEC_PATH', 'GIT_PROXY_COMMAND', 'GIT_EXTERNAL_DIFF',
   'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'GIT_PAGER', 'GIT_TEMPLATE_DIR', 'GIT_DIR', 'GIT_CONFIG', 'GIT_CONFIG_*',
-  'EDITOR', 'VISUAL', 'PAGER',
-  // Node and its package managers, npm's settings by the ones that run a program.
-  'NODE_OPTIONS', 'NODE_PATH',
-  'NPM_CONFIG_SCRIPT_SHELL', 'NPM_CONFIG_SHELL', 'NPM_CONFIG_NODE_OPTIONS', 'NPM_CONFIG_NODE_GYP', 'NPM_CONFIG_GIT', 'NPM_CONFIG_EDITOR',
-  'NPM_CONFIG_BROWSER', 'NPM_CONFIG_VIEWER', 'NPM_CONFIG_ONLOAD_SCRIPT', 'NPM_CONFIG_INIT_MODULE', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG',
-  'NPM_CONFIG_PNPMFILE', 'NPM_CONFIG_GLOBAL_PNPMFILE', 'YARN_YARN_PATH',
+  'EDITOR', 'VISUAL', 'PAGER', 'BROWSER',
+  // Node and its package managers: npm's settings that run a program, as npm and as pnpm 11 read them.
+  'NODE_OPTIONS', 'NODE_PATH', 'YARN_YARN_PATH',
+  ...['SCRIPT_SHELL', 'SHELL', 'NODE_OPTIONS', 'NODE_GYP', 'GIT', 'EDITOR', 'BROWSER', 'VIEWER', 'ONLOAD_SCRIPT', 'INIT_MODULE', 'USERCONFIG', 'GLOBALCONFIG', 'PNPMFILE', 'GLOBAL_PNPMFILE']
+    .flatMap((setting) => [`NPM_CONFIG_${setting}`, `PNPM_CONFIG_${setting}`]),
   // Other language runtimes.
-  'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'PYTHONBREAKPOINT',
+  'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'PYTHONBREAKPOINT', 'PYTHONWARNINGS',
   'PERL5OPT', 'PERL5LIB', 'PERLLIB', 'PERL5DB', 'RUBYOPT', 'RUBYLIB', 'LUA_INIT*', 'PHPRC', 'PHP_INI_SCAN_DIR',
-  'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'JAVA_OPTS', 'MAVEN_OPTS', 'GRADLE_OPTS', 'SBT_OPTS', 'ANT_OPTS', 'CATALINA_OPTS', 'CLASSPATH',
-  'DOTNET_STARTUP_HOOKS', 'DOTNET_ADDITIONAL_DEPS', 'COR_ENABLE_PROFILING', 'COR_PROFILER*', 'CORECLR_ENABLE_PROFILING', 'CORECLR_PROFILER*',
+  'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'JAVA_OPTS', 'MAVEN_OPTS', 'MAVEN_ARGS', 'GRADLE_OPTS', 'SBT_OPTS', 'ANT_OPTS', 'CATALINA_OPTS', 'CLASSPATH',
+  // MSBuild reads every variable as a property, so these are the ones its common targets run; it cannot be denylisted whole.
+  'DOTNET_STARTUP_HOOKS', 'DOTNET_ADDITIONAL_DEPS', 'PREBUILDEVENT', 'POSTBUILDEVENT', 'RUNCOMMAND', 'COR_ENABLE_PROFILING', 'COR_PROFILER*', 'CORECLR_ENABLE_PROFILING', 'CORECLR_PROFILER*',
   // Build tools: the compilers, linkers, wrappers and runners they start, and their flags (make pastes them into a shell line; gcc's -wrapper runs a program).
-  'CC', 'CXX', 'CPP', 'AR', 'LD', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'MAKEFLAGS', 'MFLAGS', 'GOFLAGS', 'CGO_*FLAGS',
+  'CC', 'CXX', 'CPP', 'AR', 'LD', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'MAKEFLAGS', 'MFLAGS', 'GOFLAGS', 'GOCACHEPROG', 'GOAUTH', 'CGO_*FLAGS',
   'RUSTC', 'RUSTC_*', 'RUSTDOC', 'RUSTDOC_*', 'RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
   'CARGO_BUILD_*', 'CARGO_TARGET_*_RUNNER', 'CARGO_TARGET_*_LINKER', 'CARGO_TARGET_*_RUSTFLAGS', 'CARGO_HOST_*',
   'CARGO_REGISTRY_CREDENTIAL_PROVIDER', 'CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS', 'CARGO_REGISTRIES_*_CREDENTIAL_PROVIDER', 'CARGO_CREDENTIAL_ALIAS_*',

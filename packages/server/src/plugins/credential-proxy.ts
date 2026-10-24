@@ -1292,19 +1292,12 @@ function checkListed(option: 'generate', listed: Record<string, 'all' | readonly
 }
 
 /**
- * A host as it is dialled, so that one spelling is checked for all: lowercase, without
- * brackets or trailing dots, an address in its one form (127.1, 2130706433 and
- * 127.0.0.1. are 127.0.0.1; [0:0::1] is ::1).
+ * A host as a URL parsed it (every caller's has been: 127.1 and 2130706433
+ * are 127.0.0.1 there, [0:0::1] is ::1), without brackets or trailing dots,
+ * which the parser keeps on a name: `localhost.` is localhost.
  */
 function canonicalHost(host: string): string {
-  const bare = host.replace(/^\[|\]$/g, '');
-  let name: string;
-  try {
-    name = new URL(`http://${bare.includes(':') ? `[${bare}]` : bare}`).hostname.replace(/^\[|\]$/g, '');
-  } catch {
-    name = bare.toLowerCase();
-  }
-  return name.replace(/\.+$/, '');
+  return host.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.+$/, '');
 }
 
 /** Whether a host is an IP address, not a name a resolver could point anywhere. */
