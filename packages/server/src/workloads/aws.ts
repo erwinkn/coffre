@@ -44,11 +44,11 @@ const MAX_HEADER_BYTES = 8 * 1024;
 const STS_URL = /^https:\/\/sts(?:\.([a-z]{2}(?:-[a-z]+)+-\d))?\.amazonaws\.com\/$/;
 
 /**
- * The headers coffre forwards, each signed. `host` is the URL's, which the
- * fetch sets; `x-amz-content-sha256`, which an SDK may sign, must then be
- * the body's own digest.
+ * The headers coffre forwards, each signed. `host` and `content-length` are
+ * the URL's and the body's, which the fetch sets, as an SDK may sign them;
+ * `x-amz-content-sha256`, which an SDK may sign, must be the body's digest.
  */
-const FORWARDED = ['authorization', 'content-type', 'host', 'x-amz-content-sha256', 'x-amz-date', 'x-amz-security-token', 'x-coffre-audience', 'x-coffre-key'] as const;
+const FORWARDED = ['authorization', 'content-length', 'content-type', 'host', 'x-amz-content-sha256', 'x-amz-date', 'x-amz-security-token', 'x-coffre-audience', 'x-coffre-key'] as const;
 /** Those its signature must cover, whatever else it does: without `content-type`, the fetch would send its own, and STS would not read the form. */
 const MUST_SIGN = ['content-type', 'host', 'x-amz-date', 'x-coffre-audience', 'x-coffre-key'] as const;
 /** A header value as SigV4 signs it and a fetch sends it: printable ASCII. */
@@ -115,6 +115,10 @@ export function checkAwsRequest(input: unknown, expected: { publicUrl: string; j
   const sentHost = url.slice('https://'.length, -1);
   if (headers.host !== undefined && headers.host !== sentHost) return malformed(`says host ${headers.host}, and is sent to ${sentHost}`);
   delete headers.host;
+  if (headers['content-length'] !== undefined && headers['content-length'] !== String(GET_CALLER_IDENTITY.length)) {
+    return malformed(`says content-length ${headers['content-length']}, and its body is ${GET_CALLER_IDENTITY.length} bytes`);
+  }
+  delete headers['content-length'];
   if (!FORM.test(headers['content-type']!)) return malformed('has a content-type other than application/x-www-form-urlencoded');
   if (headers['x-amz-content-sha256'] !== undefined && headers['x-amz-content-sha256'] !== BODY_DIGEST) return malformed("has an x-amz-content-sha256 other than its body's");
 

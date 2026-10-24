@@ -452,6 +452,9 @@ test("a workload binding's policy, from its flags: each one its profile takes, c
   await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, workload: true }), /--workload is for --github, --gitlab and --issuer/);
   await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, gcp: '1' }), /name one platform, not --aws and --gcp/);
   await assert.rejects(workload({ gcp: '1', tenant: TENANT }), /--tenant is --azure's/);
+  // A claim the platform's flags set is theirs: a --claim of it would be dropped, so it is refused.
+  await assert.rejects(workload({ kubernetes: 'ingest/api', claim: ['sub=system:serviceaccount:other:x'] }), /--kubernetes sets sub from its own flags/);
+  await assert.rejects(workload({ vercel: 'acme', 'owner-id': 'team_7Gw5ZMBpQA8h9GF832KGp7nw', 'project-id': 'prj_8bFh2nVq3eDcJ7tY5mWx', claim: ['environment=preview'] }), /--vercel sets environment from its own flags/);
   // What narrows a CI run's binding narrows no workload's: refused, never dropped.
   for (const flag of ['branch', 'event', 'github-environment', 'workflow', 'namespace-id'] as const) {
     await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, [flag]: flag === 'event' ? ['push'] : 'x' }), new RegExp(`--${flag} says which CI runs a --github or --gitlab binding takes: --aws has none`));
@@ -503,7 +506,19 @@ test("a workload's plan says what it trusts, how its sessions live, and what eac
   // A workload's plan says nothing of a CI run's events.
   assert.equal(describeEvents(plan), null);
   const enrollment = { ...plan, profile: 'enrollment' as const, issuer: 'urn:coffre:enrollment', claims: {}, policy: { replicas: 2, mintedBy: 'token:deploy' } };
-  assert.match(describePlan('token:api-prod', enrollment, null), /\n  reads    nothing: every secret value is used through coffre, never read\n  codes    minted by its managers and service:deploy, 30 days each; up to 4 sessions of 2 replicas\n           freezes when a copy contends past 15 minutes of overlap\n$/);
+  assert.equal(describePlan('token:api-prod', enrollment, null), [
+    'Would trust workloads enrolled with a code minted for this binding to sign in as service:api-prod, for key-bound sessions:',
+    '  profile  enrollment',
+    '  reaches  viewer on market/prod',
+    "  sessions key-bound, each renewed every 30 s and ended at its code's expiry, 30 days after minting",
+    '  reads    nothing: every secret value is used through coffre, never read',
+    '  codes    minted by its managers and service:deploy, 30 days each; up to 4 sessions of 2 replicas',
+    '           freezes when a copy contends past 15 minutes of overlap',
+    '',
+  ].join('\n'));
+  // A Worker's call through a service binding is no session.
+  const cloudflare = { ...plan, profile: 'cloudflare' as const, issuer: 'urn:coffre:cloudflare', claims: {}, policy: {} };
+  assert.doesNotMatch(describePlan('token:api-prod', cloudflare, null), /\n  sessions/);
   const gcp = { ...plan, profile: 'gcp' as const, issuer: 'https://accounts.google.com', jwksUri: 'https://www.googleapis.com/oauth2/v3/certs', claims: { sub: '104729384756102938475' }, policy: { keyAudience: true as const } };
   assert.match(describePlan('token:web', gcp, null), /\n  keys     https:\/\/www.googleapis.com\/oauth2\/v3\/certs\n.*\n  audience names the session's key: <publicUrl>#jkt=<thumbprint>\n/s);
   for (const [binding, says] of [

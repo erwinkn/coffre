@@ -100,7 +100,8 @@ const fakeFetch: typeof fetch = async (input, init) => {
   const by = PRINCIPALS.find((principal) => principal.accessKeyId === keyId);
   const signedHeaders = /SignedHeaders=([^,]+)/.exec(authorization)?.[1]?.split(';') ?? [];
   const headers: Record<string, string> = {};
-  for (const name of signedHeaders) headers[name] = name === 'host' ? url.host : sent[name]!;
+  // The host and the length are what the fetch sends, from the URL and the body.
+  for (const name of signedHeaders) headers[name] = name === 'host' ? url.host : name === 'content-length' ? String((init!.body as string).length) : sent[name]!;
   const stamp = sent['x-amz-date'] ?? '';
   const date = new Date(`${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9, 11)}:${stamp.slice(11, 13)}:${stamp.slice(13, 15)}Z`);
   const hostRegion = url.hostname === 'sts.amazonaws.com' ? 'us-east-1' : url.hostname.split('.')[1];
@@ -202,6 +203,10 @@ test("a role's signed GetCallerIdentity matches its binding by account and role 
   // STS's global host; a body digest an SDK signs; header names in any case.
   assert.ok(!((await verify(await signed(ROLE, { region: null }))) instanceof ExchangeRefused));
   assert.ok(!((await verify(await signed(ROLE, { checksum: true }))) instanceof ExchangeRefused));
+  // A signed content-length, as an SDK's middleware sets it, is the body's: the fetch sends that itself.
+  assert.ok(!((await verify(await signed(ROLE, { headers: { 'content-length': '43' } }))) instanceof ExchangeRefused));
+  assert.ok(!Object.hasOwn(sts.requests.at(-1)!.init.headers as object, 'content-length'));
+  await refused(await signed(ROLE, { headers: { 'content-length': '44' } }), 'malformed', /says content-length 44, and its body is 43 bytes/);
   const shouted = await signed(ROLE);
   shouted.headers = Object.fromEntries(Object.entries(shouted.headers).map(([name, value]) => [name.replace(/^./, (c) => c.toUpperCase()), value]));
   assert.ok(!((await verify(shouted)) instanceof ExchangeRefused));

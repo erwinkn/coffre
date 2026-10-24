@@ -369,7 +369,7 @@ It sends Coffre the URL, headers and body, never the credentials.
    `Action=GetCallerIdentity&Version=2011-06-15`. Nothing else is ever
    fetched, so the proof offers no SSRF.
 2. **The headers.** Coffre rebuilds the request from an allowlist:
-   `authorization`, `content-type`, `host`, `x-amz-content-sha256`,
+   `authorization`, `content-length`, `content-type`, `host`, `x-amz-content-sha256`,
    `x-amz-date`, `x-amz-security-token`, `x-coffre-audience` and
    `x-coffre-key`, each named once, in any case. Any other header is
    refused.
@@ -378,6 +378,8 @@ It sends Coffre the URL, headers and body, never the credentials.
      and `x-amz-date`.
    - Every header sent is signed, so Coffre forwards nothing the key did not
      sign. `host` may be left out: it is the URL's, which the fetch sends.
+     A signed `content-length` must be the body's, 43, which the fetch sends
+     too, as the AWS SDKs' and Go's signers may sign it.
    - The credential's scope names the URL's region (`us-east-1` for the
      global host) and `x-amz-date`'s day. `content-type` is the form's, and
      `x-amz-content-sha256`, which an SDK may sign, the body's digest.

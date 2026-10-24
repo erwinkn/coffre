@@ -493,6 +493,12 @@ const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 /** A workload's binding, by its platform's flags: IDs given, or looked up with its CLI. */
 async function platformBinding(platform: Platform, flags: TrustFlags, lookup: PlatformLookup): Promise<BindingRequest> {
   const extra = claimsFrom(flags);
+  /** The platform's claims, and those `--claim` adds: never one the platform's flags set, which would be dropped. */
+  const claimed = (own: BindingClaims): BindingClaims => {
+    const taken = Object.keys(extra).find((name) => Object.hasOwn(own, name));
+    if (taken !== undefined) throw new Error(`--${platform} sets ${taken} from its own flags: --claim adds other claims`);
+    return { ...extra, ...own };
+  };
   const required = (flag: keyof TrustFlags, what: string): string => {
     const value = flags[flag];
     if (typeof value !== 'string' || value === '') throw new Error(`--${platform} names ${what}: --${flag} <${what.split(' ').at(-1)}>`);
@@ -521,31 +527,31 @@ async function platformBinding(platform: Platform, flags: TrustFlags, lookup: Pl
       }
       const issuer = flags.issuer ?? (await lookup.kubernetesIssuer());
       const uid = flags.uid ?? (await lookup.kubernetesUid(namespace, name));
-      return { profile: 'kubernetes', issuer, claims: { ...extra, sub: `system:serviceaccount:${namespace}:${name}`, 'kubernetes.io.serviceaccount.uid': uid } };
+      return { profile: 'kubernetes', issuer, claims: claimed({ sub: `system:serviceaccount:${namespace}:${name}`, 'kubernetes.io.serviceaccount.uid': uid }) };
     }
     case 'gcp': {
       const account = flags.gcp!;
       const sub = /^\d+$/.test(account) ? account : account.includes('@') ? await lookup.gcpUniqueId(account) : null;
       if (sub === null) throw new Error(`--gcp takes a service account's email or unique ID, not ${account}`);
-      return { profile: 'gcp', issuer: GOOGLE_ISSUER, claims: { ...extra, sub } };
+      return { profile: 'gcp', issuer: GOOGLE_ISSUER, claims: claimed({ sub }) };
     }
     case 'azure': {
       const tenant = required('tenant', "the managed identity's tenant ID");
       const object = required('object', "the managed identity's object ID");
       const audience = required('audience', "the application ID URI Entra mints its tokens for, the resource's audience");
-      return { profile: 'azure', issuer: flags.issuer ?? `https://sts.windows.net/${tenant}/`, claims: { ...extra, tid: tenant, oid: object }, policy: { audience } };
+      return { profile: 'azure', issuer: flags.issuer ?? `https://sts.windows.net/${tenant}/`, claims: claimed({ tid: tenant, oid: object }), policy: { audience } };
     }
     case 'fly': {
       if (!DNS_LABEL.test(flags.fly!)) throw new Error(`--fly takes the organization's slug, as its tokens' issuer names it, not ${flags.fly}`);
       const orgId = required('org-id', "the organization's ID");
       const appId = required('app-id', "the app's ID");
-      return { profile: 'fly', issuer: `https://oidc.fly.io/${flags.fly}`, claims: { ...extra, org_id: orgId, app_id: appId } };
+      return { profile: 'fly', issuer: `https://oidc.fly.io/${flags.fly}`, claims: claimed({ org_id: orgId, app_id: appId }) };
     }
     case 'vercel': {
       if (!DNS_LABEL.test(flags.vercel!)) throw new Error(`--vercel takes the team's slug, as its tokens' issuer names it, not ${flags.vercel}`);
       const ownerId = required('owner-id', "the team's ID, from .vercel/project.json's orgId");
       const projectId = required('project-id', "the project's ID, from .vercel/project.json's projectId");
-      const claims = { ...extra, owner_id: ownerId, project_id: projectId, environment: flags['vercel-environment'] ?? 'production' };
+      const claims = claimed({ owner_id: ownerId, project_id: projectId, environment: flags['vercel-environment'] ?? 'production' });
       return { profile: 'vercel', issuer: flags.issuer ?? `https://oidc.vercel.com/${flags.vercel}`, claims };
     }
     case 'enrollment':
@@ -722,7 +728,12 @@ export function describeBinding(binding: Described): string[] {
  */
 export function policyLines(profile: string, policy: PolicyView | null): string[] {
   if (policy === null) return [];
-  const lines = [`  sessions key-bound, at most ${policy.sessionHours ?? 24} h from each proof${policy.unsignedUploads === true ? '; streamed uploads no digest binds go through' : ''}`];
+  const uploads = policy.unsignedUploads === true ? '; streamed uploads no digest binds go through' : '';
+  // An enrollment's session lives as long as its code, renewed or dead within 90 s; a Worker's call is no session.
+  const sessions = profile === 'enrollment'
+    ? `  sessions key-bound, each renewed every 30 s and ended at its code's expiry, ${policy.sessionDays ?? 30} days after minting${uploads}`
+    : profile === 'cloudflare' ? null : `  sessions key-bound, at most ${policy.sessionHours ?? 24} h from each proof${uploads}`;
+  const lines = sessions === null ? [] : [sessions];
   if (policy.audience !== undefined) lines.push(`  audience ${policy.audience}`);
   else if (policy.keyAudience === true || (KEY_NAMING_PROFILES as readonly string[]).includes(profile)) lines.push("  audience names the session's key: <publicUrl>#jkt=<thumbprint>");
   const reads = Object.entries(policy.reads ?? {});
