@@ -71,11 +71,11 @@ test('GitHub masks escape percent, CR and LF, and mask each nonempty line as wel
 test('GitHub refuses invalid entries and keys a later step would take code from', () => {
   assert.throws(() => githubEnvironment([['NOT-A-NAME', 'private']]), /valid variable name/);
   assert.throws(() => githubEnvironment([['K', 'a\0b']]), /NUL/);
-  // What a later step would take code from, each named, a family by any of its names, and in any case.
-  for (const key of ['NODE_OPTIONS', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'BASH_ENV', 'ENV', 'PATH', 'GIT_SSH_COMMAND', 'GIT_CONFIG_KEY_0', 'NODE_PATH', 'PYTHONPATH', 'PYTHONSTARTUP', 'PERL5OPT', 'RUBYOPT', 'JAVA_TOOL_OPTIONS', 'npm_config_script_shell', 'ld_preload', 'Path']) {
+  // What a later step would take code from, each named, a family by any of its names, and in any case; a credential beside them, never.
+  for (const key of ['NODE_OPTIONS', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'BASH_ENV', 'ENV', 'PATH', 'GIT_SSH_COMMAND', 'GIT_CONFIG_KEY_0', 'NODE_PATH', 'PYTHONPATH', 'PYTHONSTARTUP', 'PERL5OPT', 'RUBYOPT', 'JAVA_TOOL_OPTIONS', 'npm_config_script_shell', 'NPM_CONFIG_PNPMFILE', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER', 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER', 'CARGO_BUILD_RUSTC', 'CARGO_REGISTRIES_ACME_CREDENTIAL_PROVIDER', 'CC', 'MAKEFLAGS', 'ld_preload', 'Path']) {
     assert.throws(() => githubEnvironment([['GOOD', 'kept'], [key, 'private']]), new RegExp(`^Error: ${key} cannot be set through GITHUB_ENV`), key);
   }
-  for (const key of ['GITHUB_TOKEN', 'GIT_AUTHOR_NAME', 'PATHNAME', 'NODE_ENV', 'PYTHONUNBUFFERED', 'ENVIRONMENT', 'LDAP_URL']) {
+  for (const key of ['GITHUB_TOKEN', 'GIT_AUTHOR_NAME', 'PATHNAME', 'NODE_ENV', 'PYTHONUNBUFFERED', 'ENVIRONMENT', 'LDAP_URL', 'NPM_CONFIG_OTP', 'NPM_CONFIG__AUTHTOKEN', 'NPM_TOKEN', 'CARGO_REGISTRIES_ACME_TOKEN', 'CARGO_REGISTRY_TOKEN', 'CARGO_TARGET_DIR', 'CCACHE_DIR']) {
     assert.deepEqual(readEnvironment(githubEnvironment([[key, 'a literal value']])), { [key]: 'a literal value' }, key);
   }
 });

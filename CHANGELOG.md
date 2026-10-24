@@ -14,11 +14,13 @@
   `127.0.0.1.`, `[::ffff:a00:1]`, `[::7f00:1]`, `[64:ff9b::a00:1]`.
 - **`coffre export --format github` refuses keys a later step would take
   code from**: `PATH`, `BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`,
-  `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `NODE_PATH`, `PYTHONPATH`,
-  `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `NPM_CONFIG_*` and the
-  rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`), in any case,
-  with an error that names the key and nothing written. Before, only
-  `NODE_OPTIONS`.
+  `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `NODE_PATH`, npm's
+  `NPM_CONFIG_SCRIPT_SHELL`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`,
+  `JAVA_TOOL_OPTIONS`, `CC`, `RUSTC_WRAPPER`, `CARGO_TARGET_*_RUNNER` and
+  the rest of `RUNS_CODE` (`packages/cli/src/github-env.ts`), in any
+  case, with an error that names the key and nothing written. Before,
+  only `NODE_OPTIONS`. Credentials beside them (`NPM_CONFIG_OTP`,
+  `CARGO_REGISTRIES_*_TOKEN`) still export.
 - **Spent ID tokens are forgotten two hours after.** `consumed_tokens`,
   which refuses a CI run's token sent twice, only grew. The scheduled
   beat now removes up to 5,000 records a beat of tokens spent over two
