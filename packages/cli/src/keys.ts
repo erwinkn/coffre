@@ -77,7 +77,7 @@ export function keysScreen(keys: Keys): Screen {
       {
         title: 'For a rotation',
         lines: [
-          'Take only the vault ID and key. The vault key they replace moves to previousKeks, and stays there: what it wrapped still needs it. The app key cannot change. docs/keys.md has the steps.',
+          'Take only the key you rotate. A vault ID and key: the vault key they replace moves to previousKeks, and stays there, since what it wrapped still needs it (docs/keys.md). An app key: the one it replaces moves to previousAuditChainKeys, and stays there to verify the log (docs/deploy.md, "Rotating the app key").',
         ],
       },
     ],

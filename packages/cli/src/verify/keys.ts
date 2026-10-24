@@ -85,13 +85,19 @@ export async function vaultKeyVerdict(text: string, material: KeyMaterial['vault
   }
 }
 
-/** The app key: right if the log's entries the app signs now would carry the fingerprint it makes. */
+/**
+ * The app key: right if the log's entries the app signs now would carry the
+ * fingerprint it makes; one the app replaced if it makes one of theirs,
+ * which is said; otherwise none of this instance's.
+ */
 export function appKeyVerdict(text: string, material: KeyMaterial['app']): string {
   if (text === '') throw new Skip('not given: not checked');
   const key = decoded(text);
   if (key === null) throw malformed('an app key', text);
   try {
-    if (appLogKeyId(key) !== material.keyId) throw new Failure("not this instance's app key: the app signs with another");
+    const id = appLogKeyId(key);
+    if ((material.previous ?? []).includes(id)) throw new Failure(`this is a previous app key (${id}), not the current one: the app signs with ${material.keyId}`);
+    if (id !== material.keyId) throw new Failure("not this instance's app key: the app signs with another");
     return 'the one the app signs with now';
   } finally {
     key.fill(0);

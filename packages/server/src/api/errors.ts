@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
+import { KeyRetired } from '@coffre/db/log';
+
 import { logged } from '../logged.ts';
+import { Superseded } from '../watch.ts';
 
 /**
  * Every API error has one shape, `{ "error": code, "message": sentence }`,
@@ -21,6 +24,8 @@ import { logged } from '../logged.ts';
  *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
+ *   503 rotating           the app is moving to its new key: nothing is served until it has (key-rotation.ts)
+ *   503 app_key            the log is under an app key this deployment does not hold, or has moved on from its own
  *   500 internal_error     a bug; the details are in the server log only
  *
  * The message is written for a person and is safe to show them.
@@ -41,6 +46,8 @@ export const ERROR_STATUS = {
   not_implemented: 501,
   unavailable: 503,
   migrating: 503,
+  rotating: 503,
+  app_key: 503,
   internal_error: 500,
 } as const;
 
@@ -100,6 +107,10 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
     const body: ErrorBody = { error: error.code, message: error.message };
     if (error.reason !== undefined) body.reason = error.reason;
     return { status: error.status, body };
+  }
+  // An instance still under a key the log moved on from, as for the seconds a deploy takes: refused, not a bug.
+  if (error instanceof KeyRetired || error instanceof Superseded) {
+    return { status: 503, body: { error: 'app_key', message: 'this instance runs under an app key the audit log has moved on from: a newer deployment replaces it' } };
   }
   if (error instanceof z.ZodError) {
     const issue = error.issues[0];

@@ -100,6 +100,11 @@ export type AuthRow = { [K in AuthTable]: Fields[K] & { authMac: Buffer } }[Auth
 
 /** A versioned tuple: fixed field order, distinct nulls, bytes as hex and dates as milliseconds. */
 export function authMac<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K]): Buffer {
+  return macOf(chainKey, tupleOf(table, row));
+}
+
+/** What a row's MAC covers: its tuple, as JSON text. */
+function tupleOf<K extends AuthTable>(table: K, row: Fields[K]): string {
   const { kind, fields } = kindOf(table, row);
   const values = fields.map((field) => {
     const value = (row as Record<string, unknown>)[field];
@@ -108,18 +113,45 @@ export function authMac<K extends AuthTable>(chainKey: Buffer, table: K, row: Fi
     if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
     return value;
   });
-  const key = deriveKey(chainKey, 'signin-rows/v1');
-  try {
-    return createHmac('sha256', key).update(JSON.stringify(['coffre.auth.v2', kind, ...values])).digest();
-  } finally {
-    key.fill(0);
-  }
+  return JSON.stringify(['coffre.auth.v2', kind, ...values]);
+}
+
+function macOf(chainKey: Buffer, tuple: string): Buffer {
+  return createHmac('sha256', rowKey(chainKey)).update(tuple).digest();
+}
+
+function carries(row: { authMac: Buffer }, mac: Buffer): boolean {
+  return row.authMac instanceof Uint8Array && row.authMac.length === mac.length && timingSafeEqual(row.authMac, mac);
+}
+
+const rowKeys = new WeakMap<Buffer, Buffer>();
+
+/** The rows' MAC key, derived from `chainKey` once for as long as the configuration lives. */
+function rowKey(chainKey: Buffer): Buffer {
+  let key = rowKeys.get(chainKey);
+  if (key === undefined) rowKeys.set(chainKey, (key = deriveKey(chainKey, 'signin-rows/v1')));
+  return key;
+}
+
+/** Whether `chainKey` signed the row as it stands: nothing said either way. */
+export function signedBy<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K] & { authMac: Buffer }): boolean {
+  return carries(row, authMac(chainKey, table, row));
+}
+
+/**
+ * The row's MAC under `to`, with `changes`, if `from` signed it as it
+ * stands; null if `from` did not. What a rotation of the app key signs a
+ * row again with, its tuple made once when nothing changes.
+ */
+export function signedAgain<K extends AuthTable>(from: Buffer, to: Buffer, table: K, row: Fields[K] & { authMac: Buffer }, changes: Partial<Fields[K]> = {}): Buffer | null {
+  const tuple = tupleOf(table, row);
+  if (!carries(row, macOf(from, tuple))) return null;
+  return macOf(to, Object.keys(changes).length === 0 ? tuple : tupleOf(table, { ...row, ...changes }));
 }
 
 /** Report without trusting the row's claimed actor, or writing inside a transaction that will roll back. */
 export function checkAuthRow<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K] & { id: string; authMac: Buffer }): boolean {
-  const expected = authMac(chainKey, table, row);
-  if (row.authMac instanceof Uint8Array && row.authMac.length === expected.length && timingSafeEqual(row.authMac, expected)) return true;
+  if (signedBy(chainKey, table, row)) return true;
   console.error({ event: 'auth_row_tampered', table, id: row.id }, 'sign-in row failed authentication');
   return false;
 }

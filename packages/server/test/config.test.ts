@@ -44,6 +44,16 @@ test('a bad configuration fails on start, naming what is wrong', () => {
   }
 });
 
+test('previous app keys are each 32 bytes, counted once, and the current key listed among them is the current one', () => {
+  const [old, older] = [Buffer.alloc(32, 8), Buffer.alloc(32, 9)].map((key) => key.toString('base64'));
+  const resolved = resolveConfig({ ...base, previousAuditChainKeys: [old!, auditChainKey, older!, old!] });
+  assert.deepEqual(resolved.previousAuditChainKeys.map((key) => key.toString('base64')), [old, older]);
+  assert.deepEqual(resolveConfig(base).previousAuditChainKeys, []);
+  assert.throws(() => resolveConfig({ ...base, previousAuditChainKeys: [Buffer.alloc(31).toString('base64')] }), /previousAuditChainKeys\[0\] must be 32 bytes.*got 31/);
+  assert.throws(() => resolveConfig({ ...base, previousAuditChainKeys: [undefined as never] }), /previousAuditChainKeys\[0\] must be 32 bytes.*got 0/);
+  assert.throws(() => resolveConfig({ ...base, previousAuditChainKeys: old as never }), /a list of the app keys/);
+});
+
 test('a value is flagged for rotation after a year, unless the deployment says otherwise or turns it off', () => {
   assert.equal(resolveConfig(base).rotateAfterDays, 365);
   assert.equal(resolveConfig({ ...base, rotateAfterDays: 90 }).rotateAfterDays, 90);

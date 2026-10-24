@@ -9,14 +9,15 @@
 // Only coffre's own plugins carry a `Watcher`: core takes one only if
 // coffre's own code made it (`watcher`), whatever a plugin object says, so
 // a third-party plugin keeps routes and the API as a caller (R9).
-import { verifyEntries } from '@coffre/core/audit';
 import type { Checkpoint, CheckpointKey, LogHead, Outcome, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
+import { KeyRetired } from '@coffre/db/log';
 
 import { anchorIsOwn, anchorKeyId, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
-import { appendAudit, appLogKey, CHAIN_START, walkChain, type AuditEntry } from './db/audit.ts';
+import { appendAudit, appVerifier, CHAIN_START, verifyAppEntries, walkChain, type AuditEntry } from './db/audit.ts';
 import { auditHashAt, auditRange } from './db/queries.ts';
+import { movedFrom } from './db/rotation.ts';
 
 /** The key a watcher's hooks hang from on its plugin. */
 export const WATCH: unique symbol = Symbol('coffre.watch');
@@ -47,8 +48,14 @@ export type WatchContext = {
      * (`link: 'log'`) or to the hash it names (`'own'`). Null for none.
      */
     check(seq: number, link: 'log' | 'own'): Promise<{ ok: boolean; hash: string; reason?: string } | null>;
-    /** One entry of the watcher's, in a transaction of its own: its seq. */
+    /** One entry of the watcher's, in a transaction of its own: its seq. Throws `Superseded` under a key the log moved on from. */
     append(action: WatchAction, metadata: Record<string, unknown>): Promise<number>;
+    /**
+     * Whether the log has moved on from the app's key (key-rotation.ts): an
+     * instance a newer deployment replaces, whose walk cannot judge the
+     * new key's entries, and whose anchor is no longer its to write.
+     */
+    movedOn(): Promise<boolean>;
   };
   vault: {
     /** The vault's checkpoint of the log, asked once a scheduled run however many ask. */
@@ -89,10 +96,23 @@ export type Watcher = {
   walkOn(ctx: WatchContext, store?: AnchorStore): Promise<boolean>;
   /** An Owner's acceptance of lost entries, `actor`'s, in their request's context. A refusal throws a `Refusal`. */
   acceptLoss(ctx: WatchContext, range: { from: number; to: number }): Promise<{ resumes: number | null }>;
+  /**
+   * The app's rotation to a new key, before its `key.rotate`: the record
+   * sealed again under the new key if `from`, the old key's check, says the
+   * old key sealed it. A store it cannot use throws.
+   */
+  reseal(ctx: WatchContext, from: (anchor: AuditAnchor) => boolean): Promise<void>;
 };
 
 /** What a watcher refuses a request for, which the API answers 400 with: never anything else it throws. */
 export class Refusal extends Error {}
+
+/**
+ * An append refused because the log moved on from the app's key: this
+ * instance runs under a key a newer deployment replaced (key-rotation.ts),
+ * and what it would record of the log is no longer its to record.
+ */
+export class Superseded extends Error {}
 
 const made = new WeakSet<Watcher>();
 
@@ -112,6 +132,8 @@ export function watcherOf(plugin: object): Watcher | undefined {
 export type WatchDeps = {
   db: Database;
   chainKey: Buffer;
+  /** The keys `chainKey` replaced, which verify the entries from before the app moved on from each. */
+  previousChainKeys?: readonly Buffer[];
   vault: Pick<Vault, 'checkpoint' | 'about'>;
   alert?: (text: string) => void;
   warn?: (obj: unknown, msg: string) => void;
@@ -124,6 +146,7 @@ const SCHEDULER: WatchActor = { actorType: 'system', actorId: 'coffre-scheduler'
 /** A watch context over `deps`: one per scheduled run, request or alarm. */
 export function watchContext(deps: WatchDeps): WatchContext {
   const { db, chainKey, vault } = deps;
+  const keys = { chainKey, previousChainKeys: deps.previousChainKeys ?? [] };
   let signed: ReturnType<Vault['checkpoint']> | undefined;
   return {
     log: {
@@ -133,7 +156,7 @@ export function watchContext(deps: WatchDeps): WatchContext {
             if ((await auditHashAt(tx, BigInt(head.seq))) !== head.hash) return { ok: false as const, failedAtSeq: head.seq, reason: 'changed or cut since the anchor held it' };
           }
           const start = from === null ? CHAIN_START : { seq: BigInt(from.seq), hash: Buffer.from(from.hash, 'hex') };
-          const walked = await walkChain(tx, chainKey, start, { to: BigInt(to) });
+          const walked = await walkChain(tx, keys, start, { to: BigInt(to) });
           if (!walked.ok) return { ok: false as const, failedAtSeq: Number(walked.failedAtSeq), reason: walked.reason };
           const at = walked.at.seq < 0n ? null : { seq: Number(walked.at.seq), hash: walked.at.hash.toString('hex') };
           return { ok: true as const, at, done: walked.done };
@@ -144,11 +167,16 @@ export function watchContext(deps: WatchDeps): WatchContext {
         if (row === undefined || row.seq !== BigInt(seq)) return null;
         const before = link === 'own' ? row.prevHash.toString('hex') : seq === 0 ? CHAIN_START.hash.toString('hex') : await auditHashAt(db, BigInt(seq) - 1n);
         if (before === null) return { ok: false, hash: row.hash.toString('hex'), reason: `entry ${seq - 1}, before it, is not in the log` };
-        const alone = verifyEntries([row], { startSeq: row.seq, startPrevHash: Buffer.from(before, 'hex'), keys: [appLogKey(chainKey)], chainOnly: ['vault'] });
+        const alone = verifyAppEntries([row], { startSeq: row.seq, startPrevHash: Buffer.from(before, 'hex') }, await appVerifier(db, keys));
         return alone.ok ? { ok: true, hash: row.hash.toString('hex') } : { ok: false, hash: row.hash.toString('hex'), reason: alone.reason };
       },
+      movedOn: async () => (await movedFrom(db, [anchorKeyId(chainKey)])).size > 0,
       append: async (action, metadata) => {
-        const appended = await db.transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata }]));
+        const appended = await db
+          .transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata }]))
+          .catch((error: unknown) => {
+            throw error instanceof KeyRetired ? new Superseded(error.message) : error;
+          });
         return Number(appended.seqStart);
       },
     },

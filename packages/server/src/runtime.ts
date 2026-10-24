@@ -19,7 +19,10 @@ export type CoffreRuntime = {
   db: Database;
   /** Keys, grants and members: the vault Worker's binding, or a Node vault. */
   vault: Vault;
+  /** The app key, `auditChainKey`: what it signs its entries and rows with. */
   chainKey: Buffer;
+  /** The app keys it replaced, `previousAuditChainKeys`: they verify the log's entries from before it moved on from each. */
+  previousChainKeys: readonly Buffer[];
   /** Present in signin mode only. */
   signin: SigninService | null;
   /** Trust bindings, when sign-in turns them on. */
@@ -37,6 +40,8 @@ export type CoffreRuntime = {
   plugins: ResolvedConfig['plugins'];
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
+  /** Whether the log is under the app's key, for as long as the configuration lives (key-rotation.ts). */
+  appKey: { settled: boolean };
   /**
    * Each workload's gate (gate.ts): the process's on Node, the `GATES`
    * Durable Objects on Workers. Absent on Workers without that binding,
@@ -50,7 +55,7 @@ export type CoffreRuntime = {
  * isolate's, or the process's. Settled values, never a pending read
  * (AGENTS.md, "What an isolate keeps").
  */
-type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean } };
+type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey'] };
 const known = new WeakMap<ResolvedConfig, Known>();
 
 /**
@@ -74,7 +79,7 @@ export function createRuntime(
   let workloads: WorkloadService | null = null;
   let mcp: McpService | null = null;
   let verifier: IdentityVerifier;
-  const { schema, scopes } = knownOf(config);
+  const { schema, scopes, appKey } = knownOf(config);
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
       db,
@@ -99,6 +104,7 @@ export function createRuntime(
     db,
     vault,
     chainKey: config.auditChainKey,
+    previousChainKeys: config.previousAuditChainKeys,
     signin,
     workloads,
     mcp,
@@ -107,6 +113,7 @@ export function createRuntime(
     verifier,
     waitUntil,
     schema,
+    appKey,
     rotateAfterDays: config.rotateAfterDays,
     plugins: config.plugins,
     gates,
@@ -116,7 +123,7 @@ export function createRuntime(
 function knownOf(config: ResolvedConfig): Known {
   let kept = known.get(config);
   if (kept === undefined) {
-    kept = { schema: { migrated: false }, scopes: { sealed: false } };
+    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false } };
     known.set(config, kept);
   }
   return kept;
@@ -134,7 +141,7 @@ export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (act
   return {
     hooks,
     context: (actor) =>
-      watchContext({ db: runtime.db, chainKey: runtime.chainKey, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
+      watchContext({ db: runtime.db, chainKey: runtime.chainKey, previousChainKeys: runtime.previousChainKeys, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
   };
 }
 
@@ -146,6 +153,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     watch: watch === null ? null : { hooks: watch.hooks, context: (asCaller) => watch.context(asCaller ? actor : undefined) },
     db: runtime.db,
     chainKey: runtime.chainKey,
+    previousChainKeys: runtime.previousChainKeys,
     vault: runtime.vault,
     waitUntil: runtime.waitUntil,
     signin: runtime.signin,

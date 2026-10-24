@@ -21,6 +21,16 @@ export type CoffreConfig = {
    */
   auditChainKey: string;
   /**
+   * The app keys `auditChainKey` replaced, in any order, each as it was
+   * given: they verify the log's entries written before the app moved on
+   * from them, and nothing else. The first start under a new key signs
+   * every row that must survive again under it, signs everyone out, and
+   * writes `key.rotate` (docs/deploy.md, "Rotating the app key"). One that
+   * is `auditChainKey` itself, as before the new key is given, counts once.
+   * None if left out.
+   */
+  previousAuditChainKeys?: readonly string[];
+  /**
    * Days a value may go unchanged before the web UI and `coffre list` flag
    * it for rotation: 365 if left out, `null` for no flag. A rename is no
    * change; a reference's value is its source's.
@@ -38,6 +48,7 @@ export type ResolvedConfig = {
   publicUrl: string;
   auth: AuthConfig;
   auditChainKey: Buffer;
+  previousAuditChainKeys: readonly Buffer[];
   rotateAfterDays: number | null;
   plugins: readonly CoffrePlugin[];
 };
@@ -48,10 +59,13 @@ const ROTATE_AFTER_DAYS = 365;
 /** Check a deployment's configuration, failing on the first problem. */
 export function resolveConfig(config: CoffreConfig): ResolvedConfig {
   const publicUrl = publicOrigin(config.publicUrl);
-  const auditChainKey = Buffer.from(config.auditChainKey ?? '', 'base64');
-  if (auditChainKey.length !== 32) {
-    throw new Error(`auditChainKey must be 32 bytes, base64; got ${auditChainKey.length} bytes`);
-  }
+  const auditChainKey = appKey('auditChainKey', config.auditChainKey);
+  const previous = config.previousAuditChainKeys ?? [];
+  if (!Array.isArray(previous)) throw new Error('previousAuditChainKeys is a list of the app keys auditChainKey replaced');
+  // Each key once: the current one, listed too while it is still the one in use, is the current one.
+  const previousAuditChainKeys = previous
+    .map((text, i) => appKey(`previousAuditChainKeys[${i}]`, text))
+    .filter((key, i, keys) => !key.equals(auditChainKey) && keys.findIndex((other) => other.equals(key)) === i);
   if (config.vault === undefined || config.vault === null) throw new Error('vault is required');
   const rotateAfterDays = config.rotateAfterDays === undefined ? ROTATE_AFTER_DAYS : config.rotateAfterDays;
   if (rotateAfterDays !== null && !(Number.isSafeInteger(rotateAfterDays) && rotateAfterDays > 0)) {
@@ -61,7 +75,15 @@ export function resolveConfig(config: CoffreConfig): ResolvedConfig {
     publicUrl,
     auth: config.auth.resolve(publicUrl),
     auditChainKey,
+    previousAuditChainKeys,
     rotateAfterDays,
     plugins: checkPlugins(config.plugins ?? []),
   };
+}
+
+/** An app key as a deployment passes it: 32 bytes, base64. */
+function appKey(name: string, text: string | undefined): Buffer {
+  const key = Buffer.from(typeof text === 'string' ? text : '', 'base64');
+  if (key.length !== 32) throw new Error(`${name} must be 32 bytes, base64; got ${key.length} bytes`);
+  return key;
 }

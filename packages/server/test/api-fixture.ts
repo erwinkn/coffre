@@ -166,6 +166,7 @@ export async function contextFor(
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
+    previousChainKeys: [],
     // The audit watch over the deps' anchor, as a deployment that added it has.
     watch: {
       hooks: watcherOf(auditWatch({ anchor: deps.anchor }))!,

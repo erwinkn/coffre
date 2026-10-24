@@ -571,7 +571,7 @@ the network, never holds what decrypts a value:
 | Key | Held by | What it does | If it is lost |
 |---|---|---|---|
 | The vault key, `VAULT_KEY`, named by the vault ID, `VAULT_KEY_ID` | the vault | decrypts every value; the vault also derives from it the key it signs its log entries, member rows and checkpoints with | every value is lost for good |
-| The app key, `APP_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, and the log stops verifying |
+| The app key, `APP_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, every token and binding stops working, and the log stops verifying |
 
 The vault key matters most: with it and a copy of the database, anyone has
 every value, so it never sits beside the backups. `coffre setup` made both,
@@ -946,12 +946,141 @@ was found.
 If the store cannot be reached, the beat fails and readiness is red, and
 both recover by themselves once it answers: what it holds was not lost.
 
-**Changing `APP_KEY` (`auditChainKey`) makes the anchor unreadable**: the
-record names the key it is sealed under, and coffre cannot re-seal it yet.
-Readiness is red and the beat leaves the record alone until you empty its
-store; the next beat then re-anchors, with its alert. To empty it, delete
-the file on Node; on Workers, name a new object,
+**A rotation of `APP_KEY` seals the anchor again** under the new key
+([below](#rotating-the-app-key)): the record names the key it is sealed
+under, and the rotation seals what it says again under the new one,
+before its `key.rotate`. Changing `APP_KEY` with the old key left out of
+`previousAuditChainKeys` leaves the anchor under a key the app does not
+hold: readiness is red, and the beat leaves the record alone. List the old
+key if you still hold it, and the rotation seals the record again,
+findings and all. Only for a key that is lost, empty its store; the next
+beat then re-anchors, with its alert, and a cut made before then goes
+unseen. To empty it, delete the file on
+Node; on Workers, name a new object,
 `durableAnchor(env.ANCHOR, { name: 'anchor-2' })`, and deploy.
+
+## Rotating the app key
+
+The app key, `APP_KEY` (`auditChainKey`), MACs the app's log entries and
+every row that signs someone in: sessions, service and personal tokens,
+handles, workloads' sessions, trust bindings, enrollment codes, device
+logins, linked sign-in accounts, MCP clients and their connections. A
+rotation moves all of it to a new key, as the vault's own rotation does
+for the vault key ([keys.md](keys.md#a-local-key)).
+
+1. **Upgrade first.** Deploy a release that knows `previousAuditChainKeys`
+   under the old key, and let its deploy finish: an instance of an older
+   release would go on writing under the old key during the rotation.
+2. **Make a new key.** `coffre keys`, and take only the app key; or
+   `openssl rand -base64 32`. Keep it in your password manager beside the
+   old one.
+3. **List the old key, then give the new one.** First, keep the key in use
+   under a secret of its own too, and deploy the code that lists it; while
+   it is also `APP_KEY`, it counts once, and nothing changes. A rotation
+   adds to the list, and never replaces an entry: each key replaced stays
+   listed, under its own secret.
+
+   ```ts
+   auditChainKey: env.APP_KEY,                                // the key in use, then the new one
+   previousAuditChainKeys: [env.APP_KEY_2026_10],             // each key replaced, the one in use added now
+   // a second rotation: [env.APP_KEY_2026_10, env.APP_KEY_2027_04]
+   ```
+
+   On Workers, `wrangler secret put APP_KEY_2026_10 -c app/wrangler.jsonc`
+   with the key in use, then `pnpm run deploy`; on Node, the same in
+   `.env`, then a restart. Previous keys can be listed in any order.
+4. **Give the new key, then wait for readiness.** Set `APP_KEY` to the
+   new key: `wrangler secret put APP_KEY -c app/wrangler.jsonc`, which
+   deploys at once, or `.env` and a restart on Node. The first start under
+   it signs every row the old key signed again under the new one, a step
+   of 100 rows a request, seals the audit anchor again under it, and then
+   writes `key.rotate`. Until then every request but `/livez` and `/readyz`
+   answers 503 `rotating`, and each one, `/readyz` too, takes it a step
+   further; a Node process also steps it to the end as it starts. Given
+   the new key without the old one listed, the app runs under the new key
+   alone, everyone signed out and every token and binding failing, until
+   a deploy lists the old key and rotates. Wait on readiness:
+
+   ```sh
+   until curl -fsS https://secrets.example.com/readyz; do sleep 1; done
+   ```
+
+   Many rows take many steps: an instance with 20,000 credentials, most of
+   them CI runs' spent ones, takes two hundred.
+5. **Check.** The audit log shows the rotation's `key.reseal` steps, each
+   naming how many rows it signed again, how many sessions and approved
+   device logins it ended, how many another listed key signed, which its
+   own rotation signs next, and any row no key listed had signed, which
+   fails as it did before; then `key.rotate`. `coffre verify log` verifies
+   the whole log; `coffre verify keys` takes the new key as the one the
+   app signs with.
+
+What it changes, and what it keeps:
+
+- **Everyone signs in again.** Browser and CLI sessions are signed out,
+  never honoured under the new key. Service tokens, personal tokens,
+  handles, workloads' sessions (one awaiting approval included), trust
+  bindings, enrollment codes and MCP connections go on. An MCP client's
+  access token lasts minutes and is signed with the key, not stored: the
+  client refreshes it once, with its connection's refresh token. A sign-in
+  or an MCP approval under way when the rotation runs starts again, and a
+  CLI login approved but not yet taken is used up: the CLI logs in again.
+- **The old key writes nothing from the rotation's first step.** The step's
+  `key.reseal` names it, and the log refuses an append under a key it names
+  so: an instance still running the old key, as during the seconds a
+  deploy takes, has its writes refused, and a change it made to a row in
+  that window may be lost. Once `key.rotate` is written, the old key
+  vouches for no row, and verifies only the log's entries from before the
+  first step: an entry under it after that is a finding, the watch's and
+  `coffre verify log`'s.
+- **The anchor is sealed again** under the new key, before `key.rotate`:
+  what it says is what it said ([the audit watch](#the-audit-watch)). After
+  `key.rotate`, a record under the old key is foreign, as any other key's:
+  a store the rotation cannot reach holds it back until it can.
+- **A database that cannot be reached serves nothing** while
+  `previousAuditChainKeys` is set, until the app knows its key stands:
+  503 `unavailable`.
+- **A key replaced stays replaced.** A start under a key the log moved on
+  from, as a rollback of the deploy would be, answers 503 `app_key`, and
+  the server's log says which keys; so does a start that lists the new
+  key of a rotation under way to another key, or that is the new key of
+  one whose old key was taken out of `previousAuditChainKeys` before it
+  ended. A start that does not hold the new key of a rotation under way
+  serves, as under any key the log does not know. To undo a rotation,
+  rotate again to a new key. A key the log does not know, a lost one or
+  the wrong one, is served under as before rotations: everyone signs in
+  again, every token and binding fails, the log stops verifying, and the
+  server's log names the key it lacks.
+- **A crash, or several isolates at once, change nothing.** Each step is
+  one transaction under the log's head: the next goes on from the one the
+  log says came before, whichever process takes it.
+- **A leaked key's window closes with the rotation.** An entry forged
+  with the old key after the first step is a finding; a row forged with
+  it before `key.rotate` is signed again with the rest, as a rotation
+  cannot tell it from the instance's own. When the old key leaked, review
+  after the rotation everything that grants access without a session,
+  which signing everyone out does not end: each person's linked sign-in
+  accounts (`coffre identities`, which they unlink with `coffre
+  identities unlink`; one forged for an Owner signs its holder in as
+  them), their MCP clients (`coffre apps`) and personal tokens (`coffre
+  tokens`), and each service's tokens, bindings and enrollment codes
+  (`coffre tokens <service>`, `coffre trust <service>`, `coffre enroll
+  <service> --list`).
+- **A key replaced without a rotation**, as before this release, is
+  rotated from once it is listed in `previousAuditChainKeys`, like any
+  other: the rows it signed are signed again, so the tokens and bindings
+  that swap ended work again. Don't list one you replaced to end what it
+  signed, because it leaked: leave it out, and its entries stay
+  unverifiable, as they are now.
+
+**When may the old key go?** Keep it in `previousAuditChainKeys` for as
+long as the log holds entries written under it, which is for good: it
+verifies them, and nothing else. The app serves without it once the
+rotation is done, but the audit watch needs it until its anchor has
+verified past `key.rotate` (readiness green after a beat or two), or it
+finds the old key's entries it had still to walk; and a walk of the whole
+log, `coffre verify log` included, stops at the first entry under a key it
+does not hold. Escrow it with the vault keys.
 
 ## MCP clients
 

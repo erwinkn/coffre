@@ -15,7 +15,7 @@ import { verifyCheckpoint, type Checkpoint, type LogHead } from '@coffre/core/va
 
 import { walking, type AnchorFields, type AnchorFinding, type AnchorStore, type AuditAnchor } from '../anchor.ts';
 import type { CoffrePlugin } from '../plugins.ts';
-import { Refusal, watcher, WATCH, type WatchContext } from '../watch.ts';
+import { Refusal, Superseded, watcher, WATCH, type WatchContext } from '../watch.ts';
 
 export type AuditWatchOptions = {
   /** Where the anchor lives: `durableAnchor(env.ANCHOR)` on Workers, `fileAnchor(path)` on one Node process, or any `AnchorStore`. */
@@ -38,6 +38,7 @@ export function auditWatch(options: AuditWatchOptions): CoffrePlugin {
     },
     walkOn: (ctx, store) => walkOn(ctx, store ?? anchor),
     acceptLoss: (ctx, range) => acceptLoss(ctx, anchor, range),
+    reseal: (ctx, from) => reseal(ctx, anchor, from),
   });
   return { name: 'audit-watch', [WATCH]: hooks } as CoffrePlugin;
 }
@@ -96,6 +97,12 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
   try {
     beat = await ctx.log.append('audit.heartbeat', { source: 'scheduled' });
   } catch (error) {
+    // Replaced by a deployment under a newer app key, as for the moments a rotation's deploy takes: the anchor is the
+    // new key's to write now, and this beat leaves it as it is.
+    if (error instanceof Superseded) {
+      ctx.warn({ err: error.message }, 'audit heartbeat refused: this instance runs under an app key the log moved on from, and leaves the anchor to the one that replaced it');
+      return false;
+    }
     // A heartbeat that cannot write is itself the signal.
     unwritten = (error as Error).message;
     ctx.warn({ err: unwritten }, 'audit heartbeat failed to write');
@@ -145,8 +152,26 @@ const WRITES_LOST = 3;
 function foreign(ctx: WatchContext, anchor: AuditAnchor): string {
   const sealed = typeof anchor.keyId === 'string' ? anchor.keyId : null;
   return sealed !== null && sealed !== ctx.keyId
-    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed, and nothing re-seals it yet. Empty its store, and the next beat re-anchors`
+    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed without a rotation from ${sealed}. If you still hold that key, list it in previousAuditChainKeys, and the rotation seals this anchor again, whatever it holds; only if it is lost, empty the store, and the next beat re-anchors`
     : 'the audit anchor is not one the app wrote: once it is understood, empty its store, and the next beat re-anchors';
+}
+
+/**
+ * The anchor sealed again under the app's key, as the app's rotation to it
+ * asks before its `key.rotate` (key-rotation.ts): what the record says, as
+ * it says it, if `from` says the old key sealed it. No record, the app's
+ * own already, or one under another key, is left as it is, and the next
+ * beat says what it finds. A beat between that writes first is read
+ * again; one that keeps writing first fails the step, which tries again.
+ */
+async function reseal(ctx: WatchContext, anchors: AnchorStore, from: (anchor: AuditAnchor) => boolean): Promise<void> {
+  for (let lost = 0; lost <= WRITES_LOST; lost++) {
+    const held = await anchors.read();
+    if (held === null || ctx.own(held) || !from(held)) return;
+    const { keyId: _sealedUnder, mac: _mac, ...fields } = held;
+    if (await anchors.write(held, ctx.seal(fields))) return;
+  }
+  throw new Error('the audit anchor kept changing while the rotation sealed it again');
 }
 
 function samePoint(a: LogHead | null, b: LogHead | null): boolean {
@@ -215,6 +240,12 @@ async function advance(ctx: WatchContext, anchor: Fields, target: Checkpoint): P
  * another record than `prev`, `failed` when it could not be used.
  */
 async function commit(ctx: WatchContext, anchors: AnchorStore, prev: AuditAnchor | null, base: Fields, fields: AnchorFields): Promise<'written' | 'lost' | 'failed'> {
+  // An instance the log moved on from, as during a rotation's deploy: what it found under the new key's entries is no
+  // finding, and the anchor is the new key's to write.
+  if (await ctx.log.movedOn()) {
+    ctx.warn({}, 'the audit anchor is left as it is: this instance runs under an app key the log moved on from');
+    return 'failed';
+  }
   const written = await anchors.write(prev, ctx.seal(fields)).catch((error: Error) => {
     ctx.warn({ err: error.message }, 'the audit anchor could not be written');
     return null;

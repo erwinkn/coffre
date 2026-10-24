@@ -103,6 +103,8 @@ export const DETAIL_ACTIONS = [
   'key.check',
   'audit.heartbeat',
   'audit.checkpoint',
+  // A step of the app key's rotation, a hundred rows signed again; its `key.rotate` is shown.
+  'key.reseal',
 ] as const;
 
 /** Detail entries a page left out, by action. */
@@ -153,7 +155,8 @@ export type AuditVerification =
 
 /**
  * What an escrowed key is checked against, and nothing more: the id the
- * log records for the app key, a fingerprint of it; the vault key the vault
+ * log records for the app key, a fingerprint of it, and those of the app
+ * keys it replaced, `previousAuditChainKeys`; the vault key the vault
  * wraps under now; and each vault key's check, a known value wrapped under
  * it, as the vault wrote it. `coffre verify keys` holds a key to them on the
  * operator's machine, so the key is never sent, and nothing here answers a
@@ -161,7 +164,8 @@ export type AuditVerification =
  * log itself.
  */
 export type AuditKeys = {
-  app: { keyId: string };
+  /** `previous`, in the configuration's order; absent from 0.13.0's answer and earlier releases'. */
+  app: { keyId: string; previous?: string[] };
   vault: {
     current: { vaultId: string; provider: string };
     /** Newest first: the vault ID each names, and the check value wrapped under it, base64. */
@@ -346,7 +350,7 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
   }
   const { current, checks } = await ctx.vault.keyChecks();
   return {
-    app: { keyId: appLogKey(ctx.chainKey).keyId },
+    app: { keyId: appLogKey(ctx.chainKey).keyId, previous: ctx.previousChainKeys.map((key) => appLogKey(key).keyId) },
     vault: {
       current: { vaultId: current.kekId, provider: current.kekProvider },
       checks: checks.map(({ seq, kekProvider, kekId, kekVersion, bytes }) => ({ seq, vaultId: kekId, provider: kekProvider, version: kekVersion, wrapped: bytes })),
@@ -451,7 +455,7 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
       if (gap !== null) return failed('app', gap.found, `sequence gap: expected seq ${gap.expected}, found ${gap.found}`, gap.expected - 1n);
       // A stretch runs to its checkpoint however far that is: one more than a walk apart only when the
       // checkpoints stopped for a while, and the vault cannot end a stretch anywhere else.
-      const walked = await walkChain(tx, ctx.chainKey, start, to === null ? {} : { to: to.at.seq, limit: Infinity });
+      const walked = await walkChain(tx, ctx, start, to === null ? {} : { to: to.at.seq, limit: Infinity });
       if (!walked.ok) return failed('app', walked.failedAtSeq, walked.reason, walked.through);
       // Whether it ends at the hash the checkpoint signed is the vault's to say, once it has checked its own entries.
       const { at } = walked;

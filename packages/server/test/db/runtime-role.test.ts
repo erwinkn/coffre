@@ -37,6 +37,8 @@ const EXPECTED_UPDATE_COLUMNS = [
   'dismissed_keys.dismissed_by',
   'dismissed_keys.restored_at',
   'dismissed_keys.restored_by',
+  // An enrollment code's MAC, signed again by the app key's rotation (T105): nothing else of a code changes.
+  'enrollments.auth_mac',
   'environments.archived_at',
   'environments.name',
   'environments.slug',

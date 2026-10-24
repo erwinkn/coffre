@@ -76,10 +76,10 @@ async function scenario(operations: readonly Operation[]) {
   const signin = new SigninService({ ...deps, signin: signinConfig });
   deps.signin = signin;
   const runtime: CoffreRuntime = {
-    ...deps, signin, workloads: null, mcp: null,
+    ...deps, previousChainKeys: [], signin, workloads: null, mcp: null,
 
     auth: { mode: 'signin', signin: signinConfig },
-    publicUrl: 'https://coffre.test', verifier: signin, waitUntil, schema: { migrated: true }, rotateAfterDays: 365, plugins: [],
+    publicUrl: 'https://coffre.test', verifier: signin, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
   };
   const root = clientFor(deps, ROOT);
   const model = {
