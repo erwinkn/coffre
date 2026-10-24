@@ -54,22 +54,25 @@ export async function readLimitedText(request: Request, max: number): Promise<st
 }
 
 /**
- * Parse a JSON body, refusing a `__proto__` key. Validation would quietly
- * drop one (a secret named that, say), so the write would succeed and store
- * nothing: refuse it outright.
+ * Parse a JSON body, refusing a top-level `__proto__` key. `JSON.parse`
+ * makes it an own property, not prototype pollution, but validation treats
+ * it inconsistently (a secret named that would seem to write and store
+ * nothing), so refuse it outright. Top-level is enough: a body's data keys
+ * (secret names, paths) live there, and every nested object a route takes is
+ * `.strict()`, so a `__proto__` deeper is already refused. A plain parse,
+ * not a reviver that runs a function per node: the reviver cost is what let
+ * a large body of many tiny entries burn CPU (R27).
  */
 function parseJsonBody(text: string): unknown {
-  let proto = false;
   let body: unknown;
   try {
-    body = JSON.parse(text, (key, value: unknown) => {
-      if (key === '__proto__') proto = true;
-      return value;
-    });
+    body = JSON.parse(text);
   } catch {
     throw badRequest('the body is not JSON');
   }
-  if (proto) throw badRequest('__proto__ cannot be used as a key');
+  if (body !== null && typeof body === 'object' && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, '__proto__')) {
+    throw badRequest('__proto__ cannot be used as a key');
+  }
   return body;
 }
 
