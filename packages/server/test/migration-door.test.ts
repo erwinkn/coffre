@@ -1,4 +1,4 @@
-import test, { after, before } from 'node:test';
+import test, { mock, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { github, signin, type Principal } from '@coffre/core/identity';
@@ -136,6 +136,27 @@ test("below its migrations, a plugin's WebSocket is refused at the same door, on
     assert.match(await answer.text(), /lacks this version's migrations/);
   });
   assert.equal(asked, false);
+});
+
+test('a plugin that takes 20 s to admit a WebSocket, as under a burst of runs at once, is let in; past 45 s, refused', async () => {
+  let decide!: (answer: Response) => void;
+  const runtime = { ...freshRuntime(), plugins: [{ name: 'sockets', routes: { prefix: '/sockets', fetch: async () => new Response(), socket: () => new Promise<Response>((resolve) => (decide = resolve)) } }] };
+  runtime.schema.migrated = true;
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const slow = admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null);
+    while (decide === undefined) await new Promise((resolve) => setImmediate(resolve));
+    mock.timers.tick(20_000);
+    decide(new Response('admitted'));
+    assert.equal(await ((await slow) as Response).text(), 'admitted');
+    const stuck = admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    mock.timers.tick(45_000);
+    const refused = (await stuck) as Response;
+    assert.deepEqual([refused.status, await refused.text()], [503, 'coffre took too long to decide']);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test('only a database that cannot be reached is an outage the door lets through; any other failure is not', () => {

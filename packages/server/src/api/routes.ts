@@ -524,6 +524,10 @@ export const routes = {
     }),
     run: (ctx, { input }) => signin(ctx).issueHandle(ctx, input),
   }),
+  // A run's handle ended with its command (`coffre run`): the caller's own, and a handle only, on a personal token too.
+  ...route('DELETE /handles/:id', {
+    run: (ctx, { params }) => signin(ctx).revokeCredential(ctx, params.id, 'own handle'),
+  }),
   ...route('DELETE /members/:member/tokens/:id', {
     run: async (ctx, { params }) => {
       const member = parseMember(params.member);

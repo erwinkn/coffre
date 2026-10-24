@@ -1629,6 +1629,12 @@ export type Api = {
     input: undefined;
     output: never;
   };
+  "DELETE /handles/:id": {
+    input: undefined;
+    output: {
+      revoked: true;
+    };
+  };
 };
 
 export type AccessValue = string | null | {

@@ -52,12 +52,27 @@ const MOST_HELD = 2 * WINDOW;
 const MOST_SESSIONS = 32;
 /**
  * The longest a refused connection holds its slot while its admission
- * goes on: past the 15 s that refuse it, a database or vault that never
- * answers would otherwise keep it forever. An admission holds no window.
+ * goes on, past its refusal: a database or vault that never answers would
+ * otherwise keep it forever. An admission holds no window.
  */
 const MOST_DECIDING_MS = 60_000;
 /** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
 const COUNT_EVERY = 128 * 1024;
+/**
+ * The admissions an object runs at once, the rest waiting their turn in
+ * the order they came: one until a connection is in, which leaves the run's
+ * database URL in the cache for the rest, then a few. A pool's burst of 32
+ * made together each read the URL from the vault and wrote two entries in
+ * the log, all on the object's one database client, and past 16 or so ran
+ * into their time to decide together.
+ */
+const ADMITTING = 4;
+/**
+ * How long a connection waits for the first admission before the object
+ * stops waiting for it to fill the cache, and admits a few at once all the
+ * same: an admission that never ends holds up no other for good.
+ */
+const MOST_WAITING_MS = 15_000;
 
 /**
  * A WebSocket a plugin takes, sent to its object: one per path and bearer,
@@ -113,6 +128,11 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
     #admit: Admit | undefined;
     /** The sessions open in the object, which it holds to `MOST_SESSIONS`. */
     #open = 0;
+    /** Admissions under way, those waiting their turn, and whether one has let a connection in yet, or waited `MOST_WAITING_MS` for it. */
+    #admitting = 0;
+    readonly #waiting: (() => void)[] = [];
+    #warm = false;
+    #stalled = false;
     constructor(state: ObjectState, env: Env) {
       this.#state = state;
       this.#env = env;
@@ -129,10 +149,13 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
       this.#open += 1;
       let session: Promise<void> | undefined;
       let deciding: Promise<unknown> = Promise.resolve();
+      // Its time to decide starts with its turn (socket-admission.ts), not with the burst it came in.
+      await this.#turn();
       try {
         this.#admit ??= admission(this.#env, this.#state);
         const answer = await this.#admit(request, cloudflareSourceIp(request), (decided) => (deciding = decided));
         if (answer instanceof Response) return answer;
+        this.#warm = true;
         const pair = new (globalThis as unknown as { WebSocketPair: new () => Record<0 | 1, WorkersWebSocket> }).WebSocketPair();
         const server = pair[1];
         server.accept();
@@ -150,6 +173,8 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
         this.#state.waitUntil(session);
         return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit);
       } finally {
+        // Its turn to the next, however its admission ended.
+        this.#next();
         // Refused, or failed before its session began: the slot is free again once nothing decides for it, a minute at most.
         if (session === undefined) {
           let late: ReturnType<typeof setTimeout> | undefined;
@@ -159,6 +184,40 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
           };
           void Promise.race([deciding, new Promise<void>((resolve) => (late = setTimeout(resolve, MOST_DECIDING_MS)))]).then(free, free);
         }
+      }
+    }
+    /** How many admissions the object runs at once: one, until a connection is in or the first has taken too long. */
+    #allowed(): number {
+      return this.#warm || this.#stalled ? ADMITTING : 1;
+    }
+    /** A turn to admit: at once while fewer than the object allows are under way, else in the order they came. */
+    async #turn(): Promise<void> {
+      if (this.#admitting < this.#allowed()) {
+        this.#admitting += 1;
+        return;
+      }
+      let late: ReturnType<typeof setTimeout> | undefined;
+      let given!: () => void;
+      const turn = new Promise<void>((resolve) => (given = resolve));
+      this.#waiting.push(given);
+      const waited = await Promise.race([turn.then(() => false), new Promise<boolean>((resolve) => (late = setTimeout(() => resolve(true), MOST_WAITING_MS)))]);
+      clearTimeout(late);
+      if (!waited) return;
+      // The first admission is taking long: a few go at once from here, in order, each turn counted as it is given.
+      this.#stalled = true;
+      this.#give();
+      await turn;
+    }
+    /** An admission done: its turn to the next in line. */
+    #next(): void {
+      this.#admitting -= 1;
+      this.#give();
+    }
+    /** Turns to those waiting, in order, as many as the object now allows. */
+    #give(): void {
+      while (this.#waiting.length > 0 && this.#admitting < this.#allowed()) {
+        this.#admitting += 1;
+        this.#waiting.shift()!();
       }
     }
   };

@@ -147,6 +147,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'POST /handles': { not: "a handle is the placeholder `coffre run` gives the app it starts, which only the credential proxy takes: a page has no app to give one" },
+  'DELETE /handles/:id': { not: '`coffre run` ends its handle when its command ends; a page ends a handle as a token, Account › Tokens' },
   'DELETE /members/:member/tokens/:id': { ui: [{ does: 'a bearer token › Revoke', in: 'components/service-tokens.tsx', call: 'tokens.revoke' }] },
   'GET /members/:member/bindings': { ui: [{ does: 'a service account › Sign-in › Sign in with OIDC', in: 'components/trusted-workloads.tsx', call: 'bindings.list' }] },
   'POST /members/:member/bindings': {

@@ -37,18 +37,23 @@ const COUNT_EVERY = 128 * 1024;
  * gone, as when a laptop's network changes without a word.
  */
 const KEEPALIVE_MS = 30_000;
+/**
+ * How long coffre has to answer the upgrade: a coffre that does not is gone,
+ * and both ends close, rather than wait forever on it. Longer than coffre's
+ * own 15 s wait for a turn and 45 s to admit (cloudflare-sockets.ts,
+ * socket-admission.ts), so that its refusal for taking too long is the one said.
+ */
+const HANDSHAKE_MS = 70_000;
 
-/** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. `keepaliveMs` is for tests. */
-export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEEPALIVE_MS } = {}): Promise<{ url: string; close: () => void }> {
+/** A listener, on a port of its own, for as long as the run lasts; and the URL the app connects with. `keepaliveMs` and `handshakeMs` are for tests. */
+export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEEPALIVE_MS, handshakeMs = HANDSHAKE_MS } = {}): Promise<{ url: string; close: () => void }> {
   const sockets = new Set<Socket>();
   /** The refusals said already, by status and reason: once each for the run, however many connections a pool retries. */
   const said = new Set<string>();
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it. Longer
-    // than coffre's own 15 s to admit (socket-admission.ts), so that its refusal for taking too long is the one said.
-    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: 20_000 });
+    const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: handshakeMs });
     carry(socket, ws, keepaliveMs);
     ws.on('unexpected-response', (request, response) => {
       // coffre's refusal, said once for each reason: the app sees its connection close, and a driver may retry it at once.

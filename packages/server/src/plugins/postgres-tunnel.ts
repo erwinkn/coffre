@@ -226,9 +226,11 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   const deadline = setTimeout(end, STARTUP_MS);
   const unwatch = session.watch(end);
   void client.closed.then(end, end);
-  /** A step of the startup, which an ended session does not wait for. */
+  /** A step of the startup, which an ended session does not wait for: its work, left behind, fails unheard (a dial given up). */
   const step = <T,>(work: Promise<T>): Promise<T> =>
-    ended ? Promise.reject(new Error('the session ended')) : Promise.race([work, client.closed.then(() => Promise.reject(new Error('the app went away')))]);
+    ended
+      ? (work.catch(() => undefined), Promise.reject(new Error('the session ended')))
+      : Promise.race([work, client.closed.then(() => Promise.reject(new Error('the app went away')))]);
   try {
     // The startup: SSL and GSS refused (the hop to the listener is local), a cancel forwarded, or the real StartupMessage.
     let startup: Map<string, string> | null = null;
@@ -301,8 +303,8 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
     up.release();
     to.release();
     await Promise.race([
-      down.rest().pipeTo(client.writable).catch(() => undefined),
-      from.rest().pipeTo(socket.writable).catch(() => undefined),
+      relay(down.rest(), client.writable).catch(() => undefined),
+      relay(from.rest(), socket.writable).catch(() => undefined),
       client.closed,
     ]);
   } catch (error) {
@@ -312,6 +314,24 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
   } finally {
     clearTimeout(deadline);
     end();
+  }
+}
+
+/**
+ * Bytes from one side to the other, each chunk written before the next is
+ * read, so that each side reads only as fast as the other takes. Not
+ * `pipeTo`: on Workers, piping into a stream of JavaScript's own, as the
+ * WebSocket's (cloudflare-sockets.ts) is, keeps a promise for every chunk
+ * until the pipe ends, and a session that streamed some 4.7 GB from the
+ * database outgrew the object's 128 MB.
+ */
+async function relay(from: ReadableStream<Uint8Array>, to: WritableStream<Uint8Array>): Promise<void> {
+  const reader = from.getReader();
+  const writer = to.getWriter();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return writer.close();
+    await writer.write(value);
   }
 }
 
