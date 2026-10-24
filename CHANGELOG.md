@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Upgrading to 0.12.1, in short.** No migration: the database, the
+  settings and the API are as in 0.12.0, so `coffre migrate` has nothing to
+  apply. To send a body past 16 MiB through the proxy, upgrade the instance
+  and every `coffre serve` sidecar (and any app on the SDK) together, and
+  size the sidecar's memory for the uploads in flight (below). Upgrade one
+  side only and nothing breaks: bodies keep going, read whole, up to 16 MiB.
+
 - **Workload uploads past 16 MiB stream: a 50 MB Yousign document goes
   through the proxy.** A request body that declares its SHA-256 in a
   `Content-Digest` (RFC 9530, `sha-256=:<base64>:`) and says its length now
