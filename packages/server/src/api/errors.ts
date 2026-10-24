@@ -18,6 +18,7 @@ import { logged } from '../logged.ts';
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later
+ *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
  *   500 internal_error     a bug; the details are in the server log only
@@ -37,6 +38,7 @@ export const ERROR_STATUS = {
   method_not_allowed: 405,
   conflict: 409,
   too_many_requests: 429,
+  not_implemented: 501,
   unavailable: 503,
   migrating: 503,
   internal_error: 500,
@@ -68,6 +70,13 @@ export const forbidden = (message = 'you do not have permission to do that') =>
   new ApiError('forbidden', message);
 export const notFound = (message = 'not found') => new ApiError('not_found', message);
 export const conflict = (message: string) => new ApiError('conflict', message);
+/**
+ * A route of docs/design/workload-access.md that is declared, in every map
+ * that lists the API, before the change that serves it: its message names
+ * that change.
+ */
+export const notBuilt = (what: string, change: string) =>
+  new ApiError('not_implemented', `${what} is not served yet: docs/design/workload-access.md, ${change}, brings it`);
 
 /** The vault's refusal, as the API answers it. */
 export function vaultRefused(refusal: { code: string; message: string }): ApiError {

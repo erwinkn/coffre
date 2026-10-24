@@ -144,8 +144,8 @@ test('the GitLab form names the namespace and the project, and the other issuer 
   checkBinding(gitlab);
   assert.equal(bindingOf(form({ platform: 'gitlab', gitlabUrl: 'https://gitlab.acme.example', projectId: '1', namespaceId: '2' })).issuer, 'https://gitlab.acme.example');
 
-  const other = bindingOf(form({ platform: 'other', issuer: 'https://accounts.google.com', sub: '104', extra: 'email_verified=true\n\n  hd = acme.example ' }));
-  assert.deepEqual(other, { profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104', email_verified: 'true', hd: 'acme.example' } });
+  const other = bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', sub: '104', extra: 'email_verified=true\n\n  hd = acme.example ' }));
+  assert.deepEqual(other, { profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104', email_verified: 'true', hd: 'acme.example' } });
   assert.throws(() => bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', sub: 'x', extra: 'oops' })), /"oops" is not <claim>=<value>/);
 
   // A private cluster's keys, pasted: sent with it, for the server to check.
@@ -180,7 +180,7 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
     summary({ profile: 'gitlab', issuer: 'https://gitlab.com', claims: { project_id: '345', pipeline_source: 'push', ref_type: 'tag', ref: 'v1' } }),
     { title: 'GitLab project 345', detail: 'push at tag v1' },
   );
-  assert.deepEqual(summary({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '104' } }), { title: 'accounts.google.com', detail: 'sub 104' });
+  assert.deepEqual(summary({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104' } }), { title: 'idp.acme.example', detail: 'sub 104' });
   // A binding that carries its keys may name any issuer, a URL or not.
   assert.deepEqual(summary({ profile: 'custom', issuer: 'kapsule:fr-par', claims: { sub: 'x' } }), { title: 'kapsule:fr-par', detail: 'sub x' });
   assert.equal(keysOf({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');

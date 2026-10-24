@@ -68,9 +68,12 @@ const PARAMS: Record<string, z.ZodType<string>> = {
   key: secretKey,
   member: z.string().min(3).max(330),
   id: z.string().uuid(),
+  enrollment: z.string().uuid(),
   code: z.string().min(1).max(16),
   folder: folderName,
   role: roleId,
+  // A freeze's target, as `freezeTarget` spells it: `credential:<environment id>/<name>` sent with its `/` escaped.
+  target: z.string().min(1).max(400),
 };
 
 /**

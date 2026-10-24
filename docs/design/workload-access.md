@@ -647,10 +647,16 @@ the rest:
 - **`req`** is base64url(SHA-256) of a canonical request:
 
   ```
+  <the path as sent, as the WHATWG parser writes it: every slash and escape kept>\n
   <the raw query string as sent, without "?", or empty>\n
   <name>:<value>\n   for each header in hdr, in order, its value as received
-  <the body's SHA-256, hex | the declared payload hash, for a streamed SigV4 upload only>
+  <the body's SHA-256, hex | the declared payload hash, for a streamed SigV4 upload only, | UNSIGNED-PAYLOAD>
   ```
+
+  `htu` signs the path as a zone normalizes it; the first line signs it as
+  it goes upstream, so `/use/s3/a/b` and `/use/s3/a//b`, two objects to S3,
+  are two requests under one `htu` (PR 0's review r2). A path a zone
+  changed on the way fails closed.
 
   The declared form applies only to a credential injected by `sigv4`, and
   only when its `x-amz-content-sha256` is 64 hex characters, which S3

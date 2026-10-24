@@ -288,6 +288,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@coffre/client':
+        specifier: workspace:*
+        version: link:../client
       jose:
         specifier: 6.2.3
         version: 6.2.3

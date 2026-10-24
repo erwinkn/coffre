@@ -10,12 +10,12 @@ import { randomBytes } from 'node:crypto';
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
 import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
 import {
+  BEARER_PROFILES,
   claimValues,
   defaultIssuer,
   EVENT_EXPOSURE,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
-  WORKLOAD_PROFILES,
   type BindingClaims,
   type WorkloadProfile,
 } from '@coffre/core/identity';
@@ -818,7 +818,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     input: z
       .object({
         service,
-        profile: z.enum(WORKLOAD_PROFILES),
+        profile: z.enum(BEARER_PROFILES),
         issuer: z.string().max(400).optional().describe("The issuer's URL, for a custom profile"),
         claims: z
           .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
