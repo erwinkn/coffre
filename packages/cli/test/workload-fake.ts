@@ -211,8 +211,15 @@ export async function fakeCoffre(options: FakeOptions = {}) {
   const sockets = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
     void (async () => {
+      // As coffre's tunnel route (credential-proxy.ts): a tunnel is /use/<project>/<environment>/<name>, never /use/<name>.
+      const path = new URL(req.url!, publicUrl).pathname;
+      if (path.slice('/use/'.length).split('/').length !== 3) {
+        log.push(`GET ${path} 404`);
+        socket.end('HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n');
+        return;
+      }
       const session = await authenticate(req, null);
-      log.push(`GET ${new URL(req.url!, publicUrl).pathname} ${typeof session === 'string' ? session : 'upgrade'}`);
+      log.push(`GET ${path} ${typeof session === 'string' ? session : 'upgrade'}`);
       if (typeof session === 'string' || req.headers['coffre-tunnel-flow'] !== 'credit' || options.database === undefined) {
         socket.end(`HTTP/1.1 401 Unauthorized\r\ndpop-nonce: ${nonce()}\r\ncontent-length: 0\r\n\r\n`);
         return;

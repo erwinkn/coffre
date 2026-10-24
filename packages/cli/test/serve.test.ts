@@ -81,7 +81,7 @@ test("coffre serve forwards the app's requests signed, as sent, carries a tunnel
   const [code] = await once(run.child, 'exit');
   assert.equal(code, 0, run.stderr());
   assert.equal(coffre.log.at(-1), 'POST /api/auth/logout 200');
-  assert.ok(coffre.log.includes('GET /use/db upgrade'), coffre.log.join('\n'));
+  assert.ok(coffre.log.includes('GET /use/market/prod/db upgrade'), coffre.log.join('\n'));
 });
 
 test('coffre serve on a Unix socket: only its owner may connect', async (t) => {
@@ -237,7 +237,7 @@ test('through the sidecar: a redirect within coffre comes back to it, a SigV4 up
   await client.connect();
   assert.deepEqual((await client.query('select six')).rows, [{ value: 'select six' }]);
   await client.end();
-  assert.deepEqual(coffre.log.filter((line) => line.startsWith('GET /use/db')), ['GET /use/db use_dpop_nonce', 'GET /use/db upgrade']);
+  assert.deepEqual(coffre.log.filter((line) => line.startsWith('GET /use/market/prod/db')), ['GET /use/market/prod/db use_dpop_nonce', 'GET /use/market/prod/db upgrade']);
 });
 
 test("a service's run refuses a credential two of its environments name, and a run stopped before its command starts logs out first", async (t) => {
