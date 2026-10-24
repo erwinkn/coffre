@@ -917,7 +917,7 @@ The deployment opts in, in code. `coffre init` writes the object's wiring
 
 ```ts
 // app/src/coffre.ts: sockets: env.SOCKETS, and, to open the tunnel,
-//   plugins: [credentialProxy({ … tunnels: { db: postgres('DATABASE_URL') } })], with its route, routes/use.$.ts
+//   plugins: [credentialProxy({ … tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) } })], with its route, routes/use.$.ts
 // app/src/server.ts
 export default { fetch: (request, env, ctx) => coffre.upgrade(request, env) ?? handler.fetch(request, { context: coffre.request(env, ctx) }) };
 export const CoffreSockets = coffre.Sockets;

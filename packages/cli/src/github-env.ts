@@ -13,12 +13,15 @@ type Entries = Iterable<readonly [key: string, value: string]>;
  * that a family is one pattern, and names compare case-blind, as on
  * Windows. GitHub refuses NODE_OPTIONS itself. What only points a tool at
  * another registry (NPM_CONFIG_REGISTRY, PIP_INDEX_URL) is no part of this,
- * nor what only names a file the job does not already hold, nor a
- * credential (NPM_CONFIG_OTP, CARGO_REGISTRIES_*_TOKEN).
+ * nor what only names a directory to read files from (HOME, CARGO_HOME),
+ * nor what only an interactive shell reads (ENV, PROMPT_COMMAND), nor a
+ * credential (NPM_CONFIG_OTP, CARGO_REGISTRIES_*_TOKEN). A denylist is
+ * never complete: these are the one-variable hijacks of common tools.
  */
 export const RUNS_CODE: readonly string[] = [
   // The shell and the dynamic loader.
-  'PATH', 'ENV', 'BASH_ENV', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'IFS', 'ZDOTDIR', 'LD_*', 'DYLD_*', 'GCONV_PATH',
+  'PATH', 'BASH_ENV', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'IFS', 'ZDOTDIR', 'GCONV_PATH',
+  'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'DYLD_*',
   // Git, ssh and the programs they start.
   'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_EXEC_PATH', 'GIT_PROXY_COMMAND', 'GIT_EXTERNAL_DIFF',
   'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'GIT_PAGER', 'GIT_TEMPLATE_DIR', 'GIT_DIR', 'GIT_CONFIG', 'GIT_CONFIG_*',
@@ -31,10 +34,10 @@ export const RUNS_CODE: readonly string[] = [
   // Other language runtimes.
   'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'PYTHONBREAKPOINT',
   'PERL5OPT', 'PERL5LIB', 'PERLLIB', 'PERL5DB', 'RUBYOPT', 'RUBYLIB', 'LUA_INIT*', 'PHPRC', 'PHP_INI_SCAN_DIR',
-  'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'CLASSPATH',
+  'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'JAVA_OPTS', 'MAVEN_OPTS', 'GRADLE_OPTS', 'SBT_OPTS', 'ANT_OPTS', 'CATALINA_OPTS', 'CLASSPATH',
   'DOTNET_STARTUP_HOOKS', 'DOTNET_ADDITIONAL_DEPS', 'COR_ENABLE_PROFILING', 'COR_PROFILER*', 'CORECLR_ENABLE_PROFILING', 'CORECLR_PROFILER*',
-  // Build tools: the compilers, linkers, wrappers and runners they start.
-  'CC', 'CXX', 'CPP', 'AR', 'LD', 'MAKEFLAGS', 'MFLAGS', 'GOFLAGS',
+  // Build tools: the compilers, linkers, wrappers and runners they start, and their flags (make pastes them into a shell line; gcc's -wrapper runs a program).
+  'CC', 'CXX', 'CPP', 'AR', 'LD', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'MAKEFLAGS', 'MFLAGS', 'GOFLAGS', 'CGO_*FLAGS',
   'RUSTC', 'RUSTC_*', 'RUSTDOC', 'RUSTDOC_*', 'RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
   'CARGO_BUILD_*', 'CARGO_TARGET_*_RUNNER', 'CARGO_TARGET_*_LINKER', 'CARGO_TARGET_*_RUSTFLAGS', 'CARGO_HOST_*',
   'CARGO_REGISTRY_CREDENTIAL_PROVIDER', 'CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS', 'CARGO_REGISTRIES_*_CREDENTIAL_PROVIDER', 'CARGO_CREDENTIAL_ALIAS_*',

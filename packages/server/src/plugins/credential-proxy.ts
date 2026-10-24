@@ -205,7 +205,7 @@ export function privateKey(key: string): Signer {
 export type CredentialProxyOptions = {
   /** By name, as the proxy's URLs say it: lowercase letters, digits and dashes. */
   credentials: Record<string, Credential>;
-  /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL') }`. */
+  /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) }`. */
   tunnels?: Record<string, Tunnel>;
   /** Private keys, by name as credentials are, that coffre signs with for the app: `{ 'dfns-key': privateKey('DFNS_PRIVATE_KEY') }`. */
   signers?: Record<string, Signer>;
@@ -1320,10 +1320,10 @@ function privateHost(host: string): boolean {
   const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(name);
   if (v4 !== null) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19));
   }
-  // ::/16 holds loopback, the unspecified address and IPv4 written as IPv6 (::ffff:a00:1, ::7f00:1); 64:ff9b:: is NAT64's.
-  if (name.includes(':')) return /^(?:::|0:)/.test(name) || /^f[cd]/.test(name) || /^fe[89ab]/.test(name) || name.startsWith('64:ff9b:');
+  // ::/16 holds loopback, the unspecified address and IPv4 written as IPv6 (::ffff:a00:1, ::7f00:1); 64:ff9b:: is NAT64's; fe80::/10 is link-local, fec0::/10 site-local.
+  if (name.includes(':')) return /^(?:::|0:)/.test(name) || /^f[cd]/.test(name) || /^fe[89a-f]/.test(name) || name.startsWith('64:ff9b:');
   return false;
 }
 

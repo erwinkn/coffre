@@ -877,7 +877,7 @@ test("the configuration is checked: HTTPS upstreams, no private address, rules t
   assert.throws(make({ a: { upstream: 'https://[::1]', inject: header('x', '{K}') } }), /private address/);
   assert.throws(make({ a: { upstream: 'https://localhost', inject: header('x', '{K}') } }), /private address/);
   // However it is written: a trailing dot, any case, IPv4 inside IPv6.
-  for (const host of ['localhost.', 'LOCALHOST', 'api.localhost.', '127.0.0.1.', '[::ffff:10.0.0.8]', '[::7f00:1]', '[fe80::1]', '[64:ff9b::a00:8]']) {
+  for (const host of ['localhost.', 'LOCALHOST', 'api.localhost.', '127.0.0.1.', '[::ffff:10.0.0.8]', '[::7f00:1]', '[fe80::1]', '[fec0::1]', '[64:ff9b::a00:8]', '198.18.0.1']) {
     assert.throws(make({ a: { upstream: `https://${host}/v1`, inject: header('x', '{K}') } }), /private address/, host);
   }
   assert.throws(make({ a: { upstream: 'https://api.example.com', inject: header('x', 'static') } }), /names no key/);
