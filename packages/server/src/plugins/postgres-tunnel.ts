@@ -180,6 +180,8 @@ const STARTUP_MS = 30_000;
 const MAX_STARTUP = 10_000;
 /** The longest message the database's login sends: a SASL exchange, an error. */
 const MAX_LOGIN = 65_536;
+/** How long a cancel request waits for the database to close its connection, which says the request arrived. */
+const CANCEL_MS = 5_000;
 
 /**
  * The cancel keys the app was given, by key, for the sessions logged in
@@ -353,6 +355,17 @@ async function cancel(session: TunnelSession, given: string, own: (pipe: Pipe) =
   const writer = new Writer(socket.writable);
   await writer.write(concat(int32(16), int32(CANCEL_REQUEST), int32(target.processId), int32(target.secret)));
   writer.release();
+  // The database closes the connection once it has the request, and libpq waits for that: closing first can lose it. A VPC
+  // Network binding's socket is open before its connector has dialed the database, and closed then, it sends nothing.
+  const reader = socket.readable.getReader();
+  let late: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    (async () => {
+      while (!(await reader.read()).done);
+    })(),
+    new Promise<void>((resolve) => (late = setTimeout(resolve, CANCEL_MS))),
+  ]).catch(() => undefined);
+  clearTimeout(late);
   socket.close();
 }
 
