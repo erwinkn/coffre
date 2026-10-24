@@ -195,7 +195,10 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
             chunks.push(chunk);
           }
           // Its own, beside an app's digest of another algorithm, which declares nothing to coffre: the body streams all the same.
-          const ours = contentDigest(hash.digest('hex'));
+          // The app's own SHA-256 is held to the bytes here, before any of them go.
+          const sha256 = hash.digest('hex');
+          if (declared !== null && declared !== sha256) return answer(400, 'bad_request', 'the body is not what its Content-Digest says');
+          const ours = contentDigest(sha256);
           if (own === null) headers.set('content-digest', ours);
           else if (declared === null) headers.set('content-digest', `${own}, ${ours}`);
           headers.set('content-length', String(size));

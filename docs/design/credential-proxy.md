@@ -622,7 +622,9 @@ member, `sha-256=:<base64>:`) streams through, never held whole, up to 95
 MiB (`MAX_DIGESTED_BODY` in `@coffre/client/dpop`): 99,614,720 bytes, under
 the 100 MB (decimal) a Cloudflare zone takes on Free and Pro, so a body
 near it gets coffre's 413, which says what to do, and not the zone's. The
-SDK and `coffre serve` send it on every body
+SDK and `coffre serve` send it on every body, unless the app set a
+`Content-Digest` of its own, which the SDK keeps as it is and the sidecar
+adds its `sha-256` to
 ([workloads](../workloads.md#what-the-sdk-does-on-its-own)), which is what
 lets a workload upload a 50 MB Yousign document or a KYC file. coffre
 hashes the bytes as they pass (`scanned`, with the handle or session-token

@@ -283,6 +283,11 @@ test('through the sidecar, a 55 MB document is held once, in memory, hashed as i
   const malformed = await fetch(`${listener}/use/yousign/v3/receipts`, { method: 'POST', headers: { 'content-digest': 'sha-256=:bm90IGEgZGlnZXN0:' }, body: 'a receipt' });
   assert.equal(malformed.status, 400);
   assert.match(((await malformed.json()) as { message: string }).message, /Content-Digest declares a body's SHA-256 once/);
+  // The app's own SHA-256 of other bytes: refused here, nothing sent to coffre.
+  const forwardedBefore = coffre.forwarded.length;
+  const wrong = await fetch(`${listener}/use/yousign/v3/receipts`, { method: 'POST', headers: { 'content-digest': `sha-256=:${createHash('sha256').update('another receipt').digest('base64')}:` }, body: 'a receipt' });
+  assert.deepEqual([wrong.status, ((await wrong.json()) as { message: string }).message], [400, 'the body is not what its Content-Digest says']);
+  assert.equal(coffre.forwarded.length, forwardedBefore);
 
   // An empty POST declares the empty body's digest, and streams as any other.
   const empty = await fetch(`${listener}/use/yousign/v3/ping`, { method: 'POST' });
