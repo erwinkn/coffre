@@ -319,14 +319,13 @@ test('no copy goes into an empty environment that inherits, and a chain made aro
   await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: /parents loop or run past 3/ });
 });
 
-test("a fork's key of its own with neither a value nor a reference, written around the app, refuses a read rather than serve the parent's", async () => {
+test("a fork's key of its own with neither a value nor a reference, written around the app, reads as no value rather than serve the parent's", async () => {
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   const [market] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
   await db.owner.insert(secrets).values({ id: randomUUID(), projectId: market.id, environmentId: await environmentId('prod-eu'), key: 'STRIPE_KEY' });
-  // The list and the missing keys count it as prod-eu's own: a read settles it there too, and cannot open it.
-  const hollow = /market\/prod-eu\/STRIPE_KEY has no value: set one, or archive it/;
-  await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: hollow });
-  await assert.rejects(maintainer.secrets.reveal('market/prod-eu/STRIPE_KEY'), { status: 409, message: hollow });
+  // The list and the missing keys count it as prod-eu's own: a read settles it there too, and finds no value, as anywhere.
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, undefined);
+  await assert.rejects(maintainer.secrets.reveal('market/prod-eu/STRIPE_KEY'), { status: 404 });
   await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
   assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_live_1');
 });

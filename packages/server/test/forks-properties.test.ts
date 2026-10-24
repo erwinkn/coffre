@@ -320,7 +320,7 @@ async function check(scene: Scene): Promise<void> {
         assert.equal(item.parent.slug, scene.envs.find((each) => each.id === item.parent!.environmentId)!.slug);
       }
     }
-    for (const unread of opened.unreadable) {
+    for (const unread of [...opened.unreadable, ...opened.hollow]) {
       if (unread.key === undefined) continue;
       assert.equal(got.has(unread.key), false, `${named} settles ${unread.key} once`);
       got.set(unread.key, { environmentId: unread.parent?.environmentId ?? env.id, opens: false });

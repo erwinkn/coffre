@@ -277,6 +277,13 @@ export type Readable = {
 
 /** What a read cannot open, and why; and the parent it would be inherited from, which the reader must read to be told. */
 export type Unreadable = { reason: string; key?: string; parent?: { environmentId: string; slug: string } };
+/**
+ * A live key held with neither a value nor a reference the vault sealed,
+ * written around the app: it settles its name, as the list and the missing
+ * keys count it, so a fork serves no parent's value for it, and reads as no
+ * value, as it does anywhere.
+ */
+export type Hollow = { key: string; parent?: { environmentId: string; slug: string } };
 
 /**
  * What a read of an environment, or of one key in it, opens: each live
@@ -294,7 +301,7 @@ export async function readableValues(
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
   key?: string,
-): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
+): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
   if (place.environment!.parentId === null) return resolveValues(db, place, environment, key);
   return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
 }
@@ -305,14 +312,15 @@ export async function resolveValues(
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
   key?: string,
-): Promise<{ items: Readable[]; unreadable: Unreadable[] }> {
+): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
   const here = `${place.project.slug}/${place.environment!.slug}`;
   // An environment that names no parent has none: nothing to read.
   const parents = place.environment!.parentId === null ? [] : await parentsOf(tx, environment.environmentId);
-  if (parents === null) return { items: [], unreadable: [{ reason: `${here}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre` }] };
+  if (parents === null) return { items: [], unreadable: [{ reason: `${here}'s parents loop or run past ${MAX_PARENTS}: it was made around coffre` }], hollow: [] };
   const layers = [{ id: environment.environmentId, slug: place.environment!.slug, archived: false, deleted: false }, ...parents];
   const items: Readable[] = [];
   const refused: Unreadable[] = [];
+  const hollow: Hollow[] = [];
   // The keys a nearer environment settled: holds, or removed.
   const settled = new Set<string>();
   for (const [depth, layer] of layers.entries()) {
@@ -327,11 +335,12 @@ export async function resolveValues(
       items.push(parent === undefined ? item : { ...item, through: environment.environmentId, parent });
     }
     for (const unread of own.unreadable) if (!settled.has(unread.key)) refused.push({ ...unread, ...(parent === undefined ? {} : { parent }) });
-    for (const settles of [...own.items, ...own.unreadable]) settled.add(settles.key);
+    for (const empty of own.hollow) if (!settled.has(empty)) hollow.push({ key: empty, ...(parent === undefined ? {} : { parent }) });
+    for (const settles of [...own.items, ...own.unreadable, ...own.hollow.map((empty) => ({ key: empty }))]) settled.add(settles.key);
     if (depth < layers.length - 1) for (const dismissed of await dismissalsIn(tx, layer.id)) settled.add(dismissed.key);
   }
   items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return { items, unreadable: refused };
+  return { items, unreadable: refused, hollow };
 }
 
 /**
@@ -363,13 +372,14 @@ async function valuesIn(
   project: string,
   environment: { projectId: string; environmentId: string; slug: string },
   key?: string,
-): Promise<{ items: Readable[]; unreadable: { key: string; reason: string }[] }> {
+): Promise<{ items: Readable[]; unreadable: { key: string; reason: string }[]; hollow: string[] }> {
   const rows = (await environmentSecrets(db, environment.environmentId, key === undefined ? undefined : { key })).filter((row) => row.archivedAt === null);
   const references = await currentReferences(db, rows.filter((row) => row.current === null).map((row) => row.id));
   const live = [...references.values()].filter((reference) => reference.state === 'live');
   const envelopes = await versionEnvelopes(db, live.map((reference) => reference.source!.currentVersionId!));
   const items: Readable[] = [];
   const refused: { key: string; reason: string }[] = [];
+  const hollow: string[] = [];
   for (const row of rows) {
     if (row.current !== null) {
       items.push({
@@ -391,10 +401,8 @@ async function valuesIn(
       continue;
     }
     const reference = references.get(row.id);
-    // A live key with neither a value nor a reference the vault sealed, written around the app, still settles its
-    // key, as the list and the missing keys count it: a read refuses rather than run without it, or a parent's instead.
     if (reference === undefined) {
-      refused.push({ key: row.key, reason: `${project}/${environment.slug}/${row.key} has no value: set one, or archive it` });
+      hollow.push(row.key);
       continue;
     }
     const source = reference.source!;
@@ -416,7 +424,7 @@ async function valuesIn(
       source: placeOfRow(source),
     });
   }
-  return { items, unreadable: refused };
+  return { items, unreadable: refused, hollow };
 }
 
 // --- the API -----------------------------------------------------------------------
