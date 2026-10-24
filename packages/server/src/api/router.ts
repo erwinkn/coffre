@@ -11,6 +11,7 @@ import { formatPath } from './paths.ts';
 import { makePersonal, ownerOf, resolveRead } from './personal.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
 import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
+import { WORKLOAD_ROUTES } from './workload-routes.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
 /**
@@ -208,6 +209,14 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
           denied(ctx, 'token.use', 'personal_token', { metadata: { route: `${route.method} ${route.shape}` } }),
         ),
       );
+    }
+
+    if (ctx.caller.kind === 'workload' && !WORKLOAD_ROUTES[`${route.method} ${route.shape}` as keyof typeof WORKLOAD_ROUTES]) {
+      // A workload's session reaches what a service token does, but what only a person does (docs/design/workload-access.md, section 6.1).
+      await refuse(ctx, new Refusal(
+        new ApiError('forbidden', "a workload's session cannot do this: only a person can", 'workload'),
+        denied(ctx, 'token.use', 'workload', { metadata: { route: `${route.method} ${route.shape}` } }),
+      ));
     }
 
     for (const [name, value] of Object.entries(found.params)) {

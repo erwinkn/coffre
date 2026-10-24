@@ -74,7 +74,7 @@ export async function verifyWithKeys(
   transport: WorkloadTransport,
   url: string,
   token: string,
-  expected: { issuer: string; audience: string; now: Date },
+  expected: { issuer: string; audience: string; now: Date; maxAge?: null },
 ): ReturnType<typeof verifyWorkloadToken> {
   const now = expected.now.getTime();
   let entry = entries.get(url);

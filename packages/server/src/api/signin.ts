@@ -880,6 +880,7 @@ export class SigninService {
     serviceId: string,
     input: { label: string | null; expiresInDays: number; scope?: ScopeByPath },
   ): Promise<IssuedToken> {
+    this.#bearersIssued();
     if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > MAX_SERVICE_TOKEN_DAYS) {
       throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
     }
@@ -912,8 +913,20 @@ export class SigninService {
     });
   }
 
+  /**
+   * A strict instance issues a service no bearer token (`useOnly`,
+   * docs/design/workload-access.md, section 6.3): its workloads sign in
+   * with a key, and the tokens it holds already are refused at use.
+   */
+  #bearersIssued(): void {
+    if (this.#deps.signin.workloads?.useOnly === true) {
+      throw new ApiError('forbidden', 'this instance issues no service token (useOnly): trust the workload with a binding, and it signs in with its key', 'use_only');
+    }
+  }
+
   /** What a token issued now would reach, checked as issuing one is (`issueServiceToken`); issues nothing. */
   async planServiceToken(ctx: Asker, serviceId: string, input: { label: string | null; scope?: ScopeByPath }): Promise<TokenPlan> {
+    this.#bearersIssued();
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const { byPath, withheld } = await this.#tokenScope(ctx, serviceId, input.scope, details);
