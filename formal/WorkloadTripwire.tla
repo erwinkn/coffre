@@ -29,8 +29,8 @@ CONSTANTS
     MaxTime         \* how far the clock runs
 
 (***************************************************************************)
-(* The rule's parts, each a switch, and the two assumptions the copy is    *)
-(* caught under, which the model must fail without.                        *)
+(* The rule's parts, each a switch, and the assumption the copy is caught  *)
+(* under, which the model must fail without.                               *)
 (***************************************************************************)
 CONSTANTS
     \* The excess, `∫ (live − replicas)⁺ dt` over every root, ended ones
@@ -51,12 +51,13 @@ CONSTANTS
     \* outside the exchange's and the renewal's transactions (scenario).
     TripLags,
     \* A run's freeze commits under the head only while the binding's
-    \* newest freeze or lift is still the one its count started from.
+    \* newest freeze or lift is still the one the run read...
     TripFencedOnLift,
+    \* ...which it reads before the rows it counts. Off, after them: a lift
+    \* between the two reads passes the fence.
+    EntryReadFirst,
     \* Assumed: the deployment never leaves a slot free.
-    ReplicasFull,
-    \* Assumed: a thief, once in, stays.
-    ThiefStays
+    ReplicasFull
 
 None == "none"
 NoId == <<None, 0>>
@@ -75,7 +76,7 @@ VARIABLES
     thief,          \* the thief's session, or NoId
     counts,         \* counts[kind]: the events of each kind so far
     log,            \* the binding's `workload.freeze` and `workload.unfreeze` entries
-    pending,        \* the tripwire runs that found it contended, not yet committed
+    pending,        \* the tripwire runs under way: [at, entry, rows, since, from, hit]
     fenced,         \* the roots r1's rule fenced
     busy,           \* the `full` answers in a row
     pc, op, l, left
@@ -116,22 +117,35 @@ Contended(rows, t) ==
     \/ IF ExcessIntegral THEN ExcessTo(rows, t) > Threshold ELSE AgedExtra(rows, t)
     \/ ChurnCounted /\ Cardinality({r \in Counted(rows) : r.created >= From}) > 4 * Replicas
 
-Freeze(since, t) == [kind |-> "workload.freeze", time |-> t, since |-> since]
+\* A freeze, and the newest lift its count started from.
+Freeze(from, t) == [kind |-> "workload.freeze", time |-> t, since |-> from]
 
 \* The rule runs after an exchange or a renewal (the tick), from the rows:
-\* at once, or, with TripLags, as a run whose freeze commits later.
+\* at once, or, with TripLags, as a run of its own steps.
 Trip(rows, t) ==
-    LET hit == ~Frozen /\ Contended(rows, t) IN
-    IF hit /\ TripLags
-      THEN pending' = pending \cup {[since |-> Since, at |-> t]} /\ UNCHANGED log
-      ELSE log' = (IF hit THEN Append(log, Freeze(Since, t)) ELSE log) /\ UNCHANGED pending
+    IF TripLags
+      THEN /\ pending' = pending \cup {[at |-> t, entry |-> FALSE, rows |-> FALSE, since |-> 0, from |-> 0, hit |-> FALSE]}
+           /\ UNCHANGED log
+      ELSE /\ log' = IF ~Frozen /\ Contended(rows, t) THEN Append(log, Freeze(Since, t)) ELSE log
+           /\ UNCHANGED pending
 
-\* A run's freeze commits, fenced on the lift its count started from.
-TripCommit ==
+\* A run's next step: it reads the binding's newest freeze or lift, the
+\* fence; it counts the rows, from the newest lift then; and once it has
+\* both, its freeze commits under the head only while the binding is not
+\* frozen and the entry it read is still the newest. A run on a frozen
+\* binding does nothing.
+TripStep ==
     /\ \E run \in pending :
-         /\ pending' = pending \ {run}
-         /\ log' = IF ~Frozen /\ (TripFencedOnLift => run.since = Since)
-                     THEN Append(log, Freeze(run.since, now)) ELSE log
+         LET rest == pending \ {run} IN
+         IF ~run.entry /\ (EntryReadFirst \/ run.rows)
+           THEN /\ pending' = rest \cup {[run EXCEPT !.entry = TRUE, !.since = Since]}
+                /\ UNCHANGED log
+         ELSE IF ~run.rows
+           THEN /\ pending' = rest \cup {[run EXCEPT !.rows = TRUE, !.from = Since, !.hit = ~Frozen /\ Contended(roots, now)]}
+                /\ UNCHANGED log
+         ELSE /\ pending' = rest
+              /\ log' = IF run.hit /\ ~Frozen /\ (TripFencedOnLift => run.since = Since)
+                          THEN Append(log, Freeze(run.from, now)) ELSE log
     /\ UNCHANGED <<now, roots, running, old, started, thief, counts, fenced, busy, procs>>
 
 \* How many slots an exchange of n roots lacks: past `2 × replicas` live
@@ -261,10 +275,10 @@ Enroll(p) ==
     /\ Done(p)
     /\ UNCHANGED now
 
-\* It logs out, unless it stays.
+\* It logs out.
 Leave(p) ==
     /\ pc[p] = "leave"
-    /\ roots' = IF thief = NoId \/ ThiefStays THEN roots ELSE Ended(thief, now)
+    /\ roots' = IF thief = NoId THEN roots ELSE Ended(thief, now)
     /\ Done(p)
     /\ UNCHANGED <<now, running, old, started, thief, log, pending, fenced, busy>>
 
@@ -306,7 +320,7 @@ Step(p) ==
     \/ Crash(p) \/ Down(p) \/ Restart(p) \/ Redeploy(p) \/ Narrow(p)
     \/ Enroll(p) \/ Leave(p) \/ Lift(p)
 
-Next == (\E p \in Procs : Step(p)) \/ Finish \/ TripCommit \/ Tick \/ (now = MaxTime /\ UNCHANGED vars)
+Next == (\E p \in Procs : Step(p)) \/ Finish \/ TripStep \/ Tick \/ (now = MaxTime /\ UNCHANGED vars)
 
 Spec == Init /\ [][Next]_vars
 
@@ -323,7 +337,7 @@ TypeOK ==
 \* excess of the code's roots then.
 RECURSIVE ForeignTo(_)
 ForeignTo(t) ==
-    IF t = 0 THEN 0
+    IF t <= From THEN 0
     ELSE ForeignTo(t - 1) + Min(Cardinality({r \in LiveIn(roots, t - 1) : r.who = "thief"}),
                                 Max(0, Cardinality(LiveIn({r \in roots : ~r.child}, t - 1)) - Replicas))
 
@@ -344,19 +358,19 @@ WithinOwnBudget == OwnExcess <= Threshold /\ OwnRoots <= 4 * Replicas
 \* instance still running.
 NoFalseContention == ~Frozen /\ fenced \cap (running \cup old) = {}
 
-\* A thief whose excess beside the deployment passes the threshold, in any
-\* number of sessions with any gaps, or who makes more than `4 × replicas`
-\* roots, has frozen the code.
+\* A thief whose excess beside the deployment passes the threshold since
+\* the newest lift, in any number of sessions with any gaps, or who makes
+\* more than `4 × replicas` roots since, has frozen the code.
 TripwireFires ==
-    (ForeignTo(now) > Threshold \/ Cardinality({r \in roots : r.who = "thief"}) > 4 * Replicas) => Frozen
+    (ForeignTo(now) > Threshold \/ Cardinality({r \in roots : r.who = "thief" /\ r.created >= From}) > 4 * Replicas) => Frozen
 
-\* A lift is not undone by the history before it: every freeze counted from
-\* the newest lift before it.
+\* A lift is not undone by the history before it: every freeze's count
+\* started from the newest lift before the freeze.
 LiftHolds == \A i \in 1..Len(log) : log[i].kind = "workload.freeze" => log[i].since = LiftBefore(i)
 
-\* Every copy that enrolls is frozen out once it has been in for longer than
-\* the threshold. Not a guarantee: it holds only while the deployment
-\* leaves no slot free and the thief stays (docs/formal.md).
-CopyCaught == \A r \in roots : (r.who = "thief" /\ now > r.created + Threshold) => Frozen
+\* Every copy that has been in for longer than the threshold is frozen out.
+\* Not a guarantee: it holds only while the deployment leaves no slot free
+\* (docs/formal.md).
+CopyCaught == \A r \in roots : (r.who = "thief" /\ Min(r.ends, now) - r.created > Threshold) => Frozen
 
 =============================================================================

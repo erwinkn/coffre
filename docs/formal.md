@@ -624,11 +624,12 @@ The contention rule (4.4, item 3) is arithmetic over a code's roots, live or
 ended. So this model is a timeline rather than a race. The deployment's
 instances crash, restart, redeploy with overlap and narrow. A thief holding a
 copy of the code enrolls and leaves. After each exchange and each tick, the
-rule reads the rows; in `WorkloadLifting`, a run's freeze commits in a step
-of its own, as the rule runs outside the exchange's and the renewal's
-transactions, while a person may lift the freeze. A tick is a renewal
-period. A session that stops
-renewing lives `Life` ticks more, and the run fits in the rule's hour.
+rule reads the rows. In `WorkloadLifting`, as the rule runs outside the
+exchange's and the renewal's transactions, a run takes steps of its own:
+it reads the binding's newest freeze or lift, counts the rows, then
+commits its freeze, while a person may lift the freeze. A tick is a
+renewal period. A session that stops renewing lives `Life` ticks more, and
+the run fits in the rule's hour.
 
 | Protection, in the design | Turned off, TLC finds |
 |---|---|
@@ -636,18 +637,20 @@ renewing lives `Life` ticks more, and the run fits in the rule's hour.
 | The count of roots made, more than `4 × replicas` | a thief enrolling and leaving within one renewal, five times, never frozen (`TripwireFires`) |
 | Only roots count, never children | a deployment that narrows and redeploys, frozen (`NoFalseContention`) |
 | A full code answers `full` | under review r1's rule (admit, and fence the oldest live root): the new instance of a redeploy crashes, its restart is admitted, and the old instance, still serving its requests, is fenced (`NoFalseContention`) |
-| A run's freeze commits under the head only while the binding's newest freeze or lift is the one its count started from | two runs count the code contended; the first freezes it, Omar lifts the freeze, and the second freezes it again on the history the lift discarded (`LiftHolds`, in `WorkloadLifting`) |
+| A run's freeze commits under the head only while the binding's newest freeze or lift is the one the run read | two runs count the code contended; the first freezes it, Omar lifts the freeze, and the second freezes it again on the history the lift discarded (`LiftHolds`, in `WorkloadLifting`) |
+| The run reads that entry before it counts the rows | a run counts the rows, Omar lifts the freeze, and the run then reads the lift: its fence passes, and its freeze stands on the history before the lift (`LiftHolds`, in `WorkloadLifting`) |
 | A `full` answer is no signal | under review r2's rule (two `full` in a row freeze), two redeploys refused during a crash's tail freezing the code (`NoFalseContention`) |
 
 The tripwire is not a guarantee, and the model says so. `CopyCaught` states
-that every copy is frozen out once it has been in for longer than the
-threshold. It holds only under two assumptions, and the model must fail
-without each one, which are the design's evasions:
+that every copy that has been in for longer than the threshold is frozen
+out. It holds only under an assumption, which is the design's first
+evasion, and the model must fail without it. The second evasion, a thief
+that stays under both thresholds, is below what `TripwireFires` promises:
+the rule freezes nobody under them.
 
 | Assumption | Without it, TLC finds |
 |---|---|
-| The deployment never leaves a slot free | a replica down, the thief in its slot, never frozen (`CopyCaught`) |
-| The thief, once in, stays | a thief who leaves before the threshold, never frozen (`CopyCaught`) |
+| The deployment never leaves a slot free | a replica down, the thief in its slot for longer than the threshold, never frozen (`CopyCaught`) |
 
 ### WorkloadReads.tla
 
@@ -685,9 +688,9 @@ laundered, and so is any copy of that copy.
 | `Superseded` | No session is made from a code once a supersede names it, none renews after, and each of its sessions ends within a session's life of the supersede |
 | `MinterBound` | A code, and its sessions, hold no more than its minter held at the mint's commit, a child holding only its narrowed uses, and read sensitive values only if the minter was then an Owner, as a person; no enrollment session mints or promotes |
 | `NoFalseContention` | With no foreign holder, the deployment's crashes, restarts, redeploys and children never freeze the code, nor fence a running instance's session, while their excess stays within the threshold and their roots within `4 × replicas` (`WithinOwnBudget`, checked beside it, so a scenario past it fails rather than holding vacuously) |
-| `TripwireFires` | A thief whose excess beside the deployment passes the threshold, in any number of sessions with any gaps, or who makes more than `4 × replicas` roots, has frozen the code |
+| `TripwireFires` | A thief whose excess beside the deployment passes the threshold since the newest lift, in any number of sessions with any gaps, or who makes more than `4 × replicas` roots since, has frozen the code |
 | `LiftHolds` | Every freeze counts from the newest lift before it: a lift is not undone by the history before it |
-| `CopyCaught` | Every copy is frozen out once it has been in longer than the threshold, under the two assumptions above |
+| `CopyCaught` | Every copy that has been in, in one session, for longer than the threshold is frozen out, under the assumption above |
 | `NoLaundering` | A workload reads a value only if `reads` lists the key, by ID, where the value is held, and the value reached that key through no copy the workload could not read |
 
 ### Their scenarios
@@ -703,8 +706,8 @@ laundered, and so is any copy of that copy.
 | `WorkloadDeploys` | One replica crashes once and restarts, trying twice, redeploys twice on its code and narrows once. Nobody else holds the code | 421 thousand |
 | `WorkloadThief` | A thief enrolls up to five times beside one replica, leaving whenever it likes, and the replica may crash | 256 thousand |
 | `WorkloadReenroll` | A thief enrolls up to three times beside one replica that keeps running, leaving whenever it likes | 3 thousand |
-| `WorkloadLifting` | A thief enrolls beside one replica and stays, the rule's runs commit their freezes after they count, and Omar lifts the freeze | 79 |
-| `WorkloadCopy` | A thief enrolls beside one replica, which may go down and come back, and may leave | 2 thousand |
+| `WorkloadLifting` | A thief enrolls beside one replica and stays, the rule's runs read, count and commit in steps of their own, and Omar lifts the freeze | 10 thousand |
+| `WorkloadCopy` | A thief enrolls beside one replica, which may go down and come back, and may leave | 3 thousand |
 | `WorkloadReads` | The workload reads, copies and references, while Omar renames, deletes and remakes, and copies | 10 thousand |
 
 ### What the design said, and what the code must follow
@@ -744,9 +747,11 @@ laundered, and so is any copy of that copy.
   hour before the lift, freezes it again: section 4.4's "a lift is not
   undone by the same hour's history" fails. With `replicas: 2` a run starts
   every 15 seconds or so, so every lift has the window. Section 4.4 now
-  says the freeze commits under the head only while the binding's newest
-  freeze or lift is still the one its count started from (the shape of
-  `MinterFence`). This is for PR 3.
+  says the run reads the binding's newest freeze or lift before it counts
+  the rows, from that lift, and its freeze commits under the head only
+  while that entry is still the newest (the shape of `MinterFence`). Read
+  after the rows, a lift between the two reads passes the fence. A run on
+  a frozen binding does nothing. This is for PR 3.
 - **A tunnel stops when its last good check is older than its recheck
   interval**, even if no recheck ran, so a late recheck cannot keep bytes
   flowing. This is for PR 1d.

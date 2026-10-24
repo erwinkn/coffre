@@ -547,9 +547,10 @@ code's sessions end and a deploy must enroll again. The binding's page warns
      database alone: no gate, and no state that a restart could lose.
      Contention freezes the binding (`workload.freeze`,
      `reason: 'contention'`) and alerts. `onContention: 'alert'` only
-     alerts. The freeze commits under the log head only while the
-     binding's newest freeze or lift is still the one its count started
-     from, so a run that counted before a lift cannot undo it (PR 8's
+     alerts. A run reads the binding's newest freeze or lift first, and
+     counts from it; its freeze commits under the log head only while
+     that entry is still the newest, so a run that counted before a lift
+     cannot undo it. A run on a frozen binding does nothing (PR 8's
      model).
 
    | What happens, `replicas: 2` | Contention? |
