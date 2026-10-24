@@ -2249,20 +2249,6 @@ function talliedCheckpoints(db: Queryable, where?: SQL) {
   return db.select({ seq: auditLog.seq, metadata: auditLog.metadata, hash: auditLog.hash }).from(auditLog).where(and(...talliedWhere(db), where));
 }
 
-/** The app's newest entry of `action`, by its MAC: null if there is none the app wrote. */
-export async function newestAppEntry(db: Queryable, appKey: LogKey, action: string) {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
-  if (row === undefined) return null;
-  const entry = { ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' };
-  return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [appKey] }).ok ? entry : null;
-}
-
 /**
  * How many entries of each of `actions` match `filter`, but for its
  * exclusions and limit, from `fromSeq` on: one grouped count. Both authors

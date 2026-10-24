@@ -1,5 +1,5 @@
 // What a core scheduled run costs, in CPU, with the audit watch and without
-// it (W173): the same log of `--entries`, the same twelve entries written
+// it: the same log of `--entries`, the same twelve entries written
 // before each run, as five minutes of an instance write them; then the
 // run, timed, the vault in the same process. Not part of the suite:
 //

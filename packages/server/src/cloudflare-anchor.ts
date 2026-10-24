@@ -1,8 +1,8 @@
 // The audit watch's anchor on Workers (anchor.ts, plugins/audit-watch.ts):
-// one Durable Object for the instance, named `anchor`. The deployment binds
-// it as `ANCHOR`, hands it to the watch as `auditWatch({ anchor:
-// durableAnchor(env.ANCHOR) })`, and exports it, `export const CoffreAnchor
-// = coffre.Anchor`.
+// one Durable Object for the instance, named `anchor` unless the deployment
+// names another. The deployment binds it as `ANCHOR`, hands it to the watch
+// as `auditWatch({ anchor: durableAnchor(env.ANCHOR) })`, and exports it,
+// `export const CoffreAnchor = coffre.Anchor`.
 //
 // Not Workers KV: a KV read may be a minute stale, and KV has no
 // compare-and-set, so two beats could each write over the other, and a
@@ -42,10 +42,15 @@ const KEY = 'anchor';
 /** Between one walk of a backlog and the next. */
 const WALK_EVERY_MS = 1000;
 
-/** The instance's anchor, its Durable Object. */
-export function durableAnchor(namespace: AnchorNamespace): AnchorStore {
+/**
+ * The instance's anchor, its Durable Object. `name` picks the object: a new
+ * name is a new, empty store, which the next beat re-anchors, the way to
+ * empty it on Workers.
+ */
+export function durableAnchor(namespace: AnchorNamespace, options: { name?: string } = {}): AnchorStore {
+  const name = options.name ?? KEY;
   const ask = async <T>(call: AnchorCall): Promise<T> => {
-    const object = namespace.get(namespace.idFromName(KEY));
+    const object = namespace.get(namespace.idFromName(name));
     const response = await object.fetch(new Request('https://anchor/', { method: 'POST', body: JSON.stringify(call) }));
     if (!response.ok) throw new Error(`the audit anchor failed: ${response.status} ${await response.text()}`);
     return (await response.json()) as T;

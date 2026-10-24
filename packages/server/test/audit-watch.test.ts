@@ -377,8 +377,8 @@ test('a log that takes no writes is red at once: every checkpoint deleted, the n
   // The head row names an entry the log no longer ends with: the beat's own append refuses.
   const { said, log } = warned();
   assert.equal(await beat(vault, log), false);
-  // Nor can the finding be logged: the anchor alone keeps it.
-  assert.deepEqual(said, ['audit heartbeat failed to write', 'what the audit anchor found could not be logged']);
+  // The vault refuses the log too; nor can the finding be logged: the anchor alone keeps it.
+  assert.deepEqual(said, ['audit heartbeat failed to write', 'audit checkpoint failed', 'what the audit anchor found could not be logged']);
   const { finding } = await anchored();
   assert.deepEqual([finding?.by, finding?.seq, finding?.reason.startsWith('the log takes no writes')], ['app', null, true]);
   assert.deepEqual([(await ready()).ok, (await ready()).broken], [false, true]);
@@ -406,6 +406,64 @@ test('readiness believes only an anchor the app wrote, and a beat leaves one it 
   assert.equal(await beat(vault, log), false);
   assert.ok(said[0]!.startsWith('the audit anchor is not one the app wrote'));
   assert.deepEqual(await anchor.read(), forged);
+});
+
+test('an anchor sealed under the app key before a change of APP_KEY is not the app\'s: red, named, and left alone', async () => {
+  await beat();
+  const sealed = await anchored();
+  assert.equal(sealed.keyId, appLogKey(chainKey).keyId);
+  // The deployment's auditChainKey changed, and nothing re-seals the anchor yet.
+  const changed = Buffer.alloc(32, 9);
+  assert.equal((await auditReadiness(db.runtime, vault, changed, anchor)).anchored, false);
+  const { said, log } = warned();
+  assert.equal(await writeAuditHeartbeat(db.runtime, changed, vault, anchor, log), false);
+  assert.ok(said.includes(`the audit anchor is sealed under ${sealed.keyId}, not the app's key ${appLogKey(changed).keyId}: auditChainKey changed, and nothing re-seals it yet. Empty its store, and the next beat re-anchors`), said.join('\n'));
+  assert.deepEqual(await anchor.read(), sealed);
+});
+
+test('a beat that a walk between beats wrote the anchor before goes on from that walk, and writes its own', async () => {
+  // More than a walk of the log, which the vault and the beats have caught up with; then the store emptied, and a
+  // beat that leaves the re-anchoring's walk to go on.
+  await backlog(CHAIN_WALK + 500);
+  for (let i = 0; i < 3; i++) await beat();
+  anchor = memoryAnchor();
+  assert.equal(await beat(), true, 'a backlog is no failure');
+  const before = await anchored();
+  assert.ok(before.verified!.seq < before.checkpoint!.seq);
+  // The next beat pauses as it opens its walk; a walk between beats, the Durable Object's alarm, writes meanwhile.
+  let reached!: () => void;
+  const paused = new Promise<void>((resolve) => (reached = resolve));
+  let go!: () => void;
+  const released = new Promise<void>((resolve) => (go = resolve));
+  let n = 0;
+  const pausing = new Proxy(db.runtime, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver) as unknown;
+      if (key !== 'transaction' || typeof value !== 'function') return value;
+      return async (...args: unknown[]) => {
+        if (++n === 2) {
+          reached();
+          await released;
+        }
+        return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+      };
+    },
+  });
+  const next = writeAuditHeartbeat(pausing, chainKey, vault, anchor, quiet);
+  await paused;
+  await walkAuditBacklog(db.runtime, chainKey, vault, anchor);
+  const walked = await anchored();
+  assert.ok(walked.verified!.seq > before.verified!.seq);
+  assert.deepEqual([walked.beat, walked.at, walked.checkpoint], [before.beat, before.at, before.checkpoint]);
+  go();
+  assert.equal(await next, true);
+  // The beat's own record: its row, its checkpoint, its time, and the walk's progress kept.
+  const after = await anchored();
+  assert.ok(after.beat! > before.beat!);
+  assert.ok(after.checkpoint!.seq > before.checkpoint!.seq);
+  assert.ok(after.verified!.seq > walked.verified!.seq);
+  assert.equal(after.finding, null);
+  assert.equal((await ready()).ok, true);
 });
 
 test('readiness counts a checkpoint under a key the vault replaced only over a prefix before the rotation', async () => {

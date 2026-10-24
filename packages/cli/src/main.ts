@@ -1872,7 +1872,6 @@ async function audit(args: string[]): Promise<void> {
   }
 }
 
-/** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
 /**
  * An Owner's acceptance that audit entries `<from>` to `<to>` are lost for
  * good: the audit watch's anchor goes on past them, and its finding, with
@@ -1886,6 +1885,7 @@ async function acceptLoss(args: string[]): Promise<void> {
   process.stdout.write(`entries ${from} to ${to} accepted as lost: the audit watch goes on from entry ${resumes ?? 0}\n`);
 }
 
+/** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
 async function verify(args: string[]): Promise<void> {
   const [named, ...more] = args;
   if (named === '--help' || named === '-h') {

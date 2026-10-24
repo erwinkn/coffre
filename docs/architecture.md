@@ -705,9 +705,13 @@ vault's newest checkpoint, signed under the vault's key; how far the app
 verified, the checkpoint's prefix once caught up; what a walk found, if
 anything stands; and the beat that wrote it. The app MACs it under a key
 derived from `auditChainKey`, so a store with weak access control is
-still tamper-evident. A write replaces the record the beat read before
-its checkpoint, and never moves either point back: two beats at once, the
-second loses the compare-and-set, and finds nothing. The heartbeat rows
+still tamper-evident, and the record names that key, `app:<fingerprint>`
+as the log's entries do, so that a rotation of the key can re-seal it. A
+write replaces the record the beat read before its checkpoint, and never
+moves either point back: two beats at once, the second loses the
+compare-and-set, and finds nothing; a beat that loses it to a walk
+between beats, toward the same checkpoint, goes again from that walk's
+record. The heartbeat rows
 say nothing a beat reads: hiding, forging or deleting one is an edit or a
 gap like any other.
 

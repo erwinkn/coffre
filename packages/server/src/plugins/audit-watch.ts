@@ -86,7 +86,7 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
   let unusable: string | null = null;
   try {
     prev = await anchors.read();
-    if (prev !== null && !ctx.own(prev)) unusable = 'the audit anchor is not one the app wrote: once it is understood, empty its store, and the next beat re-anchors';
+    if (prev !== null && !ctx.own(prev)) unusable = foreign(ctx, prev);
   } catch (error) {
     unusable = `the audit anchor could not be read: ${(error as Error).message}`;
   }
@@ -101,38 +101,71 @@ export async function beat(ctx: WatchContext, anchors: AnchorStore): Promise<boo
   }
   // The vault checkpoints whatever becomes of the beat and the anchor: its own walk, its refusal and its rehash of
   // the past go on.
-  const signed = await ctx.vault.checkpoint().catch((error: Error) => ({ ok: false as const, thrown: error.message }));
+  const signed: Signed = await ctx.vault.checkpoint().then(
+    (outcome) => (outcome.ok ? outcome : { ok: false as const, reason: `the vault refused to checkpoint the log: ${outcome.refusal.message}` }),
+    (error: Error) => ({ ok: false as const, reason: `the vault could not checkpoint the log: ${error.message}` }),
+  );
   if (signed.ok && signed.warning !== undefined) ctx.warn({ warning: signed.warning }, 'the vault checkpointed the audit log, with a warning');
+  if (!signed.ok) ctx.warn({ reason: signed.reason }, 'audit checkpoint failed');
   if (unusable !== null) {
     ctx.warn({}, unusable);
     return false;
   }
-  const base = prev ?? unanchored(Date.now());
-  const write = (next: Fields) => commit(ctx, anchors, prev, base, { ...next, beat, at: Date.now() });
-  // What keeps this beat from verifying stands in the anchor, and readiness is red now: a finding of the app's walk
-  // until its entry verifies again, anything else until a beat verifies.
-  const standing = base.finding?.by === 'app' && base.finding.seq !== null ? base.finding : null;
-  const fails = async (by: AnchorFinding['by'], reason: string) => {
-    await write({ ...base, finding: standing ?? sameOr(base.finding, { seq: null, reason, by, since: Date.now() }) });
-    return false;
-  };
-  if (unwritten !== null) return fails('app', `the log takes no writes: ${unwritten}`);
-  if (!signed.ok) {
-    const reason = 'thrown' in signed ? `the vault could not checkpoint the log: ${signed.thrown}` : `the vault refused to checkpoint the log: ${signed.refusal.message}`;
-    ctx.warn({ reason }, 'audit checkpoint failed');
-    return fails('vault', reason);
+  for (let lost = 0; ; lost++) {
+    const base = prev ?? unanchored(Date.now());
+    const next = await outcome(ctx, base, signed, unwritten);
+    const written = await commit(ctx, anchors, prev, base, { ...next, beat, at: Date.now() });
+    // Short of the checkpoint, or the checkpoint short of this beat, as a vault signing a backlog a walk a call is,
+    // is no failure: the next walk goes on, and readiness says how far.
+    if (written !== 'lost') return written === 'written' && next.finding === null;
+    // A walk between beats (`walkOn`) moved only how far the app verified, toward the same checkpoint: this beat goes
+    // on from there, as if it had read it first. Another beat's anchor, a later checkpoint's, is the next beat's to
+    // go on from, and this one writes nothing.
+    const now = await anchors.read().catch(() => null);
+    if (lost === WRITES_LOST || prev === null || now === null || !ctx.own(now) || now.epoch !== prev.epoch || !samePoint(now.checkpoint, prev.checkpoint)) {
+      ctx.warn({}, 'another beat wrote the audit anchor first: the next goes on from it');
+      return false;
+    }
+    prev = now;
   }
-  if (standing !== null && !(await repaired(ctx, standing.seq!, base))) return fails('app', standing.reason);
-  let next: Fields;
+}
+
+/** The vault's checkpoint as a beat asked it: signed, or why not. */
+type Signed = { ok: true; checkpoint: Checkpoint; warning?: string } | { ok: false; reason: string };
+
+/** How many times a beat writes again over a walk between beats that wrote first. */
+const WRITES_LOST = 3;
+
+/** Why a record in the store is not the app's: another key's, or no key's. */
+function foreign(ctx: WatchContext, anchor: AuditAnchor): string {
+  const sealed = typeof anchor.keyId === 'string' ? anchor.keyId : null;
+  return sealed !== null && sealed !== ctx.keyId
+    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed, and nothing re-seals it yet. Empty its store, and the next beat re-anchors`
+    : 'the audit anchor is not one the app wrote: once it is understood, empty its store, and the next beat re-anchors';
+}
+
+function samePoint(a: LogHead | null, b: LogHead | null): boolean {
+  return a?.seq === b?.seq && a?.hash === b?.hash;
+}
+
+/**
+ * What a beat leaves in the anchor, from `base`: what keeps it from
+ * verifying stands, and readiness is red now, a finding of the app's walk
+ * until its entry verifies again, anything else until a beat verifies;
+ * otherwise the walk toward the checkpoint signed.
+ */
+async function outcome(ctx: WatchContext, base: Fields, signed: Signed, unwritten: string | null): Promise<Fields> {
+  const standing = base.finding?.by === 'app' && base.finding.seq !== null ? base.finding : null;
+  const fails = (by: AnchorFinding['by'], reason: string): Fields => ({ ...base, finding: standing ?? sameOr(base.finding, { seq: null, reason, by, since: Date.now() }) });
+  if (unwritten !== null) return fails('app', `the log takes no writes: ${unwritten}`);
+  if (!signed.ok) return fails('vault', signed.reason);
+  if (standing !== null && !(await repaired(ctx, standing.seq!, base))) return { ...base, finding: standing };
   try {
-    next = await advance(ctx, base, signed.checkpoint);
+    return await advance(ctx, base, signed.checkpoint);
   } catch (error) {
     ctx.warn({ err: (error as Error).message }, 'the audit log could not be verified from the anchor');
     return fails('app', `the log could not be walked: ${(error as Error).message}`);
   }
-  // Short of the checkpoint, or the checkpoint short of this beat, as a vault signing a backlog a walk a call is, is
-  // no failure: the next walk goes on, and readiness says how far.
-  return (await write(next)) && next.finding === null;
 }
 
 /**
@@ -146,7 +179,7 @@ export async function walkOn(ctx: WatchContext, anchors: AnchorStore): Promise<b
   if (prev === null || !ctx.own(prev) || !walking(prev)) return false;
   const next = await advance(ctx, prev, prev.checkpoint!);
   const fields = { ...next, beat: prev.beat, at: prev.at };
-  return (await commit(ctx, anchors, prev, prev, fields)) && walking(fields);
+  return (await commit(ctx, anchors, prev, prev, fields)) === 'written' && walking(fields);
 }
 
 /** Whether an anchor has a backlog to walk: a checkpoint it has not verified through, and nothing found. */
@@ -178,15 +211,15 @@ async function advance(ctx: WatchContext, anchor: Fields, target: Checkpoint): P
 /**
  * The anchor written over the record read, and what changed since `base`,
  * what the write started from, logged: a finding made or cleared, and a
- * re-anchoring done, which alerts too. Whether it was written.
+ * re-anchoring done, which alerts too. `lost` when the store holds
+ * another record than `prev`, `failed` when it could not be used.
  */
-async function commit(ctx: WatchContext, anchors: AnchorStore, prev: AuditAnchor | null, base: Fields, fields: AnchorFields): Promise<boolean> {
+async function commit(ctx: WatchContext, anchors: AnchorStore, prev: AuditAnchor | null, base: Fields, fields: AnchorFields): Promise<'written' | 'lost' | 'failed'> {
   const written = await anchors.write(prev, ctx.seal(fields)).catch((error: Error) => {
     ctx.warn({ err: error.message }, 'the audit anchor could not be written');
     return null;
   });
-  if (written === false) ctx.warn({}, 'another beat wrote the audit anchor first: the next goes on from it');
-  if (written !== true) return false;
+  if (written !== true) return written === false ? 'lost' : 'failed';
   const was = base.finding;
   const since = base.reanchor?.since;
   const reanchored = since !== undefined && fields.reanchor === null && fields.finding === null && fields.checkpoint !== null;
@@ -200,7 +233,7 @@ async function commit(ctx: WatchContext, anchors: AnchorStore, prev: AuditAnchor
   if (reanchored) {
     ctx.alert(`the audit anchor's store was empty: the log was walked whole and re-anchored at entry ${fields.checkpoint!.seq}. A cut made before the store emptied would go unseen: check the log's newest entries against your own records.`);
   }
-  return true;
+  return 'written';
 }
 
 /** The finding that stands, if it is this one again: its first sighting stays the one logged. */

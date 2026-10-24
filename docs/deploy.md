@@ -938,6 +938,13 @@ on past the range, and finds tampering anywhere else as before.
 If the store cannot be reached, the beat fails and readiness is red, and
 both recover by themselves once it answers: what it holds was not lost.
 
+**Changing `APP_KEY` (`auditChainKey`) makes the anchor unreadable**: the
+record names the key it is sealed under, and coffre cannot re-seal it yet.
+Readiness is red and the beat leaves the record alone until you empty its
+store; the next beat then re-anchors, with its alert. To empty it, delete
+the file on Node; on Workers, name a new object,
+`durableAnchor(env.ANCHOR, { name: 'anchor-2' })`, and deploy.
+
 ## MCP clients
 
 Claude and other MCP clients connect at `<PUBLIC_URL>/mcp` as the people

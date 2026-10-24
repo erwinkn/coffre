@@ -41,19 +41,58 @@
   - On Workers, a refused stream shows in the logs as an uncaught
     exception (workerd reports the subrequest body's error), beside the
     400 the app gets.
-- **The audit watch, a plugin (prototype, W173).** What the heartbeat did
-  is now `auditWatch`, which `coffre init` writes into both kinds of
-  deployment: every five minutes it walks the log from what it last
-  verified, kept outside the database (a Durable Object on Workers,
-  `durableAnchor(env.ANCHOR)`; a file on Node, `fileAnchor`, on a
-  persistent volume), and `/readyz` reads that, a constant cost. An empty
-  store re-anchors itself after a walk of the whole log, logged and
-  alerted; an Owner accepts entries lost for good with `coffre audit
-  accept-loss`. The heartbeat rows' resume cursor, its 1,000-beat lookback
-  and its clearing rule are gone; old `audit.heartbeat` entries verify as
-  any other. Without the plugin, `/readyz` says the database is migrated,
-  and the log is verified only when asked. A deployment adds the binding
-  and the plugin ([deploy.md](docs/deploy.md#the-audit-watch)).
+- **The audit watch: what the heartbeat verified is kept outside the
+  database.** Whoever can write the database, without any key, could
+  change the heartbeat rows that said how far the log was verified, and
+  so where the next beat's walk began. Two gaps were left: a row of the
+  app's relabelled as the vault's, with the tail chained again behind it,
+  kept `/readyz` green for up to a beat; and a finding standing for more
+  than 1,000 beats (about three and a half days) sent every walk back to
+  the first entry, red for good. Each beat now walks the log from what it
+  last verified to the prefix the vault just signed, and keeps that in an
+  anchor outside the database, a Durable Object on Workers or a file on
+  Node, written by compare-and-set and never moved back. `/readyz` reads
+  the anchor and one entry of the log: a constant cost however long the
+  log, and green on nothing the vault has not signed and the app walked.
+  A finding stands in the anchor, and each beat rechecks only the entry it
+  names until that entry verifies again; each finding and its clearing is
+  logged (`audit.finding`, `audit.finding_cleared`). The heartbeat rows'
+  resume cursor, its 1,000-beat lookback and its clearing rule are gone,
+  and with them both gaps; old `audit.heartbeat` rows verify as any other
+  entry.
+  - **It is a plugin, `auditWatch`**, which `coffre init` writes into both
+    kinds of deployment. Without it, `/readyz` says the database is
+    migrated, the scheduled run still has the vault checkpoint the log,
+    and the log is verified when someone asks (`coffre verify log`, the
+    audit page).
+  - **An empty store re-anchors by itself**: the first beat after the
+    watch is added, or after its store was lost, walks the log whole,
+    10,000 entries a beat and more between beats, with `/readyz` green
+    meanwhile, then logs `audit.reanchor` and sends one alert on the
+    workloads' alert channel (`signin({ workloads: { alert } })`). A cut
+    made before the store emptied cannot be seen.
+  - **Entries lost for good**, a tail cut with no backup, are accepted by
+    an Owner of the whole instance, as a person: `coffre audit accept-loss
+    <from> <to>` (`POST /api/audit/loss`), a range that holds the entry
+    the finding names. The acceptance is logged with the finding, which
+    stays in the log, and alerted.
+  - **Upgrading: no database migration; each deployment adds the watch.**
+    On Workers, in `app/wrangler.jsonc`, the binding `{ "name": "ANCHOR",
+    "class_name": "CoffreAnchor" }` beside `GATES` and the migration `{
+    "tag": "anchor", "new_sqlite_classes": ["CoffreAnchor"] }` after its
+    own; in `app/src/server.ts`, `export const CoffreAnchor =
+    coffre.Anchor;`; in `app/src/coffre.ts`, `ANCHOR: AnchorNamespace` in
+    `Env` and `plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR)
+    })]`. On Node, `plugins: [auditWatch({ anchor:
+    fileAnchor(env('AUDIT_ANCHOR')) })]`, `AUDIT_ANCHOR` a path on a
+    persistent volume only the server writes, one file per server process
+    ([deploy.md](docs/deploy.md#the-audit-watch) says what several want).
+    The first beat finds the store empty and re-anchors: expect its one
+    alert.
+  - **Changing `APP_KEY` makes the anchor unreadable**, as nothing re-seals
+    it yet: `/readyz` is red and the beat leaves it alone until its store
+    is emptied, which re-anchors. The record names the key it is sealed
+    under, for the rotation that will.
 
 ## 0.12.0 (2026-10-24)
 

@@ -14,7 +14,7 @@ import type { Checkpoint, CheckpointKey, LogHead, Outcome, Vault } from '@coffre
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
-import { anchorIsOwn, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
+import { anchorIsOwn, anchorKeyId, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
 import { appendAudit, appLogKey, CHAIN_START, walkChain, type AuditEntry } from './db/audit.ts';
 import { auditHashAt, auditRange } from './db/queries.ts';
 
@@ -60,9 +60,13 @@ export type WatchContext = {
   alert(text: string): void;
   /** The process's log. */
   warn(obj: unknown, msg: string): void;
-  /** A record of the watcher's, MACed under a key core derives from `auditChainKey`; and whether one is. */
+  /**
+   * A record of the watcher's, MACed under a key core derives from
+   * `auditChainKey` and named by that key's id, `keyId`; and whether one is.
+   */
   seal(fields: AnchorFields): AuditAnchor;
   own(anchor: AuditAnchor): boolean;
+  keyId: string;
 };
 
 /** What a watcher does, beside its plugin's routes. Each hook gets its own context, and its own store. */
@@ -149,5 +153,6 @@ export function watchContext(deps: WatchDeps): WatchContext {
     warn: deps.warn ?? ((obj, msg) => console.warn(msg, obj)),
     seal: (fields) => sealAnchor(chainKey, fields),
     own: (anchor) => anchorIsOwn(chainKey, anchor),
+    keyId: anchorKeyId(chainKey),
   };
 }

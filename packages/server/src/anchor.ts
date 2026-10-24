@@ -11,6 +11,7 @@
 // older record back.
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
+import { deriveLogKey } from '@coffre/core/audit';
 import type { Checkpoint, LogHead } from '@coffre/core/vault';
 
 /**
@@ -45,12 +46,18 @@ export type AuditAnchor = {
   epoch: number;
   /** When a beat last wrote it, milliseconds since the epoch, by the app's clock. */
   at: number;
+  /**
+   * The app key it is sealed under, as the log's entries name it
+   * (`app:<fingerprint>`): what a rotation of `auditChainKey` re-seals it
+   * from (R41). Until then, one sealed under another key is not the app's.
+   */
+  keyId: string;
   /** The app's MAC over the rest, hex. */
   mac: string;
 };
 
-/** An anchor before its MAC. */
-export type AnchorFields = Omit<AuditAnchor, 'mac'>;
+/** An anchor before its key id and MAC. */
+export type AnchorFields = Omit<AuditAnchor, 'keyId' | 'mac'>;
 
 /**
  * Where the anchor lives. `write` puts `next` in place of `prev` (null for
@@ -63,26 +70,37 @@ export type AnchorStore = {
   write(prev: AuditAnchor | null, next: AuditAnchor): Promise<boolean>;
 };
 
-const keys = new WeakMap<Buffer, Buffer>();
+const keys = new WeakMap<Buffer, { key: Buffer; id: string }>();
 
-function anchorKey(chainKey: Buffer): Buffer {
-  let key = keys.get(chainKey);
-  if (key === undefined) keys.set(chainKey, (key = Buffer.from(hkdfSync('sha256', chainKey, new Uint8Array(0), 'coffre.audit.anchor.v1', 32))));
-  return key;
+/** The record's MAC key, derived from `auditChainKey`, and that key's id as the log's entries name it. */
+function anchorKey(chainKey: Buffer): { key: Buffer; id: string } {
+  let derived = keys.get(chainKey);
+  if (derived === undefined) {
+    derived = { key: Buffer.from(hkdfSync('sha256', chainKey, new Uint8Array(0), 'coffre.audit.anchor.v1', 32)), id: deriveLogKey('app', chainKey).keyId };
+    keys.set(chainKey, derived);
+  }
+  return derived;
 }
 
-function macOf(chainKey: Buffer, fields: AnchorFields): Buffer {
-  const { checkpoint, verified, finding, beat, reanchor, epoch, at } = fields;
-  return createHmac('sha256', anchorKey(chainKey)).update(JSON.stringify([checkpoint, verified, finding, beat, reanchor, epoch, at])).digest();
+function macOf(chainKey: Buffer, fields: Omit<AuditAnchor, 'mac'>): Buffer {
+  const { checkpoint, verified, finding, beat, reanchor, epoch, at, keyId } = fields;
+  return createHmac('sha256', anchorKey(chainKey).key).update(JSON.stringify([checkpoint, verified, finding, beat, reanchor, epoch, at, keyId])).digest();
 }
 
-/** `fields`, MACed. */
+/** The id of the app key `chainKey` is, which a record sealed under it names. */
+export function anchorKeyId(chainKey: Buffer): string {
+  return anchorKey(chainKey).id;
+}
+
+/** `fields`, named by the key they are sealed under and MACed. */
 export function sealAnchor(chainKey: Buffer, fields: AnchorFields): AuditAnchor {
-  return { ...fields, mac: macOf(chainKey, fields).toString('hex') };
+  const named = { ...fields, keyId: anchorKeyId(chainKey) };
+  return { ...named, mac: macOf(chainKey, named).toString('hex') };
 }
 
-/** Whether the app wrote this record, by its MAC. */
+/** Whether the app wrote this record, under this key, by its MAC. */
 export function anchorIsOwn(chainKey: Buffer, anchor: AuditAnchor): boolean {
+  if (anchor.keyId !== anchorKeyId(chainKey)) return false;
   const mac = Buffer.from(typeof anchor.mac === 'string' ? anchor.mac : '', 'hex');
   const expected = macOf(chainKey, anchor);
   return mac.length === expected.length && timingSafeEqual(mac, expected);

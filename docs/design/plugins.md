@@ -317,7 +317,7 @@ plugins: [
 
 ### Watching the log
 
-The audit watch (`@coffre/server/plugins/audit-watch`, W173) is the first
+The audit watch (`@coffre/server/plugins/audit-watch`) is the first
 plugin that is no route: it watches the audit log on the scheduled run
 and contributes to `/readyz`. A route's plugin reaches coffre only as its
 request's caller, through the API; a watcher has no caller, and the work

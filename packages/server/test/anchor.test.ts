@@ -4,7 +4,9 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { admits, anchorIsOwn, memoryAnchor, sealAnchor, type AnchorFields, type AnchorStore } from '../src/anchor.ts';
+import { deriveLogKey } from '@coffre/core/audit';
+
+import { admits, anchorIsOwn, anchorKeyId, memoryAnchor, sealAnchor, type AnchorFields, type AnchorStore } from '../src/anchor.ts';
 import { fileAnchor } from '../src/anchor-file.ts';
 import { anchorObject, durableAnchor, type AnchorNamespace } from '../src/cloudflare-anchor.ts';
 
@@ -86,6 +88,17 @@ test('an anchor is the app\'s by its MAC: every field counts, and another key\'s
     assert.equal(anchorIsOwn(chainKey, { ...sealed, ...changed }), false, JSON.stringify(changed));
   }
   assert.equal(anchorIsOwn(chainKey, { ...sealed, mac: 'not hex' }), false);
+});
+
+test('an anchor names the app key it is sealed under, as the log\'s entries do, and the name counts', () => {
+  const sealed = sealAnchor(chainKey, fields(3));
+  assert.equal(sealed.keyId, deriveLogKey('app', chainKey).keyId);
+  assert.equal(anchorKeyId(chainKey), sealed.keyId);
+  const rotated = Buffer.alloc(32, 2);
+  assert.notEqual(anchorKeyId(rotated), sealed.keyId);
+  // Renamed, it is no longer the app's, under either key.
+  assert.equal(anchorIsOwn(chainKey, { ...sealed, keyId: anchorKeyId(rotated) }), false);
+  assert.equal(anchorIsOwn(rotated, { ...sealed, keyId: anchorKeyId(rotated) }), false);
 });
 
 test('admits: the first write needs nothing stored, every later one the record stored', () => {

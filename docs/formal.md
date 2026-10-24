@@ -283,7 +283,7 @@ reference to that secret in `References`, and none yet elsewhere.
   `projects.ts`, `secrets.ts`, `references.ts` or `signin.ts` should change
   `Coffre.tla` in the same pull request; one in `workloads.ts`, `signin.ts`,
   `services.ts` or `context.ts`, `Credentials.tla` or `Issuing.tla`; one in
-  the vault's count, `Bulk.tla`; one in `heartbeat.ts`, `anchor.ts`, `audit.ts` or
+  the vault's count, `Bulk.tla`; one in `plugins/audit-watch.ts`, `anchor.ts`, `audit.ts` or
   the vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`.
 - **Beyond the bounds.** The bounds are three places, a few members, and three
   or four requests of one to three operations each. Races that need more are
@@ -846,7 +846,7 @@ beat saw, where its prefix ends and its hash; how far the app verified;
 the entry a walk found, or that the vault refused; and the beat that
 wrote it.
 
-- **A heartbeat** (`heartbeat.ts`, `writeAuditHeartbeat`):
+- **A heartbeat** (`plugins/audit-watch.ts`, `beat`):
   1. the beat's row, under the head;
   2. the anchor, read;
   3. the vault's checkpoint, below, which returns the prefix it signed, or
@@ -857,7 +857,11 @@ wrote it.
      `CHAIN_WALK` entries, each link and hash and the app's MACs, ending
      at the hash the vault signed; a finding of the app's that stands is
      checked alone instead, its entry, until it verifies again;
-  5. the anchor written, over the record read in step 2 (`AnchorCas`).
+  5. the anchor written, over the record read in step 2 (`AnchorCas`). If
+     a walk between beats (`walkOn`) wrote it first, toward the same
+     checkpoint, the beat reads that record and goes again from step 4,
+     as it would had it read that record in step 2; any other record
+     written first, and it writes nothing.
 - **A checkpoint** (`vault.ts`, `checkpoint`), as before the anchor:
   1. the walk from the newest one, in a snapshot, at most
      `walks.checkpoint` entries, each link and hash, and the vault's MACs;
@@ -868,7 +872,7 @@ wrote it.
      reached the head, the rest walked and the head signed, or else where
      the walk got to, behind it, unless another call signed as far;
   4. a refusal's entry, in a transaction of its own.
-- **Readiness** (`auditReadiness`): the anchor, then, in another read,
+- **Readiness** (`plugins/audit-watch.ts`, `readiness`): the anchor, then, in another read,
   the log's entry at its checkpoint, by its hash (`ReadinessChecksHeld`).
 
 Why that is enough. Readiness vouches for the prefix the anchor's
@@ -888,7 +892,7 @@ beat's: readiness says nothing of it.
 | A checkpoint's walk checks the vault's MACs, and under the head the prefix signed last (`rehash`, `carries`) | a prefix signed over a vault entry chained after a rewrite (`SignsNoForgedVault`) | |
 | Under the head, a call that another overtook signs nothing, and a refusal since the last checkpoint stands (`seen`, `#standingRefusal`) | a checkpoint signed after a refusal for a tamper the vault can find (`StaysUnsignedOnceFound`) | |
 | The scrub recomputes the signed prefix's hashes (`#scrub`, `relink`) | an entry edited in place, signed over again and again (`EditFoundByNextScrub`) | |
-| Readiness checks that the log still holds the anchor's prefix (`auditReadiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
+| Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
 | A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`) | this model |
 
 Two protections the code keeps are not needed in the model: the beat's

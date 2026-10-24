@@ -55,10 +55,10 @@ CONSTANTS
     Scrubs,
     \* A beat's walk checks first that the log still holds the prefix the
     \* anchor's checkpoint signed, and that the vault signed no shorter one
-    \* (server heartbeat.ts, walkToCheckpoint).
+    \* (server plugins/audit-watch.ts, advance).
     AnchorHeld,
     \* Readiness checks that the log still holds the prefix the anchor's
-    \* checkpoint signed (server heartbeat.ts, auditReadiness, `holds`).
+    \* checkpoint signed (server plugins/audit-watch.ts, readiness, `holds`).
     ReadinessChecksHeld,
     \* A beat writes the anchor only over the record it read before its
     \* checkpoint (anchor.ts, AnchorStore.write, `admits`).
@@ -134,7 +134,7 @@ Calm == \A i \in 1..Len(log) : log[i].edited = 0
 
 NoAnchor == [exists |-> FALSE, rev |-> 0, at |-> 0, ver |-> 0, verified |-> 0, vver |-> 0, found |-> 0, vfound |-> FALSE, beat |-> 0]
 
-\* What readiness answers (server heartbeat.ts, auditReadiness): an anchor,
+\* What readiness answers (server plugins/audit-watch.ts, readiness): an anchor,
 \* no finding, caught up to its checkpoint, which covers the beat that
 \* wrote it, and whose prefix the log still holds. Its age, the
 \* signature and the key are left out.
@@ -146,7 +146,7 @@ ReadyWith(a) ==
     /\ ReadinessChecksHeld => Carries(a.at, a.ver)
 ReadyNow == ReadyWith(anchor)
 
-\* The entry a finding names verifies again, alone (heartbeat.ts, `repaired`):
+\* The entry a finding names verifies again, alone (audit-watch.ts, `repaired`):
 \* a point the anchor holds by its hash, any other by its own.
 Repaired(a) ==
     IF a.found = a.verified THEN Carries(a.verified, a.vver)
@@ -233,7 +233,7 @@ Tamper(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* A heartbeat (server heartbeat.ts, writeAuditHeartbeat): the beat, the   *)
+(* A heartbeat (server plugins/audit-watch.ts, beat): the beat, the        *)
 (* anchor read, the vault's checkpoint, the walk from the anchor to the    *)
 (* prefix it signed, then the anchor written over the record it read.      *)
 (***************************************************************************)
@@ -380,7 +380,7 @@ CkptDenied(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* Readiness, as a monitor asks it (server heartbeat.ts, auditReadiness):  *)
+(* Readiness, as a monitor asks it (server audit-watch.ts, readiness):     *)
 (* the anchor, then, in another read, the log at its checkpoint.           *)
 (***************************************************************************)
 
