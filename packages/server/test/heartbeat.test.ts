@@ -1,17 +1,17 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveLogKey, sealEntry, type StoredEntry } from '@coffre/core/audit';
+import { deriveLogKey, entryHash, sealEntry, type StoredEntry } from '@coffre/core/audit';
 import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc, desc, eq, gte } from 'drizzle-orm';
 
-import { appendAudit, appLogKey } from '../src/db/audit.ts';
+import { appendAudit, appLogKey, resumePoint } from '../src/db/audit.ts';
 import { latestCheckpoint } from '../src/db/queries.ts';
 import { auditReadiness, HEARTBEAT_STALE_AFTER_SECONDS, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { openTestDatabase, resetDatabase, testVault } from './api-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { auditChainHead, auditLog } from './db/tables.ts';
 import { withLogUnlocked } from './db/engine.ts';
 
 const db = await openTestDatabase();
@@ -27,20 +27,27 @@ function entries() {
   return db.owner.select().from(auditLog).orderBy(asc(auditLog.seq));
 }
 
-/** Moves the newest beat `seconds` into the past. Readiness reads its date, not its chain. */
+/** Moves the newest beat `seconds` into the past. Readiness reads its date, and walks the chain from it. */
 async function beatAgo(seconds: number) {
-  const [beat] = (await db.owner
+  const [beat, ...after] = (await db.owner
     .select()
     .from(auditLog)
-    .where(eq(auditLog.action, 'audit.heartbeat'))
-    .orderBy(desc(auditLog.seq))
-    .limit(1)) as StoredEntry[];
+    .where(gte(auditLog.seq, (await db.owner.select().from(auditLog).where(eq(auditLog.action, 'audit.heartbeat')).orderBy(desc(auditLog.seq)).limit(1))[0]!.seq))
+    .orderBy(asc(auditLog.seq))) as StoredEntry[];
   // Sealed again under the app's key, as if the app had written it then: readiness believes only the app's beats.
   const aged = { ...beat!, occurredAt: Date.now() - seconds * 1000 };
   const { mac, hash } = sealEntry(appLogKey(chainKey), aged.prevHash, aged);
-  await withLogUnlocked(db.owner, (owner) =>
-    owner.update(auditLog).set({ occurredAt: aged.occurredAt, mac, hash }).where(eq(auditLog.seq, beat!.seq)),
-  );
+  await withLogUnlocked(db.owner, async (owner) => {
+    await owner.update(auditLog).set({ occurredAt: aged.occurredAt, mac, hash }).where(eq(auditLog.seq, beat!.seq));
+    // And the entries after it chained to it again, as they would have been.
+    let prevHash = hash;
+    for (const entry of after) {
+      const next = entryHash(prevHash, entry, entry.mac);
+      await owner.update(auditLog).set({ prevHash, hash: next }).where(eq(auditLog.seq, entry.seq));
+      prevHash = next;
+    }
+    await owner.update(auditChainHead).set({ headHash: prevHash });
+  });
 }
 
 test('a beat is an app entry, and the vault checkpoints it in an entry of its own', async () => {
@@ -158,17 +165,20 @@ test('an empty log has nothing to checkpoint, and logs nothing for it', async ()
 
 test('readiness accepts a recent beat and rejects a stale one', async () => {
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+  // The vault's keys as it gives them: it would refuse a log whose head moved under it, as `beatAgo` moves it.
+  const { checkpointKeys } = await vault.about();
+  const keys = { about: async () => ({ checkpointKeys, rootAdmins: [] }) } as unknown as Vault;
   await beatAgo(12);
-  const recent = await auditReadiness(db.runtime, vault, chainKey);
+  const recent = await auditReadiness(db.runtime, keys, chainKey);
   assert.equal(recent.ok, true);
   assert.ok(Math.abs(recent.heartbeatAgeSeconds! - 12) < 5);
 
   // A Cron run that fires a few seconds late is not a logging failure.
   await beatAgo(307);
-  assert.equal((await auditReadiness(db.runtime, vault, chainKey)).ok, true);
+  assert.equal((await auditReadiness(db.runtime, keys, chainKey)).ok, true);
 
   await beatAgo(HEARTBEAT_STALE_AFTER_SECONDS + 60);
-  const stale = await auditReadiness(db.runtime, vault, chainKey);
+  const stale = await auditReadiness(db.runtime, keys, chainKey);
   assert.equal(stale.ok, false);
   assert.equal(stale.checkpointed, true);
   assert.ok(stale.heartbeatAgeSeconds! > HEARTBEAT_STALE_AFTER_SECONDS);
@@ -201,4 +211,146 @@ test('readiness believes only a beat the app wrote', async () => {
   assert.ok((await vault.checkpoint()).ok);
   const ready = await auditReadiness(db.runtime, vault, chainKey);
   assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
+});
+
+/**
+ * `db.runtime`, with `around` run before and after each transaction a beat opens: its reads in snapshots, then its
+ * append, the one it opens without (`write`).
+ */
+function stepping(around: (step: { n: number; write: boolean }, phase: 'before' | 'after') => Promise<void>) {
+  let n = 0;
+  return new Proxy(db.runtime, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver) as unknown;
+      if (key !== 'transaction' || typeof value !== 'function') return value;
+      return async (...args: unknown[]) => {
+        const step = { n: ++n, write: args.length < 2 };
+        await around(step, 'before');
+        const result = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        await around(step, 'after');
+        return result;
+      };
+    },
+  });
+}
+
+async function beats() {
+  return (await entries()).filter((row) => row.action === 'audit.heartbeat');
+}
+
+const said = (row: { metadata: string }) => JSON.parse(row.metadata) as { verified?: { seq: number }; broken?: { seq: number } };
+
+/** Sets a column of entry `seq` as whoever writes the database would, its hash and MAC left as they were. */
+function overwrite(seq: bigint, columns: { action?: string; metadata?: string }) {
+  return withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set(columns).where(eq(auditLog.seq, seq)));
+}
+
+// A vault whose scrub rehashes one entry a checkpoint: an edit in place behind its newest checkpoint stays unfound by it
+// for these tests, as within its two laps it does on a long log, and only the heartbeat's walk can find it.
+const slow = testVault([], {}, undefined, { scrub: 1 });
+
+/**
+ * Two heartbeats at once, as on two instances: beat A walks past entry X,
+ * clean, and waits to append; X is edited in place; beat F walks from
+ * before X, finds it, and commits; then A commits, clean, the newest beat.
+ * Returns X and F's row.
+ */
+async function overtaken() {
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await db.runtime.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'secret.read', decision: 'allow' }]));
+  const x = (await entries()).at(-1)!.seq;
+  // The checkpoint signs X before the edit, which its scrub then reaches only laps later.
+  assert.ok((await slow.checkpoint()).ok);
+  let reached!: () => void;
+  const walked = new Promise<void>((resolve) => (reached = resolve));
+  let go!: () => void;
+  const released = new Promise<void>((resolve) => (go = resolve));
+  const a = writeAuditHeartbeat(stepping(async ({ write }, phase) => {
+    if (write && phase === 'before') {
+      reached();
+      await released;
+    }
+  }), chainKey, slow, quiet);
+  await walked;
+  await overwrite(x, { metadata: '{"edited":true}' });
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  const finder = (await beats()).at(-1)!;
+  assert.equal(said(finder).broken?.seq, Number(x));
+  go();
+  await a;
+  assert.equal(said((await beats()).at(-1)!).broken, undefined, 'A walked before the edit, and says the chain verified');
+  return { x, finder };
+}
+
+test('a beat that walked before a finding, and committed after it, moves no walk past it (formal/Audit.tla, NoResumePastFinding)', async () => {
+  const { x, finder } = await overtaken();
+  // The next beat resumes no further than where F's walk began, and finds X again.
+  assert.deepEqual(await db.runtime.transaction((tx) => resumePoint(tx, chainKey)), { seq: BigInt(said(finder).verified!.seq), hash: Buffer.from(JSON.parse(finder.metadata).verified.hash, 'hex') });
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  assert.equal(said((await beats()).at(-1)!).broken?.seq, Number(x));
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
+});
+
+test('readiness runs the next beat\'s walk: red while a finding stands behind the newest beat (formal/Audit.tla, ReadinessWalks)', async () => {
+  const { x } = await overtaken();
+  // A is the newest beat, clean and checkpointed; F's finding still stands.
+  const ready = await auditReadiness(db.runtime, slow, chainKey);
+  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
+  // The edit put back, the walk passes, and readiness is green before any beat says so.
+  await overwrite(x, { metadata: '{}' });
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, true);
+});
+
+test('a finder hidden as readiness is asked is walked over, not passed over (formal/Audit.tla, ReadinessWalks)', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await db.runtime.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'secret.read', decision: 'allow' }]));
+  const x = (await entries()).at(-1)!.seq;
+  assert.ok((await slow.checkpoint()).ok);
+  await overwrite(x, { metadata: '{"edited":true}' });
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  const finder = (await beats()).at(-1)!;
+  assert.equal(said(finder).broken?.seq, Number(x));
+  // No beat at all now: the newest is the clean one before it, which the finder's checkpoint covers.
+  await overwrite(finder.seq, { action: 'audit.hidden' });
+  const ready = await auditReadiness(db.runtime, slow, chainKey);
+  assert.deepEqual([ready.ok, ready.checkpointed, ready.broken], [false, true, true]);
+});
+
+test('a finder hidden while the next beat reads where to resume, and put back before it walks, is found: one snapshot (formal/Audit.tla, OneSnapshot)', async () => {
+  const { x, finder } = await overtaken();
+  // Beat C: F's row is no beat at all as C's first snapshot begins, and back as it was once it ends.
+  await writeAuditHeartbeat(stepping(async ({ n }, phase) => {
+    if (n === 1) await overwrite(finder.seq, { action: phase === 'before' ? 'audit.hidden' : 'audit.heartbeat' });
+  }), chainKey, slow, { warn: () => undefined });
+  // C's walk read F's row hidden, and found it changed; the next walks from where F's began, and finds X.
+  assert.equal(said((await beats()).at(-1)!).broken?.seq, Number(finder.seq));
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  assert.equal(said((await beats()).at(-1)!).broken?.seq, Number(x));
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
+});
+
+test('a beat counts only by its MAC, and only for a point before its own row (formal/Audit.tla, CursorByMac)', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await db.runtime.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'coffre-scheduler', action: 'secret.read', decision: 'allow' }]));
+  const x = (await entries()).at(-1)!.seq;
+  assert.ok((await slow.checkpoint()).ok);
+  await overwrite(x, { metadata: '{"edited":true}' });
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  const finder = (await beats()).at(-1)!;
+  assert.equal(said(finder).broken?.seq, Number(x));
+  // F's row rewritten to say it verified through itself, clean: anyone who writes rows can, but not under the app's key.
+  await overwrite(finder.seq, { metadata: JSON.stringify({ source: 'scheduled', verified: { seq: Number(finder.seq), hash: finder.hash.toString('hex') } }) });
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  assert.equal(said((await beats()).at(-1)!).broken?.seq, Number(x));
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, false);
+});
+
+test('beats the app wrote since are no finding, however many instances beat at once', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  // Thirteen instances, each beating on its own timer, all in phase: more than the hour of beats a resume reads back.
+  for (let i = 0; i < 13; i++) await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  const newest = (await beats()).at(-1)!;
+  assert.equal((await db.runtime.transaction((tx) => resumePoint(tx, chainKey))).seq, BigInt(said(newest).verified!.seq));
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, true);
 });

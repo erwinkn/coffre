@@ -218,7 +218,8 @@ unsupported diff select full validation.
   gives an invocation 10 ms of CPU; `request-cost.test.ts` holds a request's
   statements and rows to the same however the instance grows.
 - `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, and
-  the credentials, issuing and bulk-limit protocols beside it, with TLC
+  the credentials, issuing, bulk-limit, audit-chain and tunnel protocols
+  beside it, with TLC
   (`docs/formal.md`): every scenario must hold, and each again without one
   of the code's protections must fail. It needs Java 11+, and downloads TLC's
   jar once, checked against its pinned SHA-256. A change to the locks a flow

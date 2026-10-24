@@ -5,7 +5,7 @@ import { issuedGrant } from '@coffre/core/access';
 import type { Through, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
-import { localVault, type LocalVault, type VaultConfig } from '@coffre/vault/node';
+import { localVault, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
 import { loadCaller, type Caller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
@@ -93,6 +93,7 @@ export function testVault(
   owners: readonly string[],
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
+  walks: VaultOptions['walks'] = {},
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -106,7 +107,7 @@ export function testVault(
         owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
         ...config,
       },
-      { clockOffset: () => offset },
+      { clockOffset: () => offset, walks },
     );
     const [first, ...others] = owners.map((email) => `user:${email}`);
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.

@@ -776,7 +776,10 @@ sessions rather than freeing them. The handle's end ends them too, on a
 timer of its own. A new group whose first session came in on a cached URL
 checks at once, so the interval always starts from the vault's own
 answer. The group lives as long as its sessions. So a revoked handle
-and a person's lost grant each end the sessions, within the minute: the
+and a person's lost grant each end the sessions within the interval and
+a check's deadline, 70 seconds by default (formal/Tunnel.tla: revoked
+just after a check, the next comes a minute later and may take its ten
+seconds): the
 first check that fails ends every session of that handle and tunnel at
 once, both sockets of each close, and the app's driver sees its
 connections drop. Every new
@@ -839,7 +842,7 @@ with the same handle, to the same path, so to the same object `9f3c…`,
 whose map has the key, and which sends the database its real one. No key
 names an object and none needs to: the bearer already does. The handle is
 revoked: the group's check, a timer in the object, gets a refusal within
-`recheckSeconds` and ends both sockets of every session; the next
+`recheckSeconds` and its deadline, and ends both sockets of every session; the next
 connection is refused at admission.
 
 *Flow control.* A Workers WebSocket has no back-pressure either way: no

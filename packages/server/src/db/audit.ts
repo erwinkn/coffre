@@ -142,27 +142,54 @@ export async function walkChain(
   }
 }
 
-/** Heartbeats looked back over for the newest that says how far the app verified: an hour of them. */
+/** Heartbeats looked back over for the newest the app wrote, by its MAC: an hour of them. */
 const ATTESTATIONS_BACK = 12;
 
+/** Heartbeats read past where a walk would resume, at most: far more than ever commit while one walks. */
+const BEATS_SINCE = 1000;
+
 /**
- * How far the app has verified the chain, as its newest heartbeat says
- * (`verified`): every number, link and hash, and its own entries' MACs,
- * from the first entry through there, each beat's walk going on from the
- * one before (`writeAuditHeartbeat`). The heartbeat's own MAC is checked
- * here, since the check that trusts it may not reach it: one in the app's
- * name it did not write is passed over, and an earlier one's walk, which
- * goes past it, finds it. Before the first such beat, the first entry.
+ * Where the next walk of the chain resumes: what the newest heartbeat the
+ * app wrote says it verified (`verified`), a walk's end, or, if it found
+ * the chain broken, where it began; and no further than where the walk of
+ * any broken one after that point began. Read in the snapshot the walk
+ * runs in (`writeAuditHeartbeat`, `auditReadiness`), so that every beat
+ * row past it is one the walk reads: one hidden, forged or deleted there
+ * is an entry it finds changed (formal/Audit.tla, `OneSnapshot`).
+ *
+ * A beat counts only by its MAC, and only for a point before its own row,
+ * which its MAC covers: anyone who writes rows can change one, never make
+ * one (`CursorByMac`). A broken one past that point found the chain
+ * broken in a walk the newest one's did not see: two beats at once, the one
+ * that walked first committing last. Its finding stands until a walk from
+ * where it began passes it (`NoResumePastFinding`). One past the point
+ * that its MAC does not vouch for is read by the walk, and found changed.
+ * Before the first beat, past the hour of them, or past `BEATS_SINCE`
+ * since, the first entry.
  */
-export async function attested(db: Queryable, chainKey: Buffer): Promise<ChainPoint> {
+export async function resumePoint(db: Queryable, chainKey: Buffer): Promise<ChainPoint> {
   const key = appLogKey(chainKey);
-  for (const beat of await newestHeartbeats(db, ATTESTATIONS_BACK)) {
-    if (!verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [key] }).ok) continue;
-    const { verified } = JSON.parse(beat.metadata) as { verified?: { seq?: unknown; hash?: unknown } };
+  const said = (beat: Awaited<ReturnType<typeof newestHeartbeats>>[number]) => {
+    if (!verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [key] }).ok) return null;
+    const { verified, broken } = JSON.parse(beat.metadata) as { verified?: { seq?: unknown; hash?: unknown }; broken?: unknown };
     const { seq, hash } = verified ?? {};
-    if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || BigInt(seq) >= beat.seq) continue;
-    if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) continue;
-    return { seq: BigInt(seq), hash: Buffer.from(hash, 'hex') };
+    const point =
+      typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 && BigInt(seq) < beat.seq && typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)
+        ? { seq: BigInt(seq), hash: Buffer.from(hash, 'hex') }
+        : CHAIN_START;
+    return { point, broken: broken !== undefined };
+  };
+  let resume: ChainPoint | undefined;
+  for (const beat of await newestHeartbeats(db, ATTESTATIONS_BACK)) {
+    resume = said(beat)?.point;
+    if (resume !== undefined) break;
   }
-  return CHAIN_START;
+  if (resume === undefined || resume.seq < 0n) return CHAIN_START;
+  const since = await newestHeartbeats(db, BEATS_SINCE, resume.seq);
+  if (since.length === BEATS_SINCE) return CHAIN_START;
+  for (const beat of since) {
+    const it = said(beat);
+    if (it?.broken === true && it.point.seq < resume.seq) resume = it.point;
+  }
+  return resume;
 }

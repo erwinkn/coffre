@@ -3,7 +3,7 @@ import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry } from '@coffre/db/log';
 
-import { actorParts, appLogKey, attested, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
+import { actorParts, appLogKey, CHAIN_START, CHAIN_WALK, resumePoint, walkChain, type ChainPoint } from '../db/audit.ts';
 import {
   auditActionCounts,
   auditHashAt,
@@ -401,7 +401,7 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
       let to: { entry: bigint; at: ChainPoint; hash: string } | null = null;
       if (query.from === undefined) {
         // From the older of where the app's MACs and the vault's tally were last verified to.
-        const [own, tallied] = await Promise.all([attested(tx, ctx.chainKey), latestTallied(tx)]);
+        const [own, tallied] = await Promise.all([resumePoint(tx, ctx.chainKey), latestTallied(tx)]);
         if (tallied !== null && tallied.checkpoint === null) return failed('vault', tallied.entry, UNREADABLE, tallied.entry - 1n);
         const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint!);
         // The prefix it says it signed still there, or the checkpoint is what is wrong, not the entry it names.

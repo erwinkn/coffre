@@ -187,6 +187,32 @@
   tokens and people are unchanged. The vault, deployed first, takes an
   older app's calls, which say no kind, as before. The Lean model holds
   the vault to it (`no_laundering`). No database migration.
+- **No heartbeat's finding is lost to two beats at once, or to someone
+  who writes the database.** On several instances, each beating on its own
+  timer, a beat whose walk began before another found the chain broken,
+  and committed after it, said the chain verified: readiness went green,
+  with the tamper found and still there, until the next beat. And whoever
+  writes the database could hide the beat that found it, or change it
+  only while the next beat read where to resume, and send every walk
+  after it past the tamper. Now a beat reads where to resume in the
+  snapshot it walks in, only from a beat its MAC vouches for, and no
+  further than where the walk of any broken beat after that began; so
+  every beat row past that point is one the walk reads, and one hidden or
+  changed there is found. Readiness runs that same walk, to the head: it
+  is red as soon as a finding stands, and while the finder is hidden. Its
+  cost is the entries since the newest beat's walk began. No database
+  migration. Found by `formal/Audit.tla`, which now gives the attacker any
+  beat row to hide, forge or put back at any step.
+- **Readiness reads the newest beat and the newest checkpoint in one
+  snapshot.** Read apart, a beat that stopped short committing between
+  them could answer green on rows that were never green together. Found
+  by `formal/Audit.tla`.
+- **`pnpm formal` checks the audit chain and the tunnel too**: heartbeats,
+  checkpoints and readiness against someone who writes the database, and
+  how long a revoked handle's tunnel session lives, which is the recheck
+  interval and a check's deadline, 70 seconds by default, not the minute
+  the docs said ([formal.md](docs/formal.md#the-audit-chain-and-the-tunnel)).
+
 - **A credential revoked while its read is under way gets nothing.** A
   read checked its token, handle or MCP connection, then asked the vault,
   which decides on the member and is only told the credential: a token
