@@ -62,7 +62,8 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTranspo
   };
 }
 
-async function capped(url: URL, body: ReadableStream<Uint8Array> | null): Promise<Uint8Array> {
+/** A body, read to its end, or `FetchRefused` past `MAX_BODY_BYTES`. */
+export async function capped(url: URL, body: ReadableStream<Uint8Array> | null): Promise<Uint8Array> {
   if (body === null) return new Uint8Array(0);
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];

@@ -115,7 +115,8 @@ into **value**, and the page shows that per binding. A strict instance
 | Kubernetes (projected token, `oidc`) | **none**: etcd holds no projected token | **use** once, for an exchange it wins the race to, until the token's `exp`; the pod's own exchange then fails `replayed` | **use** once, for an unspent token, until its `exp`: the pod spec's `expirationSeconds`, 600 at least (¹) | **use** | **use**: it can run a pod as the service account | **use**: reads fresh projected tokens | **none** | **value** |
 | AWS: ECS, Lambda, EC2, EKS (`aws`) | **none**: role credentials are runtime-only | **none**: the signed request names the key, so a copy works for no other key | **use**, until the leaked role credentials expire (²) | **use** | **use** | **use** | **none** | **value** |
 | Google Cloud, Fly, GitHub Actions (`oidc`, audience names the key) | **none** | **none** | **none**: the token works only with the key its audience names (4.2) | **use** | **use** | **use** | **none** | **value** |
-| Azure managed identity, Vercel (`oidc`, fixed audience) | **none** | **use**, with any key, until the token's `exp` (Azure up to 24 hours, Vercel one to two) | **use**, the same, unless `sources` excludes the attacker (³) | **use** | **use** | **use** | **none** | **value** |
+| Vercel (`oidc`, audience names the key, by an exchange) | **none** | **none**: what reaches Coffre names the key | **use**, with any key, until the function's own token's `exp`, if that token leaks (⁵) | **use** | **use** | n/a (Vercel's runtime) | **none** | **value** |
+| Azure managed identity (`oidc`, fixed audience) | **none** | **use**, with any key, until the token's `exp` (up to 24 hours) | **use**, the same, unless `sources` excludes the attacker (³) | **use** | **use** | **use** | **none** | **value** |
 | GitLab CI (`oidc`) | **none** | **use** once, for an exchange it wins the race to, until the token's `exp` (⁴) | **use** once, for an unspent token, until its `exp` (⁴) | **use** | **use** (it *is* CI) | **use** (the runner) | **none** | **value** |
 | Railway, Render, a VM (`enrollment`) | **use**, *detected, not prevented*: a copied code raises `enrolled` at once, and shares the code's `2 × replicas` slots with the deployment (all of them while it is down) until the next deploy promotes a new code or a person acts. A tripwire freezes the clumsy cases (4.4). `sources` narrows the addresses it works from. | as A, for the exchange that carries the code; **none** for every request after | as A | **use** | **use**: CI mints codes | **use** | **none** | **value** |
 | *Today: a bearer service token* | **value**, for up to a year | **value** | **value** | **value** | **value** | **value** | **none** | **value** |
@@ -136,13 +137,21 @@ Notes:
 4. GitLab's `id_tokens` audiences are fixed in the job's YAML, so they
    cannot name a key either. If the attacker spends the token first, the
    job's own exchange fails with `replayed`, which is loud.
+5. A Vercel function holds a token whose audience Vercel fixes
+   (`https://vercel.com/<team>`), on every request's `x-vercel-oidc-token`
+   header. Anyone holding it can exchange it at
+   `https://oidc.vercel.com/~token` for a token of any audience, the
+   attacker's key included, until it expires. A request logged with its
+   headers therefore leaks a bearer of the workload. The token Coffre
+   receives names the key, so a copy of *that* is useless.
 
 What the table says in one sentence: **no platform-side attacker ever reads
 a value.** In every **use** cell, a freeze or a revocation stops the attacker
 at their next request. What a copy can hold beyond the attacker's presence
 is bounded per row: an unspent ID token's single use until its `exp`,
-Azure's and Vercel's cached tokens and Lambda's role credentials until they
-expire, and an enrollment code until the next deploy promotes a new one.
+Azure's cached tokens, a Vercel function's own token and Lambda's role
+credentials until they expire, and an enrollment code until the next deploy
+promotes a new one.
 
 The **use** cells under D, E and F cannot be closed by any design. Code that
 runs as the workload *is* the workload. What Coffre can do about them is
@@ -244,7 +253,7 @@ Cache-Control: no-store
   | The proof | Spent | Why |
   |---|---|---|
   | Names the key: an ID token whose audience names it, or a signed `GetCallerIdentity` | never | Only that key can use it. The same key presenting a platform's cached token again, to re-prove, is harmless. |
-  | `azure`, `vercel` | never | A managed identity, or a Vercel function, hands the same cached token to every replica, invocation and restart. Spending it would refuse them. It is a bearer until it expires (4.2). |
+  | `azure` | never | A managed identity hands the same cached token to every replica and restart. Spending it would refuse them. It is a bearer until it expires (4.2). |
   | Any other ID token (`kubernetes`, `gitlab`, `custom`) | once, as today, in `consumed_tokens` | It is a bearer, and single use is what bounds a copy. |
 - **`places`** are the environments of the binding's scope, as a handle's
   `places`. With exactly one, the stable URL `/use/<credential>` works. With
@@ -253,7 +262,7 @@ Cache-Control: no-store
 
 **A workload binding is never a bearer binding.** Every binding made under
 this design carries a non-null `policy`: `{}` at least, and
-`{ "keyAudience": true }` for `github`, `gcp` and `fly`. `/api/auth/oidc`,
+`{ "keyAudience": true }` for `github`, `gcp`, `fly` and `vercel`. `/api/auth/oidc`,
 which issues the bearer credentials that read values (R13), matches only
 bindings with **no** policy, of today's five profiles (`BEARER_PROFILES`:
 `github`, `github-reusable`, `github-reusable-organization`, `gitlab`,
@@ -278,34 +287,41 @@ that pin one workload, by a field the platform never reuses:
 |---|---|---|---|---|
 | `kubernetes` | the cluster's (`kubectl get --raw /.well-known/openid-configuration`); uploaded keys for a private cluster | `sub`, `kubernetes.io.serviceaccount.uid` | `publicUrl` (the projected volume's `audience`) | the projected file, read again before each exchange |
 | `gcp` | `https://accounts.google.com` | `sub` (the service account's unique numeric ID) | `publicUrl#jkt=<thumbprint>` | `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=…&format=full`, header `Metadata-Flavor: Google` |
-| `azure` | the binding's, exactly one of `https://sts.windows.net/<tenant>/` (v1) or `https://login.microsoftonline.com/<tenant>/v2.0` (v2), whichever the resource app's `accessTokenAcceptedVersion` makes Entra issue | `tid`, `oid` (the managed identity's object ID) | the binding's `audience`, an Entra application ID URI (`api://coffre-acme`): Entra mints tokens only for a registered resource | IMDS `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…` with `Metadata: true`; App Service and Functions use `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` |
+| `azure` | the binding's, exactly one of `https://sts.windows.net/<tenant>/` (v1) or `https://login.microsoftonline.com/<tenant>/v2.0` (v2), whichever the resource app's `accessTokenAcceptedVersion` makes Entra issue | `tid`, `oid` (the managed identity's object ID) | the binding's `audience`: Entra mints tokens only for a registered resource. A v1 token's is the resource as asked for, its application ID URI (`api://coffre-acme`); a v2 token's is always the API's application (client) ID, a GUID | IMDS `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…` with `Metadata: true`; App Service and Functions use `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` |
 | `fly` | `https://oidc.fly.io/<org>` | `org_id`, `app_id` | `publicUrl#jkt=<thumbprint>` | `POST /v1/tokens/oidc` on the machine's `/.fly/api` socket, `{"aud": …}` |
-| `vercel` | `https://oidc.vercel.com/<team>` (team mode) or `https://oidc.vercel.com` (global mode), the binding's | `owner_id`, `project_id`, `environment` (`production` keeps previews out) | the binding's `audience`, `https://vercel.com/<team>`, as Vercel fixes it | the function's token: `@vercel/oidc`'s `getVercelOidcToken()`, or the `x-vercel-oidc-token` header |
+| `vercel` | `https://oidc.vercel.com/<team>` (team mode) or `https://oidc.vercel.com` (global mode), the binding's | `owner_id`, `project_id`, `environment` (`production` keeps previews out) | `publicUrl#jkt=<thumbprint>` | the function's token (the `x-vercel-oidc-token` header, `VERCEL_OIDC_TOKEN`), exchanged for that audience: `POST https://oidc.vercel.com/~token` `{ "token": …, "aud": … }`, as `@vercel/oidc`'s `getVercelOidcToken({ audience })` does |
 | `github`, `github-reusable…`, `gitlab`, `custom` | as today | as today | `publicUrl#jkt=<thumbprint>` on GitHub; `publicUrl` elsewhere | as today |
 
 - **The audience names the key wherever the platform allows it.** Where the
-  caller picks the audience (GitHub, Google, Fly), the SDK asks for
+  caller picks the audience (GitHub, Google, Fly, Vercel), the SDK asks for
   `<publicUrl>#jkt=<thumbprint>`, and the exchange accepts that form only
   when the thumbprint equals the DPoP key's. A copied token is then useless
-  to any other key, spent or not. Bindings of these three profiles require
+  to any other key, spent or not. Bindings of these profiles require
   that form (`policy.keyAudience`, on by default for them and refused off by
   the page, which says why). `kubernetes`, `gitlab` and `custom` keep plain
   `publicUrl`, since their audience is fixed in configuration.
-- **`audience` in the policy.** Azure and Vercel cannot mint for an
-  arbitrary audience. Their binding names the exact audience, under its
-  MAC. Every other profile refuses a policy `audience`.
-- **Azure's and Vercel's tokens repeat.** A managed identity caches its
-  tokens for up to 24 hours, so replicas and restarts on one identity present
-  the same one. A Vercel function's token is the same across invocations for
-  its lifetime (reported as one to two hours; unverified).
+- **Vercel picks it by an exchange.** Settled from `@vercel/oidc`'s source
+  (4.0.3; since 3.7.0): `getVercelOidcToken({ audience })` POSTs the
+  function's own token to `https://oidc.vercel.com/~token` and gets back
+  one for that audience. Vercel fixes the first token's audience,
+  `https://vercel.com/<team>`, and that token is a bearer for the exchange
+  until its own `exp`: a thief who holds it mints a token naming their own
+  key (note 5 of section 3). What reaches Coffre names the key, so only the
+  function's own token is worth stealing, and it is the platform's.
+- **`audience` in the policy.** Azure cannot mint for an arbitrary
+  audience. Its binding names the exact audience, under its MAC. Every
+  other profile refuses a policy `audience`.
+- **Azure's tokens repeat.** A managed identity caches its tokens for up
+  to 24 hours, so replicas and restarts on one identity present the same
+  one.
   - **Such a token is never spent**, and its age limit is its own `exp`
     rather than oidc.md's hour after `iat`: a restart two hours after
     issuance presents a token two hours old.
   - **A leaked one is therefore a bearer until it expires**, for any key
     (columns B and C), and the session it makes ends at its `exp` (5.4). The
-    binding's page says so. On Azure, a NAT gateway's dedicated addresses in
-    `sources` close it. On Vercel's serverless addresses nothing does.
-  - Both are unverified live: there is no Azure or Vercel account tonight.
+    binding's page says so. A NAT gateway's dedicated addresses in
+    `sources` close it.
+  - Unverified live: there is no Azure account tonight.
 - **`forcedProfiles` grows.** Google's, Fly's, Vercel's and Entra's issuers
   force their profiles, as github.com's and gitlab.com's do today. A
   `custom` binding therefore cannot drop `keyAudience` for them, or spend a
@@ -316,9 +332,10 @@ that pin one workload, by a field the platform never reuses:
     exchange accepts the same way. Google's metadata server may cache
     identity tokens per audience, which is harmless: a key-naming token is
     never spent.
-  - **Vercel** may let a function choose its token's audience; reviews
-    disagreed. PR 2 checks `@vercel/oidc`'s source. If it does, `vercel`
-    moves to the key-naming profiles and its row of the table to **none**.
+  - **Vercel**: whether `~token` takes a `#` in `aud` (the `?jkt=` form
+    is the fallback, as for Google and Fly), and that the token it answers
+    keeps the function's issuer and claims (`@vercel/oidc`'s own verifier
+    takes both issuer forms, and one key set, for either token).
 - **AWS can also use OIDC.** AWS's outbound identity federation
   (`sts:GetWebIdentityToken`) makes AWS an OIDC issuer for accounts that turn
   it on. A `custom` binding works for those. The `aws` proof below needs no
@@ -335,11 +352,15 @@ the ECS container endpoint, or IMDSv2):
 ```
 POST https://sts.<region>.amazonaws.com/
 Action=GetCallerIdentity&Version=2011-06-15
-signed headers: host, x-amz-date, x-amz-security-token (if any),
+signed headers: content-type: application/x-www-form-urlencoded; charset=utf-8,
+                host, x-amz-date, x-amz-security-token (if any),
                 x-coffre-audience: <publicUrl>, x-coffre-key: <jkt>
 ```
 
-It sends Coffre the URL, headers and body, never the credentials.
+It sends Coffre the URL, headers and body, never the credentials. It signs
+with a bare SigV4 signer, not an STS client: the AWS SDKs' STS clients add
+and sign headers of their own (`amz-sdk-invocation-id`, `amz-sdk-request`,
+`x-amz-user-agent`), which Coffre refuses.
 
 **What Coffre checks:**
 
@@ -352,17 +373,31 @@ It sends Coffre the URL, headers and body, never the credentials.
    `Action=GetCallerIdentity&Version=2011-06-15`. Nothing else is ever
    fetched, so the proof offers no SSRF.
 2. **The headers.** Coffre rebuilds the request from an allowlist:
-   `authorization`, `content-type`, `host`, `x-amz-date`,
-   `x-amz-security-token`, `x-coffre-audience` and `x-coffre-key`. Any other
-   header is refused. `x-coffre-audience` must equal `publicUrl`, and
-   `x-coffre-key` must equal the DPoP key's thumbprint. Both must be among
-   the `SignedHeaders`.
+   `authorization`, `content-length`, `content-type`, `host`, `x-amz-content-sha256`,
+   `x-amz-date`, `x-amz-security-token`, `x-coffre-audience` and
+   `x-coffre-key`, each named once, in any case. Any other header is
+   refused.
+   - `x-coffre-audience` must equal `publicUrl`, and `x-coffre-key` the DPoP
+     key's thumbprint. Both must be among the `SignedHeaders`, with
+     `content-type`, `host` and `x-amz-date`.
+   - Every header sent is signed, so Coffre forwards nothing the key did not
+     sign. `host` may be left out: it is the URL's, which the fetch sends.
+     A signed `content-length` must be the body's, 43, which the fetch sends
+     too, as the AWS SDKs' and Go's signers may sign it.
+   - The credential's scope names the URL's region (`us-east-1` for the
+     global host) and `x-amz-date`'s day. `content-type` is the form's, and
+     `x-amz-content-sha256`, which an SDK may sign, the body's digest.
 3. **The time.** `x-amz-date` must be within 5 minutes. STS refuses past 15.
 4. **STS.** Coffre forwards the request with the same transport rules as
    JWKS fetches (`https` only, no redirects, a 5 s deadline, 64 KiB). It
-   parses `<GetCallerIdentityResult>`: `Arn`, `Account` and `UserId`. An
-   account's root (`arn:aws:iam::<account>:root`) and a federated user
+   parses `<GetCallerIdentityResult>`: `Arn`, `Account` and `UserId`, each
+   once, with no markup in them. An account's root
+   (`arn:aws:iam::<account>:root`) and a federated user
    (`…:federated-user/…`) are refused.
+   - A 4xx is STS refusing the proof: 401 `signature`, naming STS's error
+     code (`SignatureDoesNotMatch`, `ExpiredToken`).
+   - A redirect, a 5xx, an answer it cannot read, or none, is 503
+     `issuer_unavailable`, as an unreachable issuer is.
 
 **What the binding names.** A role, by its **unique ID**, the `AROA…` prefix
 of `UserId` for an assumed role:
@@ -385,6 +420,23 @@ works with this key only, and column B is **none**. So it is never spent
 (4.1): replaying it can only make another session for the same key. A role's credentials
 leaked through a log (note 2 of the table) can still sign a fresh proof. That
 is the residual risk.
+
+**Checked live** (PR 2, on Erwin's AWS account, `us-east-2`), with a signer
+written apart from the SDK's:
+
+- A proof signed with SSO credentials (an `AWSReservedSSO_…` role) and one
+  signed by a throwaway Lambda's role both verify at the regional and global
+  hosts, and match a binding by account and role ID. STS answers the same
+  proof twice: it keeps no memory of requests, which is why the key, not
+  spending, is what makes a copy useless.
+- STS refuses a proof whose `x-coffre-key` or `x-coffre-audience` changed
+  after signing (`SignatureDoesNotMatch`), one sent to another region's host
+  ("Credential should be scoped to a valid region"), one 16 minutes old
+  ("Signature expired"), and one without its session token
+  (`InvalidClientTokenId`).
+- A role deleted and made again under the same name keeps its ARN and gets a
+  new `AROA…` ID: the Lambda's proof under the new role matches no binding
+  of the old.
 
 ### 4.4 `enrollment`: platforms that sign nothing
 
@@ -1694,7 +1746,7 @@ line of registration after the owner has merged:
 | **1b. The gate** | the Node gate and the `CoffreGates` Durable Object (nonces, `jti`, counters with `first`); the `GATES` wiring in `examples/*`, `dev/deployment` and `coffre init`, and `init` writing `useOnly: true` | `packages/server/src/gate.ts` (new), `…/cloudflare-gates.ts` (new), `…/cloudflare-handler.ts`, `examples/*/app/src/coffre.ts`, `examples/*/app/src/server.ts`, `examples/*/app/wrangler.jsonc`, `dev/deployment/*`, `packages/cli/src/init.ts` | A replayed proof refused, including across a gate restart (a new epoch); `use_dpop_nonce`, then success; 429 past the ceiling; a model-based Hegel test against a reference set; `bench:workers` numbers. |
 | **1c. Vault and access** | `Through.caller` made required; scopes materialized with `reads`; the vault's `use_only` at the place where the value is held; no laundering through references, forks or copies; `reads` by ID | `packages/vault/src/vault.ts`, `packages/core/src/vault.ts`, `packages/core/src/access.ts`, `packages/server/src/api/caller.ts`, `…/api/context.ts`, `…/api/secrets.ts`, `…/api/references.ts`, `…/api/forks.ts` | The vault refuses `reveal` with `use_only` and lets listed keys through; a workload caller with no scope refused; a reference to an unlisted source refused; a copy from an unreadable source refused; renaming a key onto a listed name leaves it unreadable; `NoLaundering`'s cases. |
 | **1d. The proxy's workload caller** | the proxy, `sign`, `presign` and the tunnel accepting a workload caller: forwarding only `hdr`, `req` checked, `constraintsAllow` on the resolved target, `limit`, sockets named by session, 15 s rechecks; alerts and `alert(…)` delivery | `packages/server/src/plugins/credential-proxy.ts`, `…/cloudflare-sockets.ts`, `…/alerts.ts` (new) | A header outside `hdr` is not forwarded; a changed query, header or body is refused; a streamed SigV4 upload is bound by its payload hash, and `UNSIGNED-PAYLOAD` refused without `unsignedUploads`; revocation despite a warm value cache; limits answer 429 with one alert per window; a tunnel ends within a recheck of a freeze. |
-| **2. Proofs** | the `aws` verifier; the `kubernetes`, `gcp`, `azure`, `fly` and `vercel` profiles; every new `coffre trust` flag (`--aws`, `--kubernetes`, `--gcp`, `--azure`, `--fly`, `--vercel`, `--enrollment`, `--cloudflare`, `--reads`, `--source`, `--replicas`, `--minted-by`, `--approve`, `--session-days`, `--session-hours`, `--overlap-minutes`, `--on-contention`, `--unsigned-uploads`) | `packages/server/src/workloads/aws.ts` (new), `…/workloads/profiles.ts` (new), its `PROOFS` entry, `packages/cli/src/trust.ts` | A fake STS that checks SigV4 with `@smithy/signature-v4`; `x-coffre-key` not among `SignedHeaders` refused; another region host, a non-STS URL, another body, an extra header and a redirect each refused; root, federated and IAM users refused; the same signed request again, with the same key, makes a second session and is never `replayed`; fixture tokens per profile, each with a required claim missing refused; a recreated role (new `AROA…`) refused; an Azure or Vercel token presented again, by the same key or another, makes a session each, ending at the token's `exp`; a Kubernetes token presented twice is `replayed`; whether `@vercel/oidc` lets the audience be chosen, settled from its source. **Live:** a `GetCallerIdentity` signed with the `erwinkn-mgmt` SSO credentials against real STS (no resources), and a throwaway Lambda's role (`coffre-ovn-<W#>`, deleted after). |
+| **2. Proofs** | the `aws` verifier; the `kubernetes`, `gcp`, `azure`, `fly` and `vercel` profiles; every new `coffre trust` flag (`--aws`, `--kubernetes`, `--gcp`, `--azure`, `--fly`, `--vercel`, `--enrollment`, `--cloudflare`, `--reads`, `--source`, `--replicas`, `--minted-by`, `--approve`, `--session-days`, `--session-hours`, `--overlap-minutes`, `--on-contention`, `--unsigned-uploads`) | `packages/server/src/workloads/aws.ts` (new), `…/workloads/profiles.ts` (new), its `PROOFS` entry, `packages/cli/src/trust.ts` | A fake STS that checks SigV4 with `@smithy/signature-v4`; `x-coffre-key` not among `SignedHeaders` refused; another region host, a non-STS URL, another body, an extra header and a redirect each refused; root, federated and IAM users refused; the same signed request again, with the same key, makes a second session and is never `replayed`; fixture tokens per profile, each with a required claim missing refused; a recreated role (new `AROA…`) refused; an Azure token presented again, by the same key or another, makes a session each, ending at the token's `exp` (a Vercel token names the key, D15: another key's is refused `audience`); a Kubernetes token presented twice is `replayed`; whether `@vercel/oidc` lets the audience be chosen, settled from its source. **Live:** a `GetCallerIdentity` signed with the `erwinkn-mgmt` SSO credentials against real STS (no resources), and a throwaway Lambda's role (`coffre-ovn-<W#>`, deleted after). |
 | **3. Enrollment** | the `enrollments` routes (mint with its scope, promote, the recovery action); `coffre enroll` and `coffre approve`; capacity, the tripwire, supersession and drain (through `PROOFS`' `renew` hooks), `sources` with `clientAddress`, `approve` | `packages/server/src/api/enrollments.ts` (new), `…/workloads/enrollment.ts` (new, its `PROOFS` entry), `packages/cli/src/enroll.ts` (new) | Concurrency: N exchanges racing on one code never leave more than `2 × replicas` live roots, on both engines, renewals racing included; a crash's restart and two same-code redeploys an hour never freeze; a thief overlapping full replicas for `overlapMinutes`, re-enrolling with gaps, freezes, and so does churn past `4 × replicas` roots an hour; children take no slot; supersession only on `promote`, the old sessions drain within 90 s, `--now` revokes them, and a failed deploy keeps the old code; recovery (mint, promote, lift) leaves the thief out; a Viewer-minted code holds a Viewer's scope and no sensitive value; `mintedBy` naming the service itself is refused, and so is minting from an enrollment session or a child; `sources` refused at the exchange and per request, and a null address is refused; `pending`, then approve, then use. **Live:** a throwaway Railway project (`coffre-ovn-<W#>`): enroll, restart, copy the code to a second service, watch it freeze. |
 | **4. Freeze and narrow** | the freeze routes and `coffre freeze`/`unfreeze`; `narrow` | `packages/server/src/api/freezes.ts` (new), `…/api/narrow.ts` (new), `packages/cli/src/freeze.ts` (new) | Freeze, then the next request is refused on HTTP, and on a tunnel within one recheck; lift restores; who may freeze or lift each target; narrow ⊆ parent; a child dies with any ancestor; a child cannot read, mint or renew; `/v1/refunds/%2e%2e/charges`, `/v1/refunds/..;/charges` and `/v1/refundsX` refused for a child of `/v1/refunds`; such a child refused `sign` and the tunnel; a child of `credentials: ['stripe']` refused `sign('dfns-key')`. |
 | **5. SDK and sidecar** | `@coffre/client/workload` and its proofs; `fromCoffre`; `…/workload/postgres`; `coffre serve`; `coffre run --service` in key-bound mode; the CLI's tunnel listener speaking DPoP | `packages/client/src/workload.ts` (new), `…/workload-proofs.ts` (new), `…/workload-postgres.ts` (new), `packages/client/package.json` (its exports), `packages/cli/src/serve.ts` (new), `packages/cli/src/workload.ts`, `packages/cli/src/tunnels.ts` | Against a fake server first (this doc's wire format), then the real one once PRs 1a and 1d land: renewal (hourly, and every 30 s for enrollment), re-proof before `notAfter`, the nonce retry and the freshest nonce, `full` retries, waiting out a spent projected token; `hdr` and `req` match what the server recomputes; OpenAI's SDK through `coffre.fetch`; `pg` through `connect`; the key is non-extractable (`exportKey` rejects); nothing written to disk or env. The packed client still loads on Node 20, 22 and 24 (`test:consumer`). **Live:** a GitHub Actions workflow in a scratch repository of erwinkn, and `kind` in Docker with the sidecar. |
@@ -1752,9 +1804,9 @@ worker, deleted and then verified gone through the provider's API:
 | Cloudflare | two Workers, a binding with `props`, an upstream call through the proxy, freeze | PR 6 |
 | AWS | `GetCallerIdentity` from SSO credentials; a Lambda's role; `AssumeRole` minting | PRs 2, 7 |
 | Railway | enrollment, restart, a copied code, contention freeze | PR 3 |
-| Kubernetes | a `kind` cluster in Docker with the sidecar | PRs 2, 5 |
+| Kubernetes | a `kind` cluster in Docker: a pod's projected token, checked against its binding, which `coffre trust --kubernetes` made with `kubectl` (PR 2, done: the token carries the claims the fixtures do, and a service account made again under its name gets a new UID); the sidecar (PR 5) | PRs 2, 5 |
 | GitHub Actions | a workflow in a scratch repository of erwinkn, with `id-token: write` and the audience naming the key | PR 5 |
-| Google Cloud, Azure, Fly, Vercel | **not live.** There is no account for them tonight, so they are covered by fixture tokens shaped from each platform's documentation. Their first real use should include a live check. | PR 2 |
+| Google Cloud, Azure, Fly, Vercel | **not live.** There is no account for them tonight, so they are covered by fixture tokens shaped from each platform's documentation. Their first real use should include a live check. Vercel's choice of audience is settled from `@vercel/oidc`'s source (4.2). | PR 2 |
 
 ## 13. Decisions taken (R10), each Erwin's to revisit
 
@@ -1826,6 +1878,14 @@ worker, deleted and then verified gone through the provider's API:
     - the declared payload hash limited to `sigv4` credentials (5.1), in
       PRs 0 and 1d;
     - `/api/auth/oidc` taking policy-less bindings only (4.1), in PR 1a.
+15. **Vercel's audience names the key** (PR 2). The design took it as fixed,
+    which was wrong: `@vercel/oidc` exchanges a function's token for one of
+    any audience (4.2). So `vercel` is a key-naming profile, never a
+    repeating one: a token sent to Coffre is useless to another key, and is
+    never spent. What stays is the function's own token, a bearer for that
+    exchange until its `exp` (note 5 of section 3). *Alternative:* keep
+    Vercel's fixed audience, which would leave every token Coffre receives a
+    bearer for any key.
 
 ## 14. Later
 

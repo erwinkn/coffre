@@ -2,9 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CoffreError, type BindingView } from '@coffre/client';
-import { checkBinding } from '@coffre/core/workloads';
+import { checkBinding, checkPolicy } from '@coffre/core/workloads';
 
-import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, keysLine, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
+import {
+  bindingFrom,
+  describeBindings,
+  describeEvents,
+  describeKeys,
+  describePlan,
+  keySetFrom,
+  keysLine,
+  readsFrom,
+  runsOf,
+  serviceMember,
+  type Lookup,
+  type PlatformLookup,
+  type TrustFlags,
+} from '../src/trust.ts';
 
 const SHA = 'b'.repeat(40);
 
@@ -110,8 +124,9 @@ test('any other issuer, by its claims', async () => {
 });
 
 test('the flags name one platform, and one of a branch or a tag', async () => {
-  await assert.rejects(bindingFrom({}, lookup), /name one of --github, --gitlab or --issuer/);
-  await assert.rejects(bindingFrom({ github: 'acme/api', gitlab: 'acme/api' }, lookup), /name one of --github, --gitlab or --issuer/);
+  await assert.rejects(bindingFrom({}, lookup), /name one of --github, --gitlab or --issuer, or a workload's platform: --aws, --kubernetes/);
+  await assert.rejects(bindingFrom({ github: 'acme/api', gitlab: 'acme/api' }, lookup), /name one platform, not --github and --gitlab/);
+  await assert.rejects(bindingFrom({ github: 'acme/api', issuer: 'https://idp.acme.example' }, lookup), /--github names its own/);
   await assert.rejects(bindingFrom({ github: 'acme/api', workflow: 'deploy.yml' }, lookup), /name one of --branch or --tag/);
   await assert.rejects(bindingFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', tag: 'v1' }, lookup), /name one of --branch or --tag/);
   await assert.rejects(bindingFrom({ github: 'acme/api', branch: 'main' }, lookup), /--workflow deploy.yml/);
@@ -151,7 +166,7 @@ test('a plan and a list show every claim in full', () => {
     describePlan('token:api-deploy', { ...plan, withheld: ['market/prod'] }, null),
     /\n  reads no sensitive value of market\/prod: only one an Owner of its project issues does\n$/,
   );
-  assert.equal(describeBindings('token:api-deploy', []), 'service:api-deploy trusts no CI runs: none signs in as it by OIDC\n');
+  assert.equal(describeBindings('token:api-deploy', []), "service:api-deploy trusts no CI runs or workloads: none signs in as it by OIDC or a platform's proof\n");
   const listed = describeBindings('token:api-deploy', [
     { ...plan, id: 'b1', label: 'prod', createdAt: '2026-10-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
     { ...plan, scope: null, id: 'b0', label: null, createdAt: '2026-09-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
@@ -315,4 +330,206 @@ test('the CLI hands a refused lookup back to trust, which says how to give the I
       '  gh api repos/erwinkn/website --jq \'"--repository-id \\(.id) --owner-id \\(.owner.id)"\'\n' +
       'and add the two flags it prints, --repository-id <n> --owner-id <n>, to this coffre trust.\n',
   );
+});
+
+const ACCOUNT = '671742253563';
+const ROLE_ID = 'AROAZ3EXAMPLE7QXYZAB';
+const SA_UID = '8f2d6a1e-5b3c-4e7f-9a0b-1c2d3e4f5a6b';
+const TENANT = '72f988bf-86f1-41af-91ab-2d7cd011db47';
+const OBJECT = '4c1d3b2a-9f8e-4d7c-b6a5-0123456789ab';
+
+/** What the platforms' CLIs say, as the person running coffre trust is signed in to them; what each was asked. */
+let asked: string[];
+const platforms: PlatformLookup = {
+  awsRole: async (name) => {
+    asked.push(`aws ${name}`);
+    if (name !== 'ingest-task') throw new Error('aws iam get-role failed: NoSuchEntity; add --role-id <AROA…>');
+    return { roleId: ROLE_ID, arn: `arn:aws:iam::${ACCOUNT}:role/ingest-task` };
+  },
+  kubernetesIssuer: async () => {
+    asked.push('kubectl issuer');
+    return 'https://oidc.prod.acme.example';
+  },
+  kubernetesUid: async (namespace, name) => {
+    asked.push(`kubectl ${namespace}/${name}`);
+    return SA_UID;
+  },
+  gcpUniqueId: async (email) => {
+    asked.push(`gcloud ${email}`);
+    return '104729384756102938475';
+  },
+};
+
+/** A workload's binding as the flags build it, and as the server would check it: its claims, then its policy, `reads` aside. */
+async function workload(flags: TrustFlags) {
+  asked = [];
+  const binding = await bindingFrom(flags, lookup, { service: 'token:ingest', platforms });
+  const checked = checkBinding(binding);
+  checkPolicy(binding.profile, { ...binding.policy, reads: undefined }, { service: 'token:ingest' });
+  return { ...binding, claims: checked.claims };
+}
+
+test("each workload platform's flag binds it by the IDs its platform never reuses, looked up with its CLI where one has them", async () => {
+  assert.deepEqual(await workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task` }), {
+    profile: 'aws', issuer: null, claims: { account: ACCOUNT, role_id: ROLE_ID }, policy: {},
+  });
+  assert.deepEqual(asked, ['aws ingest-task']);
+  // A role under a path is looked up by its name; --role-id asks nothing.
+  assert.deepEqual((await workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, 'role-id': 'AROAZ3EXAMPLE7QXYZAC' })).claims, { account: ACCOUNT, role_id: 'AROAZ3EXAMPLE7QXYZAC' });
+  assert.deepEqual(asked, []);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/teams/ingest-task` }), /aws iam get-role finds arn:aws:iam::671742253563:role\/ingest-task, not arn:aws:iam::671742253563:role\/teams\/ingest-task/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/other` }), /NoSuchEntity; add --role-id/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:user/ada` }), /--aws takes a role's ARN/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, claim: ['session=x'] }), /names the role alone/);
+
+  assert.deepEqual(await workload({ kubernetes: 'ingest/api' }), {
+    profile: 'kubernetes',
+    issuer: 'https://oidc.prod.acme.example',
+    claims: { 'kubernetes.io.serviceaccount.uid': SA_UID, sub: 'system:serviceaccount:ingest:api' },
+    policy: {},
+  });
+  assert.deepEqual(asked, ['kubectl issuer', 'kubectl ingest/api']);
+  const given = await workload({ kubernetes: 'ingest/api', issuer: 'https://container.googleapis.com/v1/projects/acme/locations/europe-west1/clusters/prod', uid: SA_UID, claim: ['kubernetes.io.namespace=ingest'] });
+  assert.equal(given.issuer, 'https://container.googleapis.com/v1/projects/acme/locations/europe-west1/clusters/prod');
+  assert.equal(given.claims['kubernetes.io.namespace'], 'ingest');
+  assert.deepEqual(asked, []);
+  await assert.rejects(workload({ kubernetes: 'api' }), /--kubernetes takes <namespace>\/<service-account>/);
+  // A name a platform's CLI would read as one of its flags is no name.
+  await assert.rejects(workload({ kubernetes: 'ingest/-o' }), /--kubernetes takes <namespace>\/<service-account>/);
+  await assert.rejects(workload({ gcp: '--impersonate-service-account=x@y.iam.gserviceaccount.com' }), /email or unique ID/);
+
+  assert.deepEqual((await workload({ gcp: 'web@acme-prod.iam.gserviceaccount.com' })).claims, { sub: '104729384756102938475' });
+  assert.deepEqual(asked, ['gcloud web@acme-prod.iam.gserviceaccount.com']);
+  assert.deepEqual(await workload({ gcp: '104729384756102938476' }), { profile: 'gcp', issuer: 'https://accounts.google.com', claims: { sub: '104729384756102938476' }, policy: {} });
+  await assert.rejects(workload({ gcp: 'web' }), /email or unique ID/);
+
+  assert.deepEqual(await workload({ azure: true, tenant: TENANT, object: OBJECT, audience: 'api://coffre-acme' }), {
+    profile: 'azure', issuer: `https://sts.windows.net/${TENANT}/`, claims: { oid: OBJECT, tid: TENANT }, policy: { audience: 'api://coffre-acme' },
+  });
+  assert.equal((await workload({ azure: true, tenant: TENANT, object: OBJECT, audience: 'api://coffre-acme', issuer: `https://login.microsoftonline.com/${TENANT}/v2.0` })).issuer, `https://login.microsoftonline.com/${TENANT}/v2.0`);
+  await assert.rejects(workload({ azure: true, tenant: TENANT, object: OBJECT }), /--audience/);
+  await assert.rejects(workload({ azure: true, object: OBJECT, audience: 'api://coffre-acme' }), /--tenant/);
+
+  assert.deepEqual(await workload({ fly: 'acme', 'org-id': '29873298', 'app-id': '3671581' }), {
+    profile: 'fly', issuer: 'https://oidc.fly.io/acme', claims: { app_id: '3671581', org_id: '29873298' }, policy: {},
+  });
+  await assert.rejects(workload({ fly: 'acme', 'org-id': '29873298' }), /--app-id/);
+
+  assert.deepEqual(await workload({ vercel: 'acme', 'owner-id': 'team_7Gw5ZMBpQA8h9GF832KGp7nw', 'project-id': 'prj_8bFh2nVq3eDcJ7tY5mWx' }), {
+    profile: 'vercel',
+    issuer: 'https://oidc.vercel.com/acme',
+    claims: { environment: 'production', owner_id: 'team_7Gw5ZMBpQA8h9GF832KGp7nw', project_id: 'prj_8bFh2nVq3eDcJ7tY5mWx' },
+    policy: {},
+  });
+  const preview = await workload({ vercel: 'acme', 'owner-id': 'team_7Gw5ZMBpQA8h9GF832KGp7nw', 'project-id': 'prj_8bFh2nVq3eDcJ7tY5mWx', 'vercel-environment': 'preview', issuer: 'https://oidc.vercel.com' });
+  assert.deepEqual([preview.issuer, preview.claims.environment], ['https://oidc.vercel.com', 'preview']);
+  await assert.rejects(workload({ vercel: 'acme', 'owner-id': 'team_7Gw5ZMBpQA8h9GF832KGp7nw', 'project-id': 'prj_8bFh2nVq3eDcJ7tY5mWx', audience: 'https://vercel.com/acme' }), /--audience is --azure's/);
+
+  assert.deepEqual(await workload({ enrollment: true, replicas: '2', source: ['162.220.232.0/24'], 'minted-by': 'deploy' }), {
+    profile: 'enrollment', issuer: null, claims: {}, policy: { replicas: 2, sources: ['162.220.232.0/24'], mintedBy: 'token:deploy' },
+  });
+  assert.deepEqual(await workload({ cloudflare: true }), { profile: 'cloudflare', issuer: null, claims: {}, policy: {} });
+});
+
+test("a workload binding's policy, from its flags: each one its profile takes, checked as the server checks it", async () => {
+  const enrolled = await workload({
+    enrollment: true, replicas: '3', approve: true, 'session-days': '14', 'overlap-minutes': '30', 'on-contention': 'alert', 'minted-by': 'service:deploy',
+    reads: ['market/prod=STRIPE_WEBHOOK_SECRET,DATABASE_URL,STRIPE_WEBHOOK_SECRET', 'market/dev=*'], 'unsigned-uploads': true,
+  });
+  assert.deepEqual(enrolled.policy, {
+    reads: { 'market/prod': ['DATABASE_URL', 'STRIPE_WEBHOOK_SECRET'], 'market/dev': '*' },
+    replicas: 3, sessionDays: 14, overlapMinutes: 30, mintedBy: 'token:deploy', approve: true, unsignedUploads: true, onContention: 'alert',
+  });
+  assert.deepEqual((await workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, 'session-hours': '4', source: ['10.0.0.0/8,2001:db8::/32'] })).policy, { sessionHours: 4, sources: ['10.0.0.0/8', '2001:db8::/32'] });
+
+  await assert.rejects(workload({ enrollment: true }), /replicas/);
+  await assert.rejects(workload({ enrollment: true, replicas: 'two' }), /--replicas takes a whole number/);
+  await assert.rejects(workload({ enrollment: true, replicas: '2', 'minted-by': 'ingest' }), /mintedBy names another service than service:ingest/);
+  await assert.rejects(workload({ enrollment: true, replicas: '2', 'on-contention': 'ignore' }), /freeze or alert/);
+  await assert.rejects(workload({ enrollment: true, replicas: '2', 'session-hours': '4' }), /an enrollment binding takes --reads, --source, --unsigned-uploads, --replicas, --minted-by, --approve, --session-days, --overlap-minutes, --on-contention, not --session-hours/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, replicas: '2' }), /an aws binding takes --reads, --source, --session-hours, --unsigned-uploads, not --replicas/);
+  await assert.rejects(workload({ cloudflare: true, source: ['10.0.0.0/8'] }), /a cloudflare binding takes --reads, not --source/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, 'session-hours': '169' }), /sessionHours is a whole number from 1 to 168/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, source: ['10.0.0.1/8'] }), /--source takes CIDRs, such as 162.220.232.0\/24 or 2001:db8::\/32: 10.0.0.1\/8 is none/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, source: ['push'] }), /--source takes CIDRs, such as 162.220.232.0\/24: push is none/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, workload: true }), /--workload is for --github, --gitlab and --issuer/);
+  await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, gcp: '1' }), /name one platform, not --aws and --gcp/);
+  await assert.rejects(workload({ gcp: '1', tenant: TENANT }), /--tenant is --azure's/);
+  // A claim the platform's flags set is theirs: a --claim of it would be dropped, so it is refused.
+  await assert.rejects(workload({ kubernetes: 'ingest/api', claim: ['sub=system:serviceaccount:other:x'] }), /--kubernetes sets sub from its own flags/);
+  await assert.rejects(workload({ vercel: 'acme', 'owner-id': 'team_7Gw5ZMBpQA8h9GF832KGp7nw', 'project-id': 'prj_8bFh2nVq3eDcJ7tY5mWx', claim: ['environment=preview'] }), /--vercel sets environment from its own flags/);
+  // What narrows a CI run's binding narrows no workload's: refused, never dropped.
+  for (const flag of ['branch', 'event', 'github-environment', 'workflow', 'namespace-id'] as const) {
+    await assert.rejects(workload({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest-task`, [flag]: flag === 'event' ? ['push'] : 'x' }), new RegExp(`--${flag} says which CI runs a --github or --gitlab binding takes: --aws has none`));
+  }
+
+  for (const bad of ['market=A', 'market/prod', 'market/prod=', 'market/prod/eu=A', 'market/prod=*,A']) assert.throws(() => readsFrom([bad]), /--reads takes|name keys, or \*/, bad);
+  assert.throws(() => readsFrom(['market/prod=A', 'market/prod=B']), /names market\/prod twice/);
+});
+
+test("a CI run's binding is for a key-bound session with --workload, and a bearer one without, which takes no policy", async () => {
+  const flags = { github: 'acme/api', workflow: 'deploy.yml', branch: 'main' };
+  assert.equal((await bindingFrom(flags, lookup)).policy, undefined);
+  const keyed = await bindingFrom({ ...flags, workload: true, reads: ['market/ci=NPM_TOKEN'] }, lookup, { service: 'token:ci' });
+  assert.deepEqual(keyed.policy, { reads: { 'market/ci': ['NPM_TOKEN'] } });
+  assert.equal(keyed.profile, 'github');
+  await assert.rejects(bindingFrom({ ...flags, reads: ['market/ci=NPM_TOKEN'] }, lookup), /--reads is a key-bound session's: add --workload/);
+  await assert.rejects(bindingFrom({ ...flags, source: ['10.0.0.0/8'] }, lookup), /--source is a key-bound session's: add --workload/);
+  // On GitLab, a pipeline source is a word and a session's source a CIDR: both, apart.
+  const gitlab = await bindingFrom({ gitlab: 'acme/api', branch: 'main', workload: true, source: ['push,web', '10.0.0.0/8'] }, lookup, { service: 'token:ci' });
+  assert.deepEqual([gitlab.claims.pipeline_source, gitlab.policy], [['push', 'web'], { sources: ['10.0.0.0/8'] }]);
+  await assert.rejects(bindingFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', source: ['push'] }, lookup), /--source is a GitLab pipeline's, or a CIDR: push is neither/);
+  const custom = await bindingFrom({ issuer: 'https://idp.acme.example', claim: ['sub=svc'], workload: true, 'session-hours': '2' }, lookup, { service: 'token:ci' });
+  assert.deepEqual(custom.policy, { sessionHours: 2 });
+});
+
+test("a workload's plan says what it trusts, how its sessions live, and what each listed key exposes", () => {
+  const plan = {
+    profile: 'aws' as const,
+    issuer: 'urn:coffre:aws',
+    jwksUri: '',
+    claims: { account: ACCOUNT, role_id: ROLE_ID },
+    keys: null,
+    scope: { 'market/prod': 'viewer' as const },
+    withheld: [] as string[],
+    replaces: [],
+    policy: { reads: { 'market/prod': ['STRIPE_WEBHOOK_SECRET'] }, sources: ['10.0.0.0/8'], sessionHours: 4 },
+  };
+  assert.equal(describePlan('token:ingest', plan, null), [
+    `Would trust AWS workloads running as role ${ROLE_ID} of account ${ACCOUNT} to sign in as service:ingest, for key-bound sessions:`,
+    '  profile  aws',
+    `  claims   account  ${ACCOUNT}`,
+    `           role_id  ${ROLE_ID}`,
+    '  reaches  viewer on market/prod',
+    '  sessions key-bound, at most 4 h from each proof',
+    '  reads    market/prod: STRIPE_WEBHOOK_SECRET, exposed if aws is breached',
+    '  from     10.0.0.0/8',
+    '',
+  ].join('\n'));
+  // A workload's plan says nothing of a CI run's events.
+  assert.equal(describeEvents(plan), null);
+  const enrollment = { ...plan, profile: 'enrollment' as const, issuer: 'urn:coffre:enrollment', claims: {}, policy: { replicas: 2, mintedBy: 'token:deploy' } };
+  assert.equal(describePlan('token:api-prod', enrollment, null), [
+    'Would trust workloads enrolled with a code minted for this binding to sign in as service:api-prod, for key-bound sessions:',
+    '  profile  enrollment',
+    '  reaches  viewer on market/prod',
+    "  sessions key-bound, each renewed every 30 s and ended at its code's expiry, 30 days after minting",
+    '  reads    nothing: every secret value is used through coffre, never read',
+    '  codes    minted by its managers and service:deploy, 30 days each; up to 4 sessions of 2 replicas',
+    '           freezes when a copy contends past 15 minutes of overlap',
+    '',
+  ].join('\n'));
+  // A Worker's call through a service binding is no session.
+  const cloudflare = { ...plan, profile: 'cloudflare' as const, issuer: 'urn:coffre:cloudflare', claims: {}, policy: {} };
+  assert.doesNotMatch(describePlan('token:api-prod', cloudflare, null), /\n  sessions/);
+  const gcp = { ...plan, profile: 'gcp' as const, issuer: 'https://accounts.google.com', jwksUri: 'https://www.googleapis.com/oauth2/v3/certs', claims: { sub: '104729384756102938475' }, policy: { keyAudience: true as const } };
+  assert.match(describePlan('token:web', gcp, null), /\n  keys     https:\/\/www.googleapis.com\/oauth2\/v3\/certs\n.*\n  audience names the session's key: <publicUrl>#jkt=<thumbprint>\n/s);
+  for (const [binding, says] of [
+    [{ profile: 'kubernetes', issuer: 'https://oidc.prod.acme.example', claims: { sub: 'system:serviceaccount:ingest:api', 'kubernetes.io.serviceaccount.uid': SA_UID } }, `pods of service account ingest/api (UID ${SA_UID}) of the cluster https://oidc.prod.acme.example`],
+    [{ profile: 'azure', issuer: `https://sts.windows.net/${TENANT}/`, claims: { tid: TENANT, oid: OBJECT } }, `Azure workloads of managed identity ${OBJECT} in tenant ${TENANT}`],
+    [{ profile: 'vercel', issuer: 'https://oidc.vercel.com/acme', claims: { owner_id: 'team_1', project_id: 'prj_1', environment: 'production' } }, 'Vercel functions of project prj_1 of team team_1, in production'],
+    [{ profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', claims: {} }, "Workers that call it through a service binding's props"],
+  ] as const) {
+    assert.equal(runsOf(binding as Parameters<typeof runsOf>[0]), says);
+  }
 });

@@ -71,7 +71,7 @@ test('a policy holds only what its profile allows, and is canonical: one policy,
   assert.deepEqual(checkPolicy('enrollment', JSON.parse(policyText(policy)), { service: SERVICE }), policy);
 
   // A platform whose caller picks the audience always names the key in it, said or not; never off.
-  for (const profile of ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly'] as const) {
+  for (const profile of ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly', 'vercel'] as const) {
     assert.equal(policyText(checkPolicy(profile, {}, { service: SERVICE })), '{"keyAudience":true}', profile);
     assert.equal(policyText(checkPolicy(profile, { keyAudience: true, sessionHours: 24 }, { service: SERVICE })), '{"keyAudience":true}', profile);
     assert.throws(() => checkPolicy(profile, { keyAudience: false }, { service: SERVICE }), /name the session's key/, profile);
@@ -87,7 +87,8 @@ test('a policy holds only what its profile allows, and is canonical: one policy,
     ['github', { audience: 'x' }, /not audience/],
     ['kubernetes', { keyAudience: true }, /not keyAudience/],
     ['azure', {}, /names the audience/],
-    ['vercel', { audience: '' }, /exact audience/],
+    ['azure', { audience: '' }, /exact audience/],
+    ['vercel', { audience: 'https://vercel.com/acme' }, /not audience/],
     ['enrollment', {}, /replicas/],
     ['enrollment', { replicas: 0 }, /replicas is a whole number/],
     ['enrollment', { replicas: 2, sessionDays: 91 }, /sessionDays/],

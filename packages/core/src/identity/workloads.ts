@@ -104,11 +104,11 @@ export const OIDC_PROFILES: readonly WorkloadProfile[] = WORKLOAD_PROFILES.filte
 
 /**
  * Tokens a platform hands out again, the same one to every replica and
- * restart for its lifetime: a managed identity's, a Vercel function's.
- * Spending one would refuse them, so none is spent: it is a bearer until
- * its own `exp`, which ends the session it makes (section 4.2).
+ * restart for its lifetime: a managed identity's. Spending one would
+ * refuse them, so none is spent: it is a bearer until its own `exp`, which
+ * ends the session it makes (section 4.2).
  */
-export const REPEATING_PROFILES: readonly WorkloadProfile[] = ['azure', 'vercel'];
+export const REPEATING_PROFILES: readonly WorkloadProfile[] = ['azure'];
 
 /** The claims each profile requires; a binding may add more, to narrow it. An `aws` binding's are the role's account and unique ID. */
 export const REQUIRED_CLAIMS: Record<WorkloadProfile, readonly string[]> = {
@@ -642,8 +642,9 @@ export type BindingReads = Readonly<Record<string, { readonly keys?: readonly st
  * A binding's policy, as `checkPolicy` returns it: a field left out holds
  * its default (`POLICY_DEFAULTS`), so one policy has one spelling.
  *
- * - `audience`: the exact audience of an `azure` or `vercel` token, which
- *   those platforms fix; required for them, refused for every other.
+ * - `audience`: the exact audience of an `azure` token, an Entra
+ *   application ID URI, which Entra fixes; required for it, refused for
+ *   every other profile.
  * - `keyAudience`: the token's audience must name the session's key,
  *   `<publicUrl>#jkt=<thumbprint>`: always for the platforms whose caller
  *   picks the audience (`KEY_NAMING_PROFILES`), and where a `custom`
@@ -696,8 +697,11 @@ const KEY_AUDIENCE: readonly PolicyField[] = [...SESSION_FIELDS, 'keyAudience'];
 /**
  * The profiles whose caller picks the token's audience, so their binding's
  * policy always says `keyAudience`: `checkPolicy` sets it, and refuses it off.
+ * A Vercel function picks one by exchanging its own token at
+ * `https://oidc.vercel.com/~token`, as `@vercel/oidc`'s
+ * `getVercelOidcToken({ audience })` does.
  */
-export const KEY_NAMING_PROFILES: readonly WorkloadProfile[] = ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly'];
+export const KEY_NAMING_PROFILES: readonly WorkloadProfile[] = ['github', 'github-reusable', 'github-reusable-organization', 'gcp', 'fly', 'vercel'];
 
 /** The fields each profile's policy may hold. */
 export const POLICY_FIELDS: Record<WorkloadProfile, readonly PolicyField[]> = {
@@ -710,7 +714,7 @@ export const POLICY_FIELDS: Record<WorkloadProfile, readonly PolicyField[]> = {
   gcp: KEY_AUDIENCE,
   azure: [...SESSION_FIELDS, 'audience'],
   fly: KEY_AUDIENCE,
-  vercel: [...SESSION_FIELDS, 'audience'],
+  vercel: KEY_AUDIENCE,
   aws: SESSION_FIELDS,
   enrollment: ['reads', 'sources', 'replicas', 'sessionDays', 'overlapMinutes', 'mintedBy', 'approve', 'onContention', 'unsignedUploads'],
   // A call from another Worker has no address of its own and no session to end.
