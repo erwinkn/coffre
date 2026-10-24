@@ -308,7 +308,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | rename a folder, everything in it re-filed, or remove one, everything out | `PATCH /api/folders/Clients {"name": "Customers"}`, `DELETE /api/folders/market/prod/stripe` |
 | a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
-| decrypt a secret or a whole environment; a whole environment's read also answers the `version` of what it opened (null for one secret's), the one a poller keeps | `POST /api/reveals {"path": "market/prod"}` → `{"operationId": "…", "values": {…}, "version": "…"}` |
+| decrypt a secret or a whole environment; a whole environment's read also answers the `version` of what it opened (null for one secret's), the one a poller keeps; `keys` reads only those of it, as `coffre export --keys` does, and opens, logs and counts against the bulk limit nothing else | `POST /api/reveals {"path": "market/prod"}` → `{"operationId": "…", "values": {…}, "version": "…"}`, `POST /api/reveals {"path": "market/prod", "keys": ["DATABASE_URL"]}` |
 | make a key a reference to another secret, read live through it | `PATCH /api/secrets/billing/prod {"DATABASE_URL": {"ref": "market/prod/DATABASE_URL"}}` |
 | the references into and out of a place, and who reads through them; break one | `GET /api/references?path=market/prod`, `DELETE /api/secrets/billing/prod/DATABASE_URL/reference` |
 | list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |

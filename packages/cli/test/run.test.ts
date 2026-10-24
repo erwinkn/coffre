@@ -45,6 +45,8 @@ type Environment = {
   conflicts?: string[];
   /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
   rotateAfterDays?: number | null | 'unsaid';
+  /** Read whole, whatever keys it is asked for, as an instance before 0.12. */
+  whole?: boolean;
 };
 
 /** A coffre holding these environments, which keeps every request it is sent. */
@@ -58,8 +60,9 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     const listing = /^\/api\/secrets\/([^/]+)\/([^/]+)$/.exec(req.url ?? '');
-    const path = listing === null ? (JSON.parse(body || '{}') as { path?: string }).path : `${listing[1]}/${listing[2]}`;
-    requests.push(`${listing === null ? 'reveal' : 'list'} ${path}`);
+    const asked = listing === null ? (JSON.parse(body || '{}') as { path?: string; keys?: string[] }) : {};
+    const path = listing === null ? asked.path : `${listing[1]}/${listing[2]}`;
+    requests.push(`${listing === null ? 'reveal' : 'list'} ${path}${asked.keys === undefined ? '' : `: ${asked.keys.join(' ')}`}`);
     const environment = path === undefined ? undefined : environments[path.split('/').slice(0, 2).join('/')];
     if (environment === undefined) return send(404, { error: 'not_found', message: 'unknown project or environment' });
     if (environment.refused !== undefined) return send(environment.refused, { error: 'forbidden', message: 'you do not have permission to do that' });
@@ -73,7 +76,8 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     }
     const conflict = environment.conflicts?.shift();
     if (conflict !== undefined) return send(409, { error: 'conflict', message: 'the access policy changed while this was answered: try again', reason: conflict });
-    send(200, { operationId: 'op', values: environment.values });
+    const { keys } = asked;
+    send(200, { operationId: 'op', values: keys === undefined || environment.whole ? environment.values : Object.fromEntries(Object.entries(environment.values).filter(([key]) => keys.includes(key))) });
   });
   t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
   server.listen(0, '127.0.0.1');
@@ -248,6 +252,126 @@ test('export of several environments prints their union, and refuses a clash as 
   assert.equal(clashing.stderr, 'coffre: deploy/prod and www/prod both define A: a key comes from one environment only. Nothing was read\n');
 });
 
+test('export --keys lists first and reads only the keys it names, by name or prefix; an environment it names none of is not read', async (t) => {
+  const coffre = await instance(t, {
+    'deploy/prod': { values: { DATABASE_URL: 'db', STRIPE_KEY: 'sk', STRIPE_WEBHOOK: 'wh', SHARED: 'deploy', OTHER: 'x' } },
+    'auth/prod': { values: { GITHUB_CLIENT_SECRET: 'gh', SHARED: 'auth' } },
+    'www/prod': { values: { UNRELATED: 'y' } },
+  });
+  // SHARED, which two of them define, is no clash: it is not read.
+  const run = await coffre.coffre(['export', 'deploy/prod', 'auth/prod', 'www/prod', '--keys', 'DATABASE_URL\nSTRIPE_*', '--keys=GITHUB_CLIENT_SECRET STRIPE_*', '--format', 'json']);
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.stdout, `${JSON.stringify({ DATABASE_URL: 'db', GITHUB_CLIENT_SECRET: 'gh', STRIPE_KEY: 'sk', STRIPE_WEBHOOK: 'wh' }, null, 2)}\n`);
+  assert.equal(run.stderr, '');
+  assert.deepEqual(coffre.requests, [
+    'list deploy/prod', 'list auth/prod', 'list www/prod',
+    'reveal deploy/prod: DATABASE_URL STRIPE_KEY STRIPE_WEBHOOK', 'reveal auth/prod: GITHUB_CLIENT_SECRET',
+  ]);
+  // Of one environment too: listed, then those keys only.
+  coffre.requests.length = 0;
+  const one = await coffre.coffre(['export', 'deploy/prod', '--keys', 'STRIPE_KEY', '--format', 'dotenv']);
+  assert.equal(one.code, 0, one.stderr);
+  assert.equal(one.stdout, 'STRIPE_KEY=sk\n');
+  assert.deepEqual(coffre.requests, ['list deploy/prod', 'reveal deploy/prod: STRIPE_KEY']);
+});
+
+test('export --keys stops before anything is read on a name none of the environments holds, or a prefix that starts none of their keys', async (t) => {
+  const coffre = await instance(t, {
+    'deploy/prod': { values: { DATABASE_URL: 'db' }, listed: [{ key: 'DATABASE_URL', version: 1 }, { key: 'OLD_KEY', version: 2, archived: true }, { key: 'EMPTY', version: null }] },
+    'auth/prod': { values: { TOKEN: 't' } },
+  });
+  const cases: [string, string][] = [
+    ['DATABASE_URL DATABSE_URL', 'coffre: deploy/prod and auth/prod hold no key that --keys names as DATABSE_URL. Nothing was read\n'],
+    ['DATABASE_URL STRIPE_*', 'coffre: deploy/prod and auth/prod hold no key that --keys names as STRIPE_*. Nothing was read\n'],
+    // Archived, or without a value, a key is not one to export.
+    ['TOKEN OLD_KEY EMPTY', 'coffre: deploy/prod and auth/prod hold no key that --keys names as OLD_KEY and EMPTY. Nothing was read\n'],
+  ];
+  for (const [keys, said] of cases) {
+    coffre.requests.length = 0;
+    const run = await coffre.coffre(['export', 'deploy/prod', 'auth/prod', '--keys', keys]);
+    assert.equal(run.code, 1);
+    assert.equal(run.stdout, '');
+    assert.equal(run.stderr, said);
+    assert.deepEqual(coffre.requests, ['list deploy/prod', 'list auth/prod'], keys);
+  }
+  coffre.requests.length = 0;
+  const one = await coffre.coffre(['export', 'deploy/prod', '--keys', 'TOKEN']);
+  assert.equal(one.stderr, 'coffre: deploy/prod holds no key that --keys names as TOKEN. Nothing was read\n');
+  // A key two of them define clashes once named, as without --keys.
+  const clashing = await instance(t, { 'deploy/prod': { values: { TOKEN: 'a' } }, 'auth/prod': { values: { TOKEN: 'b' } } });
+  const named = await clashing.coffre(['export', 'deploy/prod', 'auth/prod', '--keys', 'TOK*']);
+  assert.equal(named.stderr, 'coffre: deploy/prod and auth/prod both define TOKEN: a key comes from one environment only. Nothing was read\n');
+  assert.deepEqual(clashing.requests, ['list deploy/prod', 'list auth/prod']);
+});
+
+test("export --keys says a parent's key the caller cannot read is inherited, not missing, and says a named key a workload only uses was left out", async (t) => {
+  const fork = await instance(t, {
+    'market/prod-eu': { values: {}, listed: [{ key: 'EU_REGION', version: 1 }, { key: 'STRIPE_KEY', version: null, parent: { from: 'prod', state: 'inherited', changed: false, reset: false, held: true } }] },
+  });
+  const hidden = await fork.coffre(['export', 'market/prod-eu', '--keys', 'EU_REGION STRIPE_*']);
+  assert.equal(hidden.code, 1);
+  assert.equal(hidden.stderr, 'coffre: market/prod-eu inherits STRIPE_KEY from market/prod, which you cannot read. Nothing was read\n');
+  assert.deepEqual(fork.requests, ['list market/prod-eu']);
+
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const server = createServer((req, res) => {
+    const send = (value: unknown) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.method === 'GET') return send({ keys: ['TOKEN', 'SIGNER'].map((key) => ({ key, version: 1, archived: false, reference: null })) });
+    send({ operationId: 'op', values: { TOKEN: 't' }, sensitive: [], useOnly: ['SIGNER'], version: 'v' });
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  signedInWithToken(home, `http://127.0.0.1:${(server.address() as { port: number }).port}`, TOKEN);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'deploy/prod', '--keys', 'TOKEN SIGNER', '--format', 'json'], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(JSON.parse(stdout), { TOKEN: 't' });
+  assert.equal(stderr, "coffre: left out, which this workload only uses through coffre: SIGNER (its binding's reads do not list them)\n");
+});
+
+test('export --keys refuses every key, a malformed name and --watch before any request', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 't' } } });
+  const cases: [string[], RegExp, number][] = [
+    [['--keys', '*'], /^coffre: --keys names keys, or the keys a prefix starts, STRIPE_\*, never all of them: `coffre run <project>\/<environment> -- <command>` hands every key to one process\n/, 2],
+    [['--keys', ''], /^coffre: --keys names the keys to export/, 2],
+    [['--keys', ' \n'], /^coffre: --keys names the keys to export/, 2],
+    [['--keys', 'STRIPE_*_KEY'], /^coffre: --keys takes key names, or a prefix and \*, as STRIPE_\*, not "STRIPE_\*_KEY"\n/, 2],
+    [['--keys', '1KEY'], /not "1KEY"/, 2],
+    [['--keys', 'A-B'], /not "A-B"/, 2],
+    [['--keys', `K${'E'.repeat(128)}`], /--keys takes key names/, 2],
+    [['--keys', 'TOKEN', '--output-file', 'x', '--watch'], /^coffre: --watch keeps every key of its environments current: leave --keys out\n$/, 1],
+  ];
+  for (const [flags, said, code] of cases) {
+    const run = await coffre.coffre(['export', 'deploy/prod', ...flags]);
+    assert.equal(run.code, code, flags.join(' '));
+    assert.match(run.stderr, said);
+  }
+  assert.deepEqual(coffre.requests, []);
+});
+
+test('export --keys from an instance before 0.12, which reads every key, exports only those named and says so', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 't', OTHER: 'o' }, whole: true } });
+  const run = await coffre.coffre(['export', 'deploy/prod', '--keys', 'TOKEN', '--format', 'json']);
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), { TOKEN: 't' });
+  assert.equal(run.stderr, 'coffre: deploy/prod was read whole, as an instance before 0.12 reads it: only the keys --keys names are exported, and the audit log has every one\n');
+});
+
+test('export --keys stops on a key gone between listing and reading, its values unused', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 't' }, listed: [{ key: 'TOKEN', version: 1 }, { key: 'GONE', version: 1 }] } });
+  const run = await coffre.coffre(['export', 'deploy/prod', '--keys', 'TOKEN GONE', '--format', 'json']);
+  assert.equal(run.code, 1);
+  assert.equal(run.stdout, '');
+  assert.equal(run.stderr, 'coffre: deploy/prod no longer holds GONE, as read just now. No value was used, and the read is in the audit log\n');
+});
+
 test('run, export and get read again, once, when the access policy changed under their read', async (t) => {
   const reads: [string[], (stdout: string) => void][] = [
     [['run', 'deploy/prod', '--', ...printing('TOKEN')], (stdout) => assert.deepEqual(JSON.parse(stdout), { TOKEN: 'deploy-token-value' })],
@@ -399,6 +523,31 @@ test("a terminal's Ctrl-C reaches a run's command, and the run waits for it; a S
   await started(terminated);
   terminated.kill('SIGTERM');
   assert.deepEqual(await once(terminated, 'exit'), [9, null]);
+});
+
+test("a person's export --keys, on an instance with the credential proxy, is refused before a handle is made or a key listed", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pat = `coffre_pat_${'p'.repeat(43)}`;
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    if (req.url === '/use') return res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ proxy: 'coffre', credentials: [] }));
+    res.writeHead(500).end();
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  signedInWithToken(home, `http://127.0.0.1:${port}`, pat);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'market/dev', '--keys', 'DATABASE_URL'], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 1);
+  assert.equal(stderr, "coffre: --keys picks values, and a person's export here gets placeholders, which the credential proxy plans for whole environments: leave --keys out\n");
+  assert.deepEqual(requests, ['GET /use']);
 });
 
 test("a person's run, on an instance with the credential proxy, gets placeholders: one handle, the plan's variables, and what it leaves out, said", async (t) => {

@@ -1,5 +1,5 @@
 name: coffre
-description: Read one or more environments from coffre, mask their secrets, and make them available to subsequent steps
+description: Read the keys a workflow names from one or more coffre environments, mask them, and make them available to subsequent steps
 inputs:
   url:
     description: URL of your coffre instance
@@ -11,6 +11,12 @@ inputs:
     description: >-
       The project/environment to read; or several, separated by spaces or lines, read together:
       a key two of them define stops the step before anything is read
+    required: true
+  keys:
+    description: >-
+      The keys to export, which every later step of the job sees: names, or prefixes ending in `*`
+      (`DATABASE_URL STRIPE_*`), separated by spaces or lines. Each must match a key of the environments;
+      a later step's code never comes from a key the workflow does not name
     required: true
   service:
     description: >-
@@ -33,6 +39,7 @@ runs:
         INPUT_TOKEN: ${{ inputs.token }}
         INPUT_SERVICE: ${{ inputs.service }}
         INPUT_ENVIRONMENT: ${{ inputs.environment }}
+        INPUT_KEYS: ${{ inputs.keys }}
         INPUT_REQUIRE_COMPLETE: ${{ inputs.require-complete }}
       run: |
         if ! command -v node >/dev/null || ! command -v npx >/dev/null; then
@@ -49,6 +56,12 @@ runs:
         fi
         if [ -n "$INPUT_SERVICE" ] && [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
           echo '::error::service needs the job to have `permissions: id-token: write`.' >&2
+          exit 1
+        fi
+        # Every later step sees what GITHUB_ENV gets: the workflow, which its
+        # reviewers read, names it, never whoever may write the environment.
+        if [ -z "${INPUT_KEYS//[[:space:]]/}" ]; then
+          echo '::error::coffre needs `keys:`, the keys to export to the later steps, by name or prefix: `keys: DATABASE_URL STRIPE_*`. To hand every key to one process instead, run it with `coffre run <environment> -- <cmd>`.' >&2
           exit 1
         fi
         if [ "$INPUT_REQUIRE_COMPLETE" != true ] && [ "$INPUT_REQUIRE_COMPLETE" != false ]; then
@@ -90,4 +103,4 @@ runs:
           done
           if [ "$incomplete" = true ]; then exit 1; fi
         fi
-        coffre "${session[@]}" export --format github "${environments[@]}"
+        coffre "${session[@]}" export --format github --keys="$INPUT_KEYS" "${environments[@]}"

@@ -109,7 +109,40 @@ jobs:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/incomplete
+          keys: ACTION_TEST_INCOMPLETE
           require-complete: true
+      - name: Stop when the workflow names no keys
+        id: unnamed
+        continue-on-error: true
+        uses: ./action
+        env:
+          npm_config_offline: 'true'
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci
+      - name: Stop on a key no environment holds
+        id: typo
+        continue-on-error: true
+        uses: ./action
+        env:
+          npm_config_offline: 'true'
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci action-test/deploy
+          keys: UNNAMED_SECRET ACTION_TEST_PLAINN
+      - name: Stop on a prefix that matches no key
+        id: prefix
+        continue-on-error: true
+        uses: ./action
+        env:
+          npm_config_offline: 'true'
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci action-test/deploy
+          keys: UNNAMED_SECRET NOWHERE_*
       - name: Load secrets through the Action
         uses: ./action
         env:
@@ -120,14 +153,24 @@ jobs:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/ci action-test/deploy
+          # A prefix and a name, one from each; UNNAMED_SECRET, beside them in ci, stays out.
+          keys: |
+            ACTION_TEST_*
+            GITHUB_TOKEN
           # Each dismissed what it lacks: complete, so read.
           require-complete: true
       - name: Assert values and exercise runner masking
         env:
           TOOLING_NODE: ${{ steps.tooling.outputs.node }}
           INCOMPLETE_OUTCOME: ${{ steps.incomplete.outcome }}
+          UNNAMED_OUTCOME: ${{ steps.unnamed.outcome }}
+          TYPO_OUTCOME: ${{ steps.typo.outcome }}
+          PREFIX_OUTCOME: ${{ steps.prefix.outcome }}
         run: |
           test "$INCOMPLETE_OUTCOME" = failure
+          test "$UNNAMED_OUTCOME" = failure
+          test "$TYPO_OUTCOME" = failure
+          test "$PREFIX_OUTCOME" = failure
           node --version > "$RUNNER_TEMP/coffre-action-node-after"
           cmp "$RUNNER_TEMP/coffre-action-node-before" "$RUNNER_TEMP/coffre-action-node-after"
           printf '%s' "$PATH" > "$RUNNER_TEMP/coffre-action-path-after"

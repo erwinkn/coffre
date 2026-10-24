@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **Breaking: the GitHub Action exports only the keys the workflow names.**
+  Workflows must add `keys:`. What the Action writes to `GITHUB_ENV`, every
+  later step of the job sees, so anyone who could only write `market/prod`
+  could add `BASH_ENV`, `LD_PRELOAD` or a build tool's hook there and run
+  their code with the job's access; the denylist of such names (0.10.2) can
+  never be complete. Now the workflow, which its reviewers read, says what
+  the job gets, as `env: FOO: ${{ secrets.FOO }}` does:
+  `keys: DATABASE_URL STRIPE_*`, names or prefixes ending in `*`, separated
+  by spaces or lines. A step without `keys`, or with a bare `*`, stops
+  before anything is read, and points to `coffre run <environment> --
+  <cmd>` to hand every key to one process. A name none of the environments
+  holds, or a prefix that starts none of their keys, stops it too, before
+  anything is read. The denylist stays, behind it: a key on it is refused
+  before anything is read, named or found by a prefix. Several environments
+  and `require-complete` work as before; an environment `keys` names none
+  of is not read, and only named keys clash.
+- **`coffre export --keys`, and `keys` on `POST /api/reveals`.** The Action
+  runs `coffre export --format github --keys …`, which `--format github`
+  now requires. `--keys` takes the same names and prefixes, in every format,
+  but not with `--watch`, nor for a person's placeholders, which the
+  credential proxy plans for whole environments: the CLI lists the environments first, which opens no
+  value, then asks the instance for those keys only (`{"path":
+  "market/prod", "keys": ["DATABASE_URL", "STRIPE_KEY"]}`). The other keys
+  are never opened, logged or counted against the vault's bulk limit. An
+  instance before this one reads the whole environment whatever it is
+  asked: the CLI exports only the keys named, and says that the audit log
+  has every one.
+
 ## 0.11.0 (2026-10-24)
 
 - **Upgrading to 0.11, in short.** Run `coffre migrate` before you deploy,

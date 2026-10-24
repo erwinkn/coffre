@@ -440,6 +440,7 @@ export type Api = {
   "POST /reveals": {
     input: {
       path: string;
+      keys?: string[];
     };
     output: {
       operationId: string;

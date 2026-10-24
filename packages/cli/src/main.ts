@@ -15,14 +15,14 @@ import { promisify } from 'node:util';
 import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
-import { githubEnvironment, githubMasks } from './github-env.ts';
+import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken, keyBound, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
-import { clash, environmentPaths, listOf } from './environments.ts';
+import { clash, environmentPaths, keyNamed, keyPatterns, listOf } from './environments.ts';
 import { listen, type Tunnel } from './tunnels.ts';
 import { approve, enroll } from './enroll.ts';
 import { freeze, unfreeze } from './freeze.ts';
@@ -1095,54 +1095,97 @@ async function readValue(key: string): Promise<string> {
 }
 
 /**
+ * The keys each environment named gives a read of them, by path: listed,
+ * which opens no value, those `patterns` names (`export --keys`), or all of
+ * them. One the caller may not list, a reference among them that cannot be
+ * read, a pattern that names none of them, or a key two of them define
+ * stops here, before anything is read, thrown for the command to end on.
+ */
+async function listKeys(paths: readonly string[], list: CoffreClient, patterns: readonly string[] | null): Promise<Map<string, string[]>> {
+  const keys = new Map<string, string[]>();
+  for (const path of paths) {
+    const listed = await list.secrets.list(path).catch((error: unknown) => {
+      throw new Error(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`);
+    });
+    const live = listed.keys.filter(({ key, archived }) => !archived && (patterns === null || patterns.some((pattern) => keyNamed(pattern, key))));
+    // A parent's key, listed by name only to whoever cannot list that parent: held here, and never readable by them.
+    const hidden = live.filter(({ version, reference, parent }) => version === null && reference === null && parent?.state === 'inherited');
+    if (hidden.length > 0) {
+      const which = [...new Set(hidden.map(({ parent }) => parent!.from))].map((from) => `${hidden.filter(({ parent }) => parent!.from === from).map(({ key }) => key).join(', ')} from ${path.split('/')[0]}/${from}`);
+      throw new Error(`${path} inherits ${which.join('; ')}, which you cannot read. Nothing was read`);
+    }
+    // A key without a value of its own reads through its reference, which reveal refuses for the whole environment when it cannot.
+    const stuck = live.find(({ version, reference }) => version === null && reference !== null && reference.state !== 'live');
+    if (stuck !== undefined) {
+      throw new Error(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
+    }
+    keys.set(path, live.filter(({ version, reference }) => version !== null || reference !== null).map(({ key }) => key));
+  }
+  // A name none of them holds is a typo, or a key not written yet: either way, not one to export without.
+  const unmatched = (patterns ?? []).filter((pattern) => ![...keys.values()].some((held) => held.some((key) => keyNamed(pattern, key))));
+  if (unmatched.length > 0) throw new Error(`${listOf(paths)} hold${paths.length === 1 ? 's' : ''} no key that --keys names as ${listOf(unmatched)}. Nothing was read`);
+  const shared = clash([...keys]);
+  if (shared !== null) throw new Error(`${shared}: a key comes from one environment only. Nothing was read`);
+  return keys;
+}
+
+/**
  * Every value in the environments named, as one environment: all are read,
  * or none is. One is read as it always was. Of several, each is listed
- * first, which opens no value: one the caller may not read, a reference in
- * it that cannot be read, or a key two of them define stops here, before
- * anything is read. Then each is read, one audited read apiece, and what
- * came back is checked again, for an environment changed in between. What
- * stops it is thrown, for the command to end on or, watching, to outlive.
+ * first (`listKeys`), unless `only` says already which keys of each to read,
+ * those `export --keys` names, and an environment it names none of is not
+ * read at all. Then each is read, one audited read apiece, and what came
+ * back is checked again, for an environment changed in between. What stops
+ * it is thrown, for the command to end on or, watching, to outlive.
  */
-async function readEnvironments(paths: readonly string[], api: { read: CoffreClient; list: CoffreClient }): Promise<{ entries: [string, string][]; version: string; sensitive: string[] }> {
-  if (paths.length > 1) {
-    const keys: [string, string[]][] = [];
-    for (const path of paths) {
-      const listed = await api.list.secrets.list(path).catch((error: unknown) => {
-        throw new Error(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`);
-      });
-      const live = listed.keys.filter(({ archived }) => !archived);
-      // A key without a value of its own reads through its reference, which reveal refuses for the whole environment when it cannot.
-      const stuck = live.find(({ version, reference }) => version === null && reference !== null && reference.state !== 'live');
-      if (stuck !== undefined) {
-        throw new Error(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
-      }
-      keys.push([path, live.filter(({ version, reference }) => version !== null || reference !== null).map(({ key }) => key)]);
-    }
-    const shared = clash(keys);
-    if (shared !== null) throw new Error(`${shared}: a key comes from one environment only. Nothing was read`);
-  }
+async function readEnvironments(
+  paths: readonly string[],
+  api: { read: CoffreClient; list: CoffreClient },
+  only: Map<string, string[]> | null = null,
+): Promise<{ entries: [string, string][]; version: string; sensitive: string[]; useOnly: string[] }> {
+  if (only === null && paths.length > 1) await listKeys(paths, api.list, null);
+  // The keys named that a workload's read left out, as it only uses them: said, as a person's sensitive ones are.
+  const useOnly: string[] = [];
   const read: [string, { values: Record<string, string>; version: string | null; sensitive?: string[] }][] = [];
-  for (const path of paths) read.push([path, await api.read.secrets.reveal(path)]);
+  for (const path of paths) {
+    const keys = only?.get(path);
+    if (keys === undefined) {
+      read.push([path, await api.read.secrets.reveal(path)]);
+      continue;
+    }
+    if (keys.length === 0) continue;
+    const answer = await api.read.secrets.reveal(path, keys);
+    const wanted = new Set(keys);
+    // An instance before 0.12 reads the whole environment, whatever it is asked: only what was named leaves this run.
+    if (Object.keys(answer.values).some((key) => !wanted.has(key))) {
+      process.stderr.write(`coffre: ${path} was read whole, as an instance before 0.12 reads it: only the keys --keys names are exported, and the audit log has every one\n`);
+    }
+    const values = Object.fromEntries(Object.entries(answer.values).filter(([key]) => wanted.has(key)));
+    const gone = keys.filter((key) => !Object.hasOwn(values, key) && !(answer.sensitive ?? []).includes(key) && !(answer.useOnly ?? []).includes(key));
+    if (gone.length > 0) throw new Error(`${path} no longer holds ${listOf(gone)}, as read just now. No value was used, and the read is in the audit log`);
+    useOnly.push(...keys.filter((key) => (answer.useOnly ?? []).includes(key)));
+    read.push([path, { ...answer, values }]);
+  }
   const shared = clash(read.map(([path, { values }]) => [path, Object.keys(values)]));
   if (shared !== null) throw new Error(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
   // The environments' versions, of what was read: as `coffre version` answers them, together.
   // A person's read leaves its sensitive values out, by name; an instance before 0.10 says nothing.
   const sensitive = read.flatMap(([, answer]) => answer.sensitive ?? []).sort();
-  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' '), sensitive };
+  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' '), sensitive, useOnly: useOnly.sort() };
 }
 
-/** What a person's read left out, on stderr: its sensitive keys, which nobody is handed. */
-function sayLeftOut(sensitive: readonly string[]): void {
-  if (sensitive.length === 0) return;
-  process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
+/** What a read left out, on stderr: a person's sensitive keys, which nobody is handed, and the keys --keys named that a workload only uses. */
+function sayLeftOut(sensitive: readonly string[], useOnly: readonly string[] = []): void {
+  if (sensitive.length > 0) process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
+  if (useOnly.length > 0) process.stderr.write(`coffre: left out, which this workload only uses through coffre: ${useOnly.join(', ')} (its binding's reads do not list them)\n`);
 }
 
 /** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
-function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
+function readOrEnd(paths: readonly string[], only: Map<string, string[]> | null = null): Promise<[string, string][]> {
   const api = { read: reader(), list: reader([403, 404]) };
-  return readEnvironments(paths, api).then(
+  return readEnvironments(paths, api, only).then(
     (read) => {
-      sayLeftOut(read.sensitive);
+      sayLeftOut(read.sensitive, read.useOnly);
       return read.entries;
     },
     (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
@@ -1346,18 +1389,30 @@ async function exportEnv(args: string[]): Promise<void> {
       watch: { type: 'boolean', default: false },
       interval: { type: 'string' },
       'on-change': { type: 'string' },
+      keys: { type: 'string', multiple: true },
     },
     allowPositionals: true,
   });
-  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--format dotenv|json|shell|github] [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]';
+  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--keys <KEY | PREFIX_*>...] [--format dotenv|json|shell|github] [--output-file <file> [--watch [--interval 60s] [--on-change <command>]]]';
   const format = values.format;
   if (format !== 'dotenv' && format !== 'json' && format !== 'shell' && format !== 'github') fail(usage);
   const paths = environmentPaths(positionals);
+  const patterns = values.keys === undefined ? null : keyPatterns(values.keys.join(' '));
   const file = values['output-file'];
   const githubEnv = process.env.GITHUB_ENV;
   if (format === 'github' && !githubEnv) fail('--format github requires GITHUB_ENV (run it in a GitHub Actions step)');
   if (format === 'github' && file !== undefined) fail('--format github appends to GITHUB_ENV, and writes no other file');
+  // Every later step of the job sees what GITHUB_ENV gets: the workflow, which its reviewers read, names it, never whoever writes the environment.
+  if (format === 'github' && patterns === null) {
+    fail(`--format github exports to every later step of the job only the keys the workflow names: --keys "DATABASE_URL STRIPE_*". To hand every key to one process, \`coffre run ${paths.join(' ')} -- <command>\``);
+  }
+  const hijacks = (keys: readonly string[]) => {
+    const key = format === 'github' ? keys.find(runsCode) : undefined;
+    if (key !== undefined) fail(`${key} cannot be set through GITHUB_ENV: a later step's shell, loader or runtime would take code to run from it. Nothing was read`);
+  };
+  hijacks(patterns?.filter((pattern) => !pattern.endsWith('*')) ?? []);
   if (values.watch && file === undefined) fail('--watch keeps a file current: name it, --output-file <file>');
+  if (values.watch && patterns !== null) fail('--watch keeps every key of its environments current: leave --keys out');
   if (!values.watch && (values.interval !== undefined || values['on-change'] !== undefined)) fail('--interval and --on-change are for --watch');
   const text = (entries: [string, string][]) =>
     format === 'json' ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n` : format === 'shell' ? formatShellExports(entries) : formatDotenv(entries);
@@ -1387,13 +1442,21 @@ async function exportEnv(args: string[]): Promise<void> {
     }).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   }
 
+  // A person's placeholders are planned for whole environments, the handle's helpers with them: no key of them is picked.
+  if (patterns !== null && format !== 'github' && (await proxied(target()))) {
+    fail("--keys picks values, and a person's export here gets placeholders, which the credential proxy plans for whole environments: leave --keys out");
+  }
+  // The keys --keys names, by environment, listed before anything is made or read.
+  const only = patterns === null ? null : await listKeys(paths, reader([403, 404]), patterns).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  // What a prefix found, refused as a name is, and as `githubEnvironment` would refuse it once read.
+  hijacks(only === null ? [] : [...only.values()].flat());
   // GitHub's environment is a CI run's, which a service account signs in for.
   const placed = format === 'github' ? null : await placeholders(paths);
   if (placed !== null) sayPlaceholders(placed, paths, target());
   if (placed !== null && placed.tunnels.length > 0) {
     process.stderr.write(`coffre: left out of the export: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')}, whose tunnel lives only as long as \`coffre run\`\n`);
   }
-  const entries = byKey(placed === null ? await readOrEnd(paths) : Object.entries(placed.env));
+  const entries = byKey(placed === null ? await readOrEnd(paths, only) : Object.entries(placed.env));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.

@@ -279,6 +279,42 @@ test('revealing an environment returns every secret and logs one entry listing e
   assert.deepEqual(await auditRows(), []);
 });
 
+test('revealing some keys of an environment opens and logs only those, and names what it left out among them only', async () => {
+  await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y', JWT_SECRET: 'shhh', SIGNING_KEY: { value: 'k', sensitivity: 'sensitive' }, WEBHOOK: { value: 'w', sensitivity: 'sensitive' } });
+  firstSeq = await nextSeq();
+  // A key the environment does not hold is left out, not refused: the CLI listed it first.
+  const result = await reader.secrets.reveal('market/dev', ['REDIS_URL', 'DATABASE_URL', 'SIGNING_KEY', 'NOT_HERE']);
+  assert.deepEqual(result.values, { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y' });
+  // A person's read leaves the sensitive value out, as a whole read does, but names only the one asked for.
+  assert.deepEqual(result.sensitive, ['SIGNING_KEY']);
+  const rows = await auditRows('vault');
+  assert.equal(rows.length, 1);
+  const listed = rows[0]!.metadata.secrets as { subject: string }[];
+  assert.deepEqual(listed.map((secret) => secret.subject).sort(), ['market/dev/DATABASE_URL', 'market/dev/REDIS_URL']);
+  assert.equal(rows[0]!.metadata.purpose, 'run');
+  assert.equal(rows[0]!.operationId, result.operationId);
+  assert.deepEqual(await auditRows(), []);
+  // Its version is of what it read: another key's write leaves it as it was.
+  await root.secrets.set('market/dev', { JWT_SECRET: 'rotated' });
+  assert.equal((await reader.secrets.reveal('market/dev', ['DATABASE_URL', 'REDIS_URL'])).version, result.version);
+  await root.secrets.set('market/dev', { REDIS_URL: 'redis://z' });
+  assert.notEqual((await reader.secrets.reveal('market/dev', ['DATABASE_URL', 'REDIS_URL'])).version, result.version);
+
+  // Nothing it names to open: the read is logged as one, of nothing.
+  firstSeq = await nextSeq();
+  const none = await reader.secrets.reveal('market/dev', ['NOT_HERE']);
+  assert.deepEqual([none.values, none.sensitive], [{}, []]);
+  const [nothing] = await auditRows();
+  assert.deepEqual([nothing!.action, nothing!.decision, nothing!.metadata.reason], ['secret.read', 'allow', 'no_named_key']);
+});
+
+test('keys names keys of an environment, never of one key, and only well-formed ones', async () => {
+  await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x' });
+  await assert.rejects(reader.secrets.reveal('market/dev/DATABASE_URL', ['DATABASE_URL']), { status: 400, message: /keys names keys of an environment/ });
+  await assert.rejects(reader.secrets.reveal('market/dev', []), { status: 400 });
+  await assert.rejects(reader.secrets.reveal('market/dev', ['STRIPE_*']), { status: 400 });
+});
+
 test('the log of one key finds the read of its environment, which lists it, and the log of a key it did not read does not', async () => {
   await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y' });
   const { operationId } = await reader.secrets.reveal('market/dev');

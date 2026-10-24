@@ -103,12 +103,18 @@ async function fixture(t: test.TestContext, values: Record<string, string> = awk
   const envFile = join(directory, 'github-env');
   writeFileSync(envFile, 'EXISTING<<initial\nkept\ninitial\n');
   let requests = 0;
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     requests++;
+    assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+    const send = (value: unknown) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    // --keys lists the environment first, which opens no value.
+    if (req.method === 'GET' && req.url === '/api/secrets/market/prod') return send({ keys: Object.keys(values).map((key) => ({ key, version: 1, archived: false, reference: null })) });
     assert.equal(req.method, 'POST');
     assert.equal(req.url, '/api/reveals');
-    assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ values }));
+    let body = '';
+    for await (const chunk of req) body += String(chunk);
+    const { keys } = JSON.parse(body) as { keys?: string[] };
+    send({ values: keys === undefined ? values : Object.fromEntries(Object.entries(values).filter(([key]) => keys.includes(key))) });
   });
   t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
   server.listen(0, '127.0.0.1');
@@ -118,13 +124,14 @@ async function fixture(t: test.TestContext, values: Record<string, string> = awk
   return {
     envFile,
     requests: () => requests,
-    async run(format: string, path: string | null = envFile) {
+    /** `keys`: what --keys names, every key unless said, and none given as null. */
+    async run(format: string, path: string | null = envFile, keys: string | null = Object.keys(values).join(' ')) {
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && key !== 'GITHUB_ENV'));
       Object.assign(env, { COFFRE_STATE_DIR: directory, HOME: directory });
       if (path !== null) env.GITHUB_ENV = path;
       // As the Action runs it: the token saved by `coffre login --token`, never in an argument or a variable.
       signedInWithToken(directory, `http://127.0.0.1:${address.port}`, TOKEN);
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'market/prod', '--format', format], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'market/prod', '--format', format, ...(keys === null ? [] : ['--keys', keys])], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => stdout += data);
@@ -142,7 +149,40 @@ test('CLI GitHub export appends to the environment file and prints only all its 
   assert.equal(run.stdout, githubMasks(Object.entries(awkward).sort(([a], [b]) => a.localeCompare(b))));
   assert.equal(run.stderr, '');
   assert.deepEqual(readEnvironment(readFileSync(setup.envFile, 'utf8')), { EXISTING: 'kept', ...awkward });
-  assert.equal(setup.requests(), 1);
+  assert.equal(setup.requests(), 2);
+});
+
+test('CLI GitHub export masks and appends only the keys --keys names, by name or prefix', async (t) => {
+  const setup = await fixture(t, { ...awkward, UNNAMED: 'never-exported', PREFIX_A: 'a', PREFIX_B: 'b' });
+  const run = await setup.run('github', setup.envFile, 'PEM\nPREFIX_* CR');
+  assert.equal(run.code, 0, run.stderr);
+  const named = { CR: awkward.CR, PEM: awkward.PEM, PREFIX_A: 'a', PREFIX_B: 'b' };
+  assert.equal(run.stdout, githubMasks(Object.entries(named)));
+  assert.deepEqual(readEnvironment(readFileSync(setup.envFile, 'utf8')), { EXISTING: 'kept', ...named });
+});
+
+test('CLI GitHub export needs --keys, and refuses one a later step would take code from, before it reads a secret', async (t) => {
+  const setup = await fixture(t, { GOOD: 'private', LD_PRELOAD: 'evil.so', LD_SDK_KEY: 'sdk' });
+  const before = readFileSync(setup.envFile, 'utf8');
+  const unnamed = await setup.run('github', setup.envFile, null);
+  assert.equal(unnamed.code, 1);
+  assert.equal(unnamed.stderr, 'coffre: --format github exports to every later step of the job only the keys the workflow names: --keys "DATABASE_URL STRIPE_*". To hand every key to one process, `coffre run market/prod -- <command>`\n');
+  assert.equal(setup.requests(), 0);
+  // A name refused before any request, a prefix's find once listed: neither read.
+  const named = await setup.run('github', setup.envFile, 'GOOD BASH_ENV');
+  assert.equal(named.code, 1);
+  assert.match(named.stderr, /^coffre: BASH_ENV cannot be set through GITHUB_ENV: .* Nothing was read\n$/);
+  assert.equal(setup.requests(), 0);
+  const prefixed = await setup.run('github', setup.envFile, 'GOOD LD_*');
+  assert.equal(prefixed.code, 1);
+  assert.match(prefixed.stderr, /^coffre: LD_PRELOAD cannot be set through GITHUB_ENV: .* Nothing was read\n$/);
+  assert.equal(setup.requests(), 1, 'listed, never read');
+  assert.equal(prefixed.stdout, '');
+  assert.equal(readFileSync(setup.envFile, 'utf8'), before);
+  // What the denylist leaves, a prefix exports.
+  const allowed = await setup.run('github', setup.envFile, 'GOOD LD_SDK*');
+  assert.equal(allowed.code, 0, allowed.stderr);
+  assert.deepEqual(readEnvironment(readFileSync(setup.envFile, 'utf8')), { EXISTING: 'kept', GOOD: 'private', LD_SDK_KEY: 'sdk' });
 });
 
 test('CLI refuses GitHub export without GITHUB_ENV before it reads a secret', async (t) => {
@@ -162,7 +202,7 @@ test('CLI masks before a write failure and never appends a partial invalid batch
   assert.equal(run.code, 1);
   assert.equal(run.stdout, githubMasks(Object.entries(awkward).sort(([a], [b]) => a.localeCompare(b))));
   assert.ok(!run.stderr.includes(awkward.PEM));
-  const invalid = await fixture(t, { GOOD: 'private', NODE_OPTIONS: 'bad' });
+  const invalid = await fixture(t, { GOOD: 'private', NOT_VALID: 'bad\0' });
   const before = readFileSync(invalid.envFile, 'utf8');
   const refused = await invalid.run('github');
   assert.equal(refused.code, 1);

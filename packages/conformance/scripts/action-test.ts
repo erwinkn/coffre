@@ -7,6 +7,8 @@ const [command, path] = process.argv.slice(2);
 
 /** The one key of action-test/incomplete, which lacks every key its siblings have. */
 const INCOMPLETE_KEY = 'ACTION_TEST_INCOMPLETE';
+/** A key of action-test/ci that no step's `keys` names, which no step may export. */
+const UNNAMED_KEY = 'UNNAMED_SECRET';
 
 switch (command) {
   case 'serve':
@@ -19,6 +21,8 @@ switch (command) {
     }
     // The incomplete environment's gate stopped its step before anything was read.
     if (process.env[INCOMPLETE_KEY] !== undefined) throw new Error(`${INCOMPLETE_KEY} was exported past require-complete`);
+    // Neither the step that named it beside a typo or an empty prefix, which stopped, nor the one that did not name it, exported it.
+    if (process.env[UNNAMED_KEY] !== undefined) throw new Error(`${UNNAMED_KEY} was exported, though no step that exported named it`);
     for (const [marker, value] of maskProbes()) console.log(marker + value);
     console.log('All exported values match, including multiline, punctuation, empty and GITHUB_TOKEN.');
     break;
@@ -46,8 +50,9 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     await admin.api.projects.create('action-test', { name: 'Action test' });
     await admin.api.environments.create('action-test/ci', { name: 'CI' });
     await admin.api.environments.create('action-test/deploy', { name: 'Deploy' });
-    // Two environments, read together by the Action: GITHUB_TOKEN from the second.
-    const { GITHUB_TOKEN, ...values } = ACTION_VALUES;
+    // Two environments, read together by the Action: GITHUB_TOKEN from the second, and none but the keys it names.
+    const { GITHUB_TOKEN, ...named } = ACTION_VALUES;
+    const values = { ...named, [UNNAMED_KEY]: 'coffre-action-unnamed-5f0c2e' };
     await admin.api.secrets.set('action-test/ci', values);
     await admin.api.secrets.set('action-test/deploy', { GITHUB_TOKEN: GITHUB_TOKEN! });
     // For require-complete: ci and deploy each dismiss what they lack of the
