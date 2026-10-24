@@ -102,7 +102,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   const plan = await as(LEAD).bindings.preview(MEMBER, { profile: 'github', claims: { ...DEPLOY } });
   // What its runs reach, left out: all the account holds.
   const scope = { [`${SERVICE}-reads`]: 'viewer' as const };
-  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, withheld: [], replaces: [] });
+  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, policy: null, withheld: [], replaces: [] });
   assert.deepEqual(await live(), [], 'a preview writes nothing');
   assert.deepEqual(await entries(), [], 'and logs nothing');
 
@@ -110,7 +110,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   assert.deepEqual(replaced, []);
   assert.deepEqual(
     { ...binding, id: undefined, createdAt: undefined },
-    { id: undefined, createdAt: undefined, profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: plan.claims, scope, label: 'deploys to prod', createdBy: LEAD, lastUsedAt: null },
+    { id: undefined, createdAt: undefined, profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: plan.claims, scope, policy: null, label: 'deploys to prod', createdBy: LEAD, lastUsedAt: null },
   );
   assert.deepEqual(await live(), [binding]);
   // The service itself may see its bindings; another member may not.

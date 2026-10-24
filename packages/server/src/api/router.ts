@@ -11,7 +11,7 @@ import { formatPath } from './paths.ts';
 import { makePersonal, ownerOf, resolveRead } from './personal.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
 import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
-import { WORKLOAD_ROUTES } from './workload-routes.ts';
+import { ISSUING_ROUTES, WORKLOAD_ROUTES } from './workload-routes.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
 /**
@@ -211,11 +211,14 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
       );
     }
 
-    if (ctx.caller.kind === 'workload' && !WORKLOAD_ROUTES[`${route.method} ${route.shape}` as keyof typeof WORKLOAD_ROUTES]) {
-      // A workload's session reaches what a service token does, but what only a person does (docs/design/workload-access.md, section 6.1).
+    const key = `${route.method} ${route.shape}` as keyof typeof WORKLOAD_ROUTES;
+    if (ctx.caller.kind === 'workload' && !WORKLOAD_ROUTES[key]) {
+      // A workload's session reaches what a service token does, but what only a person does, and issues nothing (docs/design/workload-access.md, section 6.1).
+      const issues = ISSUING_ROUTES.has(key);
+      const reason = issues ? 'workload_cannot_issue' : 'workload';
       await refuse(ctx, new Refusal(
-        new ApiError('forbidden', "a workload's session cannot do this: only a person can", 'workload'),
-        denied(ctx, 'token.use', 'workload', { metadata: { route: `${route.method} ${route.shape}` } }),
+        new ApiError('forbidden', issues ? "a workload's session issues no credential and changes no one's access" : "a workload's session cannot do this: only a person can", reason),
+        denied(ctx, 'token.use', reason, { metadata: { route: key } }),
       ));
     }
 

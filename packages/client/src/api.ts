@@ -566,6 +566,9 @@ export type Api = {
         scope: null | {
           [key: string]: string;
         };
+        session?: {
+          bindingId: string | null;
+        };
       }[];
       references: {
         id: string;
@@ -708,6 +711,9 @@ export type Api = {
           scope: null | {
             [key: string]: string;
           };
+          session?: {
+            bindingId: string | null;
+          };
         }[];
         references: {
           id: string;
@@ -742,6 +748,9 @@ export type Api = {
         lastUsedIp: string | null;
         scope: null | {
           [key: string]: string;
+        };
+        session?: {
+          bindingId: string | null;
         };
       }[];
     };
@@ -796,15 +805,9 @@ export type Api = {
           [key: string]: string;
         };
         policy: null | {
+          sources?: string[];
           audience?: string;
           keyAudience?: true;
-          reads?: {
-            [key: string]: {
-              keys?: "*" | string[];
-              mints?: string[];
-            };
-          };
-          sources?: string[];
           sessionHours?: number;
           replicas?: number;
           sessionDays?: number;
@@ -813,6 +816,9 @@ export type Api = {
           approve?: true;
           onContention?: "alert";
           unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
         };
         label: string | null;
         createdAt: string;
@@ -858,15 +864,9 @@ export type Api = {
         [key: string]: string;
       };
       policy: null | {
+        sources?: string[];
         audience?: string;
         keyAudience?: true;
-        reads?: {
-          [key: string]: {
-            keys?: "*" | string[];
-            mints?: string[];
-          };
-        };
-        sources?: string[];
         sessionHours?: number;
         replicas?: number;
         sessionDays?: number;
@@ -875,6 +875,9 @@ export type Api = {
         approve?: true;
         onContention?: "alert";
         unsignedUploads?: true;
+        reads?: {
+          [key: string]: "*" | string[];
+        };
       };
       withheld: string[];
       replaces: {
@@ -899,15 +902,9 @@ export type Api = {
           [key: string]: string;
         };
         policy: null | {
+          sources?: string[];
           audience?: string;
           keyAudience?: true;
-          reads?: {
-            [key: string]: {
-              keys?: "*" | string[];
-              mints?: string[];
-            };
-          };
-          sources?: string[];
           sessionHours?: number;
           replicas?: number;
           sessionDays?: number;
@@ -916,6 +913,9 @@ export type Api = {
           approve?: true;
           onContention?: "alert";
           unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
         };
         label: string | null;
         createdAt: string;
@@ -1423,15 +1423,9 @@ export type Api = {
           [key: string]: string;
         };
         policy: null | {
+          sources?: string[];
           audience?: string;
           keyAudience?: true;
-          reads?: {
-            [key: string]: {
-              keys?: "*" | string[];
-              mints?: string[];
-            };
-          };
-          sources?: string[];
           sessionHours?: number;
           replicas?: number;
           sessionDays?: number;
@@ -1440,6 +1434,9 @@ export type Api = {
           approve?: true;
           onContention?: "alert";
           unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
         };
         label: string | null;
         createdAt: string;
@@ -1851,15 +1848,9 @@ export type BindingPlan = {
     [key: string]: string;
   };
   policy: null | {
+    sources?: string[];
     audience?: string;
     keyAudience?: true;
-    reads?: {
-      [key: string]: {
-        keys?: "*" | string[];
-        mints?: string[];
-      };
-    };
-    sources?: string[];
     sessionHours?: number;
     replicas?: number;
     sessionDays?: number;
@@ -1868,6 +1859,9 @@ export type BindingPlan = {
     approve?: true;
     onContention?: "alert";
     unsignedUploads?: true;
+    reads?: {
+      [key: string]: "*" | string[];
+    };
   };
   withheld: string[];
   replaces: {
@@ -1893,15 +1887,9 @@ export type BindingView = {
     [key: string]: string;
   };
   policy: null | {
+    sources?: string[];
     audience?: string;
     keyAudience?: true;
-    reads?: {
-      [key: string]: {
-        keys?: "*" | string[];
-        mints?: string[];
-      };
-    };
-    sources?: string[];
     sessionHours?: number;
     replicas?: number;
     sessionDays?: number;
@@ -1910,6 +1898,9 @@ export type BindingView = {
     approve?: true;
     onContention?: "alert";
     unsignedUploads?: true;
+    reads?: {
+      [key: string]: "*" | string[];
+    };
   };
   label: string | null;
   createdAt: string;
@@ -2251,6 +2242,9 @@ export type OffboardingReport = {
     scope: null | {
       [key: string]: string;
     };
+    session?: {
+      bindingId: string | null;
+    };
   }[];
   references: {
     id: string;
@@ -2521,5 +2515,8 @@ export type TokenRow = {
   lastUsedIp: string | null;
   scope: null | {
     [key: string]: string;
+  };
+  session?: {
+    bindingId: string | null;
   };
 };

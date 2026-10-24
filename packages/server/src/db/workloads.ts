@@ -263,20 +263,11 @@ export async function renewSession(db: Queryable, chainKey: Buffer, old: Session
   return changedRows(changed) === 1;
 }
 
-/**
- * The keys a binding's `reads` lists, by ID, among an environment's own:
- * each one's ID and whether its current value is sensitive. A reference is
- * no key of its own here: what it reads is held at its source, where the
- * vault checks `reads` (section 6.1).
- */
-export async function listedKeys(db: Queryable, environmentId: string, ids: readonly string[]): Promise<{ id: string; key: string; sensitive: boolean }[]> {
-  if (ids.length === 0) return [];
-  const { secrets, secretVersions } = tablesOf(db);
-  const rows = await db
-    .select({ id: secrets.id, key: secrets.key, sensitive: secretVersions.sensitive })
-    .from(secrets)
-    .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-    .where(and(eq(secrets.environmentId, environmentId), inArray(secrets.id, [...ids])));
-  return rows.map((row) => ({ id: row.id, key: row.key, sensitive: row.sensitive === true }));
+/** These keys' names, by ID: a binding's `reads`, shown by name. */
+export async function keyNames(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { secrets } = tablesOf(db);
+  const rows = await db.select({ id: secrets.id, key: secrets.key }).from(secrets).where(inArray(secrets.id, [...new Set(ids)]));
+  return new Map(rows.map((row) => [row.id, row.key]));
 }
 

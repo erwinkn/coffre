@@ -14,14 +14,19 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { github, signin } from '@coffre/core/identity';
+import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
+import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import { localVault } from '@coffre/vault/node';
 import type pg from 'pg';
 
 import { SigninService } from '../src/api/signin.ts';
+import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
+import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
+import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
+import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -78,6 +83,8 @@ let vaultCalls = 0;
 let root: CoffreClient;
 let reader: CoffreClient;
 let service: CoffreClient;
+/** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
+let workload: () => Promise<void>;
 
 /** A client that calls the API as a CLI or a CI run does, its token checked on each request. */
 function bearer(runtime: CoffreRuntime, token: string): CoffreClient {
@@ -132,6 +139,52 @@ before(async () => {
   if (polled.status !== 'approved') throw new Error('the device login was not approved');
   reader = bearer(runtime, polled.credential.token);
   service = bearer(runtime, (await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).token);
+
+  // A workload's key-bound session of the service, as `/api/auth/workload` makes one, and a plugin that asks for it as the proxy does.
+  const standing = (await memberStanding(deps.db, SERVICE))!;
+  const bindingId = randomUUID();
+  await insertBinding(deps.db, deps.chainKey, {
+    id: bindingId, principal: SERVICE, generation: standing.generation, profile: 'kubernetes', issuer: 'https://cluster.acme.example', jwksUri: 'https://cluster.acme.example/keys',
+    jwks: null, claims: '{"sub":"x"}', scope: null, policy: '{}', label: null, createdBy: ROOT,
+  });
+  const dev = (await places(deps.db)).find((project) => project.slug === 'market')!.environments.find((environment) => environment.slug === 'dev')!.id;
+  const key = await generateProofKey();
+  const token = generateToken('workload');
+  const now = Date.now();
+  await insertSession(deps.db, deps.chainKey, {
+    id: randomUUID(), kind: 'workload', tokenHash: hashToken(token), tokenHint: tokenHint(token), generation: standing.generation, principal: SERVICE, identityId: null,
+    label: null, createdBy: `binding:${bindingId}`, expiresAt: new Date(now + 3_600_000), revokedAt: null, scope: null,
+    places: JSON.stringify([{ environmentId: dev, personal: false }]), jkt: await thumbprint(key.jwk), notAfter: new Date(now + 86_400_000),
+    ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null,
+  });
+  const gate: Gate = { nonce: async () => 'g1.cost', admit: async () => ({ ok: true, nonce: 'g1.cost' }) };
+  // Its last use, written once in five minutes after the answer: waited for, so it lands on its own request's count.
+  const background: Promise<unknown>[] = [];
+  const proxied = {
+    ...runtime,
+    waitUntil: (promise: Promise<unknown>) => void background.push(promise),
+    auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10, total: 10 }) } }).resolve(ORIGIN),
+    gates: () => gate,
+    plugins: checkPlugins([{
+      name: 'proxy',
+      routes: {
+        prefix: '/use',
+        fetch: async (request, coffre) => {
+          await coffre.workload(request, { place: null, credential: 'stripe', body: await bodyDigest(new Uint8Array(await request.arrayBuffer())) });
+          return new Response(null, { status: 204 });
+        },
+      },
+    }]),
+  } satisfies CoffreRuntime;
+  workload = async () => {
+    const url = `${ORIGIN}/use/stripe/v1/charges`;
+    const body = 'amount=2000';
+    const headers = { 'content-type': 'application/x-www-form-urlencoded' };
+    const proof = await createProof(key, { method: 'POST', url, token, nonce: 'g1.cost', content: { headers, body: await bodyDigest(body) } });
+    const answered = await pluginRoute(new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${token}`, dpop: proof }, body }), proxied, null);
+    if (answered?.status !== 204) throw new Error(`the proxy's workload was refused: ${await answered?.text()}`);
+    await Promise.all(background.splice(0));
+  };
 });
 
 after(async () => {
@@ -149,7 +202,8 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
 
 /**
  * Each hot request, and what it costs warm: its statements on the app's
- * connection and the vault's, and the vault's calls.
+ * connection and the vault's, and the vault's calls. A workload's request
+ * at the proxy: one statement, and nothing of the vault's.
  *
  * A reveal: the credential, with the newest policy change; the path; the
  * environment's rows; once the vault has released, the credential and its
@@ -163,6 +217,8 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
   'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
+  // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked.
+  "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
 
 test('each hot request runs exactly its budget of statements, on as many connections', POSTGRES, async () => {

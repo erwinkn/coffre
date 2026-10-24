@@ -229,7 +229,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
 
 /** The gate's current nonce for a service, for an answer that admits no proof; null when it cannot say, which costs the workload one retry. */
 async function gateNonce(runtime: CoffreRuntime, service: string): Promise<string | null> {
-  if (runtime.gates == null) return null;
+  if (runtime.gates === undefined) return null;
   try {
     return await runtime.gates(service.startsWith('token:') ? service : `token:${service}`).nonce();
   } catch (error) {

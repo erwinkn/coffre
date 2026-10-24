@@ -125,9 +125,11 @@ export type PluginContext = {
    * `place` is an environment's ID; null with a `credential` means the one
    * environment the session reaches (`/use/<credential>`). A refusal throws
    * a `WorkloadRefused`, whose `response` is the answer to forward as it is.
-   * What it returns is what `use` takes in place of a handle.
+   * What it returns is what `use` takes in place of a handle. Null for a
+   * request that is no workload's, which carries no `Authorization: DPoP`:
+   * a handle's, say.
    */
-  workload(request: Request, at: WorkloadAt): Promise<WorkloadUse>;
+  workload(request: Request, at: WorkloadAt): Promise<WorkloadUse | null>;
 };
 
 /** What a workload's request uses (`PluginContext.workload`): where and which credential, the body line `req` signs, and the counts its limits take. */
@@ -274,7 +276,7 @@ export async function workloadFromBinding(runtime: CoffreRuntime, principal: str
     : environmentsOf(scope, await placeRows(runtime.db)).map((environment) => environment.id);
   const place = at.place ?? (reached.length === 1 ? reached[0]! : null);
   if (at.credential !== null && place === null) {
-    throw await refusedWith(new ApiError('bad_request', 'this service reaches several environments: name the one it uses, /use/<project>/<environment>/<credential>'));
+    throw await refusedWith(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this service reaches none, or several'));
   }
   // The credential's freeze, when the call named no environment and the statement could not know which.
   const frozen = found.frozen.instance || found.frozen.service || found.frozen.binding || found.frozen.credential
@@ -315,9 +317,9 @@ export async function workloadFromBinding(runtime: CoffreRuntime, principal: str
 }
 
 /** A workload's session for a plugin's request (`PluginContext.workload`), as `standingSession` checks it. */
-async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAt): Promise<WorkloadUse> {
+async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAt): Promise<WorkloadUse | null> {
   const token = dpopToken(request);
-  if (token === null) throw await refusedWith(new ApiError('unauthenticated', "this takes a workload's session, Authorization: DPoP coffre_wl_…, with its key's proof"));
+  if (token === null) return null;
   let session: StandingSession;
   try {
     session = await standingSession(request, runtime, token, sourceIp, { ...at, children: true });

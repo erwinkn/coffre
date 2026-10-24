@@ -1,9 +1,7 @@
 // Which API routes a workload's key-bound session reaches
 // (docs/design/workload-access.md, section 6.1): every route a service
 // token reaches today, whose handler decides as it does for a service, so
-// CI keeps its writes, its grants where it manages access, and its log;
-// and the enrollment codes it mints and promotes for the service a
-// binding's `mintedBy` names. What only a person does stays theirs: a
+// CI keeps its writes and its log. What only a person does stays theirs: a
 // handle, their own sign-in, connected apps and approvals, approving a
 // session, and setting or lifting a freeze. A session's own sign-in
 // (renew, narrow, logout) is under `/api/auth`, outside this table. Typed
@@ -12,7 +10,36 @@
 // reaches none of them: only `/use`, narrow and logout. Enforced by that
 // design's PR 1a; any other route answers 403 `workload`. Routes that
 // answer values answer only plain keys and those its binding lists.
+//
+// A session issues no credential and changes no one's access, in any mode
+// (`ISSUING_ROUTES`, 403 `workload_cannot_issue`): a token, a binding or an
+// enrollment code it made would read by column what the session may only
+// use by key, and a grant or a role it changed would widen another service
+// that does. Writes, use and deploy-on-push stay.
 import type { RouteKey } from './routes.ts';
+
+/**
+ * The routes that issue a credential or change access, which a workload's
+ * session never reaches, refused with `workload_cannot_issue`: service
+ * tokens, bindings and enrollment codes; members, grants, roles and who
+ * sets up service accounts.
+ */
+export const ISSUING_ROUTES: ReadonlySet<RouteKey> = new Set<RouteKey>([
+  'PUT /members/:member',
+  'DELETE /members/:member',
+  'POST /members/:member/tokens',
+  'POST /members/:member/bindings',
+  'POST /members/:member/bindings/keys',
+  'DELETE /members/:member/bindings/:id',
+  'POST /members/:member/bindings/:id/enrollments',
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote',
+  'PATCH /access/:member',
+  'PUT /roles/:role',
+  'DELETE /roles/:role',
+  'PUT /instance-roles/:role',
+  'DELETE /instance-roles/:role',
+  'PUT /settings',
+]);
 
 /** Whether a workload's session reaches a route. */
 export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
@@ -43,37 +70,37 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /members': true,
   'GET /members/:member': true,
   'GET /members/:member/access': true,
-  'PUT /members/:member': true,
-  'DELETE /members/:member': true,
+  'PUT /members/:member': false,
+  'DELETE /members/:member': false,
   'GET /members/:member/tokens': true,
-  'POST /members/:member/tokens': true,
+  'POST /members/:member/tokens': false,
   'DELETE /members/:member/tokens/:id': true,
   // A handle is a person's app's placeholder: a service reads its values.
   'POST /handles': false,
   'DELETE /handles/:id': false,
   'GET /members/:member/bindings': true,
-  'POST /members/:member/bindings': true,
-  'POST /members/:member/bindings/keys': true,
-  'DELETE /members/:member/bindings/:id': true,
+  'POST /members/:member/bindings': false,
+  'POST /members/:member/bindings/keys': false,
+  'DELETE /members/:member/bindings/:id': false,
   'GET /workloads/lookup': true,
   'GET /workloads/repositories': true,
   'GET /members/:member/bindings/:id/enrollments': true,
-  'POST /members/:member/bindings/:id/enrollments': true,
-  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': true,
+  'POST /members/:member/bindings/:id/enrollments': false,
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': false,
   // Approving a session is a person's check of it.
   'POST /members/:member/tokens/:id/approve': false,
   'GET /freezes': true,
   // Freezing and lifting stay with people, as the pages' and the CLI's buttons.
   'POST /freezes': false,
   'DELETE /freezes/:target': false,
-  'PATCH /access/:member': true,
+  'PATCH /access/:member': false,
   'GET /roles': true,
-  'PUT /roles/:role': true,
-  'DELETE /roles/:role': true,
-  'PUT /instance-roles/:role': true,
-  'DELETE /instance-roles/:role': true,
+  'PUT /roles/:role': false,
+  'DELETE /roles/:role': false,
+  'PUT /instance-roles/:role': false,
+  'DELETE /instance-roles/:role': false,
   'GET /settings': true,
-  'PUT /settings': true,
+  'PUT /settings': false,
   // A person's own sign-in, connected apps and approvals.
   'GET /sessions': false,
   'DELETE /sessions/:id': false,

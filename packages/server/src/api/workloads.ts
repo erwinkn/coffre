@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { CredentialScope, ScopeGrant } from '@coffre/core/access';
+import { isCredentialScope, PROJECT_ONLY_PERMISSIONS, scopeDefinition, type CredentialScope, type Permission, type ScopeGrant } from '@coffre/core/access';
 import {
   addressWithin,
   BindingInvalid,
@@ -21,6 +21,8 @@ import {
   keySummaries,
   KeysInvalid,
   MAX_BINDINGS,
+  MAX_READ_KEYS,
+  MAX_READ_PLACES,
   MAX_TOKEN_AGE_SECONDS,
   OIDC_PROFILES,
   POLICY_DEFAULTS,
@@ -33,6 +35,7 @@ import {
   WorkloadTokenRefused,
   type BindingClaims,
   type BindingPolicy,
+  type CheckedBinding,
   type DecodedToken,
   type GitHubAppRepositories,
   type JSONWebKeySet,
@@ -43,7 +46,7 @@ import {
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
 import type { Access, Vault } from '@coffre/core/vault';
-import type { Database, Transaction } from '@coffre/db';
+import type { Database, Queryable, Transaction } from '@coffre/db';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
@@ -57,6 +60,7 @@ import {
   memberStanding,
   places,
   revokeLiveCredentials,
+  secretHeads,
   standingBinding,
   tokenConsumed,
   update,
@@ -64,7 +68,7 @@ import {
   type BindingRow,
   type PlaceRow,
 } from '../db/queries.ts';
-import { databaseNow, frozenTargets, insertSession, listedKeys, renewSession, workloadCandidates } from '../db/workloads.ts';
+import { databaseNow, frozenTargets, insertSession, keyNames, renewSession, workloadCandidates } from '../db/workloads.ts';
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
@@ -89,6 +93,7 @@ import {
   type ScopeByPath,
 } from './services.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound } from './errors.ts';
+import { parsePath } from './paths.ts';
 
 export type WorkloadServiceDeps = {
   db: Database;
@@ -304,7 +309,10 @@ const OIDC: ProofKind = {
       const issued = issuedRefusal(decoded.claims.iat, Date.now() / 1000);
       if (issued !== null) return refused(issued);
     }
-    const namesKey = (JSON.parse(binding.policy!) as BindingPolicy).keyAudience === true;
+    const policy = JSON.parse(binding.policy!) as BindingPolicy;
+    const ruled = PROFILE_RULES[binding.profile as WorkloadProfile]?.token(claims, { issuer, claims: JSON.parse(binding.claims) as BindingClaims, policy }) ?? null;
+    if (ruled !== null) return new ExchangeRefused('no_match', ruled);
+    const namesKey = policy.keyAudience === true;
     return {
       binding,
       claims,
@@ -313,6 +321,21 @@ const OIDC: ProofKind = {
     };
   },
 };
+
+/**
+ * What one profile holds its bindings and tokens to beyond its required
+ * claims (PR 2's `workloads/profiles.ts` registers them, one line each):
+ * `binding` at creation, after `checkBinding` and `checkPolicy`, throwing
+ * `BindingInvalid`; `token` at the exchange, after the signature, the
+ * audience and the claims, a refusal's message or null.
+ */
+export type ProfileRules = {
+  binding(binding: CheckedBinding, policy: BindingPolicy): void;
+  token(claims: Record<string, unknown>, binding: { issuer: string; claims: BindingClaims; policy: BindingPolicy }): string | null;
+};
+
+/** Each profile's own rules, by profile. */
+export const PROFILE_RULES: Partial<Record<WorkloadProfile, ProfileRules>> = {};
 
 /**
  * The proofs the exchange takes, one line each: PR 1a registers `oidc`, PR
@@ -379,8 +402,8 @@ export type BindingView = {
   claims: BindingClaims;
   /** What the credentials it issues reach, of what its account holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
   scope: ScopeByPath | null;
-  /** A workload's binding's policy (docs/design/workload-access.md, section 11); null for one `/api/auth/oidc` takes. */
-  policy: BindingPolicy | null;
+  /** A workload's binding's policy (docs/design/workload-access.md, section 11), its reads by path and name; null for one `/api/auth/oidc` takes. */
+  policy: PolicyView | null;
   label: string | null;
   createdAt: string;
   createdBy: string;
@@ -395,8 +418,8 @@ export type BindingPlan = {
   keys: KeySummary[] | null;
   claims: BindingClaims;
   scope: ScopeByPath;
-  /** What it says beyond its claims, canonical; null for a binding `/api/auth/oidc` takes. */
-  policy: BindingPolicy | null;
+  /** What it says beyond its claims, canonical, its reads by path and name; null for a binding `/api/auth/oidc` takes. */
+  policy: PolicyView | null;
   /** The places of `scope` that hold a sensitive value its credentials will not read: only an Owner of their project binds one that does (R32). */
   withheld: string[];
   /** `asked`: named in `replaces`. `keys_moved`: the service's bindings on the issuer, under its old keys' URL. */
@@ -418,6 +441,8 @@ export type BindingInput = {
    * `/api/auth/oidc` never. Every profile but today's five always carries
    * one, `{}` at least; one of those five carries one when given, and under
    * `useOnly` always. Left out on one of them, it is a bearer binding, as before.
+   * Its `reads` name each environment by path and its keys by name, or `'*'`
+   * (`ReadsByPath`): the binding stores them by ID.
    */
   policy?: unknown;
   /**
@@ -489,7 +514,10 @@ export class WorkloadService {
     const standing = await memberStanding(this.#deps.db, member);
     if (standing === null) throw notFound('unknown service');
     const [live, known] = await Promise.all([liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation), places(this.#deps.db)]);
-    return live.map((row) => view(row, scopeByPath(readScope(row.scope), known)));
+    // Their reads by path and name, as they are named now (section 6.1).
+    const listed = live.flatMap((row) => Object.values((row.policy === null ? {} : (JSON.parse(row.policy) as BindingPolicy)).reads ?? {}));
+    const named = await keyNames(this.#deps.db, listed.flatMap(({ keys }) => (Array.isArray(keys) ? keys : [])));
+    return live.map((row) => ({ ...view(row, scopeByPath(readScope(row.scope), known)), policy: row.policy === null ? null : namedPolicy(JSON.parse(row.policy) as BindingPolicy, known, named) }));
   }
 
   /**
@@ -520,17 +548,23 @@ export class WorkloadService {
     const uploaded = input.jwks === undefined ? null : await keysOf(input.jwks);
     let policy: ReturnType<typeof checkBinding>;
     // A workload's binding, which signs in at `/api/auth/workload` alone: every one but a bearer binding of today's five profiles.
+    // Its policy checked whole but for `reads`, which name places and keys by path and name, found below.
     let rules: BindingPolicy | null = null;
+    let wantedReads: unknown;
     try {
       policy = checkBinding(input, { allowLoopback: this.#deps.config.allowLoopback, uploaded: uploaded !== null });
       if (!isBearerProfile(policy.profile) || input.policy !== undefined || this.#deps.config.useOnly) {
-        rules = checkPolicy(policy.profile, input.policy, { service: member });
+        if (input.policy !== undefined && (typeof input.policy !== 'object' || input.policy === null || Array.isArray(input.policy))) throw new BindingInvalid('a policy is an object');
+        const { reads, ...rest } = (input.policy ?? {}) as Record<string, unknown>;
+        rules = checkPolicy(policy.profile, rest, { service: member });
+        PROFILE_RULES[policy.profile]?.binding(policy, rules);
+        wantedReads = reads;
       }
     } catch (error) {
       if (error instanceof BindingInvalid) throw badRequest(error.message);
       throw error;
     }
-    if (rules?.reads !== undefined && this.#deps.config.noReads) throw badRequest('this instance lets no binding list reads (noReads): its services read plain values only');
+    if (wantedReads !== undefined && this.#deps.config.noReads) throw badRequest('this instance lets no binding list reads (noReads): its services read plain values only');
     // Its scope's shape too, before the issuer is asked anything: what it names is checked once the bindings it replaces are known.
     if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
@@ -580,9 +614,12 @@ export class WorkloadService {
         this.#deps.db, { ...ctx, caller }, setting, standing, input.scope, { action: 'token.bind', metadata: details }, inherits ? inheritedScope(replaced) : undefined,
       );
       const { byPath, withheld } = issued;
-      const scope = rules?.reads === undefined ? issued.scope : await this.#readsScope({ ...ctx, caller }, issued.scope, rules.reads, details);
+      // Its reads, each place and key found by path and name as they are now, then stored by ID (section 6.1).
+      const reads = wantedReads === undefined ? [] : await resolveReads(this.#deps.db, wantedReads);
+      if (rules !== null && reads.length > 0) rules = checked(() => checkPolicy(policy.profile, { ...rules, reads: readsById(reads) }, { service: member }));
+      const scope = reads.length === 0 ? issued.scope : readsScope({ ...ctx, caller }, issued.scope, reads, details);
       const plan = (replaces: typeof replaced): BindingPlan => ({
-        ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, policy: rules, withheld, replaces: replaces.map(({ id, why }) => ({ id, why })),
+        ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, policy: rules === null ? null : shownPolicy(rules, reads), withheld, replaces: replaces.map(({ id, why }) => ({ id, why })),
       });
       if (options.dryRun) return plan(replaced);
 
@@ -592,6 +629,10 @@ export class WorkloadService {
         await credentialStill(ctx, tx, 'token.bind');
         if (!(await stillMember(tx, member, standing))) throw unknown();
         const planned = plan(replacing(await liveBindings(tx, this.#deps.chainKey, member, standing.generation)));
+        // The keys it reads, by name, are the ones they were as it was weighed: a rename meanwhile names another.
+        if (reads.length > 0 && JSON.stringify(readsById(await resolveReads(tx, wantedReads))) !== JSON.stringify(readsById(reads))) {
+          throw conflict('the keys its reads name changed while it was made: try again');
+        }
         if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
           throw conflict('the bindings it replaces changed while it was made: try again');
         }
@@ -632,50 +673,16 @@ export class WorkloadService {
             claims: planned.claims,
             scope,
             ...(rules === null ? {} : { policy: rules }),
+            ...(reads.length === 0 ? {} : { reads: shownPolicy(rules!, reads).reads }),
             replaces: planned.replaces.map((replaced) => replaced.id),
           },
         }));
         return {
-          binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath),
+          binding: { ...view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath), policy: planned.policy },
           replaced: planned.replaces.map((replaced) => replaced.id),
         };
       });
     });
-  }
-
-  /**
-   * A binding's scope with its `reads` checked against it (section 6.1):
-   * each environment listed is one the scope reaches, each key listed one
-   * that environment holds, and a sensitive one only where its grant reads
-   * sensitive values, which an Owner of its project alone gives (R32). Each
-   * such environment gets a grant of its own, the same as the project's that
-   * covers it, so a session's `reads` attach to its grant by ID with nothing
-   * to look up (`sessionScope`).
-   */
-  async #readsScope(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>, scope: CredentialScope, reads: NonNullable<BindingPolicy['reads']>, details: Record<string, unknown>): Promise<CredentialScope> {
-    const known = await places(this.#deps.db);
-    const grants: ScopeGrant[] = [...scope];
-    for (const [environmentId, { keys }] of Object.entries(reads)) {
-      const project = known.find((candidate) => candidate.environments.some((environment) => environment.id === environmentId && environment.owner === null));
-      const path = project === undefined ? environmentId : `${project.slug}/${project.environments.find((environment) => environment.id === environmentId)!.slug}`;
-      const covering = project === undefined ? undefined
-        : scope.find((grant) => grant.environmentId === environmentId) ?? scope.find((grant) => grant.environmentId === null && grant.projectId === project.id);
-      if (covering === undefined) throw badRequest(`reads names ${path}, which the binding's scope does not reach`);
-      if (keys !== undefined && keys !== '*') {
-        const held = await listedKeys(this.#deps.db, environmentId, keys);
-        const missing = keys.filter((id) => !held.some((key) => key.id === id));
-        if (missing.length > 0) throw badRequest(`reads lists keys ${path} does not hold: ${missing.join(', ')}`);
-        const sensitive = held.filter((key) => key.sensitive);
-        if (sensitive.length > 0 && covering.sensitive !== true) {
-          throw new Refusal(
-            forbidden(`only an Owner of ${project!.slug} lets a service read its sensitive values (R32): ${sensitive.map((key) => key.key).join(', ')}`),
-            denied(ctx, 'token.bind', 'sensitive_read', { metadata: { ...details, path, keys: sensitive.map((key) => key.id) } }),
-          );
-        }
-      }
-      if (covering.environmentId === null) grants.push({ ...covering, environmentId });
-    }
-    return grants;
   }
 
   /**
@@ -1268,6 +1275,121 @@ async function stillMember(tx: Transaction, member: string, standing: Access): P
   return row !== null && row.generation === standing.generation && row.status === 'active';
 }
 
+/** A binding's `reads` as the API names them (section 6.1): each environment by path, its keys by name, or `'*'` for every one. */
+export type ReadsByPath = Record<string, readonly string[] | '*'>;
+
+/** A binding's policy as the API shows it: as stored, but its `reads` by path and name. */
+export type PolicyView = Omit<BindingPolicy, 'reads'> & { reads?: ReadsByPath };
+
+/** One environment of a binding's `reads`, found as it is now: its ID, path and project, and its keys, each found, or `'*'`. */
+type ResolvedRead = { environmentId: string; path: string; projectId: string; keys: '*' | { id: string; key: string; sensitive: boolean }[] };
+
+/** A policy's check, a refusal as a 400. */
+function checked<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (error instanceof BindingInvalid) throw badRequest(error.message);
+    throw error;
+  }
+}
+
+/**
+ * `reads` as asked, by path and name, each environment and key found as it
+ * is now: an environment that is not there, or a key it does not hold, is
+ * refused by name, since listing a key needs the key to exist. Its own
+ * keys only: a reference reads what its source holds, where the vault
+ * checks `reads`, by its source's ID.
+ */
+async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRead[]> {
+  if (typeof wanted !== 'object' || wanted === null || Array.isArray(wanted)) throw badRequest('reads maps each environment, by path, to its key names or "*"');
+  const entries = Object.entries(wanted as Record<string, unknown>);
+  if (entries.length > MAX_READ_PLACES) throw badRequest(`reads names at most ${MAX_READ_PLACES} environments`);
+  const known = await places(db);
+  const resolved: ResolvedRead[] = [];
+  for (const [path, keys] of entries) {
+    if (keys !== '*' && !(Array.isArray(keys) && keys.length <= MAX_READ_KEYS && keys.every((key) => typeof key === 'string' && key.length <= 256))) {
+      throw badRequest(`reads lists ${path}'s keys by name, at most ${MAX_READ_KEYS}, or "*" for every one`);
+    }
+    const at = parsePath(path, [2]);
+    const project = known.find((candidate) => candidate.slug === at.project);
+    const environment = project?.environments.find((candidate) => candidate.slug === at.environment && candidate.owner === null);
+    if (project === undefined || environment === undefined) throw notFound(`reads names ${path}, which is no environment`);
+    if (keys === '*') {
+      resolved.push({ environmentId: environment.id, path: `${project.slug}/${environment.slug}`, projectId: project.id, keys });
+      continue;
+    }
+    const names = [...new Set(keys as string[])];
+    const held = (await secretHeads(db, environment.id, { keys: names })).filter((row) => row.archivedAt === null && row.current !== null);
+    const missing = names.filter((name) => !held.some((row) => row.key === name));
+    if (missing.length > 0) throw badRequest(`reads lists keys ${path} does not hold: ${missing.join(', ')}`);
+    resolved.push({ environmentId: environment.id, path: `${project.slug}/${environment.slug}`, projectId: project.id, keys: held.map((row) => ({ id: row.id, key: row.key, sensitive: row.current!.sensitive })) });
+  }
+  return resolved;
+}
+
+/** `reads` as the policy stores them, by environment and key ID, sorted, as `checkPolicy` keeps them. */
+function readsById(reads: readonly ResolvedRead[]): NonNullable<BindingPolicy['reads']> {
+  return Object.fromEntries(reads.map((read) => [read.environmentId, { keys: read.keys === '*' ? '*' as const : read.keys.map((key) => key.id).sort() }]));
+}
+
+/** A policy about to be stored, shown with its `reads` by path and name, as asked. */
+function shownPolicy(policy: BindingPolicy, reads: readonly ResolvedRead[]): PolicyView {
+  const { reads: _, ...rest } = policy;
+  if (reads.length === 0) return rest;
+  return { ...rest, reads: Object.fromEntries(reads.map((read) => [read.path, read.keys === '*' ? '*' : read.keys.map((key) => key.key).sort()])) };
+}
+
+/** A stored policy shown with its `reads` by path and name, as they are named now; one deleted, by its ID. */
+function namedPolicy(policy: BindingPolicy, known: readonly PlaceRow[], named: ReadonlyMap<string, string>): PolicyView {
+  const { reads, ...rest } = policy;
+  if (reads === undefined) return rest;
+  const pathOf = (id: string) => {
+    for (const project of known) {
+      const environment = project.environments.find((candidate) => candidate.id === id);
+      if (environment !== undefined) return `${project.slug}/${environment.slug}`;
+    }
+    return id;
+  };
+  return {
+    ...rest,
+    reads: Object.fromEntries(Object.entries(reads).flatMap(([id, { keys }]) => (keys === undefined ? [] : [[pathOf(id), keys === '*' ? '*' : keys.map((key) => named.get(key) ?? key).sort()]]))),
+  };
+}
+
+/**
+ * A binding's scope with its `reads` checked against it (section 6.1):
+ * each environment listed is one the scope reaches, and a sensitive key
+ * listed only where its grant reads sensitive values, which an Owner of its
+ * project alone gives (R32). Each such environment gets a grant of its
+ * own, the project's that covers it as it holds in an environment (union
+ * semantics make it no wider), so a session's `reads` attach to its grant
+ * by ID with nothing to look up (`sessionScope`).
+ */
+function readsScope(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>, scope: CredentialScope, reads: readonly ResolvedRead[], details: Record<string, unknown>): CredentialScope {
+  const grants: ScopeGrant[] = [...scope];
+  for (const read of reads) {
+    const covering = scope.find((grant) => grant.environmentId === read.environmentId)
+      ?? scope.find((grant) => grant.environmentId === null && grant.projectId === read.projectId);
+    if (covering === undefined) throw badRequest(`reads names ${read.path}, which the binding's scope does not reach`);
+    const sensitive = read.keys === '*' ? [] : read.keys.filter((key) => key.sensitive);
+    if (sensitive.length > 0 && covering.sensitive !== true) {
+      throw new Refusal(
+        forbidden(`only an Owner of ${read.path.split('/')[0]} lets a service read its sensitive values (R32): ${sensitive.map((key) => key.key).join(', ')}`),
+        denied(ctx, 'token.bind', 'sensitive_read', { metadata: { ...details, path: read.path, keys: sensitive.map((key) => key.key) } }),
+      );
+    }
+    if (covering.environmentId === null) {
+      // Its environment's share of the project's grant: what holds in an environment, as a grant there may hold no more.
+      const { permissions, protected: guarded } = scopeDefinition(covering);
+      const there = (column: readonly Permission[]) => column.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission));
+      grants.push({ ...covering, environmentId: read.environmentId, permissions: { normal: there(permissions), protected: there(guarded) } });
+    }
+  }
+  if (!isCredentialScope(grants)) throw new Error('a binding\'s reads made a scope that does not hold');
+  return grants;
+}
+
 /**
  * The environments a scope reaches, by ID and path, as a handle's places:
  * each of its environments, and each environment of its projects but
@@ -1294,7 +1416,7 @@ function view(row: BindingRow, scope: ScopeByPath | null): BindingView {
     keys: row.jwks === null ? null : keySummaries(row.jwks),
     claims: JSON.parse(row.claims) as BindingClaims,
     scope,
-    policy: row.policy === null ? null : (JSON.parse(row.policy) as BindingPolicy),
+    policy: row.policy === null ? null : (JSON.parse(row.policy) as PolicyView),
     label: row.label,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,

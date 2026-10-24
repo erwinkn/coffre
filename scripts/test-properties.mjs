@@ -15,5 +15,6 @@ await import('../packages/server/test/tunnel-properties.test.ts');
 await import('../packages/server/test/sigv4-properties.test.ts');
 await import('../packages/server/test/credential-proxy-properties.test.ts');
 await import('../packages/core/test/workload-properties.test.ts');
+await import('../packages/server/test/workload-session-properties.test.ts');
 await import('../packages/core/test/use-only-properties.test.ts');
 await import('../packages/server/test/gate-properties.test.ts');

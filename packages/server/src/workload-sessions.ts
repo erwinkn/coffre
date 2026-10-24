@@ -129,7 +129,7 @@ export function signedUrl(request: Request, publicUrl: string): string {
 
 /** The workload gate of `principal`, or a refusal: a deployment that runs none accepts no session, since nothing would stop a replay. */
 export function gateOf(runtime: Pick<CoffreRuntime, 'gates'>, principal: string): Gate {
-  if (runtime.gates == null) throw refusal(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
+  if (runtime.gates === undefined) throw refusal(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
   return runtime.gates(principal);
 }
 
@@ -221,7 +221,7 @@ export async function standingSession(
   const places = placesOf(row.places);
   const place = ask.place ?? (places.length === 1 ? places[0]! : null);
   if (ask.credential !== null && place === null) {
-    throw refusal(new ApiError('bad_request', 'this session reaches several environments: name the one it uses, /use/<project>/<environment>/<credential>'));
+    throw refusal(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this session reaches none, or several'));
   }
   if (policy.approve === true && row.approvedAt === null) {
     throw refusal(new ApiError('unauthenticated', 'this session waits for a manager of its service to approve it', 'pending'));

@@ -231,6 +231,8 @@ export type TokenRow = {
   lastUsedIp: string | null;
   /** What it reaches, of what its account or person holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
   scope: ScopeByPath | null;
+  /** A workload's key-bound session (docs/design/workload-access.md): the binding it signed in through, whose scope it holds when its own is null. */
+  session?: { bindingId: string | null };
 };
 
 export type DeviceStart = {
@@ -283,10 +285,14 @@ function isToken(row: { kind: string }): boolean {
 
 type HeldCredential = NonNullable<Awaited<ReturnType<typeof members>>[number]>['credentials'][number];
 
-/** A member's live tokens, as their list shows them, newest first: never a session, nor what a trust binding issued a CI run for five minutes. */
+/**
+ * A member's live tokens, as their list shows them, newest first: never a
+ * person's session, nor what a trust binding issued a CI run for five
+ * minutes; a service's workload sessions, each with its binding.
+ */
 export function tokenRows(held: readonly HeldCredential[], known: readonly PlaceRow[]): TokenRow[] {
   return held
-    .filter((row) => isToken(row) && issuingBinding(row.createdBy) === null)
+    .filter((row) => (isToken(row) && issuingBinding(row.createdBy) === null) || row.kind === 'workload')
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
     .map((row) => ({
       id: row.id,
@@ -298,6 +304,7 @@ export function tokenRows(held: readonly HeldCredential[], known: readonly Place
       lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
       lastUsedIp: row.lastUsedIp,
       scope: scopeByPath(readScope(row.scope), known),
+      ...(row.kind === 'workload' ? { session: { bindingId: issuingBinding(row.createdBy) } } : {}),
     }));
 }
 
@@ -761,7 +768,8 @@ export class SigninService {
       if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principal === principalOf(principal);
-      if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !isToken(row))) throw unknown();
+      // Of a service it manages: one of its tokens, or a workload's key-bound session, which its managers end as they revoke its tokens.
+      if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
       if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
       const revoked = await updateAuth(
         tx,

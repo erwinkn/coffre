@@ -143,6 +143,7 @@ test('a plan and a list show every claim in full', () => {
     jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
     claims: { event_name: 'push', ref: 'refs/heads/main' },
     keys: null,
+    policy: null,
     scope: { 'market/dev': 'developer' as const, 'market/prod': 'viewer' as const, 'api/dev': 'developer' as const },
     withheld: [] as string[],
     replaces: [{ id: 'old', why: 'keys_moved' as const }],
