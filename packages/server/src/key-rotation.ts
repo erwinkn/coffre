@@ -37,7 +37,12 @@ export const SIGNED_TABLES: readonly AuthTable[] = [
 /** The credentials a rotation signs out: people's sessions, the browser's and the CLI's, which a sign-in gives back. */
 const SESSIONS = new Set(['browser', 'cli']);
 
-/** Rows a step reads and signs again, at most: their MACs some 1 to 2.5 ms of CPU in Node, warm or cold, to keep a step within a Worker's 10. */
+/**
+ * Rows a step reads and signs again, at most: a step of 100 credentials
+ * cost workerd 1.4 to 2.7 ms of CPU, all of it, where an empty request
+ * costs 1.6 to 2.1 (measured with 2,000 rows, as `pnpm bench:workers`
+ * reads it): well within a Worker's 10.
+ */
 export const STEP_ROWS = 100;
 
 /** Rows a step names in its entry that it could not sign again, at most; the count is whole. */
@@ -248,7 +253,7 @@ const told = new Set<string>();
 function unused(keyId: string): void {
   if (told.has(keyId)) return;
   told.add(keyId);
-  console.warn({ event: 'app_key_unused', keyId }, 'a key in previousAuditChainKeys wrote no entry of the log: it verifies nothing, and can go');
+  console.warn({ event: 'app_key_unused', keyId }, 'a key in previousAuditChainKeys wrote no entry of the log: it verifies nothing, and is never rotated from, so a row it signed stays as it is; it can go');
 }
 
 /**

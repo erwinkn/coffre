@@ -240,6 +240,12 @@ async function advance(ctx: WatchContext, anchor: Fields, target: Checkpoint): P
  * another record than `prev`, `failed` when it could not be used.
  */
 async function commit(ctx: WatchContext, anchors: AnchorStore, prev: AuditAnchor | null, base: Fields, fields: AnchorFields): Promise<'written' | 'lost' | 'failed'> {
+  // An instance the log moved on from, as during a rotation's deploy: what it found under the new key's entries is no
+  // finding, and the anchor is the new key's to write.
+  if (await ctx.log.movedOn()) {
+    ctx.warn({}, 'the audit anchor is left as it is: this instance runs under an app key the log moved on from');
+    return 'failed';
+  }
   const written = await anchors.write(prev, ctx.seal(fields)).catch((error: Error) => {
     ctx.warn({ err: error.message }, 'the audit anchor could not be written');
     return null;

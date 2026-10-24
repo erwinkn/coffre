@@ -315,10 +315,11 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
     return watch === null ? { ok: false, watched: false } : { ok: false };
   }
   // Below its key, each ask a step of the rotation: a deploy that waits on readiness takes it to its end.
-  const held = await keyReady(runtime).catch((error: unknown): KeyHeld => {
+  const held = await keyReady(runtime).catch((error: unknown) => {
     console.error('the rotation to the app key could not go on', logged(error));
-    return { kind: 'rotating' };
+    return 'error' as const;
   });
+  if (held === 'error') return { ok: false, appKey: 'error' };
   if (held !== null) return { ok: false, ...(held.kind === 'rotating' || held.kind === 'stalled' ? { rotating: true } : held.kind === 'refused' ? { appKey: false } : {}) };
   if (watch === null) return { ok: true, watched: false };
   const said = await watch.hooks.readiness(watch.context());

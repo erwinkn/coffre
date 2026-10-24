@@ -17,6 +17,7 @@ import { KeyRetired } from '@coffre/db/log';
 import { anchorIsOwn, anchorKeyId, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
 import { appendAudit, appVerifier, CHAIN_START, verifyAppEntries, walkChain, type AuditEntry } from './db/audit.ts';
 import { auditHashAt, auditRange } from './db/queries.ts';
+import { movedFrom } from './db/rotation.ts';
 
 /** The key a watcher's hooks hang from on its plugin. */
 export const WATCH: unique symbol = Symbol('coffre.watch');
@@ -49,6 +50,12 @@ export type WatchContext = {
     check(seq: number, link: 'log' | 'own'): Promise<{ ok: boolean; hash: string; reason?: string } | null>;
     /** One entry of the watcher's, in a transaction of its own: its seq. Throws `Superseded` under a key the log moved on from. */
     append(action: WatchAction, metadata: Record<string, unknown>): Promise<number>;
+    /**
+     * Whether the log has moved on from the app's key (key-rotation.ts): an
+     * instance a newer deployment replaces, whose walk cannot judge the
+     * new key's entries, and whose anchor is no longer its to write.
+     */
+    movedOn(): Promise<boolean>;
   };
   vault: {
     /** The vault's checkpoint of the log, asked once a scheduled run however many ask. */
@@ -163,6 +170,7 @@ export function watchContext(deps: WatchDeps): WatchContext {
         const alone = verifyAppEntries([row], { startSeq: row.seq, startPrevHash: Buffer.from(before, 'hex') }, await appVerifier(db, keys));
         return alone.ok ? { ok: true, hash: row.hash.toString('hex') } : { ok: false, hash: row.hash.toString('hex'), reason: alone.reason };
       },
+      movedOn: async () => (await movedFrom(db, [anchorKeyId(chainKey)])).size > 0,
       append: async (action, metadata) => {
         const appended = await db
           .transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata }]))

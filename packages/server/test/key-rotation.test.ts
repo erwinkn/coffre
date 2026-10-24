@@ -23,7 +23,8 @@ import { toErrorBody } from '../src/api/errors.ts';
 import { finishRotation, keyState, keyStateNow, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
 import { newestMove } from '../src/db/rotation.ts';
 import { postgresOnly } from './db/engine.ts';
-import { auditWatch } from '../src/plugins/audit-watch.ts';
+import { auditWatch, walkOn } from '../src/plugins/audit-watch.ts';
+import { watchContext } from '../src/watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { contextFor, holdSomething, openTestDatabase, resetDatabase, testAnchor, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -513,4 +514,33 @@ test('a beat of an instance still under the old key, during the rotation, leaves
   assert.equal(await keyReady(next), null);
   const resealed = (await anchor.read())!;
   assert.deepEqual([resealed.keyId, resealed.finding], [appLogKey(B).keyId, null]);
+});
+
+test('a step entry that does not say where the rotation goes on is refused, and readiness says the key is refused', async () => {
+  // Written under B, with B's MAC, but saying nothing of where the next step goes on.
+  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'coffre-key-rotation', action: 'key.reseal', decision: 'allow', subject: appLogKey(A).keyId, metadata: { from: appLogKey(A).keyId } }]));
+  const next = startUnder(B, [A]);
+  const state = await keyState(deps.db, next);
+  assert.equal(state.kind, 'refused');
+  assert.match((state as { reason: string }).reason, /does not say where it goes on/);
+  const request = new Request(`${ORIGIN}/readyz`);
+  const ready = await (await respond(request, next, null, async () => (await coffreRoute(request, next, null))!)).json();
+  assert.deepEqual(ready, { ok: false, appKey: false });
+});
+
+test('an instance the log moved on from leaves the anchor as it is, whatever its walk found', async () => {
+  const anchor = testAnchor();
+  const old = startUnder(A, [], [auditWatch({ anchor })]);
+  await runScheduled(old);
+  // A backlog for the walks between beats: the checkpoint held, the app's walk from the start toward it.
+  const caught = (await anchor.read())!;
+  const { keyId: _k, mac: _m, ...fields } = caught;
+  const backlog = sealAnchor(A, { ...fields, verified: null, epoch: caught.epoch + 1 });
+  assert.equal(await anchor.write(caught, backlog), true);
+  // The new key's first step, then a walk of the old instance, which meets B's entry where the checkpoint is: it writes nothing.
+  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2 })).kind, 'rotating');
+  const context = watchContext({ db: deps.db, chainKey: A, vault: deps.vault, warn: () => {} });
+  assert.equal(await context.log.movedOn(), true);
+  assert.equal(await walkOn(context, anchor), false);
+  assert.deepEqual(await anchor.read(), backlog);
 });
