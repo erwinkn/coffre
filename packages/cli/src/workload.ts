@@ -10,6 +10,8 @@
  */
 import { chmodSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 import { UNSIGNED_HEADERS } from '@coffre/client/dpop';
 import { aws, azure, CoffreError, enrollment, fly, gcp, github, kubernetes, oidc, vercel, workload, type Proof, type Workload } from '@coffre/client/workload';
@@ -144,8 +146,16 @@ const MOST_BODY = 16 * 1024 * 1024;
 export async function forwarder(coffre: Workload, origin: string, address: Address): Promise<{ url: string; close: () => void }> {
   const server = createServer((req, res) => {
     const answer = (status: number, error: string, message: string) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify({ error, message }));
-    const target = new URL(req.url ?? '/', origin);
+    let target: URL;
+    try {
+      target = new URL(req.url ?? '/', origin);
+    } catch {
+      return answer(400, 'bad_request', 'this request names no URL');
+    }
     if (target.origin !== origin || !target.pathname.startsWith('/use/')) return answer(404, 'not_found', 'this listener forwards /use/… to coffre, and nothing else');
+    // An app that goes away ends the request to coffre, and its answer's body.
+    const gone = new AbortController();
+    res.on('close', () => gone.abort());
     void (async () => {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -159,13 +169,15 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
         if (!DROPPED.has(req.rawHeaders[i]!.toLowerCase())) headers.append(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
       }
       const method = req.method ?? 'GET';
-      const response = await coffre.fetch(target.href, { method, headers, body: method === 'GET' || method === 'HEAD' ? undefined : Buffer.concat(chunks), redirect: 'manual' });
+      const response = await coffre.fetch(target.href, { method, headers, body: method === 'GET' || method === 'HEAD' ? undefined : Buffer.concat(chunks), redirect: 'manual', signal: gone.signal });
       const back: [string, string][] = [...response.headers].filter(([name]) => !UNANSWERED.has(name) && name !== 'set-cookie');
       for (const cookie of response.headers.getSetCookie()) back.push(['set-cookie', cookie]);
       res.writeHead(response.status, back);
-      if (response.body !== null) for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
-      res.end();
+      // Read only as fast as the app takes it.
+      if (response.body === null) res.end();
+      else await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream<Uint8Array>), res);
     })().catch((error: unknown) => {
+      if (gone.signal.aborted) return;
       if (res.headersSent) return res.destroy();
       answer(502, 'bad_gateway', `coffre did not answer: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -218,6 +230,12 @@ export async function keyBound(origin: string, service: string, proof: Proof, po
       const plan = (await response.json().catch(() => null)) as (Planned & { message?: unknown }) | null;
       if (!response.ok || plan === null) throw new Error(`${origin} gave ${service} no plan for ${place} (${response.status})${typeof plan?.message === 'string' ? `: ${plan.message}` : ''}`);
       plans.push([place, plan]);
+    }
+    // A tunnel's URL goes into the key the plan names for it: a plan that names none (`tunnels: ["db"]`) gives `run` nowhere to put it.
+    for (const [place, plan] of plans) {
+      if (plan.tunnels !== undefined && (typeof plan.tunnels !== 'object' || Array.isArray(plan.tunnels))) {
+        throw new Error(`${origin}'s plan for ${place} names its tunnels without the key each URL goes in: coffre run needs { <name>: { key, url } }; coffre serve --tunnel <name>=<address> needs none`);
+      }
     }
     const values = (plan: Planned) => Object.entries(plan.values ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
     const tunnels = (plan: Planned) => Object.entries(plan.tunnels ?? {}).filter((entry): entry is [string, Tunnel] => typeof entry[1].key === 'string' && typeof entry[1].url === 'string');

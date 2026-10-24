@@ -35,6 +35,8 @@ export type ProofContext = {
   fetch: Fetch;
   /** Where the SDK says what it waits for: stderr unless the app said otherwise. */
   log: (line: string) => void;
+  /** Aborted when the session closes: a proof that waits (a spent token's next) stops waiting. */
+  signal?: AbortSignal;
 };
 
 export interface Proof {
@@ -97,10 +99,11 @@ export function kubernetes(path: string = KUBERNETES_TOKEN): Proof {
       });
       return { oidc: last };
     },
-    spent: async ({ log }) => {
+    spent: async ({ log, signal }) => {
       log(`coffre: the projected token at ${path} was spent already, by an earlier start; waiting for the kubelet to write its next, up to 10 minutes`);
       for (const end = Date.now() + 10 * 60_000; Date.now() < end; ) {
         await sleep(1000);
+        signal?.throwIfAborted();
         const now = await read().catch(() => last);
         if (now !== last) return true;
       }

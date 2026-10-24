@@ -15,16 +15,25 @@
 // namespace, or, on a shared machine, a Unix socket only its owner opens.
 import { workload, type Workload } from '@coffre/client/workload';
 
+import { instanceOrigin } from './instance.ts';
 import { parse, UsageError } from './manage.ts';
 import { listen } from './tunnels.ts';
 import { addressOf, forwarder, proofOf, PROOFS } from './workload.ts';
 
-/** `coffre serve --url <url> --service <name> --proof <proof> [--listen <address>] [--tunnel <name>=<address>]…`; `url`, the session flag's, if given before the command. */
+/**
+ * `coffre serve --url <url> --service <name> --proof <proof> [--place <project>/<env>] [--listen <address>] [--tunnel <name>=<address>]…`;
+ * `url`, the session flag's, if given before the command.
+ */
 export async function serve(args: string[], sessionUrl?: string): Promise<void> {
-  const { values } = parse(args, { url: { type: 'string' }, service: { type: 'string' }, proof: { type: 'string' }, listen: { type: 'string' }, tunnel: { type: 'string', multiple: true } }, []);
+  const { values } = parse(
+    args,
+    { url: { type: 'string' }, service: { type: 'string' }, proof: { type: 'string' }, place: { type: 'string' }, listen: { type: 'string' }, tunnel: { type: 'string', multiple: true } },
+    [],
+  );
   const given = values.url ?? sessionUrl;
   if (given === undefined || values.service === undefined) throw new UsageError(`coffre serve --url <url> --service <name> --proof <proof>: which instance, as which service, proved how (${PROOFS})`);
-  const origin = new URL(given).origin;
+  // Before any proof is read or sent: https, or http on this machine, as every command talks to coffre.
+  const origin = instanceOrigin(given);
   const address = addressOf(values.listen ?? '127.0.0.1:7300', '--listen');
   const tunnels = (values.tunnel ?? []).map((spec) => {
     const [name, at] = spec.split(/=(.*)/s);
@@ -36,11 +45,12 @@ export async function serve(args: string[], sessionUrl?: string): Promise<void> 
   const proof = await proofOf(values.proof, process.env);
   const say = (line: string) => process.stderr.write(`${line}\n`);
 
-  const coffre: Workload = await workload({ url: origin, service: values.service, proof, log: say, sigterm: false });
+  const coffre: Workload = await workload({ url: origin, service: values.service, proof, place: values.place, log: say, sigterm: false });
   const opened: { url: string; close: () => void }[] = [];
   const stop = async (code: number) => {
     for (const each of opened) each.close();
-    await coffre.close();
+    // Its logout waits 3 seconds at most; unconfirmed, the session ends by itself at its expiry.
+    await coffre.close().catch((error: unknown) => say(`coffre: ${error instanceof Error ? error.message : String(error)}`));
     process.exit(code);
   };
   // A sidecar stops with its pod: it logs out first, so the session ends with it.

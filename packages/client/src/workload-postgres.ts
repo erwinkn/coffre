@@ -24,8 +24,25 @@ import { Duplex } from 'node:stream';
 
 import { upgradeHeaders, type Workload } from './workload.ts';
 
-/** A WebSocket class as the WHATWG API has one, taking the upgrade's headers as Node's, Deno's, Bun's and the `ws` package's do. */
-export type WebSocketClass = new (url: string, options: { headers: Record<string, string> }) => WebSocket;
+/**
+ * What the stream uses of a WebSocket: the WHATWG API's, which Node's,
+ * Deno's, Bun's and the `ws` package's all have; and `pause` and `resume`,
+ * which only the `ws` package's has, and which hold back a coffre that does
+ * not pace while the app reads nothing.
+ */
+export type TunnelSocket = {
+  binaryType: string;
+  readonly readyState: number;
+  readonly bufferedAmount: number;
+  send(data: Uint8Array | string): void;
+  close(): void;
+  addEventListener(type: 'open' | 'close' | 'error' | 'message', listener: (event: object) => void): void;
+  pause?(): void;
+  resume?(): void;
+};
+
+/** A WebSocket class that takes the upgrade's headers, as all of those do. */
+export type WebSocketClass = new (url: string, options: { headers: Record<string, string> }) => TunnelSocket;
 
 const FLOW = 'coffre-tunnel-flow';
 /** What either side may send that the other has not counted back. */
@@ -34,6 +51,8 @@ const WINDOW = 1024 * 1024;
 const COUNT_EVERY = 128 * 1024;
 /** How much the stream sends before it waits for the WebSocket to send it: a few COPY chunks. */
 const HIGH_WATER = 1024 * 1024;
+/** The most one message carries: a large query is sent in frames, each within the credit left. */
+const FRAME = 64 * 1024;
 /** How often an open connection says it is there, so that an idle one outlives Cloudflare's 100-second timeout. */
 const KEEPALIVE_MS = 30_000;
 
@@ -48,7 +67,7 @@ export function connect(coffre: Workload, name: string, options: { WebSocket?: W
 }
 
 export class TunnelStream extends Duplex {
-  #ws: WebSocket | null = null;
+  #ws: TunnelSocket | null = null;
   /** Whether coffre paces: unknown until its first message says. */
   #pacing: boolean | null = null;
   /** Bytes sent that coffre has not counted; bytes the app took that this has not counted back; bytes coffre sent that it has not. */
@@ -76,7 +95,7 @@ export class TunnelStream extends Duplex {
           (this.#keepalive as { unref?: () => void }).unref?.();
           this.#release();
         });
-        ws.addEventListener('message', (event) => this.#message(event.data as ArrayBuffer | string));
+        ws.addEventListener('message', (event) => this.#message((event as { data: ArrayBuffer | string }).data));
         ws.addEventListener('close', () => {
           clearInterval(this.#keepalive);
           this.push(null);
@@ -156,7 +175,11 @@ export class TunnelStream extends Duplex {
       return;
     }
     if (this.push(Buffer.from(data))) this.#took(data.byteLength);
-    else this.#held += data.byteLength;
+    else {
+      this.#held += data.byteLength;
+      // A coffre that paces waits for the count; one that does not is held back where the WebSocket can pause.
+      if (this.#pacing === false) this.#ws!.pause?.();
+    }
   }
 
   #took(bytes: number): void {
@@ -169,21 +192,27 @@ export class TunnelStream extends Duplex {
     const held = this.#held;
     this.#held = 0;
     if (held > 0) this.#took(held);
+    if (this.#pacing === false) this.#ws?.resume?.();
   }
 
   override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
-    const send = () => {
-      if (!this.#open()) return callback(new Error('the tunnel is closed'));
-      this.#uncounted += chunk.length;
-      this.#ws!.send(chunk);
-      if (!this.#full()) return callback();
-      this.#waiting = () => callback();
-      this.#release();
+    // In frames, each sent within the window coffre has left: a query larger than the window waits for its counts between them.
+    let offset = 0;
+    const next = () => {
+      while (offset < chunk.length) {
+        if (this.#full()) {
+          if (this.#ws !== null && this.#ws.readyState > 1) return callback(new Error('the tunnel is closed'));
+          this.#waiting = next;
+          return this.#release();
+        }
+        const frame = chunk.subarray(offset, offset + FRAME);
+        offset += frame.length;
+        this.#uncounted += frame.length;
+        this.#ws!.send(frame);
+      }
+      callback();
     };
-    if (this.#full()) {
-      this.#waiting = send;
-      this.#release();
-    } else send();
+    next();
   }
 
   override _final(callback: (error?: Error | null) => void): void {

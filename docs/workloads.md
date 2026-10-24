@@ -135,7 +135,10 @@ const pool = new pg.Pool({ stream: () => connect(coffre, 'db') });
 by the session. There is no listener, no password and no database URL in
 the app: coffre logs in to the database. It uses the runtime's own
 `WebSocket` (Node 22 and later, Bun, Deno). Node 20 has none, so pass the
-`ws` package's: `connect(coffre, 'db', { WebSocket })`.
+`ws` package's: `connect(coffre, 'db', { WebSocket })`. A coffre on Workers
+paces the bytes both ways. One on Node does not, and only the `ws` package's
+WebSocket can pause it while the app reads nothing, so pass that one there
+for results larger than memory.
 
 ### `narrow`
 
@@ -177,8 +180,14 @@ it uses with its own key.
   and for the kubelet to write the next projected token when a restarted
   process finds the old one spent (up to 10 minutes). It says so once on
   standard error, or through `log`.
-- **Logs out on `SIGTERM`**, then lets the signal end the process if no
-  other handler is listening.
+- **Follows redirects hop by hop**, signing each hop within coffre afresh,
+  and sending a hop elsewhere with the app's own headers alone, never the
+  session's.
+- **Logs out on `SIGTERM`**, every session it proved, then lets the signal
+  end the process if no other handler is listening. `close()` does the same
+  on demand, waits at most 3 seconds for coffre to confirm, and rejects if
+  it did not. A process that stops its own way passes `sigterm: false` and
+  calls `close()` itself.
 
 ### What never happens
 
@@ -186,6 +195,8 @@ it uses with its own key.
   `exportKey` rejects. The key, the session token and the nonce live in
   `workload()`'s closure and nowhere else.
 - Nothing is written to disk or to the environment.
+- No proof crosses plain HTTP: `workload()` takes an `https` URL, or an
+  `http` one on this machine.
 - `enrollment(code)` deletes the code from `process.env`, under whatever
   name held it, so the app's own environment dumps stop showing it. The
   platform's store still holds it.
@@ -439,6 +450,7 @@ coffre serve --url https://secrets.acme.example --service api-prod \
 | `--proof` | `kubernetes[:<file>]`, `aws`, `gcp`, `azure:<audience>`, `fly`, `vercel`, `github`, `enrollment` or `oidc`. The last two read their secret from standard input, never an argument or a variable. |
 | `--listen` | Where the app reaches it: `127.0.0.1:7300` unless given, `[::1]:7300`, or `unix:<path>`. |
 | `--tunnel` | `<name>=<host>:<port>`, a Postgres listener for the database tunnel `name`. Repeat it for each. |
+| `--place` | Which environment the tunnels are in, `market/prod`, when the session reaches several. |
 
 It signs in once, holds the session and its key in memory, and forwards each
 request under `/use/` to coffre, signed, with its method, path, query,

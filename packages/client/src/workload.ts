@@ -107,7 +107,12 @@ export interface UsedCredential {
 /** A session as the exchange answers it. */
 type Session = { token: string; expiresAt: number; notAfter: number; places: string[]; issuedAt: number };
 
-/** The gate's newest nonce, from any answer, and when it came: a nonce is good for at least the 2 minutes until the gate's next rotation. */
+/**
+ * The gate's newest nonce, and when the request that brought it went out: a
+ * nonce is good for at least the 2 minutes from then until the gate's next
+ * rotation. An answer to an older request than the one that set it never
+ * replaces it, so a late answer cannot make an old nonce look new.
+ */
 type Nonces = { value: string | undefined; at: number };
 
 /** How long a nonce is taken as fresh, for a request that cannot be sent again (a stream, a WebSocket's upgrade): under the 2 minutes it lasts. */
@@ -121,6 +126,11 @@ const ENROLLMENT_RENEW_MS = 30_000;
 const FINAL = new Set(['superseded']);
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** How long a logout may take: a process stopping waits no longer for it. */
+const LOGOUT_MS = 3000;
+/** The redirects fetch follows, and how many it follows at most. */
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const MOST_REDIRECTS = 20;
 
 /** Each session's SIGTERM handler: a process whose every handler is one of these ends on SIGTERM once they have logged out. */
 const TERMINATING = new WeakSet<object>();
@@ -133,13 +143,21 @@ const UPGRADES = new WeakMap<Workload, (url: string) => Promise<Record<string, s
  * the process runs. Rejects if the first exchange is refused.
  */
 export async function workload(options: WorkloadOptions): Promise<Workload> {
-  const origin = new URL(options.url).origin;
+  const url = new URL(options.url);
+  // A proof, a code above all, crosses only TLS, or stays on this machine.
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/.test(url.hostname))) {
+    throw new TypeError(`workload() talks to coffre over https, or http on this machine: not ${url.origin}`);
+  }
+  const origin = url.origin;
   const base: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   const log = options.log ?? ((line: string) => console.error(line));
   const key = await generateProofKey();
-  const context: ProofContext = { audience: origin, jkt: await thumbprint(key.jwk), fetch: base, log };
+  /** Aborted by `close()`: an exchange, its waits and its proof's stop with it. */
+  const lifetime = new AbortController();
+  const context: ProofContext = { audience: origin, jkt: await thumbprint(key.jwk), fetch: base, log, signal: lifetime.signal };
   const nonces: Nonces = { value: undefined, at: 0 };
   const enrolled = options.proof.kind === 'enrollment';
+  const api = apiOf({ origin, base, key, nonces });
 
   /** Trade a fresh proof for a session, waiting out what the design says to wait out; throws a refusal, with the server's words. */
   const exchange = async (): Promise<Session> => {
@@ -147,14 +165,17 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
     const said = new Set<string>();
     const say = (line: string) => void (said.has(line) || (said.add(line), log(line)));
     for (;;) {
+      lifetime.signal.throwIfAborted();
       const proof = await options.proof.prove(context);
       const url = `${origin}/api/auth/workload`;
+      const sentAt = Date.now();
       const response = await base(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', dpop: await createProof(key, { method: 'POST', url }) },
         body: JSON.stringify({ service: options.service, proof }),
+        signal: lifetime.signal,
       });
-      note(nonces, response);
+      note(nonces, response, sentAt);
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       const [expiresAt, notAfter] = [Date.parse(String(body?.expiresAt)), Date.parse(String(body?.notAfter))];
       if (response.status === 200 && typeof body?.token === 'string' && Number.isFinite(expiresAt) && Number.isFinite(notAfter)) {
@@ -164,42 +185,17 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
       const reason = typeof body?.reason === 'string' ? body.reason : undefined;
       if (response.status === 202 && Date.now() - start < PENDING_MS) {
         say(`coffre: ${options.service}'s session waits for a person to approve it${typeof body?.approve === 'string' ? `, at ${body.approve}` : ''}`);
-        await sleep(5000);
+        await sleep(5000, lifetime.signal);
         continue;
       }
       if (response.status === 429 && reason === 'full' && Date.now() - start < FULL_MS) {
         say(`coffre: ${options.service}'s enrollment code holds all the sessions it admits; waiting for one to end, up to 5 minutes`);
-        await sleep(retryAfter(response, 30_000));
+        await sleep(retryAfter(response, 30_000), lifetime.signal);
         continue;
       }
       if (reason === 'replayed' && options.proof.spent !== undefined && (await options.proof.spent(context))) continue;
       throw refusal(response.status, body, `${origin} would not sign ${options.service} in with its ${options.proof.name} proof`);
     }
-  };
-
-  /** A POST to coffre's own API with the session (renew, narrow, logout): its proof signs the token and the newest nonce, never the body. */
-  const api = async (path: string, token: string, body?: unknown) => {
-    const url = `${origin}${path}`;
-    const send = async () => {
-      const response = await base(url, {
-        method: 'POST',
-        headers: {
-          authorization: `DPoP ${token}`,
-          dpop: await createProof(key, { method: 'POST', url, token, nonce: nonces.value }),
-          accept: 'application/json',
-          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      note(nonces, response);
-      return response;
-    };
-    let response = await send();
-    if (askedNonce(response)) {
-      await response.body?.cancel();
-      response = await send();
-    }
-    return { response, body: (await response.json().catch(() => null)) as Record<string, unknown> | null };
   };
 
   let session: Session | null = await exchange();
@@ -208,6 +204,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   }
   /** The environments of the newest session, kept while a lost one is proved again. */
   let places = session.places;
+  /** Every session proved and not yet expired: a new proof leaves the old one to finish its requests, and close() ends them all, their children with them. */
+  let roots: Session[] = [session];
   let closed = false;
   /** The exchange in flight, which requests without a session wait for; and why the last one failed, while none holds. */
   let attempt: Promise<Session> | null = null;
@@ -236,11 +234,12 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
       .then((next) => {
         // Closed while it was asked for: it ends now, as the one it replaced did.
         if (closed) {
-          void api('/api/auth/logout', next.token).catch(() => undefined);
+          void logout(api, next.token).catch(() => undefined);
           throw new Error(`${options.service}'s session with coffre is closed`);
         }
         session = next;
         places = next.places;
+        roots = [...roots.filter((root) => root.expiresAt > Date.now()), next];
         failure = null;
         tries = 0;
         plan(next);
@@ -300,21 +299,29 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   const signals = (globalThis as { process?: NodeJS.Process }).process;
   let closing: Promise<void> | null = null;
   // One logout, however many ask for it (the app, and SIGTERM): each waits for it.
+  // Rejects if coffre did not confirm every session's end, each asked for at most 3 seconds.
   const close = () =>
     (closing ??= (async () => {
       closed = true;
+      lifetime.abort();
       for (const timer of Object.values(timers)) clearTimeout(timer);
-      const held = session;
       session = null;
-      if (held !== null) await api('/api/auth/logout', held.token).catch(() => undefined);
-      // Its handler goes once it has logged out: until then, SIGTERM waits for it.
-      signals?.off?.('SIGTERM', onTerm);
-      TERMINATING.delete(onTerm);
+      try {
+        const ended = await Promise.allSettled(roots.filter((root) => root.expiresAt > Date.now()).map((root) => logout(api, root.token)));
+        const failed = ended.find((each): each is PromiseRejectedResult => each.status === 'rejected');
+        if (failed !== undefined) throw failed.reason;
+      } finally {
+        // Its handler goes once it has logged out: until then, SIGTERM waits for it.
+        signals?.off?.('SIGTERM', onTerm);
+        TERMINATING.delete(onTerm);
+      }
     })());
   // A graceful stop logs out at once. Where every handler is a session's, the last to log out ends the process with SIGTERM, as it would have ended without them.
   const onTerm = () => {
     const alone = signals!.listeners('SIGTERM').every((listener) => TERMINATING.has(listener));
-    void close().finally(() => alone && signals!.listenerCount('SIGTERM') === 0 && signals!.kill(signals!.pid, 'SIGTERM'));
+    void close()
+      .catch(() => undefined)
+      .finally(() => alone && signals!.listenerCount('SIGTERM') === 0 && signals!.kill(signals!.pid, 'SIGTERM'));
   };
   if (options.sigterm !== false) {
     TERMINATING.add(onTerm);
@@ -345,7 +352,7 @@ type Core = {
   base: Fetch;
   key: ProofKey;
   nonces: Nonces;
-  api: (path: string, token: string, body?: unknown) => Promise<{ response: Response; body: Record<string, unknown> | null }>;
+  api: Api;
   service: string;
   place: string | undefined;
   current: () => Promise<Session>;
@@ -369,7 +376,8 @@ function surface(core: Core): Workload {
     if (Date.now() - nonces.at > FRESH_NONCE_MS) await core.refresh().catch(() => undefined);
   };
 
-  const signed: Fetch = async (input, init) => {
+  /** A request under `/use/`, signed; or any other, as given. Redirects come back through here, so each hop is signed for itself. */
+  const go = async (input: RequestInfo | URL, init: RequestInit | undefined, hops: number): Promise<Response> => {
     const url = input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
     if (!under(url)) return core.base(input, init);
     // As fetch would send it: the headers fetch adds for its body (a form's content-type) are the app's, and signed.
@@ -385,27 +393,45 @@ function surface(core: Core): Workload {
       const headers = new Headers(request.headers);
       headers.set('authorization', `DPoP ${token}`);
       headers.set('dpop', await createProof(key, { method: request.method, url: request.url, token, nonce: nonces.value, content: { headers: request.headers, body: line } }));
+      const sentAt = Date.now();
       const response = await core.base(request.url, {
         method: request.method,
         headers,
         body: stream ?? (bytes as Uint8Array<ArrayBuffer> | null),
         signal: request.signal,
-        redirect: request.redirect,
+        // A proof signs one URL: fetch following a redirect itself would send it to another.
+        redirect: 'manual',
         ...(stream === null ? {} : { duplex: 'half' }),
       } as RequestInit);
-      note(nonces, response);
+      note(nonces, response, sentAt);
       return response;
     };
-    // A stream is sent once: it goes with a nonce fresh enough that the gate takes it.
+    let response: Response;
     if (stream !== null) {
+      // A stream is sent once: it goes with a nonce fresh enough that the gate takes it.
       await fresh();
-      return send();
+      response = await send();
+    } else {
+      response = await send();
+      if (askedNonce(response)) {
+        await response.body?.cancel();
+        response = await send();
+      }
     }
-    const response = await send();
-    if (!askedNonce(response)) return response;
+    const location = response.headers.get('location');
+    if (request.redirect === 'manual' || !REDIRECTS.has(response.status) || location === null) return response;
     await response.body?.cancel();
-    return send();
+    if (request.redirect === 'error') throw new TypeError(`fetch failed: ${request.url} redirects, and redirect is "error"`);
+    if (hops >= MOST_REDIRECTS) throw new TypeError(`fetch failed: more than ${MOST_REDIRECTS} redirects`);
+    // As fetch follows one: a 303, or a POST's 301 or 302, becomes a GET without its body; a stream cannot be sent again.
+    const asGet = (response.status === 303 && request.method !== 'HEAD') || ((response.status === 301 || response.status === 302) && request.method === 'POST');
+    if (!asGet && stream !== null) throw new TypeError(`fetch failed: ${request.url} redirects a streamed body, which cannot be sent again`);
+    const headers = new Headers(request.headers);
+    if (asGet) for (const name of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) headers.delete(name);
+    // The next hop, signed afresh if it is coffre's, and sent with the app's own headers alone if it is not.
+    return go(new URL(location, request.url), { method: asGet ? 'GET' : request.method, headers, body: asGet ? null : (bytes as Uint8Array<ArrayBuffer> | null), signal: request.signal, redirect: 'follow' }, hops + 1);
   };
+  const signed: Fetch = (input, init) => go(input, init, 0);
 
   const placeOf = (): string => {
     const places = core.places();
@@ -479,17 +505,8 @@ function child(parent: Core, key: ProofKey, token: string, expiresAt: number, pl
   let closed = false;
   let closing: Promise<void> | null = null;
   const held: Session = { token, expiresAt, notAfter: expiresAt, places, issuedAt: Date.now() };
-  // Its own proofs: the parent's `api` signs with the parent's key.
-  const api: Core['api'] = async (path, signedToken, body) => {
-    const url = `${parent.origin}${path}`;
-    const response = await parent.base(url, {
-      method: 'POST',
-      headers: { authorization: `DPoP ${signedToken}`, dpop: await createProof(key, { method: 'POST', url, token: signedToken, nonce: parent.nonces.value }), accept: 'application/json', 'content-type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    note(parent.nonces, response);
-    return { response, body: (await response.json().catch(() => null)) as Record<string, unknown> | null };
-  };
+  // Its own proofs, with its own key, at the gate it shares with its parent.
+  const api = apiOf({ origin: parent.origin, base: parent.base, key, nonces: parent.nonces });
   return surface({
     ...parent,
     key,
@@ -500,12 +517,12 @@ function child(parent: Core, key: ProofKey, token: string, expiresAt: number, pl
       if (closed || Date.now() >= held.expiresAt) throw new Error(`this narrowed session of ${parent.service} has ended`);
       return held;
     },
-    // A child renews nothing; its nonce comes from its own answers, and its parent's, which share the gate.
-    refresh: async () => undefined,
+    // A child renews nothing: its parent's renewal brings the gate's newest nonce, which they share. A parent that ended ended it too.
+    refresh: parent.refresh,
     close: () =>
       (closing ??= (async () => {
         closed = true;
-        await api('/api/auth/logout', token).catch(() => undefined);
+        await logout(api, token);
       })()),
   });
 }
@@ -541,13 +558,51 @@ export function fromCoffre(coffre: Workload, minter: string): () => Promise<{ ac
   };
 }
 
-/** Keep the gate's newest nonce: every answer from coffre carries it. */
-function note(nonces: Nonces, response: Response): void {
+/** Keep the gate's newest nonce: every answer from coffre carries it, and the newest is the one to a request sent last. */
+function note(nonces: Nonces, response: Response, sentAt: number): void {
   const nonce = response.headers.get('dpop-nonce');
-  if (nonce !== null && nonce !== '') {
+  if (nonce !== null && nonce !== '' && sentAt >= nonces.at) {
     nonces.value = nonce;
-    nonces.at = Date.now();
+    nonces.at = sentAt;
   }
+}
+
+/** A POST to coffre's own API with a session (renew, narrow, logout), signed by its key. */
+type Api = (path: string, token: string, body?: unknown, signal?: AbortSignal) => Promise<{ response: Response; body: Record<string, unknown> | null }>;
+
+/** Its proof signs the token and the newest nonce, never the body; sent again once if the gate asks for a fresh nonce. */
+function apiOf({ origin, base, key, nonces }: { origin: string; base: Fetch; key: ProofKey; nonces: Nonces }): Api {
+  return async (path, token, body, signal) => {
+    const url = `${origin}${path}`;
+    const send = async () => {
+      const sentAt = Date.now();
+      const response = await base(url, {
+        method: 'POST',
+        headers: {
+          authorization: `DPoP ${token}`,
+          dpop: await createProof(key, { method: 'POST', url, token, nonce: nonces.value }),
+          accept: 'application/json',
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
+      });
+      note(nonces, response, sentAt);
+      return response;
+    };
+    let response = await send();
+    if (askedNonce(response)) {
+      await response.body?.cancel();
+      response = await send();
+    }
+    return { response, body: (await response.json().catch(() => null)) as Record<string, unknown> | null };
+  };
+}
+
+/** End a session, waiting 3 seconds at most; rejects unless coffre says it ended, or had already (401). */
+async function logout(api: Api, token: string): Promise<void> {
+  const { response, body } = await api('/api/auth/logout', token, undefined, AbortSignal.timeout(LOGOUT_MS));
+  if (!response.ok && response.status !== 401) throw refusal(response.status, body, 'coffre did not end the session');
 }
 
 /** Whether coffre refused a proof for its nonce alone (RFC 9449, section 8): sent again once, with the nonce it gave. */
@@ -575,4 +630,10 @@ function backoff(tries: number): number {
 /** A message as coffre's `sign` and `verify` take it: a string's UTF-8, base64url. */
 const bytesOf = (message: string | Uint8Array) => base64url(typeof message === 'string' ? new TextEncoder().encode(message) : message);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** A wait that `signal` ends early, rejecting. */
+const sleep = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => (signal.removeEventListener('abort', stop), resolve()), ms);
+    const stop = () => (clearTimeout(timer), reject(signal.reason as Error));
+    signal.addEventListener('abort', stop, { once: true });
+  });

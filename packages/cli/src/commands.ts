@@ -394,13 +394,14 @@ export const SECTIONS = [
       { command: 'unfreeze', usage: ['unfreeze <target>'], about: ['lifts it'] },
       {
         command: 'serve',
-        usage: ['serve --url <url> --service <name> --proof <proof> [--listen <address>]', '      [--tunnel <name>=<address>]...'],
+        usage: ['serve --url <url> --service <name> --proof <proof> [--place <project>/<env>]', '      [--listen <address>] [--tunnel <name>=<address>]...'],
         about: [
           "a workload's sidecar: it holds the session and its key,",
           'and forwards what the app sends it, signed; --listen, 127.0.0.1:7300',
           'unless given, or unix:<path>; each --tunnel a Postgres listener;',
           '--proof kubernetes[:<file>], aws, gcp, azure:<audience>, fly,',
-          'vercel, github, enrollment or oidc (those two read stdin)',
+          'vercel, github, enrollment or oidc (those two read stdin); --place',
+          "which of the session's environments its tunnels are in",
         ],
       },
     ],

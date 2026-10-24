@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { request } from 'node:http';
+import { connect as connectTcp } from 'node:net';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -167,4 +168,41 @@ test("a service's run falls back to the bearer exchange where the instance has n
   assert.equal(code, 1);
   assert.deepEqual(coffre.log, ['POST /api/auth/workload 501']);
   assert.match(run.stderr(), /--service signs in with the run's ID token, and there is none/);
+});
+
+test('coffre serve sends no proof to an instance outside TLS, and survives a request with no URL; --place picks the environment of its tunnels', async (t) => {
+  const plain = cli(t, ['serve', '--url', 'http://192.0.2.1:7300', '--service', 'api-prod', '--proof', 'enrollment']);
+  const [code] = await once(plain.child, 'exit');
+  assert.equal(code, 1);
+  assert.match(plain.stderr(), /not a coffre address|https/);
+
+  const database = await fakePostgres();
+  t.after(() => database.close());
+  const coffre = await fakeCoffre({ database, places: ['market/prod', 'market/staging'] });
+  t.after(() => coffre.close());
+  const run = cli(t, ['serve', '--url', coffre.url, '--service', 'api-prod', '--proof', 'enrollment', '--place', 'market/staging', '--listen', '127.0.0.1:0', '--tunnel', 'db=127.0.0.1:0']);
+  const [, listener] = await said(run, /(http:\/\/127\.0\.0\.1:\d+)\/use\/<credential>/);
+  const [, databaseUrl] = await said(run, /db on (postgres:\/\/\S+)/);
+  // A request target no URL parser takes: answered 400, and the sidecar goes on.
+  const raw = connectTcp(Number(new URL(listener!).port), '127.0.0.1');
+  raw.end('GET http://[ HTTP/1.1\r\nhost: x\r\n\r\n');
+  let answer = '';
+  for await (const chunk of raw) answer += String(chunk);
+  assert.match(answer, /^HTTP\/1\.1 400/);
+  assert.equal((await fetch(`${listener}/use/market/staging/openai/models`)).status, 200);
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  assert.deepEqual((await client.query('select five')).rows, [{ value: 'select five' }]);
+  await client.end();
+  assert.ok(coffre.log.includes('GET /use/market/staging/db upgrade'), coffre.log.join('\n'));
+});
+
+test("a service's run refuses a plan whose tunnels name no key for their URL", async (t) => {
+  const coffre = await fakeCoffre({ plan: { environment: 'market/prod', values: {}, credentials: [], tunnels: ['db'] } });
+  t.after(() => coffre.close());
+  const run = cli(t, ['--url', coffre.url, '--service', 'api-prod', 'run', '--proof', 'enrollment', '--', process.execPath, '-e', '']);
+  const [code] = await once(run.child, 'exit');
+  assert.equal(code, 1);
+  assert.match(run.stderr(), /names its tunnels without the key each URL goes in/);
+  assert.equal(coffre.log.at(-1), 'POST /api/auth/logout 200');
 });

@@ -24,12 +24,13 @@ import { connect } from '@coffre/client/workload/postgres';
 import { fakeCoffre, fakePostgres, type FakeOptions } from './workload-fake.ts';
 
 const quiet = () => undefined;
+// Teardown closes each session after its fake coffre is gone, so a logout cannot be confirmed: close() says so, and it is not the test's point.
 
 async function signedIn(t: test.TestContext, options: FakeOptions = {}, proof = oidc(() => 'id-token')) {
   const coffre = await fakeCoffre(options);
   t.after(() => coffre.close());
   const session = await workload({ url: coffre.url, service: 'api-prod', proof, log: quiet });
-  t.after(() => session.close());
+  t.after(() => session.close().catch(() => undefined));
   return { coffre, session };
 }
 
@@ -173,7 +174,7 @@ test('a full enrollment code is waited out, by its Retry-After', async (t) => {
   t.after(() => coffre.close());
   const started = Date.now();
   const session = await workload({ url: coffre.url, service: 'api-prod', proof: enrollment(`coffre_enr_${'f'.repeat(43)}`), log: (line) => said.push(line) });
-  t.after(() => session.close());
+  t.after(() => session.close().catch(() => undefined));
   assert.ok(Date.now() - started >= 2000);
   assert.equal(said.length, 1);
   assert.match(said[0]!, /holds all the sessions it admits/);
@@ -185,7 +186,7 @@ test('a session awaiting approval is asked for again every 5 seconds, with the s
   t.after(() => coffre.close());
   const said: string[] = [];
   const session = await workload({ url: coffre.url, service: 'api-prod', proof: enrollment(`coffre_enr_${'p'.repeat(43)}`), log: (line) => said.push(line) });
-  t.after(() => session.close());
+  t.after(() => session.close().catch(() => undefined));
   assert.equal(new Set(jkts).size, 1);
   assert.match(said[0]!, /waits for a person to approve it, at https:\/\/coffre\/approve\/s1/);
 });
@@ -200,7 +201,7 @@ test('a projected token spent already is waited out until the kubelet writes the
   setTimeout(() => writeFileSync(file, 'next-token\n'), 1500);
   const said: string[] = [];
   const session = await workload({ url: coffre.url, service: 'api-prod', proof: kubernetes(file), log: (line) => said.push(line) });
-  t.after(() => session.close());
+  t.after(() => session.close().catch(() => undefined));
   assert.match(said[0]!, /was spent already/);
   assert.equal(coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).join(','), 'POST /api/auth/workload 401,POST /api/auth/workload 200');
 });
@@ -280,11 +281,14 @@ for (const paced of [true, false]) {
     const database = await fakePostgres();
     t.after(() => database.close());
     const { coffre, session } = await signedIn(t, { database, paced });
-    const pool = new pg.Pool({ stream: () => connect(session, 'db', { WebSocket: WebSocket as never }) });
+    const pool = new pg.Pool({ stream: () => connect(session, 'db', { WebSocket }) });
     assert.deepEqual((await pool.query('select one')).rows, [{ value: 'select one' }]);
     const big = await pool.query('select 3000 1000');
     assert.equal(big.rows.length, 3000);
     assert.equal(big.rows[2999].value.length, 1000);
+    // A query larger than the window goes in frames, each within the credit left.
+    const query = `select ${'q'.repeat(3 * 1024 * 1024)}`;
+    assert.equal((await pool.query(query)).rows[0].value.length, query.length);
     assert.ok(coffre.log.includes('GET /use/db upgrade'), coffre.log.join('\n'));
     await pool.end();
   });
@@ -332,10 +336,10 @@ test('with several environments, URLs name the one chosen', async (t) => {
   const coffre = await fakeCoffre({ places: ['market/prod', 'market/staging'] });
   t.after(() => coffre.close());
   const unnamed = await workload({ url: coffre.url, service: 'api-prod', proof: oidc('t'), log: quiet });
-  t.after(() => unnamed.close());
+  t.after(() => unnamed.close().catch(() => undefined));
   assert.throws(() => unnamed.url('openai'), /name the one to use/);
   const named = await workload({ url: coffre.url, service: 'api-prod', proof: oidc('t'), place: 'market/staging', log: quiet });
-  t.after(() => named.close());
+  t.after(() => named.close().catch(() => undefined));
   assert.equal(named.url('openai'), `${coffre.url}/use/market/staging/openai`);
   await assert.rejects(workload({ url: coffre.url, service: 'api-prod', proof: oidc('t'), place: 'market/dev', log: quiet }), /not market\/dev/);
 });
@@ -353,4 +357,76 @@ test('a narrowed session signs with its own key, and ends with its parent', asyn
   const { jwk } = await generateProofKey();
   const handed = await (await signedIn(t)).session.narrow({ key: jwk, credentials: ['stripe'] });
   assert.match(handed.token, /^coffre_wl_/);
+});
+
+test('closing after a new proof ends every session it proved, and their children', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const { coffre, session } = await signedIn(t, { lifetimeMs: 48 * 3_600_000 });
+  const child = await session.narrow({ credentials: ['stripe'] });
+  // At 90% of the way to its 24-hour end, the parent proves again: the child's root is the old session, alive until then.
+  await advance(t, 22 * 3_600_000, () => count(coffre.log, 'POST /api/auth/workload 200') === 2);
+  assert.equal(count(coffre.log, 'POST /api/auth/workload 200'), 2, coffre.log.join('\n'));
+  await session.close();
+  assert.ok([...coffre.sessions.values()].filter((each) => each.parent === undefined).every((each) => each.revoked));
+  assert.equal((await child.fetch(child.url('stripe'))).status, 401);
+});
+
+test("a child's logout survives a restarted gate, and ends the grandchild", async (t) => {
+  const { coffre, session } = await signedIn(t);
+  const child = await session.narrow({ credentials: ['stripe'] });
+  const grandchild = await child.narrow({ credentials: ['stripe'] });
+  coffre.gate.restart();
+  await child.close();
+  assert.deepEqual(coffre.log.slice(-2), ['POST /api/auth/logout use_dpop_nonce', 'POST /api/auth/logout 200']);
+  assert.equal((await grandchild.fetch(grandchild.url('stripe'))).status, 401);
+});
+
+test('a redirect is followed hop by hop: signed afresh within coffre, and without the session anywhere else', async (t) => {
+  const seen: Record<string, string | string[] | undefined>[] = [];
+  const other = createServer((req, res) => (seen.push(req.headers), res.end('elsewhere'))).listen(0, '127.0.0.1');
+  t.after(() => other.close());
+  await once(other, 'listening');
+  const elsewhere = `http://127.0.0.1:${(other.address() as { port: number }).port}/landing`;
+  const { coffre, session } = await signedIn(t, {
+    upstream: (sent) =>
+      sent.path === '/use/openai/start' ? { status: 307, headers: { location: '/use/openai/next' } }
+        : sent.path === '/use/openai/next' ? { status: 303, headers: { location: elsewhere } }
+          : { status: 200, body: sent },
+  });
+  const response = await session.fetch(`${session.url('openai')}/start`, { method: 'POST', body: 'payload', headers: { 'x-app': '1' } });
+  assert.equal(await response.text(), 'elsewhere');
+  assert.deepEqual(coffre.forwarded.map((sent) => [sent.method, sent.path, sent.body]), [['POST', '/use/openai/start', 'payload'], ['POST', '/use/openai/next', 'payload']]);
+  assert.equal(seen[0]!['x-app'], '1');
+  assert.equal(seen[0]!.authorization, undefined);
+  assert.equal(seen[0]!.dpop, undefined);
+  // Asked not to follow, the redirect is the answer.
+  assert.equal((await session.fetch(`${session.url('openai')}/start`, { method: 'POST', redirect: 'manual' })).status, 307);
+});
+
+test('close() stops an exchange waiting for approval, and a logout that never answers is given up after 3 seconds', async (t) => {
+  let refused = false;
+  const { coffre, session } = await signedIn(t, {
+    lifetimeMs: 1000,
+    renew: () => (refused ? null : ((refused = true), { status: 401, body: { error: 'unauthorized', reason: 'revoked' } })),
+    exchange: (_proof, _jkt, attempt) => (attempt === 1 ? null : { status: 202, body: { pending: 's2' } }),
+  });
+  await sleep(1200);
+  const asked = coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length;
+  assert.ok(asked >= 2, coffre.log.join('\n'));
+  const started = Date.now();
+  await session.close();
+  assert.ok(Date.now() - started < 1000, 'no session to log out: the pending one was never given');
+  await sleep(5500);
+  assert.equal(coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length, asked);
+
+  const silent = await fakeCoffre({ stallLogout: true });
+  t.after(() => silent.close());
+  const stalled = await workload({ url: silent.url, service: 'api-prod', proof: oidc('t'), log: quiet });
+  const closing = Date.now();
+  await assert.rejects(stalled.close());
+  assert.ok(Date.now() - closing < 4000);
+});
+
+test('workload() talks to coffre over https, or http on this machine only', async () => {
+  await assert.rejects(workload({ url: 'http://192.0.2.1:7300', service: 'api-prod', proof: oidc('t'), log: quiet, fetch: () => assert.fail('nothing is sent') }), /over https/);
 });

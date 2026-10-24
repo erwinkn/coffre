@@ -41,6 +41,8 @@ export type FakeOptions = {
   paced?: boolean;
   /** Where the tunnel's bytes go. */
   database?: { port: number };
+  /** A logout that never answers. */
+  stallLogout?: boolean;
 };
 
 const WINDOW = 1024 * 1024;
@@ -141,6 +143,7 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       if (session === 'use_dpop_nonce') return record('use_dpop_nonce');
       if (typeof session === 'string') return record(session), refuse(res, session);
       if (url.pathname === '/api/auth/logout') {
+        if (options.stallLogout) return record('stalled');
         session.revoked = true;
         return record('200'), answer(res, { status: 200, body: { revoked: true } });
       }
@@ -226,9 +229,10 @@ export async function fakeCoffre(options: FakeOptions = {}) {
   };
 }
 
-/** The tunnel's coffre end: bytes both ways, by credit when it paces, as cloudflare-sockets.ts does. */
+/** The tunnel's coffre end: bytes both ways, by credit when it paces, as cloudflare-sockets.ts does, ending a client that sends past two windows. */
 function tunnel(ws: WebSocket, database: Socket, paced: boolean): void {
   let uncounted = 0;
+  let held = 0;
   if (paced) ws.send('0');
   database.on('data', (chunk: Buffer) => {
     ws.send(chunk);
@@ -241,7 +245,12 @@ function tunnel(ws: WebSocket, database: Socket, paced: boolean): void {
       if (uncounted < WINDOW) database.resume();
       return;
     }
-    database.write(data, () => paced && ws.send(String(data.length)));
+    held += data.length;
+    if (paced && held > 2 * WINDOW) return ws.terminate();
+    database.write(data, () => {
+      held -= data.length;
+      if (paced) ws.send(String(data.length));
+    });
   });
   ws.on('close', () => database.destroy());
   database.on('close', () => ws.close());
