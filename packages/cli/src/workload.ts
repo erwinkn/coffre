@@ -234,6 +234,16 @@ export async function keyBound(origin: string, service: string, proof: Proof, po
     for (const each of opened) each.close();
     await coffre.close();
   };
+  // Stopped while the command is not yet started: the session ends first, then the run, by the same signal. The run's own
+  // handlers, which pass a signal on to its command, take over once it starts.
+  const signals = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
+  const stopped = (signal: NodeJS.Signals) => {
+    for (const each of signals) process.off(each, stopped);
+    void close()
+      .catch(() => undefined)
+      .finally(() => process.kill(process.pid, signal));
+  };
+  for (const each of signals) process.on(each, stopped);
   try {
     const places = positionals.length === 0 ? [...coffre.places] : environmentPaths(positionals);
     const outside = places.filter((place) => !coffre.places.includes(place));
@@ -258,6 +268,9 @@ export async function keyBound(origin: string, service: string, proof: Proof, po
     const names = (list: unknown) => (Array.isArray(list) ? list.filter((name): name is string => typeof name === 'string') : []);
     const shared = clash(plans.map(([place, plan]) => [place, [...values(plan).map(([key]) => key), ...tunnels(plan).map(([, tunnel]) => tunnel.key)]]));
     if (shared !== null) throw new Error(`${shared}: a key comes from one environment only`);
+    // A credential is named once in COFFRE_CREDENTIALS: one named in two environments would quietly be the last one's.
+    const twice = clash(plans.map(([place, plan]) => [place, names(plan.credentials)]));
+    if (twice !== null) throw new Error(`${twice}: a credential comes from one environment only; run with the one it should be`);
     const env: Record<string, string> = {};
     const credentials: Record<string, string> = {};
     for (const [place, plan] of plans) {
@@ -280,5 +293,7 @@ export async function keyBound(origin: string, service: string, proof: Proof, po
   } catch (error) {
     await close();
     throw error;
+  } finally {
+    for (const each of signals) process.off(each, stopped);
   }
 }

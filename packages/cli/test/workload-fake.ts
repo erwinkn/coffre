@@ -35,8 +35,9 @@ export type FakeOptions = {
   upstream?: (forwarded: Forwarded) => Answer;
   /** Credentials injected by SigV4, whose body line is the declared digest. */
   sigv4?: string[];
-  /** The plan's answer, at `GET /use/<project>/<env>`. */
-  plan?: Record<string, unknown>;
+  /** The plan's answer, at `GET /use/<project>/<env>`, or each place's; and how long it takes. */
+  plan?: Record<string, unknown> | ((place: string) => Record<string, unknown>);
+  planDelayMs?: number;
   /** Whether the tunnel paces by credit, as a coffre on Workers does, or not, as one on Node. */
   paced?: boolean;
   /** Where the tunnel's bytes go. */
@@ -140,7 +141,10 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       });
     }
     if (req.method === 'POST' && (url.pathname === '/api/auth/workload/renew' || url.pathname === '/api/auth/logout' || url.pathname === '/api/auth/workload/narrow')) {
-      const session = await authenticate(req, res);
+      // A body is signed with its proof (narrow's: the child's key and limits); renew and logout carry none.
+      const signedHeaders = new Headers();
+      for (let i = 0; i < req.rawHeaders.length; i += 2) signedHeaders.append(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
+      const session = await authenticate(req, res, body.length === 0 ? undefined : { headers: signedHeaders, body: await bodyDigest(body) });
       if (session === 'use_dpop_nonce') return record('use_dpop_nonce');
       if (typeof session === 'string') return record(session), refuse(res, session);
       if (url.pathname === '/api/auth/logout') {
@@ -185,7 +189,10 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       // The environment's own URL: the plan, or what coffre makes with its values.
       const place = segments.join('/');
       if (places.includes(place)) {
-        if (req.method === 'GET') return answer(res, { status: 200, body: options.plan ?? { environment: place, values: {}, credentials: [], tunnels: {} } });
+        if (req.method === 'GET') {
+          if (options.planDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.planDelayMs));
+          return answer(res, { status: 200, body: (typeof options.plan === 'function' ? options.plan(place) : options.plan) ?? { environment: place, values: {}, credentials: [], tunnels: {} } });
+        }
         forwarded.push(sent);
         return answer(res, options.upstream?.(sent) ?? { status: 200, body: { computed: JSON.parse(sent.body) } });
       }

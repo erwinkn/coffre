@@ -22,7 +22,7 @@
 import { Buffer } from 'node:buffer';
 import { Duplex } from 'node:stream';
 
-import { upgradeHeaders, type Workload } from './workload.ts';
+import { upgradeHeaders, upgradeRefused, type Workload } from './workload.ts';
 
 /**
  * What the stream uses of a WebSocket: the WHATWG API's, which Node's,
@@ -81,6 +81,8 @@ export class TunnelStream extends Duplex {
   /** A write waiting for room: credit from coffre, or the WebSocket's own buffer to empty. */
   #waiting: (() => void) | null = null;
   #keepalive: ReturnType<typeof setInterval> | undefined;
+  /** Whether coffre took the upgrade. */
+  #opened = false;
 
   constructor(coffre: Workload, url: string, WebSocketImpl: WebSocketClass) {
     super();
@@ -91,6 +93,7 @@ export class TunnelStream extends Duplex {
         ws.binaryType = 'arraybuffer';
         this.#ws = ws;
         ws.addEventListener('open', () => {
+          this.#opened = true;
           this.emit('connect');
           this.emit('ready');
           this.#keepalive = setInterval(() => this.#count(), KEEPALIVE_MS);
@@ -103,7 +106,11 @@ export class TunnelStream extends Duplex {
           this.push(null);
           this.destroy();
         });
-        ws.addEventListener('error', () => this.destroy(new Error(`the tunnel to ${url} was refused or cut`)));
+        ws.addEventListener('error', () => {
+          // Refused before it opened, perhaps for its nonce, which this WebSocket does not show: the next one asks for the newest.
+          if (ws.readyState !== 1 && !this.#opened) upgradeRefused(coffre);
+          this.destroy(new Error(`the tunnel to ${url} was refused or cut`));
+        });
       },
       (error: unknown) => this.destroy(error as Error),
     );

@@ -140,7 +140,7 @@ const MOST_REDIRECTS = 20;
 const TERMINATING = new WeakSet<object>();
 
 /** What `upgradeHeaders` and `upgradeRefused` reach, for each workload: its own, never on the object. */
-const UPGRADES = new WeakMap<Workload, { sign: (url: string) => Promise<Record<string, string>>; refused: (headers: { get(name: string): string | null }) => void }>();
+const UPGRADES = new WeakMap<Workload, { sign: (url: string) => Promise<Record<string, string>>; refused: () => void }>();
 
 /**
  * Sign in as `service`, with `proof`, and hold the session for as long as
@@ -225,7 +225,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   let attempt: Promise<Session> | null = null;
   let failure: unknown = null;
   let tries = 0;
-  let renewing: Promise<void> | null = null;
+  /** The renewal in flight for each session: one each, so that an old session's renewal answered late takes no new session's turn. */
+  const renewals = new WeakMap<Session, Promise<void>>();
   const timers = { renew: undefined as Timer | undefined, prove: undefined as Timer | undefined, retry: undefined as Timer | undefined };
   const at = (which: keyof typeof timers, when: number, run: () => unknown) => {
     clearTimeout(timers[which]);
@@ -269,10 +270,12 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   };
 
   /** Push the session's expiry on; a session coffre no longer renews is lost, and proved again. */
-  const renew = (): Promise<void> =>
-    (renewing ??= (async () => {
-      const held = session;
-      if (held === null || closed) return;
+  const renew = (): Promise<void> => {
+    const held = session;
+    if (held === null || closed) return Promise.resolve();
+    const running = renewals.get(held);
+    if (running !== undefined) return running;
+    const renewal = (async () => {
       try {
         const { response, body } = await api('/api/auth/workload/renew', held.token);
         if (response.ok && typeof body?.expiresAt === 'string') {
@@ -288,7 +291,10 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
         if (Date.now() >= held.expiresAt) return lose();
         at('renew', Math.min(Date.now() + (enrolled ? 5000 : 30_000), held.expiresAt), renew);
       }
-    })().finally(() => (renewing = null)));
+    })().finally(() => renewals.delete(held));
+    renewals.set(held, renewal);
+    return renewal;
+  };
 
   const lose = () => {
     if (closed) return;
@@ -516,8 +522,8 @@ function surface(core: Core): Workload {
       const url = target.replace(/^ws/, 'http');
       return { authorization: `DPoP ${token}`, dpop: await createProof(key, { method: 'GET', url, token, nonce: nonces.value }) };
     },
-    // Its answer came just now: the nonce it carries is the gate's newest.
-    refused: (headers) => note(nonces, { headers }, dispatch(nonces)),
+    // When a refusal's nonce came cannot be told against the answers since: the next upgrade asks the gate's newest first.
+    refused: () => (nonces.at = 0),
   });
   return workload;
 }
@@ -562,12 +568,12 @@ export function upgradeHeaders(coffre: Workload, url: string): Promise<Record<st
 }
 
 /**
- * What coffre answered an upgrade it refused, where the transport shows it
- * (the `ws` package's does): its `DPoP-Nonce`, so the next upgrade signs
- * with the gate's newest.
+ * Say that coffre refused an upgrade, or that it never opened: its nonce may
+ * be the gate's no longer, so the next upgrade, which cannot be sent again
+ * either, first asks for the newest.
  */
-export function upgradeRefused(coffre: Workload, headers: { get(name: string): string | null }): void {
-  UPGRADES.get(coffre)?.refused(headers);
+export function upgradeRefused(coffre: Workload): void {
+  UPGRADES.get(coffre)?.refused();
 }
 
 /**
@@ -602,21 +608,24 @@ function note(nonces: Nonces, response: { headers: { get(name: string): string |
 /** A POST to coffre's own API with a session (renew, narrow, logout), signed by its key. */
 type Api = (path: string, token: string, body?: unknown, signal?: AbortSignal) => Promise<{ response: Response; body: Record<string, unknown> | null }>;
 
-/** Its proof signs the token and the newest nonce, never the body; sent again once if the gate asks for a fresh nonce. */
+/**
+ * Its proof signs the token and the newest nonce, and a body where there is
+ * one (`hdr` and `req`: narrow's, the key and the limits it gives a child),
+ * so no one who sees the request can make it say anything else; sent again
+ * once if the gate asks for a fresh nonce.
+ */
 function apiOf({ origin, base, key, nonces }: { origin: string; base: Fetch; key: ProofKey; nonces: Nonces }): Api {
   return async (path, token, body, signal) => {
     const url = `${origin}${path}`;
+    const json = body === undefined ? undefined : JSON.stringify(body);
+    const headers = { accept: 'application/json', ...(json === undefined ? {} : { 'content-type': 'application/json' }) };
+    const content = json === undefined ? undefined : { headers, body: await bodyDigest(json) };
     const send = async () => {
       const sent = dispatch(nonces);
       const response = await base(url, {
         method: 'POST',
-        headers: {
-          authorization: `DPoP ${token}`,
-          dpop: await createProof(key, { method: 'POST', url, token, nonce: nonces.value }),
-          accept: 'application/json',
-          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        headers: { ...headers, authorization: `DPoP ${token}`, dpop: await createProof(key, { method: 'POST', url, token, nonce: nonces.value, content }) },
+        body: json,
         signal,
         redirect: 'error',
       });

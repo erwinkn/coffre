@@ -451,3 +451,41 @@ test('a logout coffre keeps asking a fresh nonce for has not ended the session: 
   const { session } = await signedIn(t, { nonceLogout: true });
   await assert.rejects(session.close(), /did not end the session/);
 });
+
+test("narrow's body is signed with its proof: a copy of the request carrying another key is refused", async (t) => {
+  const coffre = await fakeCoffre();
+  t.after(() => coffre.close());
+  const seen: { url: string; headers: Headers; body: string }[] = [];
+  const session = await workload({
+    url: coffre.url,
+    service: 'api-prod',
+    proof: oidc('t'),
+    log: quiet,
+    fetch: async (input, init) => {
+      if (String(input).endsWith('/narrow')) seen.push({ url: String(input), headers: new Headers(init?.headers), body: String(init?.body) });
+      return fetch(input, init);
+    },
+  });
+  t.after(() => session.close().catch(() => undefined));
+  await session.narrow({ credentials: ['stripe'] });
+  const [asked] = seen;
+  const { jwk } = await generateProofKey();
+  const forged = JSON.stringify({ ...JSON.parse(asked!.body), key: jwk, constraints: {} });
+  const replayed = await fetch(asked!.url, { method: 'POST', headers: asked!.headers, body: forged });
+  assert.equal(replayed.status, 401);
+  assert.equal(((await replayed.json()) as { reason: string }).reason, 'req');
+});
+
+test("a tunnel refused before it opened makes the next one ask for the gate's newest nonce", async (t) => {
+  const database = await fakePostgres();
+  t.after(() => database.close());
+  const { coffre, session } = await signedIn(t, { database });
+  coffre.gate.restart();
+  await assert.rejects(new pg.Client({ stream: () => connect(session, 'db') } as pg.ClientConfig).connect());
+  const client = new pg.Client({ stream: () => connect(session, 'db') } as pg.ClientConfig);
+  await client.connect();
+  assert.deepEqual((await client.query('select seven')).rows, [{ value: 'select seven' }]);
+  await client.end();
+  // The refused one, perhaps twice (undici's WebSocket tries its handshake again), then a renewal for the newest nonce, then the upgrade.
+  assert.deepEqual(coffre.log.slice(-3), ['POST /api/auth/workload/renew use_dpop_nonce', 'POST /api/auth/workload/renew 200', 'GET /use/db upgrade']);
+});

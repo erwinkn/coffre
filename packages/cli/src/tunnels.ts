@@ -69,8 +69,8 @@ export async function listen(
     const ws = new WebSocket(tunnel.url, { headers: { ...(typeof as === 'string' ? { authorization: `Bearer ${as}` } : {}), [FLOW]: 'credit' }, handshakeTimeout: handshakeMs, finishRequest: signed(as, tunnel.url) });
     carry(socket, ws, keepaliveMs);
     ws.on('unexpected-response', (request, response) => {
-      // A workload's refusal carries the gate's newest nonce: the next connection signs with it.
-      if (typeof as !== 'string') upgradeRefused(as, { get: (name) => (typeof response.headers[name] === 'string' ? (response.headers[name] as string) : null) });
+      // A workload's refusal may be for its nonce: the next connection asks for the gate's newest first.
+      if (typeof as !== 'string') upgradeRefused(as);
       // coffre's refusal, said once for each reason: the app sees its connection close, and a driver may retry it at once.
       let body = '';
       response.setEncoding('utf8');

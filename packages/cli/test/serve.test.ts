@@ -239,3 +239,21 @@ test('through the sidecar: a redirect within coffre comes back to it, a SigV4 up
   await client.end();
   assert.deepEqual(coffre.log.filter((line) => line.startsWith('GET /use/db')), ['GET /use/db use_dpop_nonce', 'GET /use/db upgrade']);
 });
+
+test("a service's run refuses a credential two of its environments name, and a run stopped before its command starts logs out first", async (t) => {
+  const coffre = await fakeCoffre({ places: ['market/prod', 'market/staging'], plan: (place) => ({ environment: place, values: {}, credentials: ['openai'], tunnels: {} }) });
+  t.after(() => coffre.close());
+  const both = cli(t, ['--url', coffre.url, '--service', 'api-prod', 'run', '--proof', 'enrollment', '--', process.execPath, '-e', '']);
+  const [code] = await once(both.child, 'exit');
+  assert.equal(code, 1);
+  assert.match(both.stderr(), /both define openai: a credential comes from one environment only/);
+
+  const slow = await fakeCoffre({ planDelayMs: 10_000 });
+  t.after(() => slow.close());
+  const run = cli(t, ['--url', slow.url, '--service', 'api-prod', 'run', '--proof', 'enrollment', '--', process.execPath, '-e', '']);
+  for (let i = 0; i < 100 && !slow.log.includes('POST /api/auth/workload 200'); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+  run.child.kill('SIGTERM');
+  const [exit, signal] = await once(run.child, 'exit');
+  assert.deepEqual([exit, signal], [null, 'SIGTERM']);
+  assert.ok(slow.log.includes('POST /api/auth/logout 200'), slow.log.join('\n'));
+});
