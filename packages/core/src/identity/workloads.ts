@@ -24,6 +24,8 @@
  * no GitHub binding matches `sub`: `ref` and `workflow_ref` stay as they were.
  */
 
+import type { Constraints } from './constraints.ts';
+
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 export const GITLAB_ISSUER = 'https://gitlab.com';
 
@@ -35,8 +37,29 @@ export const GITLAB_ISSUER = 'https://gitlab.com';
  *   the organization: an explicit choice, never what a missing claim means.
  * - `gitlab`: a project's pipelines, outside merge requests.
  * - `custom`: any other issuer, by its subject, which the owner vouches for.
+ *
+ * Then the platforms of docs/design/workload-access.md, section 4, which
+ * sign in at `/api/auth/workload` alone, for a key-bound session:
+ *
+ * - `kubernetes`, `gcp`, `azure`, `fly`, `vercel`: the platform's ID token.
+ * - `aws`: a signed `GetCallerIdentity`, bound to the session's key.
+ * - `enrollment`: a code CI mints, for platforms that sign nothing.
+ * - `cloudflare`: a service binding's `props`, which no request carries.
  */
-export type WorkloadProfile = 'github' | 'github-reusable' | 'github-reusable-organization' | 'gitlab' | 'custom';
+export type WorkloadProfile =
+  | 'github'
+  | 'github-reusable'
+  | 'github-reusable-organization'
+  | 'gitlab'
+  | 'custom'
+  | 'kubernetes'
+  | 'gcp'
+  | 'azure'
+  | 'fly'
+  | 'vercel'
+  | 'aws'
+  | 'enrollment'
+  | 'cloudflare';
 
 export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
   'github',
@@ -44,15 +67,63 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
   'github-reusable-organization',
   'gitlab',
   'custom',
+  'kubernetes',
+  'gcp',
+  'azure',
+  'fly',
+  'vercel',
+  'aws',
+  'enrollment',
+  'cloudflare',
 ];
 
-/** The claims each profile requires; a binding may add more, to narrow it. */
+/**
+ * The profiles `/api/auth/oidc` exchanges for a bearer credential, and only
+ * on a binding with no policy: a platform's token bought at that route reads
+ * values, so a binding made for a key-bound session, policy and all, is never
+ * one it matches. Every binding of another profile carries a policy.
+ */
+export const BEARER_PROFILES = ['github', 'github-reusable', 'github-reusable-organization', 'gitlab', 'custom'] as const satisfies readonly WorkloadProfile[];
+export type BearerProfile = (typeof BEARER_PROFILES)[number];
+
+/** Whether a binding's profile is one `/api/auth/oidc` takes; it takes the binding only if it has no policy, too. */
+export function isBearerProfile(profile: string): profile is BearerProfile {
+  return (BEARER_PROFILES as readonly string[]).includes(profile);
+}
+
+/** The profiles whose proof is no ID token: their binding's issuer is this URN, which no token names, and its keys none. */
+export const PROFILE_URNS = {
+  aws: 'urn:coffre:aws',
+  enrollment: 'urn:coffre:enrollment',
+  cloudflare: 'urn:coffre:cloudflare',
+} as const satisfies Partial<Record<WorkloadProfile, string>>;
+
+/** The profiles whose proof is a platform's ID token. */
+export const OIDC_PROFILES: readonly WorkloadProfile[] = WORKLOAD_PROFILES.filter((profile) => !Object.hasOwn(PROFILE_URNS, profile));
+
+/**
+ * Tokens a platform hands out again, the same one to every replica and
+ * restart for its lifetime: a managed identity's, a Vercel function's.
+ * Spending one would refuse them, so none is spent: it is a bearer until
+ * its own `exp`, which ends the session it makes (section 4.2).
+ */
+export const REPEATING_PROFILES: readonly WorkloadProfile[] = ['azure', 'vercel'];
+
+/** The claims each profile requires; a binding may add more, to narrow it. An `aws` binding's are the role's account and unique ID. */
 export const REQUIRED_CLAIMS: Record<WorkloadProfile, readonly string[]> = {
   github: ['repository_owner_id', 'repository_id', 'workflow_ref', 'ref', 'event_name'],
   'github-reusable': ['repository_owner_id', 'repository_id', 'ref', 'event_name', 'job_workflow_ref', 'job_workflow_sha'],
   'github-reusable-organization': ['repository_owner_id', 'ref', 'event_name', 'job_workflow_ref', 'job_workflow_sha'],
   gitlab: ['namespace_id', 'project_id', 'ref_type', 'ref', 'pipeline_source'],
   custom: ['sub'],
+  kubernetes: ['sub', 'kubernetes.io.serviceaccount.uid'],
+  gcp: ['sub'],
+  azure: ['tid', 'oid'],
+  fly: ['org_id', 'app_id'],
+  vercel: ['owner_id', 'project_id', 'environment'],
+  aws: ['account', 'role_id'],
+  enrollment: [],
+  cloudflare: [],
 };
 
 /**
@@ -98,6 +169,14 @@ const EVENT_CLAIM: Record<WorkloadProfile, { name: string; values: readonly stri
   'github-reusable-organization': GITHUB_EVENT,
   gitlab: { name: 'pipeline_source', values: GITLAB_PIPELINE_SOURCES, why: 'merge-request pipelines name another project' },
   custom: null,
+  kubernetes: null,
+  gcp: null,
+  azure: null,
+  fly: null,
+  vercel: null,
+  aws: null,
+  enrollment: null,
+  cloudflare: null,
 };
 
 /** At most this many live bindings per service, and claims per binding. */
@@ -131,7 +210,7 @@ export type BindingClaims = Record<string, ClaimValue>;
  * its keys (`uploaded`): then coffre fetches nothing, and it is any string,
  * matched exactly, such as a private Kubernetes cluster's.
  */
-export type BindingPolicy = { profile: WorkloadProfile; issuer: string; claims: BindingClaims };
+export type CheckedBinding = { profile: WorkloadProfile; issuer: string; claims: BindingClaims };
 
 /** A binding that breaks a rule, said so an owner can fix it. */
 export class BindingInvalid extends Error {
@@ -148,10 +227,20 @@ function forcedProfiles(issuer: string): readonly WorkloadProfile[] | null {
   return null;
 }
 
-/** The issuer a profile means when none is given: github.com's or gitlab.com's. A GitHub Enterprise Server or a self-managed GitLab names its own. */
+/** Google's, for every `gcp` binding. */
+export const GOOGLE_ISSUER = 'https://accounts.google.com';
+
+/**
+ * The issuer a profile means when none is given: github.com's, gitlab.com's
+ * or Google's, or the URN of a profile that is no ID token. A GitHub
+ * Enterprise Server, a self-managed GitLab, a cluster, a tenant or a team
+ * names its own.
+ */
 export function defaultIssuer(profile: WorkloadProfile): string | null {
+  if (Object.hasOwn(PROFILE_URNS, profile)) return PROFILE_URNS[profile as keyof typeof PROFILE_URNS];
+  if (profile.startsWith('github')) return GITHUB_ISSUER;
   if (profile === 'gitlab') return GITLAB_ISSUER;
-  return profile === 'custom' ? null : GITHUB_ISSUER;
+  return profile === 'gcp' ? GOOGLE_ISSUER : null;
 }
 
 /** The longest issuer a binding with uploaded keys names, in bytes. */
@@ -166,14 +255,19 @@ export const MAX_ISSUER_BYTES = 400;
 export function checkBinding(
   input: { profile: string; issuer: string | null; claims: Record<string, unknown> },
   options: { allowLoopback?: boolean; uploaded?: boolean } = {},
-): BindingPolicy {
+): CheckedBinding {
   const profile = input.profile as WorkloadProfile;
   if (!WORKLOAD_PROFILES.includes(profile)) {
     throw new BindingInvalid(`unknown profile "${input.profile}": one of ${WORKLOAD_PROFILES.join(', ')}`);
   }
   const issuer = input.issuer ?? defaultIssuer(profile);
-  if (issuer === null) throw new BindingInvalid('a custom binding names its issuer');
-  if (options.uploaded === true) checkIssuerName(issuer);
+  if (issuer === null) throw new BindingInvalid(`a ${profile} binding names its issuer`);
+  const urn = defaultIssuer(profile);
+  if (Object.hasOwn(PROFILE_URNS, profile)) {
+    // No token names it, and coffre fetches nothing for it: the URN alone keeps one key source per issuer.
+    if (issuer !== urn) throw new BindingInvalid(`a ${profile} binding's issuer is ${urn}`);
+    if (options.uploaded === true) throw new BindingInvalid(`a ${profile} binding carries no keys: its proof is no ID token`);
+  } else if (options.uploaded === true) checkIssuerName(issuer);
   else checkFetchUrl(issuer, 'the issuer', { allowLoopback: options.allowLoopback, path: true, query: false });
   const forced = forcedProfiles(issuer);
   if (forced !== null && !forced.includes(profile)) {
@@ -205,6 +299,7 @@ export function checkBinding(
     }
     claims[name] = value;
   }
+  if (REQUIRED_CLAIMS[profile].length === 0 && entries.length > 0) throw new BindingInvalid(`a ${profile} binding names no claims: its proof carries none`);
   const missing = REQUIRED_CLAIMS[profile].filter((name) => claims[name] === undefined);
   if (missing.length > 0) throw new BindingInvalid(`the ${profile} profile requires ${missing.join(', ')}`);
   if (profile === 'github-reusable-organization' && claims.repository_id !== undefined) {
@@ -230,6 +325,7 @@ function checkIssuerName(issuer: string): void {
   if (issuer === GITHUB_ISSUER || issuer === GITLAB_ISSUER) {
     throw new BindingInvalid(`${issuer} publishes its keys and rotates them: coffre fetches them, so upload none`);
   }
+  if (issuer.startsWith('urn:coffre:')) throw new BindingInvalid(`${issuer} is coffre's own, for a binding that is no ID token's`);
 }
 
 /** A claim's values, one or several. */
@@ -402,6 +498,9 @@ export function checkFetchUrl(
 // in. They decide nothing: `checkBinding`, on the server, holds the result
 // to its profile, whoever built it.
 
+/** What a preset fills in: a profile `/api/auth/oidc` takes, and its claims. */
+export type Preset = { profile: BearerProfile; claims: BindingClaims };
+
 /** `refs/heads/main`, or `refs/tags/v1`, as GitHub names a ref. */
 export function fullRef(kind: 'branch' | 'tag', name: string): string {
   return `refs/${kind === 'branch' ? 'heads' : 'tags'}/${name}`;
@@ -450,7 +549,7 @@ export function githubWorkflow(input: {
   workflow: string;
   ref: string;
   environment?: string;
-} & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'event', 'events'>): Preset {
   return {
     profile: 'github',
     claims: {
@@ -483,7 +582,7 @@ export function githubReusable(input: {
   sha: string;
   caller?: { repository: string; workflow: string };
   environment?: string;
-} & Starts<'event', 'events'>): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'event', 'events'>): Preset {
   const claims: BindingClaims = {
     repository_owner_id: input.ownerId,
     ...(input.repositoryId === null ? {} : { repository_id: input.repositoryId }),
@@ -503,7 +602,7 @@ export function gitlabProject(input: {
   projectId: string;
   refType: 'branch' | 'tag';
   ref: string;
-} & Starts<'source', 'sources'>): Omit<BindingPolicy, 'issuer'> {
+} & Starts<'source', 'sources'>): Preset {
   return {
     profile: 'gitlab',
     claims: {
@@ -515,3 +614,388 @@ export function gitlabProject(input: {
     },
   };
 }
+
+// --- policy --------------------------------------------------------------------
+//
+// What a binding says beyond its claims (docs/design/workload-access.md,
+// section 11): stored beside them, under the binding's MAC, as canonical
+// JSON, and as immutable as the rest of it. Each profile takes a fixed
+// subset of the fields.
+
+/**
+ * What a binding's sessions may read, by environment ID and key ID, so a
+ * rename moves nothing: `keys` lists keys, or `'*'` every key of the
+ * environment; `mints`, the minters whose children it is handed.
+ */
+export type BindingReads = Readonly<Record<string, { readonly keys?: readonly string[] | '*'; readonly mints?: readonly string[] }>>;
+
+/**
+ * A binding's policy, as `checkPolicy` returns it: a field left out holds
+ * its default (`POLICY_DEFAULTS`), so one policy has one spelling.
+ *
+ * - `audience`: the exact audience of an `azure` or `vercel` token, which
+ *   those platforms fix; required for them, refused for every other.
+ * - `keyAudience`: the token's audience must name the session's key,
+ *   `<publicUrl>#jkt=<thumbprint>`; for the platforms whose caller picks
+ *   the audience (`github…`, `gcp`, `fly`, and `custom`).
+ * - `reads`: the escape hatch, by ID (section 6.1).
+ * - `sources`: CIDRs a session's client address must be within.
+ * - `sessionHours`: a session's hard end after its proof, at most 168.
+ * - An `enrollment` binding's codes: `replicas` (required), `sessionDays`,
+ *   `overlapMinutes`, `mintedBy` (the service, never the binding's own,
+ *   that may mint them), `approve` and `onContention` (section 4.4).
+ * - `unsignedUploads`: a streamed upload no digest binds may go through a
+ *   credential that takes one (section 5.1), which leaves column B at use.
+ */
+export type BindingPolicy = {
+  readonly audience?: string;
+  readonly keyAudience?: true;
+  readonly reads?: BindingReads;
+  readonly sources?: readonly string[];
+  readonly sessionHours?: number;
+  readonly replicas?: number;
+  readonly sessionDays?: number;
+  readonly overlapMinutes?: number;
+  readonly mintedBy?: string;
+  readonly approve?: true;
+  readonly onContention?: 'alert';
+  readonly unsignedUploads?: true;
+};
+
+/** What a field left out of a policy means. */
+export const POLICY_DEFAULTS = {
+  keyAudience: false,
+  sessionHours: 24,
+  sessionDays: 30,
+  overlapMinutes: 15,
+  approve: false,
+  onContention: 'freeze',
+  unsignedUploads: false,
+} as const;
+
+/** The most environments, and keys in each, a binding's `reads` lists; the most `sources`. */
+export const MAX_READ_PLACES = 64;
+export const MAX_READ_KEYS = 256;
+export const MAX_SOURCES = 16;
+
+type PolicyField = keyof BindingPolicy;
+
+const SESSION_FIELDS: readonly PolicyField[] = ['reads', 'sources', 'sessionHours', 'unsignedUploads'];
+const KEY_AUDIENCE: readonly PolicyField[] = [...SESSION_FIELDS, 'keyAudience'];
+
+/** The fields each profile's policy may hold. */
+export const POLICY_FIELDS: Record<WorkloadProfile, readonly PolicyField[]> = {
+  github: KEY_AUDIENCE,
+  'github-reusable': KEY_AUDIENCE,
+  'github-reusable-organization': KEY_AUDIENCE,
+  gitlab: SESSION_FIELDS,
+  custom: KEY_AUDIENCE,
+  kubernetes: SESSION_FIELDS,
+  gcp: KEY_AUDIENCE,
+  azure: [...SESSION_FIELDS, 'audience'],
+  fly: KEY_AUDIENCE,
+  vercel: [...SESSION_FIELDS, 'audience'],
+  aws: SESSION_FIELDS,
+  enrollment: ['reads', 'sources', 'replicas', 'sessionDays', 'overlapMinutes', 'mintedBy', 'approve', 'onContention', 'unsignedUploads'],
+  // A call from another Worker has no address of its own and no session to end.
+  cloudflare: ['reads'],
+};
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A credential's name in the proxy's config: a minter's, a signer's, an upstream's. */
+export const CREDENTIAL_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+/** A service's name after `token:`, as a member names it. */
+const SERVICE_NAME = /^[^\s\p{Cc}]{1,320}$/u;
+
+function integer(value: unknown, name: string, min: number, max: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
+    throw new BindingInvalid(`${name} is a whole number from ${min} to ${max}`);
+  }
+  return value as number;
+}
+
+function sortedUnique(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function uuidList(value: unknown, what: string, max: number): string[] {
+  if (!Array.isArray(value) || value.length > max || value.some((id) => typeof id !== 'string' || !UUID.test(id.toLowerCase()))) {
+    throw new BindingInvalid(`${what} lists at most ${max} IDs`);
+  }
+  return sortedUnique(value.map((id: string) => id.toLowerCase()));
+}
+
+function checkReads(value: unknown): BindingReads | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new BindingInvalid('reads maps environment IDs to { keys, mints }');
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_READ_PLACES) throw new BindingInvalid(`reads names at most ${MAX_READ_PLACES} environments`);
+  const reads: Record<string, { keys?: readonly string[] | '*'; mints?: readonly string[] }> = {};
+  const seen = new Set<string>();
+  for (const [environment, entry] of entries) {
+    const id = environment.toLowerCase();
+    if (!UUID.test(id)) throw new BindingInvalid(`reads names environments by ID: ${environment} is none`);
+    if (seen.has(id)) throw new BindingInvalid(`reads names ${id} twice`);
+    seen.add(id);
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new BindingInvalid('each environment of reads is { keys, mints }');
+    const { keys, mints, ...rest } = entry as Record<string, unknown>;
+    if (Object.keys(rest).length > 0) throw new BindingInvalid(`each environment of reads holds keys and mints, not ${Object.keys(rest).join(', ')}`);
+    const read: { keys?: readonly string[] | '*'; mints?: readonly string[] } = {};
+    if (keys !== undefined) {
+      const listed = keys === '*' ? '*' : uuidList(keys, 'reads.keys', MAX_READ_KEYS);
+      if (listed === '*' || listed.length > 0) read.keys = listed;
+    }
+    if (mints !== undefined) {
+      if (!Array.isArray(mints) || mints.length > MAX_READ_KEYS || mints.some((name) => typeof name !== 'string' || !CREDENTIAL_NAME.test(name))) {
+        throw new BindingInvalid('reads.mints lists minters by name');
+      }
+      if (mints.length > 0) read.mints = sortedUnique(mints as string[]);
+    }
+    // A place that lists nothing reads nothing: one spelling, left out.
+    if (read.keys !== undefined || read.mints !== undefined) reads[id] = read;
+  }
+  return Object.keys(reads).length === 0 ? undefined : reads;
+}
+
+/**
+ * Check a binding's policy against its profile and return it canonical:
+ * every field its profile allows, valid, those at their default left out,
+ * lists sorted and IDs in lower case, so that one policy has one spelling
+ * (`policyText`). `service` is the binding's own, `token:<name>`, which its
+ * `mintedBy` may not name: a session of the service would then mint codes
+ * for itself, and outlive every deploy. Throws `BindingInvalid`.
+ */
+export function checkPolicy(profile: WorkloadProfile, input: unknown, options: { service: string }): BindingPolicy {
+  if (input === undefined || input === null) input = {};
+  if (typeof input !== 'object' || Array.isArray(input)) throw new BindingInvalid('a policy is an object');
+  const given = input as Record<string, unknown>;
+  const allowed = POLICY_FIELDS[profile];
+  const extra = Object.keys(given).filter((name) => given[name] !== undefined && !allowed.includes(name as PolicyField));
+  if (extra.length > 0) throw new BindingInvalid(`a ${profile} binding's policy holds ${allowed.join(', ') || 'nothing'}, not ${extra.join(', ')}`);
+  const policy: { -readonly [K in PolicyField]?: BindingPolicy[K] } = {};
+
+  if (given.audience !== undefined) {
+    if (typeof given.audience !== 'string' || given.audience === '' || given.audience.length > 400 || /\p{Cc}|^\s|\s$/u.test(given.audience)) {
+      throw new BindingInvalid('audience is the exact audience the platform puts in its tokens');
+    }
+    policy.audience = given.audience;
+  } else if (allowed.includes('audience')) {
+    throw new BindingInvalid(`a ${profile} binding names the audience its platform puts in its tokens: ${profile} lets no caller choose one`);
+  }
+  if (given.keyAudience !== undefined) {
+    if (typeof given.keyAudience !== 'boolean') throw new BindingInvalid('keyAudience is true or false');
+    if (given.keyAudience) policy.keyAudience = true;
+  }
+  if (given.reads !== undefined) {
+    const reads = checkReads(given.reads);
+    if (reads !== undefined) policy.reads = reads;
+  }
+  if (given.sources !== undefined) {
+    if (!Array.isArray(given.sources) || given.sources.length > MAX_SOURCES) throw new BindingInvalid(`sources lists at most ${MAX_SOURCES} CIDRs`);
+    const sources = sortedUnique(given.sources.map((source: unknown) => {
+      const block = typeof source === 'string' ? parseCidr(source) : null;
+      if (block === null) throw new BindingInvalid(`sources lists CIDRs, such as 162.220.232.0/24 or 2001:db8::/32: ${String(source)} is none`);
+      return block.text;
+    }));
+    if (sources.length > 0) policy.sources = sources;
+  }
+  const number = (name: 'sessionHours' | 'sessionDays' | 'overlapMinutes' | 'replicas', min: number, max: number) => {
+    if (given[name] === undefined) return;
+    const value = integer(given[name], name, min, max);
+    if (name === 'replicas' || value !== POLICY_DEFAULTS[name]) policy[name] = value;
+  };
+  number('sessionHours', 1, 168);
+  number('sessionDays', 1, 90);
+  number('overlapMinutes', 1, 60);
+  number('replicas', 1, 64);
+  if (profile === 'enrollment' && policy.replicas === undefined) {
+    throw new BindingInvalid('an enrollment binding says how many replicas run, its replicas: a code admits twice that many sessions');
+  }
+  if (given.mintedBy !== undefined) {
+    const named = typeof given.mintedBy === 'string' ? (given.mintedBy.startsWith('token:') ? given.mintedBy : `token:${given.mintedBy}`) : '';
+    if (!SERVICE_NAME.test(named.slice('token:'.length))) throw new BindingInvalid('mintedBy names a service account');
+    if (named === options.service) throw new BindingInvalid(`mintedBy names another service than ${shownService(options.service)}: a session of its own would mint codes for itself`);
+    policy.mintedBy = named;
+  }
+  for (const flag of ['approve', 'unsignedUploads'] as const) {
+    if (given[flag] === undefined) continue;
+    if (typeof given[flag] !== 'boolean') throw new BindingInvalid(`${flag} is true or false`);
+    if (given[flag]) policy[flag] = true;
+  }
+  if (given.onContention !== undefined) {
+    if (given.onContention !== 'freeze' && given.onContention !== 'alert') throw new BindingInvalid('onContention is freeze or alert');
+    if (given.onContention === 'alert') policy.onContention = 'alert';
+  }
+  return policy;
+}
+
+function shownService(service: string): string {
+  return service.startsWith('token:') ? `service:${service.slice('token:'.length)}` : service;
+}
+
+/** A value as canonical JSON: every object's keys sorted, at every depth. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** A policy as the binding's `policy` column and its MAC hold it: `checkPolicy`'s result, as canonical JSON. */
+export function policyText(policy: BindingPolicy): string {
+  return canonicalJson(policy);
+}
+
+// --- sources -------------------------------------------------------------------
+
+/** An address block: its version, its network's bytes, its prefix length, and its one spelling. */
+export type Cidr = { version: 4 | 6; bytes: Uint8Array; bits: number; text: string };
+
+function ipv4(text: string): Uint8Array | null {
+  const parts = text.split('.');
+  if (parts.length !== 4 || parts.some((part) => !/^(0|[1-9][0-9]{0,2})$/.test(part) || Number(part) > 255)) return null;
+  return Uint8Array.from(parts.map(Number));
+}
+
+function ipv6(text: string): Uint8Array | null {
+  const halves = text.toLowerCase().split('::');
+  if (halves.length > 2) return null;
+  const groups = halves.map((half) => (half === '' ? [] : half.split(':')));
+  if (groups.flat().some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  const count = groups.flat().length;
+  if (halves.length === 1 ? count !== 8 : count > 7) return null;
+  const words = halves.length === 1 ? groups[0]! : [...groups[0]!, ...Array<string>(8 - count).fill('0'), ...groups[1]!];
+  const bytes = new Uint8Array(16);
+  words.forEach((word, i) => {
+    const value = parseInt(word, 16);
+    bytes[2 * i] = value >> 8;
+    bytes[2 * i + 1] = value & 0xff;
+  });
+  return bytes;
+}
+
+/** An address, IPv4 dotted or IPv6 in hex groups; null for anything else. */
+export function parseAddress(text: string): { version: 4 | 6; bytes: Uint8Array } | null {
+  const v4 = ipv4(text);
+  if (v4 !== null) return { version: 4, bytes: v4 };
+  const v6 = text.includes(':') ? ipv6(text) : null;
+  return v6 === null ? null : { version: 6, bytes: v6 };
+}
+
+/** IPv6 as RFC 5952 writes it: lower case, no leading zeros, the longest run of two or more zero groups as `::`, the first of equals. */
+function ipv6Text(bytes: Uint8Array): string {
+  const words = Array.from({ length: 8 }, (_, i) => (bytes[2 * i]! << 8) | bytes[2 * i + 1]!);
+  let best = { at: -1, length: 0 };
+  for (let i = 0; i < 8;) {
+    if (words[i] !== 0) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < 8 && words[j] === 0) j++;
+    if (j - i > best.length) best = { at: i, length: j - i };
+    i = j;
+  }
+  const hexes = words.map((word) => word.toString(16));
+  if (best.length < 2) return hexes.join(':');
+  return `${hexes.slice(0, best.at).join(':')}::${hexes.slice(best.at + best.length).join(':')}`;
+}
+
+/**
+ * A CIDR, `162.220.232.0/24` or `2001:db8::/32`, as its one spelling; null
+ * for anything else, a block with host bits set included, since
+ * `162.220.232.5/24` most likely means another block than it says.
+ */
+export function parseCidr(text: string): Cidr | null {
+  const slash = text.indexOf('/');
+  if (slash < 0 || !/^(0|[1-9][0-9]{0,2})$/.test(text.slice(slash + 1))) return null;
+  const address = parseAddress(text.slice(0, slash));
+  const bits = Number(text.slice(slash + 1));
+  if (address === null || bits > address.bytes.length * 8) return null;
+  for (let bit = bits; bit < address.bytes.length * 8; bit++) {
+    if ((address.bytes[bit >> 3]! >> (7 - (bit & 7))) & 1) return null;
+  }
+  const shown = address.version === 4 ? Array.from(address.bytes).join('.') : ipv6Text(address.bytes);
+  return { ...address, bits, text: `${shown}/${bits}` };
+}
+
+/** Whether an address is within any of these blocks, each `parseCidr`'s: never for an address that does not parse, or of the other version. */
+export function addressWithin(address: string, sources: readonly string[]): boolean {
+  const parsed = parseAddress(address);
+  if (parsed === null) return false;
+  return sources.some((source) => {
+    const block = parseCidr(source);
+    if (block === null || block.version !== parsed.version) return false;
+    for (let bit = 0; bit < block.bits; bit++) {
+      const mask = 1 << (7 - (bit & 7));
+      if ((block.bytes[bit >> 3]! & mask) !== (parsed.bytes[bit >> 3]! & mask)) return false;
+    }
+    return true;
+  });
+}
+
+// --- freezes -------------------------------------------------------------------
+
+/**
+ * What a freeze names, in its one spelling (section 8.2): every workload's
+ * use, one service, one binding, one session, or one upstream credential of
+ * an environment, by the environment's ID so a rename moves nothing.
+ *
+ *   freezeTarget('Binding:0F0E…') → null      freezeTarget('binding:0f0e…') → 'binding:0f0e…'
+ *   freezeTarget('credential:6B1C…-…/stripe') → 'credential:6b1c…-…/stripe'
+ */
+export function freezeTarget(text: string): string | null {
+  if (text === 'instance') return text;
+  const colon = text.indexOf(':');
+  const kind = text.slice(0, colon);
+  const rest = text.slice(colon + 1);
+  switch (kind) {
+    case 'token':
+      return SERVICE_NAME.test(rest) ? text : null;
+    case 'binding':
+    case 'session':
+      return UUID.test(rest.toLowerCase()) ? `${kind}:${rest.toLowerCase()}` : null;
+    case 'credential': {
+      const [environment, name, ...more] = rest.split('/');
+      if (more.length > 0 || environment === undefined || name === undefined) return null;
+      return UUID.test(environment.toLowerCase()) && CREDENTIAL_NAME.test(name) ? `credential:${environment.toLowerCase()}/${name}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+// --- callers -------------------------------------------------------------------
+
+/**
+ * A workload, authenticated for one request (section 5.3): a key-bound
+ * session's, or a Cloudflare service binding's, which has no session row.
+ * `PluginContext.workload(request, …)` returns it, so the proxy sees one
+ * kind of caller whichever way it signed in, and never parses a proof.
+ */
+export type WorkloadCaller = {
+  readonly kind: 'workload';
+  /** The service, `token:<name>`. */
+  readonly principal: string;
+  /** The session's credential ID, or `binding:<id>` for a Cloudflare call: what the log names. */
+  readonly credentialId: string;
+  readonly bindingId: string;
+  readonly profile: WorkloadProfile;
+  /** A `narrow` child's limits; null for a root, which only its scope bounds. */
+  readonly constraints: Constraints | null;
+  /** The headers the proof signs, which alone are forwarded; null for a Cloudflare call, whose request nobody in between could change. */
+  readonly hdr: readonly string[] | null;
+  readonly sourceIp: string | null;
+};
+
+/** What a workload's alert says (section 8.3), to the log and to the deployment's `alert`. */
+export type WorkloadAlert = {
+  readonly kind: 'enrolled' | 'contention' | 'limit' | 'expiring' | 'frozen';
+  readonly service: string;
+  readonly binding: string | null;
+  readonly session: string | null;
+  readonly ip: string | null;
+  /** One line for a person: `api-prod enrolled from 203.0.113.9 (railway, code minted by deploy run 7001)`. */
+  readonly text: string;
+};

@@ -2,7 +2,7 @@ import { SigninError, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
-import { ApiError, notFound } from './api/errors.ts';
+import { ApiError, notBuilt, notFound } from './api/errors.ts';
 import type { SignedInAccount } from './api/signin.ts';
 import { ExchangeRefused } from './api/workloads.ts';
 import {
@@ -156,6 +156,21 @@ export async function exchangeWorkloadToken(
     if (error instanceof ExchangeRefused) return refuse(error);
     return errorResponse(error);
   }
+}
+
+/**
+ * POST /api/auth/workload: a workload's proof, an ID token, a signed
+ * `GetCallerIdentity` or an enrollment code, for a session bound to the
+ * key its DPoP proof names (docs/design/workload-access.md, section 4.1).
+ * Declared by that design's PR 0; PR 1a serves it, through `PROOFS`.
+ */
+export async function exchangeWorkloadSession(_request: Request, _runtime: CoffreRuntime, _sourceIp: string | null) {
+  return errorResponse(notBuilt("a workload's sign-in", 'PR 1a'));
+}
+
+/** POST /api/auth/workload/renew: a session's expiry moved on, by a proof of its key (section 5.4). PR 1a serves it. */
+export async function renewWorkloadSession(_request: Request, _runtime: CoffreRuntime, _sourceIp: string | null) {
+  return errorResponse(notBuilt("renewing a workload's session", 'PR 1a'));
 }
 
 /** POST /api/auth/logout: revoke the bearer token this request carries, `coffre logout`. */

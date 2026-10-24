@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { deriveKey } from '@coffre/core/identity';
-import type { credentials, deviceAuthorizations, identities, mcpConnections, oauthClients, serviceBindings } from '@coffre/db/schema';
+import type { credentials, deviceAuthorizations, enrollments, identities, mcpConnections, oauthClients, serviceBindings } from '@coffre/db/schema';
 
 type Rows = {
   identities: typeof identities.$inferSelect;
@@ -10,6 +10,7 @@ type Rows = {
   service_bindings: typeof serviceBindings.$inferSelect;
   oauth_clients: typeof oauthClients.$inferSelect;
   mcp_connections: typeof mcpConnections.$inferSelect;
+  enrollments: typeof enrollments.$inferSelect;
 };
 export type AuthTable = keyof Rows;
 
@@ -21,6 +22,8 @@ export type AuthTable = keyof Rows;
 // something: who, which client and how it is shown (its name, host, and
 // whether it registered itself, which Connected apps and the log say), what
 // scopes, where codes go, its code and refresh token, and how long it lasts.
+// An enrollment code is all of it but its hint and when it was made: whose
+// binding, its hash, the scope its sessions hold, who minted it, and its end.
 const FIELDS = {
   identities: ['id', 'provider', 'issuerHash', 'subject', 'principal', 'generation', 'revokedAt'],
   credentials: ['id', 'tokenHash', 'kind', 'principal', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
@@ -31,6 +34,7 @@ const FIELDS = {
     'id', 'principal', 'generation', 'clientId', 'clientName', 'clientHost', 'registration', 'scopes', 'redirectUri',
     'codeHash', 'codeChallenge', 'codeExpiresAt', 'refreshHash', 'refreshPreviousHash', 'expiresAt', 'revokedAt',
   ],
+  enrollments: ['id', 'bindingId', 'codeHash', 'scope', 'createdBy', 'createdWith', 'expiresAt'],
 } as const satisfies { [K in AuthTable]: readonly (keyof Rows[K])[] };
 
 type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> };
@@ -54,22 +58,39 @@ export function issuingBinding(createdBy: unknown): string | null {
 }
 
 /**
+ * A workload's session (docs/design/workload-access.md, section 11): one
+ * kind of its own, which composes with no other, over today's fields and
+ * then everything that binds it: who made it, its scope and places, its
+ * key, its hard end, its ancestors and limits, its code, and its approval.
+ */
+const WORKLOAD_FIELDS = [
+  ...FIELDS.credentials,
+  'createdBy', 'scope', 'places', 'jkt', 'notAfter', 'ancestors', 'constraints', 'enrollmentId', 'approvedAt', 'approvedBy',
+] as const satisfies readonly (keyof Rows['credentials'])[];
+
+/**
  * The tuple's kind and fields: an exchanged credential's are its own, and
  * so are a binding's that carries its issuer's keys, which covers them. A
  * token's or a binding's scope makes another kind again, which covers it:
  * the rows of 0.4 had none, and still check as they were sealed until the
  * app seals them with one (`sealScopes`); a scope cleared or changed fails
- * either way. A handle's places do the same.
+ * either way. A handle's places do the same, and a binding's policy, last:
+ * a binding that carries one never checks as one `/api/auth/oidc` takes.
+ * A workload's session is its own kind first, whatever else it carries.
  */
 function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
-  const { createdBy, scope, jwks, places } = row as { createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown };
+  const { kind: credentialKind, createdBy, scope, jwks, places, policy } = row as {
+    kind?: unknown; createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown; policy?: unknown;
+  };
+  if (table === 'credentials' && credentialKind === 'workload') return { kind: 'workload_credentials', fields: WORKLOAD_FIELDS };
   const exchanged = table === 'credentials' && issuingBinding(createdBy) !== null;
   const uploaded = table === 'service_bindings' && jwks != null;
   const kind = exchanged ? 'exchanged_credentials' : uploaded ? 'uploaded_service_bindings' : table;
   const fields = exchanged ? [...FIELDS.credentials, 'createdBy'] : uploaded ? [...FIELDS.service_bindings, 'jwks'] : FIELDS[table];
   const scoped = scope == null ? { kind, fields } : { kind: `scoped_${kind}`, fields: [...fields, 'scope'] };
   // A handle's places, which the proxy's stable URL resolves to, make a kind of their own: a handle of 0.8 has none, and checks as it was sealed.
-  return table === 'credentials' && places != null ? { kind: `placed_${scoped.kind}`, fields: [...scoped.fields, 'places'] } : scoped;
+  if (table === 'credentials' && places != null) return { kind: `placed_${scoped.kind}`, fields: [...scoped.fields, 'places'] };
+  return table === 'service_bindings' && policy != null ? { kind: `policed_${scoped.kind}`, fields: [...scoped.fields, 'policy'] } : scoped;
 }
 
 export type AuthRow = { [K in AuthTable]: Fields[K] & { authMac: Buffer } }[AuthTable];

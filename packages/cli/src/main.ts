@@ -24,7 +24,10 @@ import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './
 import { help, lookup, usage, type Command } from './commands.ts';
 import { clash, environmentPaths, listOf } from './environments.ts';
 import { listen, type Tunnel } from './tunnels.ts';
+import { approve, enroll } from './enroll.ts';
+import { freeze, unfreeze } from './freeze.ts';
 import * as manage from './manage.ts';
+import { serve } from './serve.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { interval, replaceFile, watch } from './watch.ts';
@@ -1968,6 +1971,11 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'tokens revoke': (args) => manage.tokensRevoke(connect, args),
   trust,
   untrust: (args) => manage.untrust(connect, args),
+  enroll,
+  approve,
+  freeze,
+  unfreeze,
+  serve,
   audit,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),

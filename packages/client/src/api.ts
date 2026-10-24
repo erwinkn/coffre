@@ -780,7 +780,7 @@ export type Api = {
     output: {
       bindings: {
         id: string;
-        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
         issuer: string;
         jwksUri: string;
         keys: null | {
@@ -820,7 +820,7 @@ export type Api = {
       };
     };
     output: {
-      profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+      profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
       issuer: string;
       jwksUri: string;
       keys: null | {
@@ -842,7 +842,7 @@ export type Api = {
     } | {
       binding: {
         id: string;
-        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
         issuer: string;
         jwksUri: string;
         keys: null | {
@@ -1347,7 +1347,7 @@ export type Api = {
     } | {
       bindings: {
         id: string;
-        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
         issuer: string;
         jwksUri: string;
         keys: null | {
@@ -1594,6 +1594,41 @@ export type Api = {
       };
     };
   };
+  "GET /members/:member/bindings/:id/enrollments": {
+    input: undefined;
+    output: never;
+  };
+  "POST /members/:member/bindings/:id/enrollments": {
+    input: {
+      [key: string]: never;
+    };
+    output: never;
+  };
+  "POST /members/:member/bindings/:id/enrollments/:enrollment/promote": {
+    input: {
+      now?: boolean;
+    };
+    output: never;
+  };
+  "POST /members/:member/tokens/:id/approve": {
+    input: undefined;
+    output: never;
+  };
+  "GET /freezes": {
+    input: undefined;
+    output: never;
+  };
+  "POST /freezes": {
+    input: {
+      target: string;
+      reason: string;
+    };
+    output: never;
+  };
+  "DELETE /freezes/:target": {
+    input: undefined;
+    output: never;
+  };
 };
 
 export type AccessValue = string | null | {
@@ -1715,7 +1750,7 @@ export type AuthorizationView = {
 };
 
 export type BindingPlan = {
-  profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+  profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
   issuer: string;
   jwksUri: string;
   keys: null | {
@@ -1738,7 +1773,7 @@ export type BindingPlan = {
 
 export type BindingView = {
   id: string;
-  profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+  profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
   issuer: string;
   jwksUri: string;
   keys: null | {

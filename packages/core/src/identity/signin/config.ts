@@ -18,6 +18,7 @@
  * one of the deployment's own, in the same list.
  */
 import { GitHubApp, pkcs8Of, type GitHubAppOptions } from '../github-app.ts';
+import type { WorkloadAlert } from '../workloads.ts';
 import { GitHubSigninProvider } from './github.ts';
 import { OidcSigninProvider } from './oidc.ts';
 import type { SigninBrand, SigninProvider } from './types.ts';
@@ -105,6 +106,18 @@ export type WorkloadsOptions = {
    * and only public ones' IDs are looked up.
    */
   github?: GitHubApp;
+  /**
+   * Leaves services nothing but key-bound sessions (docs/design/
+   * workload-access.md, section 6.3): no service token is issued or taken,
+   * and `/api/auth/oidc` answers 410. Its sessions still read their
+   * bindings' listed `reads`. Taken, and not yet enforced: that design's PR
+   * 1a does.
+   */
+  useOnly?: boolean;
+  /** Stricter still: no binding may list `reads`, so services read plain values only. Taken, and not yet enforced (PR 1a). */
+  noReads?: boolean;
+  /** The deployment's own delivery of a workload's alerts, called in the background after the response: a Slack webhook, a pager. */
+  alert?: (alert: WorkloadAlert) => unknown;
 };
 
 /** Cloudflare's rate-limiting binding, as coffre calls it; `processLimits()` has the same shape. */
@@ -112,7 +125,14 @@ export type RateLimiter = { limit(options: { key: string }): Promise<{ success: 
 
 export type WorkloadLimits = { perSource: RateLimiter; total: RateLimiter };
 
-export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits; github: GitHubApp | null };
+export type WorkloadsConfig = {
+  allowLoopback: boolean;
+  limits: WorkloadLimits;
+  github: GitHubApp | null;
+  useOnly: boolean;
+  noReads: boolean;
+  alert: ((alert: WorkloadAlert) => unknown) | null;
+};
 
 /**
  * MCP clients, Claude among them, acting as the people who connect them,
@@ -423,7 +443,18 @@ function workloadsConfig(options: WorkloadsOptions, publicUrl: string): Workload
   if (app !== undefined && app.apiUrl !== 'https://api.github.com' && !isLoopback(new URL(app.apiUrl))) {
     throw new Error('workloads.github is for github.com: GitHub Enterprise Server is not supported yet; sign in with its app, and leave workloads.github out');
   }
-  return { allowLoopback: loopback, limits: options.limits, github: app ?? null };
+  for (const flag of ['useOnly', 'noReads'] as const) {
+    if (options[flag] !== undefined && typeof options[flag] !== 'boolean') throw new Error(`workloads.${flag} is true or false`);
+  }
+  if (options.alert !== undefined && typeof options.alert !== 'function') throw new Error('workloads.alert is a function, given each alert');
+  return {
+    allowLoopback: loopback,
+    limits: options.limits,
+    github: app ?? null,
+    useOnly: options.useOnly === true,
+    noReads: options.noReads === true,
+    alert: options.alert ?? null,
+  };
 }
 
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */

@@ -364,6 +364,42 @@ export const SECTIONS = [
     ],
   },
   {
+    title: 'Workloads: apps that use secrets through coffre, with a session bound to a key they never export',
+    entries: [
+      {
+        command: 'enroll',
+        usage: ['enroll <service> [--binding <id>]'],
+        about: ['an enrollment code, for one deploy of an app on a platform', 'that signs nothing: printed once, for the platform to hold'],
+      },
+      {
+        command: 'enroll',
+        usage: ['enroll <service> --promote <code-id> [--now]'],
+        about: ["the binding's current code, once the deploy is up: older", "codes' sessions drain; --now ends them at once"],
+      },
+      { command: 'enroll', usage: ['enroll <service> --list [--json]'], about: ["the binding's live codes, and what each reaches"] },
+      { command: 'approve', usage: ['approve <service> <session-id>'], about: ['a session its binding holds for a person to check'] },
+      {
+        command: 'freeze',
+        usage: ['freeze [<target> --reason <text>]'],
+        about: [
+          'every use under the target refused from its next request,',
+          'its sessions and codes kept: instance, service:<name>,',
+          'binding:<id>, session:<id> or credential:<path>/<name>;',
+          'alone, what is frozen',
+        ],
+      },
+      { command: 'unfreeze', usage: ['unfreeze <target>'], about: ['lifts it'] },
+      {
+        command: 'serve',
+        usage: ['serve --service <name> --proof <proof> [--listen <address>]'],
+        about: [
+          "a workload's sidecar: it holds the session and its key,",
+          'and forwards what the app sends it, signed',
+        ],
+      },
+    ],
+  },
+  {
     title: 'Audit',
     entries: [{ command: 'audit', usage: ['audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail] [--json]'], about: ['a project, environment or KEY: market/prod/DATABASE_URL lists', 'who read or changed it, reads of several that listed it included'] }],
   },
@@ -490,6 +526,13 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'POST /members/:member/bindings/keys': { commands: ['trust'] },
   'DELETE /members/:member/bindings/:id': { commands: ['untrust'] },
   'GET /workloads/lookup': { commands: ['trust'] },
+  'GET /members/:member/bindings/:id/enrollments': { commands: ['enroll'] },
+  'POST /members/:member/bindings/:id/enrollments': { commands: ['enroll'] },
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': { commands: ['enroll'] },
+  'POST /members/:member/tokens/:id/approve': { commands: ['approve'] },
+  'GET /freezes': { commands: ['freeze'] },
+  'POST /freezes': { commands: ['freeze'] },
+  'DELETE /freezes/:target': { commands: ['unfreeze'] },
   'GET /workloads/repositories': {
     browser: "the pages' repository picker: `coffre trust` names its repository, which `GET /workloads/lookup` resolves through the same GitHub App",
   },

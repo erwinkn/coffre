@@ -344,8 +344,18 @@ type Correlation = {
  * a trust binding's: unlike the correlation, the vault decides on it, and
  * its principal holds nothing past it (`allows`). Null, or left out, for a
  * session's, which carries all its member holds.
+ *
+ * `caller` is what kind of credential that is: a person's (a session or a
+ * personal token), a bearer's (a service token, or an exchanged one), or a
+ * workload's key-bound session, which reads only what its scope's `reads`
+ * list (docs/design/workload-access.md, section 6.1). Left out by this
+ * release's app, and decided on by none of the vault yet: the release that
+ * makes it required (that design's PR 1c) holds a workload to it.
  */
-export type Through = { credentialScope?: CredentialScope | null };
+export type Through = { credentialScope?: CredentialScope | null; caller?: CallerKind };
+
+/** The kinds of credential a request comes in on, as the vault is told (`Through`). */
+export type CallerKind = 'person' | 'bearer' | 'workload';
 
 export type UnwrapInput = Correlation & Through & {
   principal: string;

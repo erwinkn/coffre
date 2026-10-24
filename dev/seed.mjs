@@ -59,6 +59,7 @@ await pool.query('DELETE FROM mcp_approvals');
 await pool.query('DELETE FROM mcp_connections');
 await pool.query('DELETE FROM oauth_clients');
 await pool.query('DELETE FROM credentials');
+await pool.query('DELETE FROM enrollments');
 await pool.query('DELETE FROM device_authorizations');
 await pool.query('DELETE FROM identities');
 await pool.query('DELETE FROM service_bindings');
