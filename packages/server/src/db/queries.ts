@@ -616,7 +616,8 @@ export async function newestAccessSeq(db: Queryable, principal: string): Promise
 /**
  * Whether a request's way in still stands: its member active at the
  * generation it was checked at, the credential it came in on not revoked,
- * and the MCP connection it came through neither; one statement, with the
+ * and the MCP connection or Cloudflare binding it came through neither, the
+ * binding with no tombstone either; one statement, with the
  * database clock, so that Hyperdrive never answers it from its cache: a
  * cached yes from an earlier request would let a revoked one through. Rows
  * read only to refuse, so no MAC to check: a row changed around the app can
@@ -624,15 +625,17 @@ export async function newestAccessSeq(db: Queryable, principal: string): Promise
  */
 export async function wayInStands(
   db: Queryable,
-  way: { principal: string; generation: number; credentialId: string | null; connectionId: string | null },
+  way: { principal: string; generation: number; credentialId: string | null; bindingId?: string | null; connectionId: string | null },
 ): Promise<boolean> {
-  const { vaultMembers, credentials, mcpConnections } = tablesOf(db);
+  const { vaultMembers, credentials, mcpConnections, serviceBindings } = tablesOf(db);
   const credential = way.credentialId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${credentials} WHERE ${credentials.id} = ${way.credentialId}
     AND ${credentials.revokedAt} IS NULL AND ${credentials.generation} = ${way.generation})`;
   const connection = way.connectionId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${mcpConnections} WHERE ${mcpConnections.id} = ${way.connectionId}
     AND ${mcpConnections.revokedAt} IS NULL AND ${mcpConnections.generation} = ${way.generation})`;
+  const binding = way.bindingId == null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${serviceBindings} WHERE ${serviceBindings.id} = ${way.bindingId}
+    AND ${serviceBindings.revokedAt} IS NULL AND ${serviceBindings.generation} = ${way.generation}) AND NOT ${hasTombstone(db, way.bindingId)}`;
   const [row] = await db
-    .select({ status: vaultMembers.status, generation: vaultMembers.generation, stands: truth(sql`${credential} AND ${connection}`), now: clock(db) })
+    .select({ status: vaultMembers.status, generation: vaultMembers.generation, stands: truth(sql`${credential} AND ${connection} AND ${binding}`), now: clock(db) })
     .from(vaultMembers)
     .where(eq(vaultMembers.principal, way.principal));
   return row !== undefined && row.status === 'active' && row.generation === way.generation && row.stands;

@@ -11,7 +11,7 @@ import { bodyDigest, createProof, generateProofKey, thumbprint, type ProofKey } 
 import { github, hashToken, signin, type Gate, type GateAdmission, type RateLimiter } from '@coffre/core/identity';
 import { isCredentialScope, type ScopeGrant } from '@coffre/core/access';
 import type { Database } from '@coffre/db';
-import { eq, Placeholder, sql } from 'drizzle-orm';
+import { desc, eq, Placeholder, sql } from 'drizzle-orm';
 
 import { allowed, audited } from '../src/api/context.ts';
 import { authMac } from '../src/auth-rows.ts';
@@ -884,4 +884,54 @@ test("bindingRoute: a Cloudflare call is its service's, through its cloudflare b
   await freeze(`binding:${binding}`, 'workload.unfreeze');
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   assert.equal((await read((await bindingRoute(request(), runtime, MEMBER))!)).status, 401);
+});
+
+/** The newest entries `author` wrote, newest first. */
+async function newest(author: 'app' | 'vault', count = 5) {
+  const rows = await db.owner.select().from(auditLog).where(eq(auditLog.author, author)).orderBy(desc(auditLog.seq)).limit(count);
+  return rows.map((row) => ({ action: row.action, decision: row.decision, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+}
+
+test("a Cloudflare call uses its service's values: the vault's entry names no credential, the app's names the binding", async () => {
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
+  runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
+  await marketProd();
+  const binding = await bind('cloudflare', null, {});
+  assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
+  const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
+  assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
+  const [opened] = await newest('vault', 1);
+  assert.equal(opened!.decision, 'allow');
+  assert.equal(opened!.metadata.credentialId, undefined, 'the vault is told no credential: the binding has no credentials row');
+  const logged = (await newest('app')).find((entry) => entry.action === 'credential.use');
+  assert.equal(logged?.metadata.credentialId, `binding:${binding}`, 'the app names the binding the call came through');
+});
+
+test('a Cloudflare binding unbound after its call was checked releases nothing: the read is withheld, as for a revoked session', async () => {
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
+  runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
+  await marketProd();
+  const binding = await bind('cloudflare', null, {});
+  assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
+  // Checked; then unbound before the vault is asked.
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
+  await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
+  // The vault released, and logged it; the app withheld the value, and logged that, naming the binding.
+  assert.equal((await newest('vault', 1))[0]!.decision, 'allow');
+  const [withheld] = await newest('app', 1);
+  assert.deepEqual([withheld!.decision, withheld!.metadata.reason, withheld!.metadata.credentialId], ['deny', 'credential_ended', `binding:${binding}`]);
+});
+
+test('a Cloudflare binding with a tombstone, though its row was never revoked, releases nothing', async () => {
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
+  runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
+  await marketProd();
+  const binding = await bind('cloudflare', null, {});
+  assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
+  // A tombstone alone, as an unbind whose row update a restored backup lost.
+  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
+  await audited({ db: deps.db, chainKey: deps.chainKey }, async (_tx, log) => {
+    log.push(allowed(ctx, 'token.unbind', { metadata: { bindingId: binding } }));
+  });
+  await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
 });
