@@ -2,10 +2,13 @@
 // as a VPC Service's do: here a service binding to this Worker, which plays
 // the upstream behind it and says what reached it. A VPC Service binding is
 // no more than such a `Fetcher`, and local workerd has none of its own.
+// `yousign` leaves through the Worker's own fetch, for the suite's upstream
+// at `UPSTREAM`, and takes a workload's request too: any session token
+// stands, its proof signing `content-type` and `content-digest`.
 import type { PluginContext } from '../../src/plugins.ts';
 import { credentialProxy, header, sigv4, type Egress } from '../../src/plugins/credential-proxy.ts';
 
-type Env = { EGRESS: Egress; MISSING?: Egress };
+type Env = { EGRESS: Egress; MISSING?: Egress; UPSTREAM: string };
 
 const KEY = 'sk_schumann_real_0123456789abcdef';
 const AWS = { AWS_ACCESS_KEY_ID: 'AKIAREAL0123456789AB', AWS_SECRET_ACCESS_KEY: 'real/secret/0123456789abcdefghijklmnopqr' };
@@ -13,8 +16,11 @@ const AWS = { AWS_ACCESS_KEY_ID: 'AKIAREAL0123456789AB', AWS_SECRET_ACCESS_KEY: 
 /** coffre as the proxy calls it: every handle stands, for market/dev, and opens these values. */
 const coffre = {
   publicUrl: 'https://secrets.acme.example',
-  // A handle's request is no workload's.
-  workload: async () => null,
+  // A handle's request is no workload's; a session's stands, its proof checked on Node.
+  workload: async (request: Request) =>
+    /^DPoP coffre_wl_/.test(request.headers.get('authorization') ?? '')
+      ? { kind: 'workload', principal: 'token:api-prod', credentialId: 'c1', bindingId: 'b1', profile: 'github', constraints: null, hdr: ['content-type', 'content-digest'], sourceIp: null, nonce: null, places: ['market/dev'], place: 'market/dev', path: 'market/dev' }
+      : null,
   handle: async () => ({ expiresAt: new Date(Date.now() + 3_600_000).toISOString(), paths: ['market/dev'] }),
   use: async () => ({
     values: { SCHUMANN_API_KEY: KEY, ...AWS },
@@ -25,9 +31,11 @@ const coffre = {
   }),
 } as unknown as PluginContext;
 
-const proxy = (egress: Egress | undefined) =>
+const proxy = (egress: Egress | undefined, upstream: string) =>
   credentialProxy({
+    insecureUpstreams: true,
     credentials: {
+      yousign: { upstream, inject: header('authorization', 'Bearer {SCHUMANN_API_KEY}') },
       schumann: { upstream: 'https://dev.api.europ.schuman.io', inject: header('x-api-key', '{SCHUMANN_API_KEY}'), egress: egress! },
       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }), egress: egress! },
     },
@@ -53,7 +61,7 @@ export default {
     const url = new URL(request.url);
     if (!url.pathname.startsWith('/use')) return upstream(request);
     try {
-      const routes = proxy(url.searchParams.has('missing') ? env.MISSING : env.EGRESS).routes!;
+      const routes = proxy(url.searchParams.has('missing') ? env.MISSING : env.EGRESS, env.UPSTREAM).routes!;
       return await routes.fetch(request, coffre);
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 500 });

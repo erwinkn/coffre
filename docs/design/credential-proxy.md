@@ -559,7 +559,8 @@ request sent on:
 4. **Sent on.** Every header but those about the hop, coffre's caller,
    its cookies and the handle; then the rule's header, parameter or
    Basic authorization, filled in. The body is read up to 16 MiB and no
-   further, whatever it declares. If the handle is still anywhere in the
+   further, unless it declares its digest and says its length, which
+   streams (below, "Declared bodies stream"). If the handle is still anywhere in the
    request (a header, inside another header's Basic base64, the URL, the
    body), it is refused rather than leaked to a third party. The request
    goes out with `redirect: 'manual'`, through the global `fetch` or the
@@ -615,6 +616,40 @@ no caller reaches it. The honest limit of section 2 of
 returned what it opened would undo placeholders. The proxy is first-party and
 small enough to read.
 
+**Declared bodies stream.** A body of any credential that says its length
+and declares its SHA-256 in a `Content-Digest` (RFC 9530, its `sha-256`
+member, `sha-256=:<base64>:`) streams through, never held whole, up to 95
+MiB (`MAX_DIGESTED_BODY` in `@coffre/client/dpop`): 99,614,720 bytes, under
+the 100 MB (decimal) a Cloudflare zone takes on Free and Pro, so a body
+near it gets coffre's 413, which says what to do, and not the zone's. The
+SDK and `coffre serve` send it on every body, unless the app set a
+`Content-Digest` of its own, which the SDK keeps as it is and the sidecar
+adds its `sha-256` to
+([workloads](../workloads.md#what-the-sdk-does-on-its-own)), which is what
+lets a workload upload a 50 MB Yousign document or a KYC file. coffre
+hashes the bytes as they pass (`scanned`, with the handle or session-token
+check and the length) and holds back the last of them until the digest
+matches. A body with other bytes, short of its length or past it, is cut
+off before that last byte, so the upstream, which was told the length,
+never gets a complete request, and the app gets a 400 naming why. An
+empty body has no last byte to hold back, and its request is whole once its
+headers are sent, so it is checked before anything goes. On
+Workers, the length goes with the body through `FixedLengthStream`; on
+Node, fetch sends the header as given and errors the request when the body
+does. A `Content-Digest` whose `sha-256` member is no SHA-256 is a 400; one
+with no `sha-256` member (an app's own `sha-512`) declares nothing, and its
+body is read whole. A body read whole, under 16 MiB, must be what its
+`Content-Digest` says too.
+
+What this leaves: an upstream that acts on a request before it ends, such
+as a multipart part stored as soon as it is read, may act on a body whose
+digest then fails. The request that does it carries other bytes than its
+proof signed, so it comes from the session's holder, who could have signed
+those bytes, or from a copy of a proof read on its way to coffre and sent
+first. Bodies with no digest keep the 16 MiB they are read whole to: an
+older SDK's, and a person's app, which `coffre run` gives a handle and
+which sends none of its own.
+
 ## 5. The other shapes
 
 **S3 and SigV4 (PR 2, built).** The credential:
@@ -662,7 +697,7 @@ signature needs no byte of it. It is checked as it passes: a handle
 anywhere in it, a chunk boundary included, or a length other than the one
 it declared, and it stops, so the upstream stores nothing. What a handle
 could still begin, and its last bytes, are held back until that is known. Other bodies are
-read whole, up to 16 MiB. Equisafe's PutObject past 16 MiB failed on that
+read whole, up to 16 MiB, unless they declare a `Content-Digest` (section 4). Equisafe's PutObject past 16 MiB failed on that
 limit (a 413), not on Workers' own request limit, which Cloudflare sets
 by plan (100 MB on Free and Pro, 200 MB on Business, 500 MB on
 Enterprise): past that, a Workers deployment needs multipart uploads,

@@ -9,13 +9,14 @@
 // a tunnel ends within a recheck of a freeze. Both engines.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { bodyDigest, bodyLine, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, contentDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
+import { keyAudience, workload } from '@coffre/client/workload';
 import { github, hashToken, signin, type WorkloadAlert } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { eq } from 'drizzle-orm';
@@ -63,10 +64,12 @@ let vaultCalls: number;
 let alerts: WorkloadAlert[];
 let background: Promise<unknown>[];
 
-/** The upstream: what reached it, each request's method, URL, headers and body's SHA-256. */
+/** The upstream: what reached it, each request's method, URL, headers and body's SHA-256; what it got of each it never got whole; the bytes so far. */
 let upstream: Server;
 let upstreamAt: string;
 let reached: { method: string; url: string; headers: IncomingMessage['headers']; sha256: string; length: number }[];
+let broken: { url: string; length: number }[];
+let received: number;
 
 const transport: WorkloadTransport = {
   json: async (url) => {
@@ -84,6 +87,7 @@ function proxy(options: { recheckSeconds?: number } = {}) {
       metered: { upstream: `${upstreamAt}/stripe`, inject: header('authorization', `Bearer {STRIPE_KEY}`), limit: (service) => (service === MEMBER ? { perMinute: 3 } : undefined) },
       // A rule that sends its key under the DPoP scheme: a handle's app sends its handle there.
       dpopped: { upstream: `${upstreamAt}/dpopped`, inject: header('authorization', 'DPoP {STRIPE_KEY}') },
+      yousign: { upstream: `${upstreamAt}/yousign`, inject: header('authorization', `Bearer {STRIPE_KEY}`) },
       s3: { upstream: `${upstreamAt}/s3`, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
     },
     signers: { 'dfns-key': privateKey('SIGNING_KEY') },
@@ -114,6 +118,10 @@ before(async () => {
     request.on('data', (chunk: Buffer) => {
       hash.update(chunk);
       length += chunk.length;
+      received += chunk.length;
+    });
+    request.on('close', () => {
+      if (!request.complete) broken.push({ url: request.url!, length });
     });
     request.on('end', () => {
       reached.push({ method: request.method!, url: request.url!, headers: request.headers, sha256: hash.digest('hex'), length });
@@ -135,6 +143,8 @@ beforeEach(async () => {
   await resetDatabase(db.owner);
   forgetKeys();
   reached = [];
+  broken = [];
+  received = 0;
   alerts = [];
   background = [];
   gates = processGates();
@@ -167,12 +177,17 @@ const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('ba
 
 type Session = { token: string; key: ProofKey };
 
+/** A GitHub run's ID token for `audience`, the instance's URL naming a key. */
+function runToken(audience: string): string {
+  const seconds = Math.floor(Date.now() / 1000);
+  const input = `${part({ alg: 'RS256', kid: 'k1', typ: 'JWT' })}.${part({ iss: GITHUB, aud: audience, sub: 'repo:acme/api:ref:refs/heads/main', iat: seconds - 5, exp: seconds + 600, jti: randomUUID(), ...DEPLOY })}`;
+  return `${input}.${signWith('sha256', Buffer.from(input), signer.privateKey).toString('base64url')}`;
+}
+
 /** A session of the service, from a GitHub run's token whose audience names its key. */
 async function session(): Promise<Session> {
   const key = await generateProofKey();
-  const seconds = Math.floor(Date.now() / 1000);
-  const input = `${part({ alg: 'RS256', kid: 'k1', typ: 'JWT' })}.${part({ iss: GITHUB, aud: `${ORIGIN}#jkt=${await thumbprint(key.jwk)}`, sub: 'repo:acme/api:ref:refs/heads/main', iat: seconds - 5, exp: seconds + 600, jti: randomUUID(), ...DEPLOY })}`;
-  const jwt = `${input}.${signWith('sha256', Buffer.from(input), signer.privateKey).toString('base64url')}`;
+  const jwt = runToken(`${ORIGIN}#jkt=${await thumbprint(key.jwk)}`);
   const url = `${ORIGIN}/api/auth/workload`;
   const made = await answer(new Request(url, { method: 'POST', headers: { 'content-type': 'application/json', dpop: await createProof(key, { method: 'POST', url }) }, body: JSON.stringify({ service: MEMBER, proof: { oidc: jwt } }) }), runtime, ui, IP);
   const body = (await made.json()) as { token: string };
@@ -360,6 +375,150 @@ test('a streamed SigV4 upload is bound by the payload hash it declares; UNSIGNED
   assert.equal(reached.at(-1)!.headers['x-amz-content-sha256'], 'UNSIGNED-PAYLOAD');
 });
 
+/** A Yousign document upload as the app makes it: a PDF of `size` bytes and the document's nature, as multipart. */
+function document(size: number): { type: string; body: Buffer<ArrayBuffer> } {
+  const boundary = `----coffre${randomBytes(8).toString('hex')}`;
+  const head = `--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="contract.pdf"\r\ncontent-type: application/pdf\r\n\r\n`;
+  const tail = `\r\n--${boundary}\r\ncontent-disposition: form-data; name="nature"\r\n\r\nsignable_document\r\n--${boundary}--\r\n`;
+  return { type: `multipart/form-data; boundary=${boundary}`, body: Buffer.concat([Buffer.from(head), randomBytes(size), Buffer.from(tail)]) };
+}
+
+/** `bytes` as a stream of 1 MiB chunks, which waits before the chunk at `pause` until `until()` holds: what a body sent on as it comes sees. */
+function chunked(bytes: Uint8Array, pause?: { at: number; until: () => boolean }): ReadableStream<Uint8Array> {
+  const size = 1024 * 1024;
+  let at = 0;
+  return new ReadableStream({
+    async pull(out) {
+      if (at >= bytes.length) return out.close();
+      if (pause !== undefined && at === pause.at * size) {
+        for (let waited = 0; !pause.until(); waited += 10) {
+          if (waited > 20_000) return out.error(new Error(`the upstream got ${received} bytes while coffre held the rest: it buffered the body`));
+          await sleep(10);
+        }
+      }
+      out.enqueue(bytes.subarray(at, at + size));
+      at += size;
+    },
+  });
+}
+
+test('a 55 MB document that declares its Content-Digest streams through the SDK and coffre to the upstream byte for byte, never held whole', { timeout: 120_000 }, async () => {
+  await bind();
+  // The SDK as the app runs it, its requests answered by this runtime.
+  const coffre = await workload({
+    url: ORIGIN,
+    service: SERVICE,
+    proof: { name: 'github', kind: 'oidc', prove: async (context) => ({ oidc: runToken(keyAudience(context)) }) },
+    fetch: (input, init) => answer(new Request(input, init), runtime, ui, IP),
+    log: () => undefined,
+    sigterm: false,
+  });
+  try {
+    const { type, body } = document(55_000_000);
+    const sha256 = createHash('sha256').update(body).digest('hex');
+    // Read whole by the SDK, which declares its digest: coffre streams it on all the same, past the 16 MiB it reads whole.
+    const whole = await coffre.fetch(`${coffre.url('yousign')}/v3/signature_requests/sr-1/documents`, { method: 'POST', headers: { 'content-type': type }, body });
+    assert.equal(whole.status, 200, await whole.text());
+    assert.deepEqual([reached.at(-1)!.length, reached.at(-1)!.sha256], [body.length, sha256]);
+    assert.equal(reached.at(-1)!.headers['content-digest'], contentDigest(sha256));
+    assert.equal(reached.at(-1)!.headers['content-type'], type);
+    assert.equal(reached.at(-1)!.headers['content-length'], String(body.length));
+    assert.equal(reached.at(-1)!.headers.authorization, `Bearer ${STRIPE_KEY}`);
+    // Declared by whoever holds the bytes, as `coffre serve` does, and streamed: the upstream has 17 MiB of it before the app
+    // sends past 24 MiB, so coffre holds no more than a chunk of it at a time.
+    const start = received;
+    const streamed = await coffre.fetch(`${coffre.url('yousign')}/v3/signature_requests/sr-1/documents`, {
+      method: 'POST',
+      headers: { 'content-type': type, 'content-digest': contentDigest(sha256), 'content-length': String(body.length) },
+      body: chunked(body, { at: 24, until: () => received - start >= 17 * 1024 * 1024 }),
+      duplex: 'half',
+    } as RequestInit);
+    assert.equal(streamed.status, 200, await streamed.text());
+    assert.deepEqual([reached.at(-1)!.length, reached.at(-1)!.sha256], [body.length, sha256]);
+    assert.equal(reached.length, 2);
+    assert.deepEqual(broken, []);
+  } finally {
+    await coffre.close();
+  }
+});
+
+test('a body other than its Content-Digest says, short of its length, past it, or declaring it badly is refused, and the upstream never gets it whole', { timeout: 60_000 }, async () => {
+  await bind();
+  const held = await session();
+  const url = `${ORIGIN}/use/yousign/v3/documents`;
+  const bytes = randomBytes(3 * 1024 * 1024);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  /** `sent` streamed, saying `length`, its proof signing `signed` headers (the digest header, unless told) and `line`. */
+  const upload = async (sent: Uint8Array, options: { length?: number; header?: string; signed?: Record<string, string>; line?: string } = {}) => {
+    const headers = { 'content-type': 'application/pdf', 'content-digest': options.header ?? contentDigest(digest) };
+    const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: options.signed ?? headers, body: options.line ?? digest } });
+    const request = new Request(url, { method: 'POST', headers: { ...headers, 'content-length': String(options.length ?? sent.length), authorization: `DPoP ${held.token}`, dpop: proof }, body: chunked(sent), duplex: 'half' } as RequestInit);
+    return read((await pluginRoute(request, runtime, IP))!);
+  };
+  // Other bytes of the same length: the digest fails at the end, and the upstream, which had all but the last of it, stores nothing.
+  const tampered = Buffer.from(bytes);
+  tampered[1000] = tampered[1000]! ^ 1;
+  const swapped = await upload(tampered);
+  assert.deepEqual([swapped.status, swapped.body.message], [400, 'the body is not what its Content-Digest says']);
+  // Short of the length it says, and past it.
+  const short = await upload(bytes.subarray(0, bytes.length - 1), { length: bytes.length });
+  assert.deepEqual([short.status, short.body.message], [400, 'the body ended short of the length it declared']);
+  const long = await upload(Buffer.concat([bytes, Buffer.from('x')]), { length: bytes.length });
+  assert.deepEqual([long.status, long.body.message], [400, 'the body ran past the length it declared']);
+  for (let waited = 0; broken.length < 3 && waited < 5000; waited += 10) await sleep(10);
+  // A sha-256 member that is no SHA-256, or two of them: refused before anything goes.
+  const before = broken.length;
+  for (const header of ['sha-256=:bm90IGEgZGlnZXN0:', `${contentDigest(digest)}, ${contentDigest(digest)}`, 'sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFV=:']) {
+    const malformed = await upload(bytes, { header, signed: { 'content-type': 'application/pdf', 'content-digest': header } });
+    assert.equal(malformed.status, 400, header);
+    assert.match(malformed.body.message as string, /Content-Digest declares a body's SHA-256 once/);
+  }
+  // The proof must sign the header that chose the line; and a header other than the one signed fails the proof.
+  const unsigned = await upload(bytes, { signed: { 'content-type': 'application/pdf' } });
+  assert.deepEqual([unsigned.status, unsigned.body.message], [400, 'content-digest says what binds the body, so the proof signs it: name it in hdr']);
+  const other = createHash('sha256').update('another document').digest('hex');
+  const resigned = await upload(bytes, { header: contentDigest(other) });
+  assert.deepEqual([resigned.status, resigned.body.reason], [401, 'req']);
+  assert.equal(broken.length, before, 'nothing reached the upstream of a request refused before it streams');
+  assert.equal(reached.length, 0, 'the upstream got no request whole');
+  assert.equal(broken.length, 3);
+  assert.ok(broken.every((one) => one.length < bytes.length), JSON.stringify(broken));
+  assert.ok(broken.some((one) => one.length > 1024 * 1024), 'the refused bodies streamed until their end');
+  // An empty body that declares the empty body's digest, as `coffre serve` sends an empty POST: its line is that digest anyway.
+  const empty = createHash('sha256').digest('hex');
+  const none = await read((await pluginRoute(new Request(url, { method: 'POST', headers: { 'content-digest': contentDigest(empty), 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: { 'content-digest': contentDigest(empty) }, body: empty } }) }, body: chunked(new Uint8Array(0)), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.equal(none.status, 200, JSON.stringify(none.body));
+  assert.equal(reached.at(-1)!.length, 0);
+  // Another digest on it, added on the way: an empty request is whole once its headers are, so it is refused before any go.
+  const [whole, cut] = [reached.length, broken.length];
+  const stale = await read((await pluginRoute(new Request(url, { method: 'POST', headers: { 'content-digest': contentDigest(other), 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: {}, body: empty } }) }, body: chunked(new Uint8Array(0)), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.deepEqual([stale.status, stale.body.message], [400, 'the body is not what its Content-Digest says']);
+  await sleep(50);
+  assert.deepEqual([reached.length, broken.length], [whole, cut], 'nothing of it reached the upstream');
+  // Through an AWS-signed credential, a Content-Digest alone is the payload hash coffre signs again, which S3 checks too.
+  const s3Url = `${ORIGIN}/use/s3/bucket/digested`;
+  const s3Proof = await createProof(held.key, { method: 'PUT', url: s3Url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: { 'content-digest': contentDigest(digest) }, body: digest } });
+  const s3 = await read((await pluginRoute(new Request(s3Url, { method: 'PUT', headers: { 'content-digest': contentDigest(digest), 'content-length': String(bytes.length), authorization: `DPoP ${held.token}`, dpop: s3Proof }, body: chunked(bytes), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.equal(s3.status, 200, JSON.stringify(s3.body));
+  assert.deepEqual([reached.at(-1)!.headers['x-amz-content-sha256'], reached.at(-1)!.sha256], [digest, digest]);
+  assert.match(reached.at(-1)!.headers.authorization as string, new RegExp(`^AWS4-HMAC-SHA256 Credential=${AWS.AWS_ACCESS_KEY_ID}/`));
+  // An app's own digest of another algorithm declares nothing: read whole, under 16 MiB, and sent on as it is.
+  const sha512 = `sha-512=:${createHash('sha512').update(bytes).digest('base64')}:`;
+  const own = await use(held, 'POST', '/use/yousign/v3/documents', { headers: { 'content-digest': sha512 }, body: 'a small body' });
+  assert.equal(own.status, 200, JSON.stringify(own.body));
+  assert.equal(reached.at(-1)!.headers['content-digest'], sha512);
+  // Past 16 MiB with no digest declared: the refusal names the way through.
+  const big = new Uint8Array(randomBytes(17 * 1024 * 1024));
+  const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: {}, body: createHash('sha256').update(big).digest('hex') } });
+  const refused = await read((await pluginRoute(new Request(url, { method: 'POST', headers: { authorization: `DPoP ${held.token}`, dpop: proof }, body: big }), runtime, IP))!);
+  assert.equal(refused.status, 413);
+  assert.match(refused.body.message as string, /Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre\/client\/workload send it/);
+  // Past 95 MiB, said by its length: refused before a byte is read.
+  const huge = await upload(bytes, { length: 95 * 1024 * 1024 + 1 });
+  assert.equal(huge.status, 413);
+  assert.match(huge.body.message as string, /up to 95 MiB, under the 100 MB a Cloudflare zone takes/);
+});
+
 test('a revocation or a freeze stops the next request, though the values are warm in the cache', async () => {
   await bind();
   const held = await session();
@@ -448,7 +607,7 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.equal(plan.body.environment, 'market/prod');
   assert.deepEqual(plan.body.values, { REGION: 'eu-west-3' }, 'its plain value, and no secret one: it uses them');
-  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe']);
+  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe', 'yousign']);
   assert.deepEqual(plan.body.tunnels, { db: { key: 'DATABASE_URL', url: 'wss://secrets.acme.example/use/market/prod/db' } });
   assert.deepEqual([...(plan.body.useOnly as string[])].sort(), ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'SIGNING_KEY', 'STRIPE_KEY']);
 });

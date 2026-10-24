@@ -39,8 +39,10 @@
  * values its person may read, plain and secret ones, never a sensitive one
  * (docs/design/credential-proxy.md, section 2).
  */
+import { createHash } from 'node:crypto';
+
 import { CoffreError } from '@coffre/client';
-import { bodyDigest, bodyLine, UNSIGNED_BODY } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 
@@ -268,7 +270,7 @@ const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const TEMPLATE_KEY = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
 /** A handle, wherever the app put it: alone, or inside a header the upstream's own scheme frames. */
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
-/** A request's body is read whole before it is sent on: an API call's, not an upload's. */
+/** A request's body that declares no digest is read whole before it is sent on: an API call's, not an upload's. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** An AWS-signed upload streams through, up to S3's own limit for one request; past it, a multipart upload's parts each pass. */
 const MAX_STREAM_BYTES = 5 * 1024 ** 3;
@@ -967,20 +969,38 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
 
 /**
  * What a request through a credential carries: a body read whole, up to
- * 16 MiB, or, for an AWS-signed upload that says its payload's hash and
- * length, the length it streams with, never held whole (an S3 object may be
- * gigabytes, and its signature needs no byte of it); or the refusal.
+ * 16 MiB, or, for one that says its length and declares its digest, the
+ * length it streams with, never held whole: an AWS-signed upload's
+ * `x-amz-content-sha256`, which S3 checks (an S3 object may be gigabytes,
+ * and its signature needs no byte of it), or a `Content-Digest`'s SHA-256,
+ * `digest`, which coffre checks as the bytes pass (`scanned`), up to
+ * `MAX_DIGESTED_BODY`; or the refusal. A body read whole is what its
+ * `Content-Digest` declares, too.
  */
-type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string };
+type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string; digest: string | null };
 
 async function carried(request: Request, credential: Resolved): Promise<Carried | Response> {
   const declared = request.headers.get('content-length') ?? '';
-  const streamed = credential.inject.kind === 'sigv4' && request.body !== null && request.headers.has('x-amz-content-sha256') && /^\d+$/.test(declared);
-  if (streamed && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
+  const amz = credential.inject.kind === 'sigv4' && request.headers.has('x-amz-content-sha256');
+  let digest: string | null = null;
+  try {
+    digest = amz ? null : declaredDigest(request.headers.get('content-digest') ?? '');
+  } catch (error) {
+    return failure(400, (error as Error).message);
+  }
+  // An empty body is checked before anything goes: with no last byte to hold back, its request is whole once its headers are.
+  const streamed = (amz || (digest !== null && Number(declared) > 0)) && request.body !== null && /^\d+$/.test(declared);
+  if (streamed && amz && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
+  if (streamed && !amz && Number(declared) > MAX_DIGESTED_BODY) {
+    return failure(413, `a body that declares its digest streams through the proxy up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes: send a larger one in parts`);
+  }
   const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
-  if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB, unless it is AWS-signed with its payload's hash and length, which streams`);
+  if (body === null) {
+    return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB read whole; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
+  }
+  if (digest !== null && !streamed && (await bodyDigest(body ?? new Uint8Array(0))) !== digest) return failure(400, 'the body is not what its Content-Digest says');
   // As a number writes it: `00` is the 0 it says, as it goes on and as the body's line reads it.
-  return { body, streamed, declared: streamed ? String(Number(declared)) : declared };
+  return { body, streamed, declared: streamed ? String(Number(declared)) : declared, digest };
 }
 
 /** One request through a credential, a handle's: the handle checked, its values opened (or remembered), the request sent on with them. */
@@ -1076,29 +1096,31 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   const content = await carried(request, credential);
   if (content instanceof Response) return nonced(content, caller);
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
-  // the proof bound. Through a sigv4 credential, a body of any bytes signs the hash its `x-amz-content-sha256` declares,
-  // which the upstream checks against them, streamed or not (any other value binds nothing); every other request, an
-  // empty body's included whatever its header says, the bytes' own digest.
+  // the proof bound. A body of any bytes signs the SHA-256 its `Content-Digest` declares, which `carried` and `scanned`
+  // hold the bytes to, streamed or not; through a sigv4 credential, the hash its `x-amz-content-sha256` declares, which
+  // the upstream checks against them (any other value binds nothing); every other request, an empty body's included
+  // whatever its header says, the bytes' own digest.
   // The header that chose the line must be one the proof signs, and a buffered body must be what it declares: neither is
   // left for a copier to pick.
   let payload: string | undefined;
-  let declaring = false;
+  let declaring: 'content-digest' | 'x-amz-content-sha256' | null = null;
   if (token !== null) {
     // The rule the SDK signs by (`bodyLine`), from the body's length as coffre holds it: a stream's declared content-length,
     // which `scanned` keeps it to, or the bytes read.
-    const declared = credential.inject.kind === 'sigv4' ? request.headers.get('x-amz-content-sha256') : null;
+    const amz = content.digest === null && credential.inject.kind === 'sigv4' ? request.headers.get('x-amz-content-sha256') : null;
+    const declared = content.digest ?? amz;
     const length = content.streamed ? Number(content.declared) : (content.body?.byteLength ?? 0);
-    declaring = declared !== null && length !== 0;
+    declaring = declared === null || length === 0 ? null : content.digest !== null ? 'content-digest' : 'x-amz-content-sha256';
     const body = await bodyLine({ declared, length, bytes: content.body ?? null });
-    if (declaring && !content.streamed && body !== UNSIGNED_BODY && body !== (await bodyDigest(content.body!))) return failure(400, 'the body is not what its x-amz-content-sha256 says');
+    if (amz !== null && length !== 0 && !content.streamed && body !== UNSIGNED_BODY && body !== (await bodyDigest(content.body!))) return failure(400, 'the body is not what its x-amz-content-sha256 says');
     payload = body === UNSIGNED_BODY ? 'UNSIGNED-PAYLOAD' : body;
     caller = await workloadOf(request, coffre, { ...at, body });
     if (caller instanceof Response) return caller;
   }
   const workload = caller!;
   return answering(workload, async () => {
-    if (declaring && workload.hdr !== null && !workload.hdr.includes('x-amz-content-sha256')) {
-      return failure(400, 'x-amz-content-sha256 says what binds the body, so the proof signs it: name it in hdr');
+    if (declaring !== null && workload.hdr !== null && !workload.hdr.includes(declaring)) {
+      return failure(400, `${declaring} says what binds the body, so the proof signs it: name it in hdr`);
     }
     if (workload.path === null) return failure(409, 'the environment this session reaches is gone');
     if (!constraintsAllow(workload.constraints, { place: workload.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
@@ -1144,7 +1166,7 @@ type Sending = Aim & Carried & {
  * authenticated the request to coffre goes nowhere upstream.
  */
 async function send(request: Request, credential: Resolved, out: Sending): Promise<Response> {
-  const { target, under, body, streamed, declared, headers, opened: { values, plain }, secret } = out;
+  const { target, under, body, streamed, declared, digest, headers, opened: { values, plain }, secret } = out;
   const inject = credential.inject;
   // A streamed body says its length itself, which S3 requires of a PutObject.
   if (streamed) headers.set('content-length', declared);
@@ -1155,9 +1177,9 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     if (inject.kind === 'sigv4') {
       // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
       for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
-      // The hash the session's proof bound; else the client's own, as a streamed upload declared it or as sent on; or the
-      // body's, an empty one's included, as SigV4 has it when no header says otherwise.
-      const given = out.payload ?? (streamed ? request.headers.get('x-amz-content-sha256') : headers.get('x-amz-content-sha256'));
+      // The hash the session's proof bound; else the client's own, as a streamed upload declared it or as sent on, or as its
+      // Content-Digest declares it; or the body's, an empty one's included, as SigV4 has it when no header says otherwise.
+      const given = out.payload ?? (streamed ? request.headers.get('x-amz-content-sha256') : headers.get('x-amz-content-sha256')) ?? digest;
       const payload = given ?? hex(await crypto.subtle.digest('SHA-256', body ?? new Uint8Array(0)));
       await signV4(request.method, target, headers, payload, {
         accessKeyId: render(inject.accessKeyId, values),
@@ -1172,7 +1194,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   // What authenticated the request goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
   if (secret !== null) {
     const leaked = [...headers].find(([, value]) => carries(value, secret.pattern)) ?? (carries(bytesOf(target.href), secret.pattern) ? ['URL'] : undefined)
-      ?? (body !== undefined && secret.pattern.test(new TextDecoder('latin1').decode(body)) ? ['body'] : undefined);
+      ?? (body !== undefined && secret.pattern.test(LATIN1.decode(body)) ? ['body'] : undefined);
     if (leaked !== undefined) {
       return failure(400, `${secret.what} is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
     }
@@ -1188,16 +1210,20 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   const made = credential.keys.some((key) => !plain.includes(key)) ? [injected] : [];
   const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
 
+  // A streamed body's refusal, once `scanned` stops it: the answer, whatever the upstream made of the broken request.
+  const upload = streamed ? scanned(request.body!, Number(declared), secret, digest) : null;
   let upstream: Response;
   try {
     upstream = await (credential.egress ?? globalThis).fetch(target, {
       method: request.method,
       headers,
-      body: streamed ? scanned(request.body!, Number(declared), secret) : body,
+      body: upload?.body ?? body,
       redirect: 'manual',
       ...(streamed ? { duplex: 'half' } : {}),
     } as RequestInit);
   } catch (error) {
+    const refused = upload?.refused() ?? null;
+    if (refused !== null) return failure(400, refused);
     // The error may quote the request, its URL a query rule's value and all, an egress's more so: redacted, as its UTF-8 bytes.
     const said = binary(new TextEncoder().encode(error instanceof Error ? error.message : String(error)));
     const message = new TextDecoder().decode(Uint8Array.from(redact.whole(said), (char) => char.charCodeAt(0)));
@@ -1222,6 +1248,11 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
       return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
     } else at = location;
+  }
+  const refused = upload?.refused() ?? null;
+  if (refused !== null) {
+    await upstream.body?.cancel();
+    return failure(400, refused);
   }
   return redacted(upstream, redact, at);
 }
@@ -1258,41 +1289,55 @@ function binary(bytes: Uint8Array): string {
   return text;
 }
 
+const LATIN1 = new TextDecoder('latin1');
+
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
 /**
  * A streamed upload, as it passes: a handle anywhere in it, a chunk
- * boundary included, or a length other than the one it declared, and it
- * stops, so the upstream gets a broken request and stores nothing. What a
- * handle could still begin, and the last bytes, wait until that is known. On Workers,
- * its declared length goes with it (`FixedLengthStream`); Node's fetch
- * sends the header as given.
+ * boundary included, a length other than the one it declared, or, with
+ * `digest`, bytes whose SHA-256 is not that one, and it stops, so the
+ * upstream gets a broken request and stores nothing: the length goes with
+ * it, and it never gets all of it. What a handle could still begin, and the
+ * last byte at least, wait until that is known. On Workers, its declared
+ * length goes with it (`FixedLengthStream`); Node's fetch sends the header
+ * as given. `refused` says why it stopped, once it has.
  */
-function scanned(body: ReadableStream<Uint8Array>, length: number, secret: Sending['secret']): ReadableStream<Uint8Array> {
-  // The last bytes seen, held back: what a handle (or session token) could still be the start of, and the end, sent only once it is the length declared.
+function scanned(body: ReadableStream<Uint8Array>, length: number, secret: Sending['secret'], digest: string | null): { body: ReadableStream<Uint8Array>; refused: () => string | null } {
+  // The last bytes seen, held back: what a handle (or session token) could still be the start of, and the end, sent only once it is the length declared, and its digest.
   let held = new Uint8Array(0);
   let seen = 0;
+  let refusal: string | null = null;
+  const refuse = (why: string): never => {
+    refusal = why;
+    throw new Error(why);
+  };
+  const hash = digest === null ? null : createHash('sha256');
+  const keep = Math.max(1, (secret?.length ?? 0) - 1);
   const checked = body.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, out) {
         seen += chunk.length;
-        if (seen > length) throw new Error('the upload ran past the length it declared');
+        if (seen > length) refuse('the body ran past the length it declared');
+        hash?.update(chunk);
         const window = new Uint8Array(held.length + chunk.length);
         window.set(held);
         window.set(chunk, held.length);
-        if (secret?.pattern.test(binary(window))) throw new Error(`${secret.what} is in the upload`);
-        const keep = Math.min(window.length, (secret?.length ?? 1) - 1);
-        if (window.length > keep) out.enqueue(window.slice(0, window.length - keep));
-        held = window.slice(window.length - keep);
+        // Decoded natively, a tenth of the CPU `binary` takes: no byte past ASCII decodes to an ASCII character a secret holds.
+        if (secret?.pattern.test(LATIN1.decode(window))) refuse(`${secret.what} is in the body`);
+        const kept = Math.min(window.length, keep);
+        if (window.length > kept) out.enqueue(window.slice(0, window.length - kept));
+        held = window.slice(window.length - kept);
       },
       flush(out) {
-        if (seen !== length) throw new Error('the upload ended short of the length it declared');
+        if (seen !== length) refuse('the body ended short of the length it declared');
+        if (hash !== null && hash.digest('hex') !== digest) refuse('the body is not what its Content-Digest says');
         if (held.length > 0) out.enqueue(held);
       },
     }),
   );
   const Fixed = (globalThis as { FixedLengthStream?: new (length: number) => TransformStream<Uint8Array, Uint8Array> }).FixedLengthStream;
-  return Fixed === undefined ? checked : checked.pipeThrough(new Fixed(length));
+  return { body: Fixed === undefined ? checked : checked.pipeThrough(new Fixed(length)), refused: () => refusal };
 }
 
 /** Whether a header's value carries what `pattern` finds, a handle say: as it is, or inside Basic authentication's base64. */

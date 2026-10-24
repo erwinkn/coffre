@@ -176,8 +176,17 @@ it uses with its own key.
   again before the next request, with backoff from 1 second to a minute.
   A superseded enrollment code is final.
 - **Signs with the newest nonce**, and sends a request once more if coffre
-  asks for a fresh one. A streamed S3 upload cannot be sent twice, so it
-  goes with a nonce under 100 seconds old.
+  asks for a fresh one. A stream cannot be sent twice, so it goes with a
+  nonce under 100 seconds old.
+- **Declares the body's digest.** A proof signs the body's SHA-256, so the
+  SDK reads a body whole before it sends it, and sends its digest with it,
+  `Content-Digest: sha-256=:<base64>:` (RFC 9530), and its length. Coffre
+  then streams the body to the upstream instead of reading it whole, up to
+  95 MiB (below). A stream that already declares both, as `coffre serve`
+  sends one, goes as it is, never read here. A `Content-Digest` the app set
+  itself stays as it is: a SHA-256 in it is the body's line, and one
+  without (`sha-512` alone) declares nothing to coffre, so the body is read
+  whole, up to 16 MiB.
 - **Waits** for an enrollment code that is `full` (up to 5 minutes), for a
   person to approve a pending session (up to 10 minutes, every 5 seconds),
   and for the kubelet to write the next projected token when a restarted
@@ -463,6 +472,29 @@ headers and body as the app sent them. Anything else answers 404. It holds
 no value, and writes no URL into the app's environment: the app's own
 config names the listener.
 
+**Bodies, and the sidecar's memory.** The proof signs the body's SHA-256
+and goes out in the headers, so the sidecar reads a body whole before it
+sends anything. It holds the body **in memory**, as the chunks it came in,
+one copy, and hashes it as it comes. It never writes it to disk: a
+signature or KYC document never lands on the pod's filesystem. It then
+sends the chunks to coffre with the body's `Content-Digest` and length, and
+coffre streams them to the upstream, checking the bytes against the digest
+as they pass. A body is at most **95 MiB** (99,614,720 bytes), which the
+sidecar refuses past with a 413 before sending anything. That is under the
+100 MB (decimal) Cloudflare takes in one request on Free and Pro zones, so
+a body near the limit gets coffre's answer, not the zone's. **Size the
+sidecar's memory limit for the uploads you run at once**: the process's
+own (about 120 MB at its peak in the test, signed in and idle), and up to
+95 MiB more for each upload in flight. A 55 MB Yousign document raised the
+sidecar's peak by 70 MB. A body goes to coffre as a stream, which the SDK
+sends with a nonce under 100 seconds old: after a quieter spell than that, a
+request first renews the session, one short call, so that a large body is
+not sent twice for a stale nonce. If coffre still asks for a fresh one, the
+sidecar sends the body again from what it holds. An app's own `Content-Digest` of another
+algorithm (`sha-512`) keeps its member, and the sidecar adds its `sha-256`
+beside it. An S3 upload, which
+declares its own hash, streams through without being held, up to 5 GiB.
+
 ```sh
 OPENAI_BASE_URL=http://127.0.0.1:7300/use/openai
 DATABASE_URL=postgres://app@127.0.0.1:7432/app?sslmode=disable
@@ -515,6 +547,16 @@ an earlier exposure still works. By kind of credential:
 - **coffre is on the request path.** Each upstream call is one more hop, and
   coffre's availability becomes the app's. A short outage stops uses but not
   sessions, which last an hour.
+- **A streamed body is checked as it passes, not before.** Coffre sends a
+  body with a `Content-Digest` on as it comes and holds back only its last
+  bytes until the digest matches; one that does not, or ends short or runs
+  long, is cut off before its last byte, so the upstream never gets a
+  complete request, and the app gets coffre's 400. An upstream that acts on
+  part of a request before it ends, a multipart part it stores as soon as
+  it has read it, can still have done so. That takes a request whose bytes
+  are not the ones its proof signed: from a client holding the session,
+  which could sign those bytes anyway, or from someone who read a proof on
+  its way to coffre and sent a copy first, with other bytes.
 - **On Node, coffre runs as one process.** The replay gate lives in the app
   process. Several replicas would each hold their own nonces, and clients
   would bounce between them and fail. Run coffre on Node as a single

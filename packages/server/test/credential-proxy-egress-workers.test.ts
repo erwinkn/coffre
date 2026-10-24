@@ -3,9 +3,15 @@
 // a VPC Service's, which local workerd cannot run. The binding is handed the
 // URL and init the proxy made, and what it answers goes back to the app as
 // an upstream's: a redirect kept on the proxy, an upload streamed, never
-// held whole. A binding the Worker lacks fails the configuration.
+// held whole. A binding the Worker lacks fails the configuration. And a
+// workload's body that declares its Content-Digest streams out of workerd to
+// an upstream on this machine, which gets it whole only if it is that digest.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, randomBytes } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,17 +19,41 @@ import { fileURLToPath } from 'node:url';
 
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
+import { contentDigest } from '@coffre/client/dpop';
+
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const NAME = 'coffre-egress-workers-test';
 
 let dir: string;
 let worker: Unstable_DevWorker;
+/** The upstream on this machine: each request it got whole, and how much it got of each it did not. */
+let upstream: Server;
+const whole: { headers: IncomingHttpHeaders; length: number; sha256: string }[] = [];
+const broken: number[] = [];
 
 before(async () => {
+  upstream = createServer((request, response) => {
+    const hash = createHash('sha256');
+    let length = 0;
+    request.on('data', (chunk: Buffer) => (hash.update(chunk), (length += chunk.length)));
+    request.on('close', () => void (request.complete || broken.push(length)));
+    request.on('end', () => {
+      whole.push({ headers: request.headers, length, sha256: hash.digest('hex') });
+      response.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+    });
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
   dir = mkdtempSync(join(tmpdir(), 'coffre-egress-worker-'));
   writeFileSync(
     join(dir, 'wrangler.json'),
-    JSON.stringify({ name: NAME, compatibility_date: '2026-08-06', compatibility_flags: ['nodejs_compat'], services: [{ binding: 'EGRESS', service: NAME }] }),
+    JSON.stringify({
+      name: NAME,
+      compatibility_date: '2026-08-06',
+      compatibility_flags: ['nodejs_compat'],
+      services: [{ binding: 'EGRESS', service: NAME }],
+      vars: { UPSTREAM: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v3` },
+    }),
   );
   // Bundled from the packages' sources, as the tests read them.
   process.env.WRANGLER_BUILD_CONDITIONS = 'coffre:source,workerd,worker,browser';
@@ -37,6 +67,8 @@ before(async () => {
 after(async () => {
   await worker?.stop();
   rmSync(dir, { recursive: true, force: true });
+  upstream.closeAllConnections();
+  upstream.close();
 });
 
 test('a request leaves through the binding with the real key, and its redirect stays on the proxy', { timeout: 30_000 }, async () => {
@@ -69,4 +101,37 @@ test('a binding the Worker lacks, undefined in its env, fails the configuration'
   const missing = await worker.fetch('/use/schumann/companies?missing', { headers: { 'x-api-key': HANDLE } });
   assert.equal(missing.status, 500);
   assert.match(await missing.text(), /schumann's egress is undefined, as a Worker's binding is when wrangler\.jsonc lacks it/);
+});
+
+test("a workload's 55 MB document that declares its Content-Digest streams out of workerd whole, with its length; other bytes never arrive whole", { timeout: 120_000 }, async () => {
+  const body = randomBytes(55_000_000);
+  const sha256 = createHash('sha256').update(body).digest('hex');
+  // Straight to workerd, as Cloudflare's edge hands a Worker a request, with its content-length: `worker.fetch` sends any body chunked.
+  const send = (bytes: Uint8Array<ArrayBuffer>) =>
+    fetch(`http://${worker.address}:${worker.port}/use/yousign/documents`, {
+      method: 'POST',
+      headers: { authorization: `DPoP coffre_wl_${'t'.repeat(43)}`, dpop: 'checked on Node', 'content-type': 'application/pdf', 'content-digest': contentDigest(sha256), 'x-dropped': 'not signed' },
+      body: bytes,
+    });
+  const sent = await send(body);
+  assert.equal(sent.status, 200, await sent.text());
+  assert.deepEqual([whole.at(-1)!.length, whole.at(-1)!.sha256], [body.length, sha256]);
+  assert.equal(whole.at(-1)!.headers['content-length'], String(body.length), 'the length goes with it (FixedLengthStream)');
+  assert.equal(whole.at(-1)!.headers['content-digest'], contentDigest(sha256));
+  assert.equal(whole.at(-1)!.headers['x-dropped'], undefined);
+  assert.equal(whole.at(-1)!.headers.authorization, 'Bearer sk_schumann_real_0123456789abcdef');
+  // The same length, one bit else: refused once all of it has passed, and the upstream, cut off before its last byte, has none of it whole.
+  const tampered = Buffer.from(body);
+  tampered[body.length >> 1]! ^= 1;
+  const refused = await send(tampered);
+  assert.deepEqual([refused.status, ((await refused.json()) as { message: string }).message], [400, 'the body is not what its Content-Digest says']);
+  for (let waited = 0; broken.length === 0 && waited < 5000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(whole.length, 1);
+  assert.equal(broken.length, 1);
+  assert.ok(broken[0]! < body.length, `the upstream got ${broken[0]} bytes of ${body.length}`);
+  // An empty body under that digest: whole once its headers are sent, so refused before they are.
+  const empty = await send(new Uint8Array(0));
+  assert.deepEqual([empty.status, ((await empty.json()) as { message: string }).message], [400, 'the body is not what its Content-Digest says']);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual([whole.length, broken.length], [1, 1], 'nothing of it reached the upstream');
 });
