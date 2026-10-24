@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.0 (2026-10-24)
+
 - **Upgrading to 0.11, in short.** Run `coffre migrate` before you deploy,
   as always: it applies `0015_workload_access` and `0016_spent_tokens`, both
   additive, so the release before keeps serving on them until the deploy.
