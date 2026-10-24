@@ -189,3 +189,21 @@ export function carry(socket: Socket, ws: WebSocket, keepaliveMs: number): void 
   });
   socket.on('error', () => ws.terminate());
 }
+
+/**
+ * How a workload's upgrade is sent: its session and a proof, signed as the
+ * request goes, since a proof is made fresh for each. A handle's needs
+ * nothing more than its header.
+ */
+function signed(as: string | Workload, url: string): ((request: import('node:http').ClientRequest) => void) | undefined {
+  if (typeof as === 'string') return undefined;
+  return (request) => {
+    upgradeHeaders(as, url).then(
+      (headers) => {
+        for (const [name, value] of Object.entries(headers)) request.setHeader(name, value);
+        request.end();
+      },
+      (error: unknown) => request.destroy(error as Error),
+    );
+  };
+}
