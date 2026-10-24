@@ -27,7 +27,7 @@
  *     once if the gate asks for a fresh one;
  *   - logout on `close()`, and on SIGTERM.
  */
-import { base64url, bodyDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey, type PublicJwk } from './dpop.ts';
+import { base64url, bodyDigest, bodyLine, createProof, generateProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
 
@@ -129,7 +129,6 @@ const ENROLLMENT_RENEW_MS = 30_000;
 /** Refusals no new proof can change: the code was superseded by a newer deploy's. */
 const FINAL = new Set(['superseded']);
 
-const SHA256_HEX = /^[0-9a-f]{64}$/;
 /** How long a logout may take: a process stopping waits no longer for it. */
 const LOGOUT_MS = 3000;
 /** The redirects fetch follows, and how many it follows at most. */
@@ -417,8 +416,10 @@ function surface(core: Core): Workload {
     const streamed = init?.body instanceof ReadableStream || (input instanceof Request && init?.body === undefined);
     const stream = declared !== null && request.body !== null && streamed ? request.body : null;
     const bytes = stream === null && request.body !== null ? new Uint8Array(await request.arrayBuffer()) : null;
-    // A request with no body signs the empty body's digest, whatever it declares, as coffre recomputes it.
-    const line = declared === null || (stream === null && (bytes === null || bytes.length === 0)) ? await bodyDigest(bytes ?? new Uint8Array()) : SHA256_HEX.test(declared) ? declared : UNSIGNED_BODY;
+    // The body's length as known: the bytes read, or a stream's content-length, which coffre holds it to; none stated, none known.
+    const stated = request.headers.get('content-length');
+    const length = stream === null ? (bytes?.length ?? 0) : stated !== null && /^\d+$/.test(stated) ? Number(stated) : null;
+    const line = await bodyLine({ declared, length, bytes });
     const send = async () => {
       const { token } = await core.current();
       const headers = new Headers(request.headers);

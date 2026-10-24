@@ -40,7 +40,7 @@
  * (docs/design/credential-proxy.md, section 2).
  */
 import { CoffreError } from '@coffre/client';
-import { bodyDigest, UNSIGNED_BODY } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 
@@ -979,7 +979,8 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
   if (streamed && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
   const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
   if (body === null) return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB, unless it is AWS-signed with its payload's hash and length, which streams`);
-  return { body, streamed, declared };
+  // As a number writes it: `00` is the 0 it says, as it goes on and as the body's line reads it.
+  return { body, streamed, declared: streamed ? String(Number(declared)) : declared };
 }
 
 /** One request through a credential, a handle's: the handle checked, its values opened (or remembered), the request sent on with them. */
@@ -1083,13 +1084,13 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   let payload: string | undefined;
   let declaring = false;
   if (token !== null) {
-    const declared = request.headers.get('x-amz-content-sha256');
-    const bytes = content.streamed ? content.declared !== '0' : (content.body?.byteLength ?? 0) > 0;
-    declaring = credential.inject.kind === 'sigv4' && declared !== null && bytes;
-    // A stream that declares no bytes is an empty body (`scanned` stops it if it carries any); any other stream, the declared hash.
-    const digest = content.streamed && bytes ? null : await bodyDigest(content.body ?? new Uint8Array(0));
-    const body = declaring ? (/^[0-9a-f]{64}$/.test(declared!) ? declared! : UNSIGNED_BODY) : digest!;
-    if (declaring && !content.streamed && body !== UNSIGNED_BODY && body !== digest) return failure(400, 'the body is not what its x-amz-content-sha256 says');
+    // The rule the SDK signs by (`bodyLine`), from the body's length as coffre holds it: a stream's declared content-length,
+    // which `scanned` keeps it to, or the bytes read.
+    const declared = credential.inject.kind === 'sigv4' ? request.headers.get('x-amz-content-sha256') : null;
+    const length = content.streamed ? Number(content.declared) : (content.body?.byteLength ?? 0);
+    declaring = declared !== null && length !== 0;
+    const body = await bodyLine({ declared, length, bytes: content.body ?? null });
+    if (declaring && !content.streamed && body !== UNSIGNED_BODY && body !== (await bodyDigest(content.body!))) return failure(400, 'the body is not what its x-amz-content-sha256 says');
     payload = body === UNSIGNED_BODY ? 'UNSIGNED-PAYLOAD' : body;
     caller = await workloadOf(request, coffre, { ...at, body });
     if (caller instanceof Response) return caller;

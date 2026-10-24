@@ -1182,7 +1182,8 @@ differences:
   authenticates, so the proxy never parses DPoP itself.
 - **The tunnel's WebSocket** carries `Authorization: DPoP` and a proof whose
   `htm` is `GET` and whose `htu` is the `https` form of its URL. Its
-  Durable Object is named by the session's ID rather than the bearer token.
+  Durable Object is the session's, named by its token's digest, which names
+  exactly that session with nothing to look up first (D22).
   Rechecks run 5.3 without the proof, because the socket is already
   authenticated.
 
@@ -1867,8 +1868,15 @@ line of registration after the owner has merged:
   `unsignedUploads`. A request whose body has no bytes (a GET, an empty
   POST, a streamed `content-length: 0`) signs `bodyDigest('')` whatever its
   header says, on every platform, so it needs no `unsignedUploads`. Every
-  other request signs its bytes' digest. The payload hash coffre signs
-  again is that same line, never re-read from the headers it forwards. A
+  other request signs its bytes' digest. The rule is one function,
+  `bodyLine` in `@coffre/client/dpop`, which the SDK and coffre each call
+  with the body's length as they know it: the bytes read, or a stream's
+  `content-length`, null for a stream of no stated length. One case cannot
+  agree: an empty stream with no stated length, which the SDK signs as
+  declared and coffre, holding no bytes, cannot tell from no body at all.
+  It fails closed (401 `req`); a stream that states its length agrees. The
+  payload hash coffre signs again is that same line, never re-read from
+  the headers it forwards. A
   copier may not choose the declared form: the header that chose it must
   be one the proof signs (`hdr`), and a buffered body must be the hash it
   declares (400 otherwise). `standingSession` holds the `unsignedUploads`
@@ -2084,8 +2092,8 @@ worker, deleted and then verified gone through the provider's API:
 19. **A sigv4 credential's body signs its declared hash, streamed or
     not; `UNSIGNED-PAYLOAD` with a body needs `unsignedUploads`, buffered
     too** (PR 1d), since coffre would forward a buffered body that no
-    proof bound. A request with no body is never unsigned. The SDK's rule
-    is the same (PR 5).
+    proof bound. A request with no body is never unsigned. The SDK and
+    coffre run one function for it, `bodyLine` (Fable's review of PR 1d).
 20. **Signers take a `limit` too** (PR 1d). A signature by a payments key
     is the use most worth counting. *Alternative:* limits on credentials
     only, as section 8.1 shows them.

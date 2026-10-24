@@ -15,7 +15,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { bodyDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
 import { github, hashToken, signin, type WorkloadAlert } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { eq } from 'drizzle-orm';
@@ -254,6 +254,20 @@ test('only the headers the proof signs go upstream, with the real key in place o
   assert.equal(handled.status, 401);
   assert.equal(handled.headers.get('www-authenticate'), null, JSON.stringify(handled.body));
   assert.match(leaked.body.message as string, /session token/);
+  // Nor in the URL, as it is or escaped, nor in an upload that streams: nothing of it reaches the upstream.
+  for (const query of [`?t=${held.token}`, `?t=${held.token.replace('_', '%5F')}`]) {
+    const inUrl = await use(held, 'GET', `/use/stripe/v1/notes${query}`);
+    assert.equal(inUrl.status, 400, `${query}: ${JSON.stringify(inUrl.body)}`);
+  }
+  const carrying = new TextEncoder().encode(`prefix ${held.token} suffix`);
+  const carryingHash = createHash('sha256').update(carrying).digest('hex');
+  const s3Url = `${ORIGIN}/use/s3/bucket/leak`;
+  const s3Headers = { 'x-amz-content-sha256': carryingHash };
+  const s3Proof = await createProof(held.key, { method: 'PUT', url: s3Url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: s3Headers, body: carryingHash } });
+  const streamedLeak = await pluginRoute(new Request(s3Url, { method: 'PUT', headers: { ...s3Headers, 'content-length': String(carrying.length), authorization: `DPoP ${held.token}`, dpop: s3Proof }, body: new Blob([carrying]).stream(), duplex: 'half' } as RequestInit), runtime, IP);
+  assert.notEqual(streamedLeak!.status, 200);
+  await streamedLeak!.body?.cancel();
+  assert.ok(reached.every((one) => !one.url.includes('/s3/bucket/leak') || one.length === 0), 'nothing of the upload reached the upstream');
   assert.equal(reached.length, 2);
 });
 
@@ -332,7 +346,12 @@ test('a streamed SigV4 upload is bound by the payload hash it declares; UNSIGNED
   const streamedEmpty = await read((await pluginRoute(new Request(marker, { method: 'PUT', headers: { ...markerHeaders, 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: markerProof }, body: new Blob([]).stream(), duplex: 'half' } as RequestInit), runtime, IP))!);
   assert.equal(streamedEmpty.status, 200, JSON.stringify(streamedEmpty.body));
   assert.equal(reached.at(-1)!.length, 0);
-  assert.equal(reached.length, 6);
+  // As the SDK signs an empty stream that says its content-length, UNSIGNED-PAYLOAD and all: the line `bodyLine` gives both sides.
+  const sdkHeaders = { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' };
+  const sdkProof = await createProof(held.key, { method: 'PUT', url: marker, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: sdkHeaders, body: await bodyLine({ declared: 'UNSIGNED-PAYLOAD', length: 0 }) } });
+  const sdkEmpty = await read((await pluginRoute(new Request(marker, { method: 'PUT', headers: { ...sdkHeaders, 'content-length': '0', authorization: `DPoP ${held.token}`, dpop: sdkProof }, body: new Blob([]).stream(), duplex: 'half' } as RequestInit), runtime, IP))!);
+  assert.equal(sdkEmpty.status, 200, JSON.stringify(sdkEmpty.body));
+  assert.equal(reached.length, 7);
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, strict);
   await bind({ unsignedUploads: true });
   const loose = await session();

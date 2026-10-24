@@ -190,6 +190,30 @@ export const UNSIGNED_BODY = 'UNSIGNED-PAYLOAD';
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /**
+ * A body's line in `req` (section 5.1), one rule for the SDK and coffre,
+ * each from what it knows of the body:
+ *
+ * - `declared`: its `x-amz-content-sha256`, given only through a credential
+ *   `sigv4` signs; null otherwise, or when it sets none.
+ * - `length`: its bytes as known: those read, a stream's `content-length`,
+ *   or null for a stream of no stated length.
+ *
+ * A body of no bytes signs the empty body's digest, whatever it declares.
+ * One that declares a hash signs it, which S3 checks against the bytes, so
+ * it may stream: 64 lower-case hex digits, or `UNSIGNED_BODY` for any other
+ * value. Every other body signs its bytes' digest (`bytes`, none for none).
+ *
+ *   bodyLine({ declared: null, length: 6, bytes })                       bodyDigest(bytes)
+ *   bodyLine({ declared: 'UNSIGNED-PAYLOAD', length: 0 })                bodyDigest('')
+ *   bodyLine({ declared: 'UNSIGNED-PAYLOAD', length: null })             UNSIGNED_BODY
+ *   bodyLine({ declared: '9f86…0f00a08', length: 4 })                     '9f86…0f00a08'
+ */
+export async function bodyLine(body: { declared: string | null; length: number | null; bytes?: Uint8Array | null }): Promise<string> {
+  if (body.declared !== null && body.length !== 0) return SHA256_HEX.test(body.declared) ? body.declared : UNSIGNED_BODY;
+  return bodyDigest(body.bytes ?? new Uint8Array());
+}
+
+/**
  * What `req` signs, one line each:
  *
  *   <the path as sent, as the WHATWG parser writes it: every slash and escape kept>
