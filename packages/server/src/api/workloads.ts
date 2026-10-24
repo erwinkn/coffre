@@ -303,7 +303,7 @@ export class WorkloadService {
     if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
       // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { credentialScope: ctx.caller.credentialScope, generation: ctx.caller.generation });
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
       const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
@@ -425,7 +425,7 @@ export class WorkloadService {
     const jwksUri = `${UPLOADED}${uploaded.digest}`;
     return withRefusals(this.#deps, async () => {
       // The issuer as the vault answers now, held to under the head (`issuerStill`), as in `bind`.
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { credentialScope: ctx.caller.credentialScope, generation: ctx.caller.generation });
+      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
       const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));

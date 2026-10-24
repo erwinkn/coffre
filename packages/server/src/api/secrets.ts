@@ -1655,7 +1655,7 @@ export async function reveal(
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
-  return recorded(ctx, async (log, fence) => {
+  return recorded(ctx, async (log, fence, at) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
     const place = await resolveRead(ctx, path);
     const environment = place === null ? null : liveEnvironment(place);
@@ -1669,6 +1669,7 @@ export async function reveal(
         }),
       );
     }
+    at({ ...environment, operationId });
     // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.
     need(ctx, use === undefined ? 'secret.read' : 'secret.use', placeOf(place.project, place.environment), 'secret.read', {
       operationId,

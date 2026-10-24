@@ -82,7 +82,7 @@ vars == <<rows, log, locks, procs, given>>
 
 \* The vault's entries that change someone's access: their role, grants or
 \* membership (core vault.ts, ACCESS_ACTIONS).
-AccessKinds == {"member.role", "access.revoke", "access.grant", "member.remove", "member.add"}
+AccessKinds == {"member.add", "member.restore", "member.owner", "member.role", "member.remove", "access.grant", "access.revoke"}
 
 \* The newest entry about m's access, by its place in the log; 0 for none
 \* (server db/queries.ts, newestAccessSeq).

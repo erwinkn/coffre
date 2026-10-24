@@ -227,20 +227,22 @@ export const POLICY_CHANGED = 'policy_changed';
  */
 export async function recorded<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>,
-  work: (log: AuditEntry[], fence: () => void) => Promise<T>,
+  work: (log: AuditEntry[], fence: () => void, at: (where: EntryFields) => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
     const log: AuditEntry[] = [];
     let fencing = false;
-    const result = await work(log, () => (fencing = true));
+    // Where the read was, and its operation, for the refusal of a credential that ended meanwhile.
+    let where: EntryFields = {};
+    const result = await work(log, () => (fencing = true), (fields) => (where = fields));
     if (log.length > 0) {
       await audited(ctx, async (tx, entries) => {
-        await credentialStill(ctx, tx);
+        await credentialStill(ctx, tx, 'secret.read', where);
         entries.push(...log);
       });
     } else {
       if (fencing) await fenced(ctx);
-      await credentialStill(ctx, ctx.db);
+      await credentialStill(ctx, ctx.db, 'secret.read', where);
     }
     return result;
   });
@@ -259,7 +261,8 @@ export async function recorded<T>(
  * release (formal/Credentials.tla, `CredentialFenceUnderHead` and
  * `CredentialFenceUnlocked`). Issuing a service account a credential checks
  * it too, under the head (`issuerNow`). A refusal is logged, `action`
- * refused as `credential_ended`, after the vault's release if there was one.
+ * refused as `credential_ended`, `where` the read was, after the vault's
+ * release if there was one: the same operation.
  *
  *   Ada's token checked, her export asks the vault
  *   Ada revokes the token                            token.revoke
@@ -270,6 +273,7 @@ export async function credentialStill(
   ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>,
   db: Queryable,
   action = 'secret.read',
+  where: EntryFields = {},
 ): Promise<void> {
   const stands = await wayInStands(db, {
     principal: formatMember(ctx.caller.principal),
@@ -281,7 +285,7 @@ export async function credentialStill(
   if (!stands) {
     throw new Refusal(
       new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'),
-      denied(ctx, action, 'credential_ended', { metadata: { credentialId: ctx.credentialId } }),
+      denied(ctx, action, 'credential_ended', { ...where, metadata: { credentialId: ctx.credentialId } }),
     );
   }
 }

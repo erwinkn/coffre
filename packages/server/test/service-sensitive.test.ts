@@ -235,6 +235,9 @@ test('an issuer removed and admitted again while issuing issues nothing: the req
   }, { after: true });
   await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 401 });
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+  const [refused] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'deny')));
+  assert.equal((JSON.parse(refused!.metadata) as { reason: string }).reason, 'credential_ended');
 });
 
 test('a trust binding is weighed the same: an Owner demoted while binding a workload binds nothing', async () => {
